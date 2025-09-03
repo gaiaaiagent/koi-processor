@@ -1,0 +1,219 @@
+{
+  "@context": {
+    "regen": "https://regen.network/ontology#",
+    "prov": "http://www.w3.org/ns/prov#",
+    "koi": "https://regen.network/koi#"
+  },
+  "metadata": {
+    "generated_at": "2025-09-03T03:36:50.748975+00:00",
+    "total_observations": 5,
+    "total_resolutions": 1,
+    "total_canonical_entities": 1,
+    "total_transformations": 6
+  },
+  "canonical_entities": [
+    {
+      "@id": "entity:8f60b4335c6a",
+      "primary_name": "Regen Network",
+      "type": "regen:Agent",
+      "aliases": [
+        "REGEN NETWORK",
+        "Regen Network",
+        "Regen Network Inc."
+      ],
+      "properties": {
+        "website": "https://regen.network",
+        "email": "info@regen.network",
+        "description": "Ecological platform"
+      },
+      "observation_count": 3,
+      "source_count": 3
+    }
+  ],
+  "transformations": [
+    {
+      "@type": "regen:Transformation",
+      "@id": "orn:regen.transform:extract_obs:0e60e80d7dcd",
+      "process": "Extract",
+      "fromState": "cid:sha256:abc123",
+      "toState": "obs:0e60e80d7dcd",
+      "method": "mistral:7b",
+      "timestamp": "2025-09-03T03:36:50.748700+00:00",
+      "confidence": 1.0,
+      "cid": "cid:sha256:7549158ee54667dc"
+    },
+    {
+      "@type": "regen:Transformation",
+      "@id": "orn:regen.transform:extract_obs:411a72287d1e",
+      "process": "Extract",
+      "fromState": "cid:sha256:abc123",
+      "toState": "obs:411a72287d1e",
+      "method": "mistral:7b",
+      "timestamp": "2025-09-03T03:36:50.748871+00:00",
+      "confidence": 1.0,
+      "cid": "cid:sha256:8cd5f48b95a340b4"
+    },
+    {
+      "@type": "regen:Transformation",
+      "@id": "orn:regen.transform:extract_obs:00885634fa5d",
+      "process": "Extract",
+      "fromState": "cid:sha256:def456",
+      "toState": "obs:00885634fa5d",
+      "method": "mistral:7b",
+      "timestamp": "2025-09-03T03:36:50.748888+00:00",
+      "confidence": 1.0,
+      "cid": "cid:sha256:97fb4c2e5ba0e564"
+    },
+    {
+      "@type": "regen:Transformation",
+      "@id": "orn:regen.transform:extract_obs:b7abc725f342",
+      "process": "Extract",
+      "fromState": "cid:sha256:def456",
+      "toState": "obs:b7abc725f342",
+      "method": "mistral:7b",
+      "timestamp": "2025-09-03T03:36:50.748904+00:00",
+      "confidence": 1.0,
+      "cid": "cid:sha256:04a66ef3626bd5ca"
+    },
+    {
+      "@type": "regen:Transformation",
+      "@id": "orn:regen.transform:extract_obs:309c5a353b70",
+      "process": "Extract",
+      "fromState": "cid:sha256:ghi789",
+      "toState": "obs:309c5a353b70",
+      "method": "mistral:7b",
+      "timestamp": "2025-09-03T03:36:50.748915+00:00",
+      "confidence": 1.0,
+      "cid": "cid:sha256:8902d71916872e68"
+    },
+    {
+      "@type": "regen:Transformation",
+      "@id": "orn:regen.transform:resolve_res:18b71209316d",
+      "process": "Resolve",
+      "fromState": [
+        "obs:0e60e80d7dcd",
+        "obs:00885634fa5d",
+        "obs:309c5a353b70"
+      ],
+      "toState": "entity:8f60b4335c6a",
+      "method": "exact_match",
+      "timestamp": "2025-09-03T03:36:50.748938+00:00",
+      "confidence": 0.95,
+      "evidence": {
+        "method": "exact_match",
+        "matched_on": "name"
+      },
+      "cid": "cid:sha256:982b192221365d94"
+    }
+  ],
+  "provenance_links": {
+    "entity:8f60b4335c6a": {
+      "@context": {
+        "regen": "https://regen.network/ontology#",
+        "prov": "http://www.w3.org/ns/prov#"
+      },
+      "@type": "regen:EntityProvenance",
+      "@id": "entity:8f60b4335c6a",
+      "canonical": {
+        "name": "Regen Network",
+        "type": "regen:Agent",
+        "properties": {
+          "website": "https://regen.network",
+          "email": "info@regen.network",
+          "description": "Ecological platform"
+        },
+        "aliases": [
+          "REGEN NETWORK",
+          "Regen Network",
+          "Regen Network Inc."
+        ]
+      },
+      "observations": [
+        {
+          "@id": "obs:0e60e80d7dcd",
+          "name": "Regen Network",
+          "source": "data/notion/page1.md",
+          "source_cid": "cid:sha256:abc123",
+          "timestamp": "2025-09-03T03:36:50.748700+00:00",
+          "method": "mistral:7b",
+          "position": {
+            "file": "data/notion/page1.md",
+            "index": 0
+          },
+          "confidence": 1.0
+        },
+        {
+          "@id": "obs:00885634fa5d",
+          "name": "Regen Network Inc.",
+          "source": "data/discourse/thread2.json",
+          "source_cid": "cid:sha256:def456",
+          "timestamp": "2025-09-03T03:36:50.748888+00:00",
+          "method": "mistral:7b",
+          "position": {
+            "file": "data/discourse/thread2.json",
+            "index": 0
+          },
+          "confidence": 1.0
+        },
+        {
+          "@id": "obs:309c5a353b70",
+          "name": "REGEN NETWORK",
+          "source": "data/github/readme.md",
+          "source_cid": "cid:sha256:ghi789",
+          "timestamp": "2025-09-03T03:36:50.748915+00:00",
+          "method": "mistral:7b",
+          "position": {
+            "file": "data/github/readme.md",
+            "index": 0
+          },
+          "confidence": 1.0
+        }
+      ],
+      "resolutions": [
+        {
+          "@id": "res:18b71209316d",
+          "method": "exact_match",
+          "timestamp": "2025-09-03T03:36:50.748938+00:00",
+          "confidence": 0.95,
+          "linked_observations": [
+            "obs:0e60e80d7dcd",
+            "obs:00885634fa5d",
+            "obs:309c5a353b70"
+          ],
+          "evidence": {
+            "method": "exact_match",
+            "matched_on": "name"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "@type": "regen:Transformation",
+          "@id": "orn:regen.transform:resolve_res:18b71209316d",
+          "process": "Resolve",
+          "fromState": [
+            "obs:0e60e80d7dcd",
+            "obs:00885634fa5d",
+            "obs:309c5a353b70"
+          ],
+          "toState": "entity:8f60b4335c6a",
+          "method": "exact_match",
+          "timestamp": "2025-09-03T03:36:50.748938+00:00",
+          "confidence": 0.95,
+          "evidence": {
+            "method": "exact_match",
+            "matched_on": "name"
+          },
+          "cid": "cid:sha256:982b192221365d94"
+        }
+      ],
+      "statistics": {
+        "total_observations": 3,
+        "unique_sources": 3,
+        "name_variations": 3,
+        "created_at": "2025-09-03T03:36:50.748932+00:00",
+        "last_updated": "2025-09-03T03:36:50.748945+00:00"
+      }
+    }
+  }
+}
