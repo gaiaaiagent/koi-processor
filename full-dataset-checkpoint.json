@@ -1,0 +1,28 @@
+{
+  "timestamp": "2025-09-04T21:15:30.903533+00:00",
+  "processed_documents": 1100,
+  "entities_extracted": 3041,
+  "mistral_success": 420,
+  "fallback_extractions": 680,
+  "source_stats": {
+    "medium": {
+      "docs": 1,
+      "entities": 3,
+      "mistral_success": 0,
+      "processing_time": 18.212703943252563
+    },
+    "notion": {
+      "docs": 983,
+      "entities": 2240,
+      "mistral_success": 328,
+      "processing_time": 53301.91507911682
+    },
+    "podcast": {
+      "docs": 115,
+      "entities": 798,
+      "mistral_success": 92,
+      "processing_time": 2870.142953157425
+    }
+  },
+  "last_processed": 0
+}

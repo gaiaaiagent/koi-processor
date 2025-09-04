@@ -10,7 +10,7 @@ This repository contains the core processing pipeline that transforms raw conten
 Documents undergo JSON-LD extraction **first** to identify metabolic entities and discourse elements, then get chunked along semantic boundaries respecting entity relationships.
 
 ```
-Raw Content → JSON-LD Extraction → Ontology-Informed Chunking → CAT Receipts → Knowledge Graph
+Raw Content → JSON-LD Extraction → Ontology-Informed Chunking → CAT Receipts → Apache Jena RDF Store
 ```
 
 ## 🏗️ Architecture Components
@@ -23,6 +23,8 @@ Raw Content → JSON-LD Extraction → Ontology-Informed Chunking → CAT Receip
 
 ### Core Features:
 - ✅ **Unified Ontology v1.0**: 36 classes, 26 properties (metabolic + discourse)
+- ✅ **Apache Jena Integration**: RDF-ready JSON-LD output for semantic reasoning
+- ✅ **W3C Standards Compliance**: Full SPARQL/OWL compatibility for Registry Framework
 - ✅ **Ontology Provenance Tracking**: Every entity knows which ontology version created it
 - ✅ **Dual Identification**: RIDs for semantic identity + CIDs for deduplication
 - ✅ **CAT Receipt Generation**: Complete transformation audit trails
@@ -68,12 +70,45 @@ Every processing step generates CAT (Content-Addressable Transformation) receipt
 - Cost tracking and performance metrics
 - Complete audit trail for governance
 
+## 🎯 Apache Jena & RDF Integration
+
+### RDF-Ready Output Format
+All processed entities are generated as standards-compliant JSON-LD, ready for direct import into Apache Jena:
+
+```json
+{
+  "@context": {
+    "regen": "https://regen.network/ontology#",
+    "koi": "https://regen.network/koi#"
+  },
+  "@id": "orn:regen.agent:greg-landau",
+  "@type": "regen:Agent",
+  "regen:alignsWith": ["Re-Whole Value", "Harmonize Agency"],
+  "koi:cid": "cid:sha256:e002e2e94b5cc9057e16fe0173854c88af1d1ba307986c0337066ddcbfdeb4a7",
+  "prov:wasGeneratedBy": "orn:regen.transform:extraction_001"
+}
+```
+
+### SPARQL Query Ready
+Entities can be immediately queried using standard SPARQL:
+```sparql
+PREFIX regen: <https://regen.network/ontology#>
+SELECT ?agent ?essence WHERE {
+  ?agent a regen:Agent ;
+         regen:alignsWith ?essence .
+}
+```
+
+### Registry Framework Integration
+Direct compatibility with Regen Network's RDF-based Registry Framework for seamless "credits as claims" modeling and cross-methodology reasoning.
+
 ## 🎯 Target Performance Metrics
 
 - **Processing Throughput**: 1000+ documents/hour through ontology pipeline
 - **Cost Control**: <$100/day with intelligent model selection
 - **Storage Efficiency**: 30%+ reduction via CID-based deduplication
 - **Semantic Quality**: Entity-boundary-aware chunking preserving meaning
+- **RDF Compatibility**: 100% standards-compliant JSON-LD output
 
 ## 🌱 Regenerative Alignment
 
