@@ -2,7 +2,7 @@
 
 🔄 **Processing Pipeline for KOI (Knowledge Organization Infrastructure)**
 
-This repository contains the core processing pipeline that transforms raw content from sensor networks into semantically-enhanced, provenance-tracked knowledge artifacts using Regen Network's unified ontology.
+This repository contains the core processing pipeline that transforms raw content from sensor networks into semantically-enhanced, provenance-tracked knowledge artifacts using Regen Network's unified ontology. Now includes BGE semantic search capabilities via MCP (Model Context Protocol) servers for AI agent integration.
 
 ## 🧬 Ontology-Enhanced Processing Pipeline
 
