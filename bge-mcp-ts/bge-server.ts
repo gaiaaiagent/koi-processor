@@ -76,8 +76,11 @@ async function searchEmbeddings(
     const queryEmbedding = await generateEmbedding(query);
     const embeddingStr = '[' + queryEmbedding.join(',') + ']';
     
-    // Build SQL query
+    // Build SQL query with agent permission filtering
     let sql = `
+      WITH agent_patterns AS (
+        SELECT unnest(get_agent_allowed_patterns($2::uuid)) as pattern
+      )
       SELECT 
         e.id as embedding_id,
         m.id as memory_id,
@@ -94,9 +97,25 @@ async function searchEmbeddings(
     const params: any[] = [embeddingStr];
     let paramCount = 2;
     
+    // If agentId is provided, filter by allowed patterns
     if (agentId) {
-      sql += ` AND m."agentId" = $${paramCount}`;
       params.push(agentId);
+      paramCount++;
+      
+      // Add RID pattern filtering - ONLY allow documents with matching RIDs
+      sql += ` AND (
+        -- Document must have an RID
+        m.content->>'rid' IS NOT NULL
+        AND
+        -- And the RID must match an allowed pattern
+        EXISTS (
+          SELECT 1 FROM agent_patterns ap
+          WHERE m.content->>'rid' LIKE ap.pattern
+        )
+      )`;
+    } else {
+      // If no agentId provided, add a placeholder for the get_agent_allowed_patterns function
+      params.push(null);
       paramCount++;
     }
     
@@ -186,6 +205,64 @@ async function getStats() {
   }
 }
 
+// Get agent permissions
+async function getAgentPermissions(agentId?: string) {
+  try {
+    let sql = `
+      SELECT 
+        a.id as agent_id,
+        a.name as agent_name,
+        akp.source_type,
+        akp.source_identifier,
+        akp.permission,
+        akp.metadata,
+        akp.created_at,
+        akp.updated_at
+      FROM agents a
+      LEFT JOIN agent_knowledge_permissions akp ON a.id = akp.agent_id
+    `;
+    
+    const params: any[] = [];
+    if (agentId) {
+      sql += ` WHERE a.id = $1`;
+      params.push(agentId);
+    }
+    
+    sql += ` ORDER BY a.name, akp.source_type, akp.source_identifier`;
+    
+    const result = await pool.query(sql, params);
+    
+    // Group permissions by agent
+    const agentPermissions: Record<string, any> = {};
+    
+    for (const row of result.rows) {
+      if (!agentPermissions[row.agent_id]) {
+        agentPermissions[row.agent_id] = {
+          agent_id: row.agent_id,
+          agent_name: row.agent_name,
+          permissions: []
+        };
+      }
+      
+      if (row.source_type && row.source_identifier) {
+        agentPermissions[row.agent_id].permissions.push({
+          source_type: row.source_type,
+          source_identifier: row.source_identifier,
+          permission: row.permission,
+          metadata: row.metadata,
+          created_at: row.created_at,
+          updated_at: row.updated_at
+        });
+      }
+    }
+    
+    return Object.values(agentPermissions);
+  } catch (error) {
+    console.error("[BGE-MCP] Permission query failed:", error);
+    throw error;
+  }
+}
+
 // Main server setup
 async function main() {
   // Test database connection
@@ -213,7 +290,7 @@ async function main() {
     tools: [
       {
         name: "bge_search",
-        description: "Search for semantically similar content using BGE embeddings",
+        description: "Search for semantically similar content using BGE embeddings (filtered by agent permissions)",
         inputSchema: {
           type: "object",
           properties: {
@@ -228,7 +305,7 @@ async function main() {
             },
             agent_id: {
               type: "string",
-              description: "Optional: Filter by agent ID"
+              description: "Optional: Filter by agent ID (also applies permission filtering)"
             },
             room_id: {
               type: "string",
@@ -244,6 +321,19 @@ async function main() {
         inputSchema: {
           type: "object",
           properties: {}
+        }
+      },
+      {
+        name: "bge_permissions",
+        description: "Get agent knowledge permissions",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agent_id: {
+              type: "string",
+              description: "Optional: Get permissions for specific agent"
+            }
+          }
         }
       }
     ]
@@ -271,6 +361,16 @@ async function main() {
         };
       } else if (name === "bge_stats") {
         const result = await getStats();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      } else if (name === "bge_permissions") {
+        const result = await getAgentPermissions(args.agent_id as string);
         return {
           content: [
             {
