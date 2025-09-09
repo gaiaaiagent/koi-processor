@@ -138,6 +138,76 @@ async def create_cat_receipt(event: KOIEvent, result: ProcessingResult) -> Dict[
     }
     return receipt
 
+async def persist_cat_receipt(receipt: Dict[str, Any], event: KOIEvent, result: ProcessingResult):
+    """Persist CAT receipt to PostgreSQL and Apache Jena"""
+    
+    # 1. Store in PostgreSQL for fast queries
+    async with asyncpg.create_pool(DB_URL) as pool:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO transformation_receipts 
+                (receipt_id, transformation_type, input_rid, input_cid, 
+                 output_rid, output_cid, processor_name, processor_version,
+                 chunks_created, embeddings_created, source_sensor, event_type,
+                 metadata, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            """,
+                receipt["receipt_id"],
+                receipt["transformation"],
+                event.bundle.rid,
+                event.bundle.cid,
+                f"processed.{event.bundle.rid}",  # Output RID
+                result.cid if hasattr(result, 'cid') else event.bundle.cid,  # Output CID
+                "koi_event_bridge",
+                receipt["processor_version"],
+                result.chunks_created,
+                result.embeddings_created,
+                event.source_sensor,
+                event.event_type,
+                json.dumps(receipt),
+                datetime.utcnow()
+            )
+    
+    # 2. Store in Apache Jena as RDF for graph queries
+    try:
+        # Convert to RDF Turtle format
+        turtle_data = f"""
+@prefix koi: <http://koi.network/ontology#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix cat: <http://koi.network/cat#> .
+@prefix rid: <http://koi.network/rid#> .
+
+cat:{receipt["receipt_id"]} a koi:CATReceipt ;
+    koi:transformationType "{receipt["transformation"]}" ;
+    koi:inputRID rid:{event.bundle.rid} ;
+    koi:inputCID "{event.bundle.cid}" ;
+    koi:outputRID rid:processed.{event.bundle.rid} ;
+    koi:sourceSensor "{event.source_sensor}" ;
+    koi:eventType "{event.event_type}" ;
+    koi:chunksCreated {result.chunks_created} ;
+    koi:embeddingsCreated {result.embeddings_created} ;
+    koi:processorVersion "{receipt["processor_version"]}" ;
+    prov:generatedAtTime "{receipt["timestamp"]}"^^xsd:dateTime ;
+    prov:wasGeneratedBy <http://koi.network/processor/event_bridge> .
+"""
+        
+        # POST to Fuseki (if available)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            fuseki_url = os.getenv('FUSEKI_URL', 'http://localhost:3030/koi/data')
+            response = await client.post(
+                fuseki_url,
+                data=turtle_data,
+                headers={"Content-Type": "text/turtle"}
+            )
+            if response.status_code == 200:
+                logger.info(f"CAT receipt stored in Fuseki: {receipt['receipt_id']}")
+    except Exception as e:
+        # Log but don't fail - Fuseki is optional
+        logger.warning(f"Could not store CAT receipt in Fuseki: {e}")
+    
+    logger.info(f"CAT receipt persisted: {receipt['receipt_id']}")
+
 async def extract_text_from_bundle(bundle: KOIBundle) -> str:
     """Extract text content from KOI bundle"""
     content = bundle.content
@@ -332,8 +402,10 @@ async def process_event_endpoint(event: KOIEvent):
     # Create CAT receipt for provenance
     receipt = await create_cat_receipt(event, result)
     
-    # Log the receipt (in production, store this in database)
-    print(f"[KOI Bridge] CAT Receipt: {json.dumps(receipt, indent=2)}")
+    # Persist CAT receipt to both PostgreSQL and Apache Jena
+    await persist_cat_receipt(receipt, event, result)
+    
+    print(f"[KOI Bridge] CAT Receipt persisted: {receipt['receipt_id']}")
     
     if not result.success:
         print(f"[KOI Bridge] Processing failed: {result.error}")
@@ -341,6 +413,75 @@ async def process_event_endpoint(event: KOIEvent):
     
     print(f"[KOI Bridge] Successfully processed: {result.chunks_created} chunks, {result.embeddings_created} embeddings")
     return result
+
+@app.get("/provenance/{rid}")
+async def get_provenance_chain(rid: str):
+    """Get complete provenance chain for a RID"""
+    try:
+        async with asyncpg.create_pool(DB_URL) as pool:
+            async with pool.acquire() as conn:
+                # Use the PostgreSQL function we created
+                rows = await conn.fetch(
+                    "SELECT * FROM get_provenance_chain($1)",
+                    rid
+                )
+                
+                provenance_chain = []
+                for row in rows:
+                    provenance_chain.append({
+                        "receipt_id": row["receipt_id"],
+                        "transformation_type": row["transformation_type"],
+                        "input_rid": row["input_rid"],
+                        "output_rid": row["output_rid"],
+                        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                        "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
+                    })
+                
+                return {
+                    "rid": rid,
+                    "chain_length": len(provenance_chain),
+                    "transformations": provenance_chain
+                }
+    except Exception as e:
+        logger.error(f"Error fetching provenance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/transformations")
+async def get_recent_transformations(limit: int = 10):
+    """Get recent transformation receipts"""
+    try:
+        async with asyncpg.create_pool(DB_URL) as pool:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT receipt_id, transformation_type, input_rid, output_rid,
+                           chunks_created, embeddings_created, source_sensor, 
+                           event_type, created_at
+                    FROM transformation_receipts
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                """, limit)
+                
+                transformations = []
+                for row in rows:
+                    transformations.append({
+                        "receipt_id": row["receipt_id"],
+                        "transformation_type": row["transformation_type"],
+                        "input_rid": row["input_rid"],
+                        "output_rid": row["output_rid"],
+                        "chunks_created": row["chunks_created"],
+                        "embeddings_created": row["embeddings_created"],
+                        "source_sensor": row["source_sensor"],
+                        "event_type": row["event_type"],
+                        "created_at": row["created_at"].isoformat() if row["created_at"] else None
+                    })
+                
+                return {
+                    "count": len(transformations),
+                    "transformations": transformations
+                }
+    except Exception as e:
+        logger.error(f"Error fetching transformations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/stats")
 async def get_stats():
