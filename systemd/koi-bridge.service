@@ -1,0 +1,22 @@
+[Unit]
+Description=KOI Event Bridge v2
+After=network.target postgresql.service koi-bge.service
+Wants=koi-bge.service
+
+[Service]
+Type=simple
+User=darren
+WorkingDirectory=/opt/projects/koi-processor
+Environment="PATH=/opt/projects/koi-processor/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="USE_ISOLATED_TABLES=true"
+Environment="EVENT_BRIDGE_PORT=8100"
+Environment="BGE_API_URL=http://localhost:8090/encode"
+Environment="POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza"
+ExecStart=/opt/projects/koi-processor/venv/bin/python /opt/projects/koi-processor/koi_event_bridge_v2.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/koi/event-bridge.log
+StandardError=append:/var/log/koi/event-bridge.log
+
+[Install]
+WantedBy=multi-user.target

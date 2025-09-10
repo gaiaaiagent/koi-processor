@@ -1,0 +1,18 @@
+[Unit]
+Description=KOI BGE Embedding Server
+After=network.target
+
+[Service]
+Type=simple
+User=darren
+WorkingDirectory=/opt/projects/koi-processor
+Environment="PATH=/opt/projects/koi-processor/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="BGE_SERVER_PORT=8090"
+ExecStart=/opt/projects/koi-processor/venv/bin/python /opt/projects/koi-processor/bge_server.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/koi/bge-server.log
+StandardError=append:/var/log/koi/bge-server.log
+
+[Install]
+WantedBy=multi-user.target
