@@ -1,20 +1,48 @@
-# MCP-KOI Server Requirements
+# KOI Processor Requirements
+# Python 3.8+ required
 
-# MCP SDK
-mcp>=1.1.0
+# Core Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic>=2.0.0
 
 # Database
 asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
+pgvector==0.2.4
 
-# Embeddings
-sentence-transformers>=3.0.0
-torch>=2.0.0
-numpy>=1.24.0
-
-# KOI Components
+# HTTP & Networking
+httpx==0.25.2
+requests==2.31.0
 aiohttp>=3.9.0
-pydantic>=2.0.0
+
+# Data Processing
+numpy>=1.24.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
 
 # Utilities
 python-dotenv>=1.0.0
+python-dateutil==2.8.2
+typing-extensions==4.9.0
+
+# Logging
+colorlog==6.8.0
+
+# Testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+
+# Development (optional)
+black==23.12.0
+flake8==6.1.0
+mypy==1.7.1
+
+# Optional: For real BGE embeddings (requires CUDA)
+# torch>=2.0.0
+# transformers==4.36.0
+# sentence-transformers>=3.0.0
+
+# Optional: For MCP server
+# mcp>=1.1.0

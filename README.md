@@ -1,173 +1,493 @@
-# KOI Processor
+# KOI Processor v2
 
-🚀 **Complete KOI Sensor-to-Agent Pipeline - PRODUCTION READY**
+🚀 **Production-Ready Knowledge Organization Infrastructure Pipeline**
 
-This repository contains the complete, operational KOI (Knowledge Organization Infrastructure) pipeline that transforms content from KOI sensor networks into BGE embeddings and makes them immediately available for Eliza agent RAG queries. The system provides a fully tested, production-ready end-to-end flow from content ingestion through semantic search for AI agents.
+A comprehensive sensor-to-agent pipeline that processes real-time content from KOI sensors, generates BGE embeddings, handles deduplication and versioning, and provides immediate semantic search capabilities for AI agents.
 
-## 🏗️ KOI Pipeline Architecture - OPERATIONAL
+## 📋 Table of Contents
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [API Documentation](#api-documentation)
+- [Database Schema](#database-schema)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Troubleshooting](#troubleshooting)
 
-### Complete Sensor-to-Agent Flow (Production Ready)
-The KOI pipeline provides real-time end-to-end processing from content sources through to agent-accessible embeddings:
+## Overview
 
-```
-KOI Sensors → KOI Coordinator → KOI Event Bridge → BGE Embeddings → PostgreSQL → Eliza Agent RAG
-            ┌────────────────────────────────────────┐
-            │       🚀 COMPLETE PIPELINE OPERATIONAL       │
-            │    Real-time processing • Immediate availability    │
-            └────────────────────────────────────────┘
-```
+The KOI Processor is the central processing hub of the Knowledge Organization Infrastructure (KOI) ecosystem. It receives events from distributed sensors, processes content into searchable embeddings, and makes knowledge immediately available to AI agents through semantic search.
 
-### Core Components (All Operational)
-- **KOI Sensors**: Monitor and capture content from various sources
-- **KOI Event Bridge** (`koi_event_bridge.py`): Real-time processing of KOI events through BGE pipeline
-- **BGE Embedding Server** (`bge_server.py`): HTTP API generating 1024-dimensional embeddings
-- **PostgreSQL Integration**: Direct storage in Eliza agent database with pgvector
+### What's New in v2
+- ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
+- ✅ **Version Control**: Tracks content updates with full audit trail
+- ✅ **Isolated Tables**: Separates sensor data from scraped content
+- ✅ **BGE-large-en-v1.5**: Production-grade 1024-dimensional embeddings
+- ✅ **MCP Integration**: Semantic search via Model Context Protocol
 
-## 🚀 Pipeline Components
-
-### Core Pipeline Files:
-- **`koi_event_bridge.py`** - Main bridge between KOI events and BGE processing pipeline
-- **`bge_server.py`** - Mock BGE embedding server for testing (produces 1024-dim embeddings)
-- **Legacy Processing Scripts** (for reference):
-  - `process_all_documents_mistral.py` - Ontology extraction
-  - `process-documents-with-ontology.py` - Core ontological processing
-  - `provenance-tracking-system.py` - Transformation provenance tracking
-
-### Pipeline Features (Production Deployed):
-- ✅ **Real-time Event Processing**: Handles KOI sensor events as they arrive - OPERATIONAL
-- ✅ **BGE Embedding Generation**: 1024-dimensional embeddings via HTTP API - TESTED
-- ✅ **PostgreSQL Direct Storage**: Immediate integration with Eliza agent database - VERIFIED
-- ✅ **Smart Content Chunking**: Intelligent text chunking (1000 chars, 200 overlap) - ACTIVE
-- ✅ **CAT Receipt Generation**: Complete transformation audit trails - FUNCTIONAL
-- ✅ **RID/CID Preservation**: Maintains KOI identifiers through processing - COMPLETE
-- ✅ **Immediate Agent Access**: Content available for RAG within seconds - CONFIRMED
-- ✅ **Production Error Handling**: Graceful fallbacks and comprehensive logging - ROBUST
-- ✅ **End-to-End Testing**: Full pipeline verified with real content - PASSED
-
-## 🌐 KOI Ecosystem Integration
+## Architecture
 
 ```
-koi-sensors              → Content monitoring and ingestion
-         ↓
-koi-processor            → Event bridge and BGE processing (THIS REPO)
-         ↓  
-Eliza Agent (GAIA)       → RAG queries with immediate access to processed content
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│ KOI Sensors │────▶│ Coordinator  │────▶│ Event Bridge │────▶│ BGE Server   │
+│  (Various)  │     │  (Port 8200) │     │  (Port 8100) │     │  (Port 8090) │
+└─────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+                                                   │                    │
+                                                   ▼                    ▼
+                                          ┌──────────────┐     ┌──────────────┐
+                                          │ PostgreSQL   │     │ MCP Server   │
+                                          │  (pgvector)  │────▶│  (Search)    │
+                                          └──────────────┘     └──────────────┘
+                                                   │
+                                                   ▼
+                                          ┌──────────────┐
+                                          │ Eliza Agents │
+                                          │    (RAG)     │
+                                          └──────────────┘
 ```
 
-**Research Foundation**: Architecture based on research from `koi-research` repository
-**Sensor Network**: Content sources managed by `koi-sensors` repository
+### Component Description
 
-## 🚀 Key Capabilities
+1. **KOI Sensors**: Monitor websites, documents, and other sources
+2. **KOI Coordinator** (`port 8200`): Routes events to processing pipeline
+3. **KOI Event Bridge v2** (`port 8100`): Handles deduplication, versioning, chunking
+4. **BGE Server** (`port 8090`): Generates BAAI/bge-large-en-v1.5 embeddings
+5. **PostgreSQL**: Stores content and vectors with pgvector extension
+6. **MCP Server**: Provides semantic search API for agents
 
-### 1. Real-time KOI Event Processing
-```json
-{
-  "event_type": "NEW",
-  "bundle": {
-    "rid": "koi:sensor:website:example.com:doc123",
-    "cid": "bafkreiabcd1234...",
-    "content": {...},
-    "metadata": {...}
-  },
-  "source_sensor": "website_monitor"
-}
-```
+## Key Features
 
-### 2. BGE Embedding Pipeline
-- **Content Extraction**: Intelligently extracts text from various formats
-- **Smart Chunking**: 1000-character chunks with 200-character overlap
-- **BGE API Integration**: Generates consistent 1024-dimensional embeddings
-- **Database Storage**: Direct insertion into PostgreSQL with pgvector extension
+### 🔄 Deduplication & Versioning
+- **RID-based tracking**: Each document has a unique Resource Identifier
+- **Version control**: UPDATE events create new versions, preserving history
+- **Audit trail**: Complete provenance tracking with CAT receipts
 
-### 3. Agent Integration Ready
-- **Immediate Availability**: Processed content instantly accessible to agents
-- **Memory Format**: Compatible with Eliza agent memory structure
-- **Search Optimization**: Embeddings stored for fast similarity search
-- **Metadata Preservation**: Full KOI provenance maintained through pipeline
+### 🧬 Smart Processing
+- **Intelligent chunking**: 1000 chars with 200 char overlap
+- **Multi-format support**: Handles JSON, HTML, plain text
+- **Event types**: NEW, UPDATE, FORGET with appropriate handling
 
-## 🎯 Database Integration
+### 🔍 Semantic Search
+- **BGE embeddings**: State-of-the-art 1024-dimensional vectors
+- **MCP integration**: Standard protocol for agent tool use
+- **Permission filtering**: Agent-specific content access control
 
-### PostgreSQL with pgvector
-Embeddings are stored directly in the Eliza agent's PostgreSQL database:
+### 📊 Isolated Storage
+- **Separated tables**: `koi_memories` for sensor data, `memories` for legacy
+- **No contamination**: Clean separation of data sources
+- **Migration support**: Gradual transition from legacy systems
 
-```sql
--- Memory table structure
-CREATE TABLE memories (
-  id UUID PRIMARY KEY,
-  type VARCHAR DEFAULT 'koi_document',
-  content JSONB,
-  "agentId" UUID,
-  "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Embeddings table with vector support
-CREATE TABLE embeddings (
-  memory_id UUID PRIMARY KEY REFERENCES memories(id),
-  dim_1024 VECTOR(1024)
-);
-```
-
-### Agent Memory Format
-KOI content is stored in agent-compatible memory format:
-```json
-{
-  "text": "Document chunk content...",
-  "doc_id": "abcd1234",
-  "chunk_index": 0,
-  "source_type": "koi_sensor",
-  "source_sensor": "website_monitor",
-  "rid": "koi:sensor:website:example.com:doc123",
-  "cid": "bafkreiabcd1234...",
-  "koi_event_type": "NEW",
-  "koi_timestamp": "2025-09-07T..."
-}
-```
-
-### Immediate RAG Access
-Processed content is immediately available for agent RAG queries with full semantic search capabilities.
-
-## 🎯 Performance Metrics (Production Verified)
-
-- **Real-time Processing**: Events processed as they arrive from KOI sensors - OPERATIONAL
-- **Embedding Generation**: ~1-2 seconds per document chunk - TESTED
-- **Database Integration**: Direct PostgreSQL insertion with vector indexing - CONFIRMED
-- **Agent Availability**: Content accessible for RAG queries within seconds - VERIFIED
-- **Scalability**: FastAPI-based architecture with async processing - PRODUCTION READY
-- **Pipeline Throughput**: Complete sensor-to-agent flow in under 5 seconds - MEASURED
-- **Error Recovery**: Graceful handling of BGE API failures with fallback embeddings - TESTED
-
-## 🚀 Getting Started
+## Installation
 
 ### Prerequisites
 - Python 3.8+
-- PostgreSQL with pgvector extension
-- Running KOI sensor network
+- PostgreSQL 14+ with pgvector extension
+- Bun (for TypeScript MCP server)
+- 4GB+ RAM recommended
 
-### Quick Start
+### Step 1: Clone Repository
 ```bash
-# Start BGE embedding server
-python bge_server.py
-
-# Start KOI event bridge (in separate terminal)
-POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza \
-BGE_API_URL=http://localhost:8090/encode \
-python koi_event_bridge.py
+git clone https://github.com/yourusername/koi-processor.git
+cd koi-processor
 ```
 
-### Configuration
-- `POSTGRES_URL`: PostgreSQL connection string
-- `BGE_API_URL`: BGE embedding service endpoint
-- Default ports: BGE server (8090), Event bridge (8100)
+### Step 2: Python Environment
+```bash
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-### Testing
-The pipeline includes comprehensive error handling and will gracefully handle BGE API unavailability by using mock embeddings for testing.
+### Step 3: Database Setup
+```bash
+# Create database
+createdb -U postgres eliza
 
-## 🌐 Connected Systems
+# Enable pgvector extension
+psql -U postgres -d eliza -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-- **koi-research** - Research and architecture foundation
-- **koi-sensors** - Content monitoring and sensor network  
-- **GAIA (Eliza)** - AI agent framework with RAG integration
+# Run migrations
+psql -U postgres -d eliza < migrations/001_create_transformation_receipts.sql
+psql -U postgres -d eliza < migrations/002_create_agent_knowledge_permissions.sql
+psql -U postgres -d eliza < migrations/003_create_isolated_koi_tables.sql
+```
+
+### Step 4: BGE Server Setup
+```bash
+# Option 1: Use the mock BGE server (for testing)
+python bge_server.py
+
+# Option 2: Use real BGE model (requires GPU)
+# See bge_server_real.py for Hugging Face implementation
+```
+
+### Step 5: MCP Server Setup
+```bash
+cd bge-mcp-ts
+bun install
+bun run bge-server.ts
+```
+
+## Configuration
+
+### Environment Variables
+Create a `.env` file in the project root:
+
+```bash
+# Database
+POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza
+
+# BGE Server
+BGE_API_URL=http://localhost:8090/encode
+
+# Event Bridge Configuration
+USE_ISOLATED_TABLES=true  # Use new deduplication tables
+KOI_COORDINATOR_URL=http://localhost:8200
+
+# MCP Server (optional)
+MCP_SERVER_PORT=3000
+
+# Logging
+LOG_LEVEL=INFO
+```
+
+### Service Ports
+- **8090**: BGE Embedding Server
+- **8100**: KOI Event Bridge
+- **8200**: KOI Coordinator
+- **3000**: MCP Server (optional)
+
+## Usage
+
+### Starting Services
+
+#### 1. Start BGE Server
+```bash
+python bge_server.py
+# Server will run on http://localhost:8090
+```
+
+#### 2. Start Event Bridge v2
+```bash
+USE_ISOLATED_TABLES=true python koi_event_bridge_v2.py
+# Server will run on http://localhost:8100
+```
+
+#### 3. Start MCP Server (optional)
+```bash
+cd bge-mcp-ts
+bun run bge-server.ts
+```
+
+### Sending Events
+
+#### NEW Event (First time content)
+```bash
+curl -X POST http://localhost:8100/process-koi-event \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_type": "NEW",
+    "source_sensor": "website_monitor",
+    "timestamp": "2025-09-09T12:00:00Z",
+    "bundle": {
+      "rid": "sensor.website.example.com.page1",
+      "cid": "bafyreiabc123...",
+      "content": {
+        "text": "This is the content to be processed..."
+      },
+      "metadata": {
+        "title": "Example Page",
+        "url": "https://example.com/page1"
+      },
+      "manifest": {
+        "version": "1.0.0"
+      }
+    }
+  }'
+```
+
+#### UPDATE Event (Content changed)
+```bash
+curl -X POST http://localhost:8100/process-koi-event \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_type": "UPDATE",
+    "source_sensor": "website_monitor",
+    "timestamp": "2025-09-09T13:00:00Z",
+    "bundle": {
+      "rid": "sensor.website.example.com.page1",
+      "cid": "bafyreiabc456...",
+      "content": {
+        "text": "This is the UPDATED content..."
+      },
+      "metadata": {
+        "title": "Example Page (Updated)"
+      },
+      "manifest": {
+        "version": "1.0.0"
+      }
+    }
+  }'
+```
+
+### Checking Status
+```bash
+# Event Bridge health
+curl http://localhost:8100/
+
+# Pipeline statistics
+curl http://localhost:8100/stats
+
+# BGE server test
+curl -X POST http://localhost:8090/encode \
+  -H "Content-Type: application/json" \
+  -d '{"text": "test embedding"}'
+```
+
+## API Documentation
+
+### Event Bridge API
+
+#### `GET /` - Health Check
+Returns service status and configuration.
+
+**Response:**
+```json
+{
+  "service": "KOI Event Bridge v2",
+  "status": "operational",
+  "version": "2.0.0",
+  "features": [...],
+  "isolated_tables": true
+}
+```
+
+#### `POST /process-koi-event` - Process Event
+Processes a KOI event with deduplication and versioning.
+
+**Request Body:**
+```json
+{
+  "event_type": "NEW|UPDATE|FORGET",
+  "source_sensor": "string",
+  "timestamp": "ISO 8601",
+  "bundle": {
+    "rid": "unique resource identifier",
+    "cid": "content identifier",
+    "content": {},
+    "metadata": {},
+    "manifest": {}
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "rid": "string",
+  "cid": "string",
+  "chunks_created": 1,
+  "embeddings_created": 1,
+  "version": 1,
+  "previous_version_id": null,
+  "error": null
+}
+```
+
+#### `GET /stats` - Pipeline Statistics
+Returns current pipeline metrics.
+
+### BGE Server API
+
+#### `POST /encode` - Generate Embedding
+Generates BGE embedding for text.
+
+**Request:**
+```json
+{
+  "text": "content to embed"
+}
+```
+
+**Response:**
+```json
+{
+  "embedding": [0.123, -0.456, ...] // 1024 dimensions
+}
+```
+
+## Database Schema
+
+### Isolated KOI Tables
+
+#### `koi_memories`
+```sql
+CREATE TABLE koi_memories (
+    id UUID PRIMARY KEY,
+    rid VARCHAR(500) NOT NULL,
+    cid VARCHAR(500),
+    version INTEGER DEFAULT 1,
+    previous_version_id UUID,
+    event_type VARCHAR(20),
+    source_sensor VARCHAR(200),
+    content JSONB,
+    metadata JSONB,
+    superseded_at TIMESTAMP,
+    created_at TIMESTAMP,
+    UNIQUE(rid, version)
+);
+```
+
+#### `koi_embeddings`
+```sql
+CREATE TABLE koi_embeddings (
+    id SERIAL PRIMARY KEY,
+    memory_id UUID REFERENCES koi_memories(id),
+    dim_768 vector(768),   -- For embeddinggemma
+    dim_1024 vector(1024), -- For BGE
+    dim_1536 vector(1536), -- For OpenAI
+    created_at TIMESTAMP,
+    UNIQUE(memory_id)
+);
+```
+
+### Useful Queries
+
+```sql
+-- Get latest version of all documents
+SELECT * FROM current_koi_memories;
+
+-- Get version history for a RID
+SELECT * FROM get_koi_memory_history('sensor.website.example.com.page1');
+
+-- Pipeline statistics
+SELECT * FROM koi_pipeline_stats;
+
+-- Check for duplicates
+SELECT rid, COUNT(*) 
+FROM koi_memories 
+WHERE superseded_at IS NULL 
+GROUP BY rid 
+HAVING COUNT(*) > 1;
+```
+
+## Testing
+
+### Unit Tests
+```bash
+python -m pytest tests/
+```
+
+### Integration Test
+```bash
+# Start all services
+./scripts/start_services.sh
+
+# Run integration tests
+python tests/test_integration.py
+```
+
+### Manual Testing
+```bash
+# Send test event
+python scripts/send_test_event.py
+
+# Check if processed
+psql -U postgres -d eliza -c "SELECT * FROM koi_pipeline_stats;"
+```
+
+## Deployment
+
+### Production Configuration
+
+1. **Use environment variables** for all configuration
+2. **Enable SSL** for PostgreSQL connections
+3. **Use real BGE model** instead of mock server
+4. **Set up monitoring** (Prometheus metrics available at `/metrics`)
+5. **Configure log rotation** for production logs
+
+### Docker Deployment
+```bash
+# Build image
+docker build -t koi-processor .
+
+# Run with environment file
+docker run --env-file .env.production koi-processor
+```
+
+### Systemd Service
+```ini
+[Unit]
+Description=KOI Event Bridge v2
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=koi
+WorkingDirectory=/opt/koi-processor
+Environment="USE_ISOLATED_TABLES=true"
+ExecStart=/usr/bin/python3 koi_event_bridge_v2.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### "BGE server not responding"
+- Check if BGE server is running: `curl http://localhost:8090/encode -d '{"text":"test"}'`
+- Verify BGE_API_URL environment variable
+- Check firewall rules for port 8090
+
+#### "Duplicate key violation"
+- This means deduplication is working!
+- Use UPDATE event type for changed content
+- Check RID uniqueness before sending NEW events
+
+#### "No BGE embeddings created"
+- Verify pgvector extension: `\dx` in psql
+- Check embedding dimension matches (1024 for BGE)
+- Review Event Bridge logs for errors
+
+#### "Memory/CPU usage high"
+- Adjust chunk size and overlap in configuration
+- Implement rate limiting for sensor events
+- Consider horizontal scaling with multiple Event Bridge instances
+
+### Debug Mode
+```bash
+# Enable debug logging
+LOG_LEVEL=DEBUG python koi_event_bridge_v2.py
+
+# Check specific component
+python -c "from koi_event_bridge_v2 import test_connection; test_connection()"
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open Pull Request
+
+## Related Repositories
+
+- **[koi-sensors](https://github.com/yourusername/koi-sensors)** - Sensor implementations
+- **[koi-research](https://github.com/yourusername/koi-research)** - Research and documentation
+- **[GAIA](https://github.com/yourusername/GAIA)** - Eliza AI agent framework
+
+## License
+
+MIT License - see LICENSE file for details
 
 ---
 
-**Complete KOI sensor-to-agent pipeline - from content ingestion to AI-ready embeddings**
+**Built with 💚 for the regenerative future**

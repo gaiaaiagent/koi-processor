@@ -1,0 +1,110 @@
+# Changelog
+
+All notable changes to the KOI Processor project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.0.0] - 2025-09-09
+
+### Added
+- **RID-based Deduplication System** - Prevents duplicate content ingestion using Resource Identifiers
+- **Version Control for Updates** - UPDATE events create new versions with full audit trail
+- **Isolated KOI Tables** - New `koi_memories` and `koi_embeddings` tables separate sensor data from scraped content
+- **Event Bridge v2** (`koi_event_bridge_v2.py`) - Complete rewrite with deduplication and versioning
+- **Database Migration 003** - Creates isolated tables with version tracking
+- **Comprehensive Documentation** - Complete README with installation, configuration, and troubleshooting
+- **Setup Script** (`scripts/setup.sh`) - Automated environment setup
+- **Integration Test Suite** (`scripts/test_pipeline.py`) - End-to-end pipeline testing
+- **Environment Configuration** (`.env.example`) - Template for all configuration options
+- **BGE-large-en-v1.5 Support** - Production-grade 1024-dimensional embeddings
+- **MCP Server Integration** - TypeScript implementation for semantic search
+- **CAT Receipt System** - Complete provenance tracking for transformations
+- **Permission Filtering** - Agent-specific content access control
+
+### Changed
+- **Event Processing Logic** - Now checks for existing RIDs before processing
+- **Database Schema** - Added version tracking and superseded_at timestamps
+- **Embedding Storage** - Support for multiple embedding dimensions (768, 1024, 1536)
+- **Error Handling** - More robust with graceful fallbacks
+- **Logging** - Enhanced with color output and structured messages
+- **API Responses** - Include version information and previous_version_id
+
+### Fixed
+- **Duplicate Content Issue** - RID-based deduplication prevents duplicate ingestion
+- **Update Event Handling** - Properly creates new versions instead of duplicating
+- **Memory Leaks** - Improved connection pooling and resource cleanup
+- **BGE Server Compatibility** - Handles both "text" and "input" field formats
+- **Database Connection Issues** - Better error handling and retry logic
+
+### Security
+- **Environment Variables** - All sensitive configuration moved to .env file
+- **SQL Injection Prevention** - Parameterized queries throughout
+- **Input Validation** - Pydantic models for all API inputs
+
+## [1.0.0] - 2025-09-07
+
+### Added
+- Initial KOI Event Bridge implementation
+- BGE mock server for testing
+- Basic PostgreSQL integration
+- Simple chunking algorithm
+- FastAPI-based REST API
+- Agent memory format support
+
+### Known Issues (Fixed in v2)
+- No deduplication mechanism
+- UPDATE events not properly handled
+- Mixed data sources in same tables
+- No version tracking
+
+## [0.1.0] - 2025-09-01
+
+### Added
+- Project initialization
+- Basic project structure
+- Research documentation
+- Initial prototypes
+
+---
+
+## Migration Guide
+
+### From v1.0.0 to v2.0.0
+
+1. **Database Migration Required**
+   ```bash
+   psql -U postgres -d eliza < migrations/003_create_isolated_koi_tables.sql
+   ```
+
+2. **Environment Variable Changes**
+   - Add `USE_ISOLATED_TABLES=true` to your .env file
+   - Review new options in .env.example
+
+3. **Code Changes**
+   - Replace `koi_event_bridge.py` with `koi_event_bridge_v2.py`
+   - Update any custom integrations to handle version fields in responses
+
+4. **Testing**
+   - Run `scripts/test_pipeline.py` to verify the upgrade
+   - Check deduplication is working with duplicate RID tests
+
+### Rollback Instructions
+
+If you need to rollback to v1.0.0:
+1. Set `USE_ISOLATED_TABLES=false` in .env
+2. Use `koi_event_bridge.py` instead of v2
+3. The isolated tables can remain - they won't be used
+
+---
+
+## Upcoming Features (Planned)
+
+- [ ] Batch processing for bulk imports
+- [ ] Automatic sensor health monitoring
+- [ ] Content change detection with diff generation
+- [ ] Multi-model embedding support
+- [ ] GraphQL API for complex queries
+- [ ] Distributed processing with message queues
+- [ ] Real-time WebSocket event streaming
+- [ ] Prometheus metrics and Grafana dashboards
