@@ -34,9 +34,48 @@ Generates semantic embeddings using BGE-large-en-v1.5:
 Sensor Event → Event Bridge → BGE Server → Embeddings
                     ↓              ↓
                 PostgreSQL ← Vector Storage
+                    ↓
+                MCP Server ←→ Eliza Agents
+                    ↓
+                Apache Jena Fuseki
+                (SPARQL Triplestore)
 ```
 
-### 3. Database Schema
+### 3. MCP Server (`bge-mcp-ts/bge-server.ts`)
+
+Provides Model Context Protocol interface for agents:
+- Routes semantic queries to PostgreSQL pgvector
+- Routes ontological/SPARQL queries to Apache Jena
+- Implements `bge_search` and `bge_stats` tools
+- TypeScript implementation for ElizaOS compatibility
+- Stdio transport for agent communication
+
+**Query Routing:**
+```
+Eliza Agent Query → MCP Server
+                        ↓
+            [Semantic?] → PostgreSQL
+            [Ontological?] → Apache Jena
+                        ↓
+                  Unified Response
+```
+
+### 4. Apache Jena Fuseki
+
+Semantic reasoning and ontological storage:
+- SPARQL endpoint on port 3030
+- RDF triplestore for knowledge graph
+- OWL ontologies for inference
+- Separate from embedding pipeline
+- Used for complex semantic queries
+
+**Data Sources:**
+- Unified metabolic ontology (36 classes)
+- Entity relationships and hierarchies
+- Provenance tracking via CAT receipts
+- Registry Framework integration
+
+### 5. Database Schema
 
 #### Isolated Tables (v2)
 ```sql
@@ -86,7 +125,22 @@ RID Extraction & Deduplication Check
 [DELETE Event] → Mark as superseded
 ```
 
-### 2. Content Processing
+### 2. Agent Query Flow
+```
+Eliza Agent → MCP Server (stdio)
+    ↓
+Query Analysis
+    ↓
+[Embedding Search] → PostgreSQL pgvector
+[SPARQL Query] → Apache Jena Fuseki
+[Hybrid Query] → Both systems
+    ↓
+Results Aggregation
+    ↓
+Response to Agent
+```
+
+### 3. Content Processing
 ```
 Raw Content → Text Extraction
     ↓
@@ -99,7 +153,7 @@ Parallel Embedding Generation
 Batch Database Insert
 ```
 
-### 3. Embedding Pipeline
+### 4. Embedding Pipeline
 ```
 Text Chunk → BGE API Request
     ↓
@@ -250,6 +304,19 @@ Load Balancer (nginx/HAProxy)
 └─────────────┘  └─────────────┘  └─────────────┘
        ↓                ↓                ↓
     PostgreSQL Primary → Read Replicas
+              ↓
+    ┌─────────────────────────┐
+    │     MCP Server Pool     │
+    │  (Load Balanced stdio)  │
+    └─────────────────────────┘
+         ↓              ↓
+    PostgreSQL    Apache Jena
+                  (Clustered)
+         ↓              ↓
+    ┌─────────────────────────┐
+    │    Eliza Agent Fleet    │
+    │  (5+ agents concurrent) │
+    └─────────────────────────┘
 ```
 
 ### Vertical Scaling
