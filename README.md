@@ -39,14 +39,25 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
                                                    │                    │
                                                    ▼                    ▼
                                           ┌──────────────┐     ┌──────────────┐
-                                          │ PostgreSQL   │     │ MCP Server   │
-                                          │  (pgvector)  │────▶│  (Search)    │
+                                          │ PostgreSQL   │     │   Embeddings │
+                                          │  (pgvector)  │     │   Storage    │
                                           └──────────────┘     └──────────────┘
                                                    │
                                                    ▼
                                           ┌──────────────┐
+                                          │  MCP Server  │
+                                          │ (Query Router)│
+                                          └──────────────┘
+                                              ↙        ↘
+                                    ┌──────────────┐  ┌──────────────┐
+                                    │ PostgreSQL   │  │ Apache Jena  │
+                                    │  (Semantic)  │  │   Fuseki     │
+                                    └──────────────┘  │ (Port 3030)  │
+                                              ↘        │   (SPARQL)   │
+                                               ↘       └──────────────┘
+                                          ┌──────────────┐
                                           │ Eliza Agents │
-                                          │    (RAG)     │
+                                          │ (5 AI Agents)│
                                           └──────────────┘
 ```
 
@@ -57,7 +68,14 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 3. **KOI Event Bridge v2** (`port 8100`): Handles deduplication, versioning, chunking
 4. **BGE Server** (`port 8090`): Generates BAAI/bge-large-en-v1.5 embeddings
 5. **PostgreSQL**: Stores content and vectors with pgvector extension
-6. **MCP Server**: Provides semantic search API for agents
+6. **MCP Server**: Query router between agents and data stores
+   - Routes semantic searches to PostgreSQL pgvector
+   - Routes ontological queries to Apache Jena Fuseki
+   - Provides unified interface via stdio transport
+7. **Apache Jena Fuseki** (`port 3030`): SPARQL triplestore for semantic reasoning
+   - Stores RDF triples and OWL ontologies
+   - Handles complex ontological queries
+   - Separate from embedding pipeline
 
 ## Key Features
 
@@ -87,6 +105,7 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - Python 3.8+
 - PostgreSQL 14+ with pgvector extension
 - Bun (for TypeScript MCP server)
+- Apache Jena Fuseki 4.x
 - 4GB+ RAM recommended
 
 ### Step 1: Clone Repository
@@ -125,7 +144,21 @@ python bge_server.py
 # See bge_server_real.py for Hugging Face implementation
 ```
 
-### Step 5: MCP Server Setup
+### Step 5: Apache Jena Fuseki Setup
+```bash
+# Download and extract Fuseki
+wget https://dlcdn.apache.org/jena/binaries/apache-jena-fuseki-4.10.0.tar.gz
+tar -xzf apache-jena-fuseki-4.10.0.tar.gz
+cd apache-jena-fuseki-4.10.0
+
+# Start Fuseki server
+./fuseki-server --loc=/path/to/data --port=3030 /koi
+
+# Or use Docker
+docker run -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki
+```
+
+### Step 6: MCP Server Setup
 ```bash
 cd bge-mcp-ts
 bun install
@@ -159,7 +192,8 @@ LOG_LEVEL=INFO
 - **8090**: BGE Embedding Server
 - **8100**: KOI Event Bridge
 - **8200**: KOI Coordinator
-- **3000**: MCP Server (optional)
+- **3000**: MCP Server (stdio transport)
+- **3030**: Apache Jena Fuseki SPARQL endpoint
 
 ## Usage
 
@@ -177,10 +211,17 @@ USE_ISOLATED_TABLES=true python koi_event_bridge_v2.py
 # Server will run on http://localhost:8100
 ```
 
-#### 3. Start MCP Server (optional)
+#### 3. Start Apache Jena Fuseki
+```bash
+./fuseki-server --loc=/path/to/data --port=3030 /koi
+# SPARQL endpoint will be at http://localhost:3030/koi
+```
+
+#### 4. Start MCP Server
 ```bash
 cd bge-mcp-ts
 bun run bge-server.ts
+# MCP server handles query routing between agents and data stores
 ```
 
 ### Sending Events
@@ -246,7 +287,30 @@ curl http://localhost:8100/stats
 curl -X POST http://localhost:8090/encode \
   -H "Content-Type: application/json" \
   -d '{"text": "test embedding"}'
+
+# Apache Jena SPARQL test
+curl http://localhost:3030/koi/sparql \
+  -H "Content-Type: application/sparql-query" \
+  -d "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```
+
+### Agent Query Flow
+
+The MCP Server acts as a unified query interface for Eliza agents:
+
+1. **Semantic Search** (via PostgreSQL pgvector):
+   - Agent sends: `{"tool": "bge_search", "query": "regenerative agriculture"}`
+   - MCP routes to PostgreSQL for embedding similarity search
+   - Returns relevant documents with similarity scores
+
+2. **Ontological Query** (via Apache Jena):
+   - Agent sends: `{"tool": "sparql_query", "query": "SELECT ?entity WHERE..."}`
+   - MCP routes to Apache Jena Fuseki
+   - Returns RDF triples and relationships
+
+3. **Hybrid Query**:
+   - MCP can combine results from both systems
+   - Semantic context from embeddings + ontological relationships
 
 ## API Documentation
 
