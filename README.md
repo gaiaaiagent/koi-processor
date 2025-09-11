@@ -32,58 +32,113 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ KOI Sensors │────▶│ Coordinator  │────▶│ Event Bridge │────▶│  Embedding   │
-│  (Various)  │     │  (Port 8200) │     │  (Port 8100) │     │   Server     │
-└─────────────┘     └──────────────┘     └──────────────┘     │  (Port 8090) │
-                                                              └──────────────┘
-                                                   │                    │
-                                                   ▼                    ▼
-                                    ┌───────────────────────────────────┐
-                                    │         PostgreSQL                │
-                                    │  • koi_memories (KOI knowledge)   │
-                                    │  • koi_embeddings (pgvector)      │
-                                    │  • memories (agent state)         │
-                                    │  • conversations (agent history)  │
-                                    └───────────────────────────────────┘
+DATA INGESTION PIPELINE:
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐
+│ KOI Sensors │────▶│ Coordinator  │────▶│ Event Bridge │
+│  (Various)  │     │  (Port 8200) │     │  (Port 8100) │
+└─────────────┘     └──────────────┘     └──────────────┘
                                                    │
-                                         ┌─────────┴─────────┐
-                                         │                   │
-                                         ▼                   ▼
-                                ┌──────────────┐    ┌──────────────────┐
-                                │ Eliza Agents │    │   MCP Server     │
-                                │              │◀───│ (Knowledge API)  │
-                                │ • Direct SQL │    │                  │
-                                │   for state  │    │ Routes queries:  │
-                                │              │    │ • PostgreSQL     │
-                                │ • MCP tools  │    │   (pgvector)     │
-                                │   for search │    │ • Apache Jena    │
-                                │              │    │   Fuseki:3030    │
-                                └──────────────┘    └──────────────────┘
+                                    ┌──────────────┴──────────────┐
+                                    │                             │
+                                    ▼                             ▼
+                            ┌──────────────┐            ┌──────────────────┐
+                            │  Embedding   │            │ Entity Extractor │
+                            │   Server     │            │  (JSON-LD/RDF)   │
+                            │  (Port 8090) │            │    [PLANNED]     │
+                            └──────────────┘            └──────────────────┘
+                                    │                              │
+                                    ▼                              ▼
+                            ┌──────────────┐            ┌──────────────────┐
+                            │ PostgreSQL   │            │  Apache Jena     │
+                            │  (pgvector)  │            │    Fuseki        │
+                            │ • Embeddings │            │  (Port 3030)     │
+                            └──────────────┘            │ • RDF Triples    │
+                                                        │ • Ontologies     │
+                                                        └──────────────────┘
+
+QUERY/ACCESS LAYER:
+                            ┌───────────────────────────────────┐
+                            │         PostgreSQL                │
+                            │  • koi_memories (KOI knowledge)   │
+                            │  • koi_embeddings (pgvector)      │
+                            │  • memories (agent state)         │
+                            │  • conversations (agent history)  │
+                            └───────────────────────────────────┘
+                                               │
+                                               ▼
+                            ┌─────────────────────────────────┐
+                            │         Eliza Agents            │
+                            │        (5 AI Agents)            │
+                            │                                 │
+                            │ • Direct SQL for state          │
+                            │ • MCP tools for external data   │
+                            └─────────────────────────────────┘
+                                     ▲             ▲
+                                     │             │
+                        ┌────────────┴───┐    ┌────┴──────────┐
+                        │ Knowledge MCP  │    │  Regen MCP    │
+                        │     Server     │    │    Server     │
+                        │                │    │               │
+                        │ Routes to:     │    │ Connects to:  │
+                        │ • PostgreSQL   │    │ • Regen       │
+                        │   (pgvector)   │    │   Ledger      │
+                        │ • Apache Jena  │    │ • Blockchain  │
+                        │   Fuseki       │    │   data        │
+                        └────────────────┘    └───────────────┘
+                                ▲                     ▲
+                                │                     │
+                        ┌───────┴────────┐            │
+                        │                │            │
+                  PostgreSQL      Apache Jena    Regen Ledger
+                  (pgvector)        Fuseki       (Blockchain)
 ```
 
 ### Component Description
 
+#### Data Ingestion Pipeline:
 1. **KOI Sensors**: Monitor websites, documents, and other sources
 2. **KOI Coordinator** (`port 8200`): Routes events to processing pipeline
-3. **KOI Event Bridge v2** (`port 8100`): Handles deduplication, versioning, chunking
+3. **KOI Event Bridge v2** (`port 8100`): Distributes content to processors
+   - Handles deduplication, versioning, chunking
+   - Routes to both embedding and entity extraction paths
+
 4. **Embedding Server** (`port 8090`): Generates semantic embeddings
    - Currently using BAAI/bge-large-en-v1.5 (1024 dimensions)
-   - Model-agnostic API allows swapping to other models (OpenAI, Cohere, etc.)
-5. **PostgreSQL**: Dual-purpose database
+   - Model-agnostic API allows swapping to other models
+   - Stores embeddings in PostgreSQL pgvector
+
+5. **Entity Extractor** (PLANNED): Extracts structured data
+   - Processes content into JSON-LD/RDF format
+   - Extracts entities, relationships, and ontological information
+   - Uses unified metabolic ontology (36 classes)
+   - Loads RDF triples directly into Apache Jena
+
+#### Storage Layer:
+6. **PostgreSQL**: Dual-purpose database
    - Stores KOI knowledge (koi_memories, koi_embeddings with pgvector)
    - Stores agent state (memories, conversations, relationships)
-6. **Eliza Agents**: Two connection patterns
-   - **Direct PostgreSQL**: For agent state, conversations, memories
-   - **Via MCP Server**: For knowledge queries (KOI content)
-7. **MCP Server**: Knowledge query API for agents
-   - Routes semantic searches to PostgreSQL pgvector (KOI embeddings)
+
+7. **Apache Jena Fuseki** (`port 3030`): SPARQL triplestore
+   - Stores RDF triples and OWL ontologies
+   - Populated by Entity Extractor (when implemented)
+   - Handles complex ontological/semantic reasoning queries
+
+#### Query/Access Layer:
+8. **Knowledge MCP Server**: KOI knowledge query API for agents
+   - Routes semantic searches to PostgreSQL pgvector
    - Routes ontological queries to Apache Jena Fuseki
    - Provides unified knowledge interface via stdio transport
-8. **Apache Jena Fuseki** (`port 3030`): SPARQL triplestore
-   - Stores RDF triples and OWL ontologies
-   - Handles complex ontological/semantic reasoning queries
-   - Accessed by agents through MCP Server only
+
+9. **Regen MCP Server**: Blockchain data API for agents
+   - Connects to Regen Ledger blockchain
+   - Provides access to on-chain data (carbon credits, ecological state, etc.)
+   - Handles blockchain queries and transactions
+   - Separate from knowledge infrastructure
+
+10. **Eliza Agents**: Three connection patterns
+    - **Direct PostgreSQL**: For agent state, conversations, memories
+    - **Via Knowledge MCP**: For KOI knowledge queries (embeddings and ontologies)
+    - **Via Regen MCP**: For blockchain/ledger queries
 
 ## Key Features
 
@@ -167,11 +222,17 @@ cd apache-jena-fuseki-4.10.0
 docker run -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki
 ```
 
-### Step 6: MCP Server Setup
+### Step 6: Knowledge MCP Server Setup
 ```bash
 cd bge-mcp-ts
 bun install
 bun run bge-server.ts
+```
+
+### Step 7: Regen MCP Server Setup (Optional)
+```bash
+# See separate Regen MCP repository for blockchain integration
+# https://github.com/yourusername/regen-mcp-server
 ```
 
 ## Configuration
@@ -226,11 +287,17 @@ USE_ISOLATED_TABLES=true python koi_event_bridge_v2.py
 # SPARQL endpoint will be at http://localhost:3030/koi
 ```
 
-#### 4. Start MCP Server
+#### 4. Start Knowledge MCP Server
 ```bash
 cd bge-mcp-ts
 bun run bge-server.ts
-# MCP server handles query routing between agents and data stores
+# Knowledge MCP server handles query routing to PostgreSQL and Apache Jena
+```
+
+#### 5. Start Regen MCP Server (if needed)
+```bash
+# See Regen MCP repository for setup
+# Provides blockchain data access to agents
 ```
 
 ### Sending Events
@@ -305,21 +372,28 @@ curl http://localhost:3030/koi/sparql \
 
 ### Agent Query Flow
 
-The MCP Server acts as a unified query interface for Eliza agents:
+The dual MCP Server architecture provides specialized query interfaces:
 
+#### Knowledge MCP Server:
 1. **Semantic Search** (via PostgreSQL pgvector):
    - Agent sends: `{"tool": "bge_search", "query": "regenerative agriculture"}`
-   - MCP routes to PostgreSQL for embedding similarity search
+   - Routes to PostgreSQL for embedding similarity search
    - Returns relevant documents with similarity scores
 
 2. **Ontological Query** (via Apache Jena):
    - Agent sends: `{"tool": "sparql_query", "query": "SELECT ?entity WHERE..."}`
-   - MCP routes to Apache Jena Fuseki
+   - Routes to Apache Jena Fuseki
    - Returns RDF triples and relationships
 
 3. **Hybrid Query**:
-   - MCP can combine results from both systems
+   - Combines results from both systems
    - Semantic context from embeddings + ontological relationships
+
+#### Regen MCP Server:
+4. **Blockchain Query**:
+   - Agent sends: `{"tool": "ledger_query", "query": "carbon_credits"}`
+   - Connects to Regen Ledger
+   - Returns on-chain data (credits, attestations, ecological state)
 
 ## API Documentation
 
