@@ -27,6 +27,7 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Isolated Tables**: Separates sensor data from scraped content
 - ✅ **BGE-large-en-v1.5**: Production-grade 1024-dimensional embeddings
 - ✅ **MCP Integration**: Semantic search via Model Context Protocol
+- 🚧 **Daily Content Curator** (Planned): Processor component for content curation and X bot integration
 
 ## Architecture
 
@@ -373,6 +374,35 @@ FROM koi_memories
 WHERE superseded_at IS NULL 
 GROUP BY rid 
 HAVING COUNT(*) > 1;
+```
+
+## Planned Components
+
+### Daily Content Curator
+**Status**: Architecture Defined (Session 7 of Milestone B)
+
+The Daily Content Curator will be a specialized processor component that aggregates and curates content for daily X posts and weekly digests.
+
+**Architecture Decision**: 
+- **Component Type**: Processor/Aggregator (NOT a KOI node)
+- **Location**: `/koi-processor/daily_curator.py`
+- **Integration**: Queries KOI infrastructure rather than acting as a sensor
+
+**Key Features**:
+- Query PostgreSQL for recent koi_memories (24-48 hours)
+- BGE similarity search for trending topic identification
+- Stats aggregation from ledger sensor data
+- Thread generation (3-5 posts with headline, stat, links, CTA)
+- Style guide compliance checking
+- JSON output for X bot consumption
+
+**Data Flow**:
+```
+KOI Sensors → Event Bridge → PostgreSQL
+                                ↓
+                        Daily Content Curator
+                                ↓
+                        X Bot / Weekly Digest
 ```
 
 ## Testing
