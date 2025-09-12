@@ -165,12 +165,30 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 WHERE id = $2
             """, datetime.now(tz=timezone.utc), previous['id'])
         
-        # Insert new version
+        # Extract publication date from metadata or content
+        published_at = None
+        published_confidence = 0.0
+        content_hash = None
+        
+        # Try to extract from metadata first
+        if 'published_at' in event.bundle.metadata:
+            published_at = event.bundle.metadata['published_at']
+            published_confidence = event.bundle.metadata.get('published_confidence', 0.9)
+        elif 'created_at' in event.bundle.metadata:
+            published_at = event.bundle.metadata['created_at']
+            published_confidence = 0.8
+        
+        # Calculate content hash for deduplication
+        import hashlib
+        content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
+        
+        # Insert new version with publication tracking
         await conn.execute("""
             INSERT INTO koi_memories (
                 id, rid, cid, version, previous_version_id,
-                event_type, source_sensor, content, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                event_type, source_sensor, content, metadata,
+                published_at, published_confidence, content_hash
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         """, 
             memory_id,
             event.bundle.rid,
@@ -187,7 +205,10 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 **event.bundle.metadata,
                 "koi_timestamp": event.timestamp,
                 "koi_manifest": event.bundle.manifest
-            })
+            }),
+            published_at,
+            published_confidence,
+            content_hash
         )
     else:
         # Legacy table structure - just insert without version control

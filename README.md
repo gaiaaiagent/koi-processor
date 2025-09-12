@@ -164,6 +164,55 @@ QUERY/ACCESS LAYER:
 
 ## Installation
 
+### Quick Start (New Users)
+
+If you're cloning this repository for the first time:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/RegenAI/koi-processor.git
+cd koi-processor
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Run database migrations (REQUIRED)
+./scripts/run_migrations.sh
+
+# 4. Start the processor
+python koi_event_bridge_v2.py
+```
+
+### Database Setup
+
+**Important**: The database requires migrations to be run before first use. See [MIGRATION_SETUP.md](MIGRATION_SETUP.md) for detailed instructions.
+
+**Quick migration command:**
+```bash
+# Automated setup (recommended)
+./scripts/run_migrations.sh
+
+# Or manual setup
+psql postgresql://postgres:postgres@localhost:5433/eliza -f migrations/*.sql
+```
+
+### Daily Content Curator
+
+The Daily Content Curator is a new component that aggregates content for social media posts:
+
+```bash
+# Run migration first (if not already done)
+python scripts/run_daily_curator.py migrate
+
+# Check content status
+python scripts/run_daily_curator.py status
+
+# Generate daily thread
+python scripts/run_daily_curator.py daily
+```
+
+See [DAILY_CURATOR_README.md](DAILY_CURATOR_README.md) for full documentation.
+
 ### Prerequisites
 - Python 3.8+
 - PostgreSQL 14+ with pgvector extension
