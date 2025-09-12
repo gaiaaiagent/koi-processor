@@ -49,6 +49,26 @@ class DailyCurator:
             logger.warning(f"Config file {config_path} not found, using defaults")
             return {}
     
+    async def initialize(self):
+        """Initialize the Daily Curator"""
+        logger.info("Initializing Daily Curator...")
+        self.conn = None
+        try:
+            self.conn = await asyncpg.connect(self.db_url)
+            logger.info("Daily Curator initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize Daily Curator: {e}")
+            return False
+    
+    async def cleanup(self):
+        """Cleanup Daily Curator resources"""
+        logger.info("Cleaning up Daily Curator...")
+        if hasattr(self, 'conn') and self.conn:
+            await self.conn.close()
+        logger.info("Daily Curator cleaned up")
+        return True
+    
     async def get_recent_published_content(self, 
                                           hours: int = 48,
                                           min_confidence: float = 0.5) -> List[Dict[str, Any]]:

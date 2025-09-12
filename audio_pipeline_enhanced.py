@@ -33,13 +33,19 @@ except ImportError:
     print("Install with: pip install mutagen")
 
 # Import our modules
+PODCASTFY_AVAILABLE = False
 try:
     from weekly_aggregator import WeeklyAggregator
     from notebooklm_exporter import NotebookLMExporter
-    from podcastfy_generator import PodcastfyGenerator, PODCASTFY_AVAILABLE
 except ImportError as e:
     print(f"Warning: Could not import module: {e}")
     print("Some features may be unavailable.")
+    
+try:
+    from podcastfy_generator import PodcastfyGenerator
+    PODCASTFY_AVAILABLE = True
+except ImportError:
+    pass
 
 # Configure logging
 logging.basicConfig(
@@ -134,13 +140,15 @@ class EnhancedAudioPipeline:
     def _initialize_storage(self):
         """Initialize storage directories"""
         directories = [
-            self.config["output"]["digest_dir"],
-            self.config["output"]["notebooklm_dir"],
-            self.config["output"]["podcast_dir"],
-            self.config["output"]["archive_dir"],
-            self.config["output"]["versions_dir"],
-            self.config["output"]["watch_dir"]
+            self.config["output"].get("digest_dir", "output/weekly"),
+            self.config["output"].get("notebooklm_dir", "output/notebooklm"),
+            self.config["output"].get("podcast_dir", "output/podcasts"),
+            self.config["output"].get("archive_dir", "output/archive"),
+            self.config["output"].get("versions_dir", "output/audio_versions")
         ]
+        # Add watch_dir if specified
+        if "watch_dir" in self.config["output"]:
+            directories.append(self.config["output"]["watch_dir"])
         
         for directory in directories:
             os.makedirs(directory, exist_ok=True)

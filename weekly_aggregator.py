@@ -97,6 +97,25 @@ class WeeklyAggregator:
                 }
             }
     
+    async def initialize(self):
+        """Initialize the Weekly Aggregator"""
+        logger.info("Initializing Weekly Aggregator...")
+        try:
+            self.connect_db()
+            logger.info("Weekly Aggregator initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize Weekly Aggregator: {e}")
+            return False
+    
+    async def cleanup(self):
+        """Cleanup Weekly Aggregator resources"""
+        logger.info("Cleaning up Weekly Aggregator...")
+        if hasattr(self, 'db_conn') and self.db_conn:
+            self.db_conn.close()
+        logger.info("Weekly Aggregator cleaned up")
+        return True
+    
     def connect_db(self):
         """Connect to PostgreSQL database"""
         try:

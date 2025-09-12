@@ -22,7 +22,8 @@
     "digest_dir": "output/weekly",
     "notebooklm_dir": "output/notebooklm",
     "podcast_dir": "output/podcasts",
-    "archive_dir": "output/archive"
+    "archive_dir": "output/archive",
+    "versions_dir": "output/audio_versions"
   },
   "distribution": {
     "podcast_feed_dir": "/var/www/podcasts",
