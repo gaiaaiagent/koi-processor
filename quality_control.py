@@ -3,6 +3,7 @@ Quality Control System for Daily Bot and Weekly Digest
 Implements comprehensive review and approval workflow for Milestone B
 """
 
+import os
 import json
 import asyncio
 from pathlib import Path
@@ -46,7 +47,7 @@ class QualityControl:
     def __init__(self, config_path: Optional[str] = None):
         """Initialize with configuration"""
         self.config = self._load_config(config_path)
-        self.db_url = self.config.get('database_url', 'postgresql://postgres:postgres@localhost:5433/eliza')
+        self.db_url = self.config.get('database_url', os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:5433/eliza'))
         
         # Quality thresholds
         self.thresholds = self.config.get('quality_thresholds', {})
@@ -84,7 +85,7 @@ class QualityControl:
     def _get_default_config(self) -> Dict[str, Any]:
         """Return default configuration"""
         return {
-            'database_url': 'postgresql://postgres:postgres@localhost:5433/eliza',
+            'database_url': os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:5433/eliza'),
             'quality_thresholds': {
                 'min_style_score': 0.8,
                 'min_validation_score': 0.9,

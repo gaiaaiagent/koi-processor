@@ -26,6 +26,8 @@ Thumbs.db
 
 # Logs
 *.log
+logs/*.log
+logs/*.bak
 
 # Testing
 .pytest_cache/
@@ -36,3 +38,28 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Test files and temporary
+test_*.py
+*_test.py
+*_fixed.py
+debug_*.py
+temp_*.py
+trace_*.py
+verify_*.py
+final_*_test.py
+test_results.log
+validation_results.json
+
+# Output directories
+output/
+db-backups/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Node modules (for TypeScript components)
+node_modules/
+bge-mcp-ts/node_modules/

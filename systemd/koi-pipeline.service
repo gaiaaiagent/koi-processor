@@ -1,0 +1,36 @@
+[Unit]
+Description=KOI Pipeline Services
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=forking
+User=darren
+Group=gaia-devs
+WorkingDirectory=/opt/projects/koi-processor
+
+# Environment
+Environment="POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza"
+Environment="BGE_API_URL=http://localhost:8090/encode"
+Environment="USE_ISOLATED_TABLES=true"
+
+# Start all services
+ExecStart=/opt/projects/koi-processor/start_all_services.sh
+
+# Stop all services
+ExecStop=/usr/bin/pkill -f "koi_event_bridge_v2.py"
+ExecStop=/usr/bin/pkill -f "bge_server.py"
+ExecStop=/usr/bin/pkill -f "koi_knowledge_mcp_server.py"
+ExecStop=/usr/bin/pkill -f "coordinator_fixed.py"
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65535
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

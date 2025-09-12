@@ -3,6 +3,7 @@ Daily Content Curator for Regen Network
 Aggregates and curates content from KOI infrastructure for daily X posts and weekly digests
 """
 
+import os
 import asyncio
 import json
 import hashlib
@@ -27,7 +28,7 @@ class DailyCurator:
     def __init__(self, config_path: str = "config/curator_config.yaml"):
         """Initialize the Daily Curator with configuration"""
         self.config = self._load_config(config_path)
-        self.db_url = self.config.get('database_url', 'postgresql://postgres:postgres@localhost:5433/eliza')
+        self.db_url = self.config.get('database_url', os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:5433/eliza'))
         self.bge_url = self.config.get('bge_server_url', 'http://localhost:8090')
         self.date_extractor = DateExtractor()
         self.content_enricher = ContentDateEnricher()

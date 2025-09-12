@@ -1,0 +1,29 @@
+[Unit]
+Description=KOI MCP Knowledge Server
+After=network.target postgresql.service
+Requires=postgresql.service
+PartOf=koi-pipeline.service
+
+[Service]
+Type=simple
+User=darren
+Group=gaia-devs
+WorkingDirectory=/opt/projects/koi-processor
+
+# Environment
+Environment="POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza"
+Environment="BGE_API_URL=http://localhost:8090/encode"
+
+# Start MCP Server
+ExecStart=/usr/bin/python3 /opt/projects/koi-processor/koi_knowledge_mcp_server.py
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=append:/opt/projects/koi-processor/logs/mcp_server.log
+StandardError=append:/opt/projects/koi-processor/logs/mcp_server.log
+
+[Install]
+WantedBy=koi-pipeline.service
