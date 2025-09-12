@@ -126,3 +126,42 @@ features:
   enable_sentiment_analysis: false
   enable_auto_publish: false     # Start with false, enable after testing
   enable_duplicate_detection: true
+
+# X Bot configuration for Twitter/X posting
+x_bot:
+  # Draft mode for first week (Milestone B requirement)
+  draft_mode: true
+  draft_days: 7
+  
+  # Style guide settings (David Fortson / Many Mangos)
+  style_guide:
+    tone: professional_friendly
+    use_thread_numbers: true
+    max_tweet_length: 280
+    default_cta: "Learn more at regen.network"
+    
+  # Hashtags for posts
+  hashtags:
+    - "#RegenNetwork"
+    - "#ReFi"
+    - "#Regenerative"
+    
+  # Content validation
+  validation:
+    check_links: true
+    no_speculation: true      # Milestone B requirement
+    require_sources: true
+    timeout_seconds: 10
+    max_retries: 3
+    
+  # Review workflow
+  review:
+    require_approval_week_1: true
+    min_style_score: 0.7      # 70% minimum style compliance
+    max_invalid_links: 1      # Maximum 1 broken link allowed
+    
+  # Twitter API settings (to be configured with actual credentials)
+  twitter:
+    api_version: "v2"
+    post_time: "12:00"        # 12:00 ET as per Milestone B
+    timezone: "America/New_York"
