@@ -43,6 +43,17 @@ This will:
 - Create configuration files
 - Initialize directories
 
+**For database migrations with backup (recommended):**
+```bash
+# Use this instead of regular migrations for safety
+bash scripts/run_migrations_with_backup.sh
+```
+This will:
+- Create compressed backup before migrations
+- Apply all migrations
+- Keep last 5 backups automatically
+- Provide restore instructions if anything fails
+
 ### 3. Configure Environment
 
 Create or update `.env` file with production values:
