@@ -16,7 +16,7 @@ from loguru import logger
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daily_curator import DailyCurator
+from src.content.daily_curator import DailyCurator
 
 
 def setup_logging(verbose: bool = False):

@@ -1,0 +1,68 @@
+<?xml version="1.0" ?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+  <channel>
+    <title>Pathway to Planetary Regeneration</title>
+    <description>Weekly deep dives into regenerative agriculture and Regen Network</description>
+    <language>en-us</language>
+    <link>https://regen.network</link>
+    <itunes:subtitle>Weekly insights from the Regen Network ecosystem</itunes:subtitle>
+    <itunes:author>Regen Network</itunes:author>
+    <itunes:summary>Weekly deep dives into regenerative agriculture and Regen Network</itunes:summary>
+    <itunes:owner>
+      <itunes:name>Regen Network</itunes:name>
+      <itunes:email>podcast@regen.network</itunes:email>
+    </itunes:owner>
+    <itunes:explicit>no</itunes:explicit>
+    <itunes:category text="Science"/>
+    <atom:link href="" rel="self" type="application/rss+xml"/>
+    <item>
+      <title>Week 37, 2025: Major Carbon Credit Milestone and Governance Updates</title>
+      <description>
+        This week marked a significant milestone for Regen Network with the approval of 
+        a new soil carbon methodology that could unlock millions of acres for regenerative 
+        agriculture credits. The community also passed Governance Proposal 52, allocating 
+        2 million REGEN tokens to ecosystem development. On-chain activity surged with 
+        KlimaDAO's integration bringing substantial demand for nature-based credits.
+**Top Stories This Week:**
+• Revolutionary Soil Carbon Methodology Approved
+• KlimaDAO Integrates Regen Credits into Treasury
+• Governance Proposal 52: Ecosystem Fund Approved
+• New Biodiversity Credit Class Launched
+• Technical Upgrade: IBC Integration Complete
+**Key Themes:**
+• Market Expansion
+• Governance Maturity
+• Technical Innovation
+• Regenerative Agriculture
+• DeFi Integration
+**By the Numbers:**
+• 247 pieces of content analyzed
+• Top sources: Twitter, Forum, Discord
+**Get Involved:**
+• Join the discussion at forum.regen.network
+• Explore carbon credits at registry.regen.network
+• Learn more at docs.regen.network</description>
+      <pubDate>Sat, 13 Sep 2025 18:28:15 +0000</pubDate>
+      <guid isPermaLink="false">regen-weekly-001</guid>
+      <enclosure url="https://regen.network/podcast/episodes/episode_001_test_episode.mp3" length="41710" type="audio/mpeg"/>
+      <itunes:author>Regen Network</itunes:author>
+      <itunes:subtitle>
+        This week marked a significant milestone for Regen Network with the approval of 
+        a new soil carbon methodology that could unlock millions of acres for regenerative 
+        agriculture credits. The community also passed Governance Proposa</itunes:subtitle>
+      <itunes:summary>
+        This week marked a significant milestone for Regen Network with the approval of 
+        a new soil carbon methodology that could unlock millions of acres for regenerative 
+        agriculture credits. The community also passed Governance Proposal 52, allocating 
+        2 million REGEN tokens to ecosystem development. On-chain activity surged with 
+        KlimaDAO's integration bringing substantial demand for nature-based credits.
+        </itunes:summary>
+      <itunes:duration>00:00:02</itunes:duration>
+      <itunes:explicit>no</itunes:explicit>
+      <itunes:episodeType>full</itunes:episodeType>
+      <itunes:episode>1</itunes:episode>
+      <itunes:season>1</itunes:season>
+      <itunes:keywords>regenerative, ecology, governance, carbon credits, blockchain</itunes:keywords>
+    </item>
+  </channel>
+</rss>
