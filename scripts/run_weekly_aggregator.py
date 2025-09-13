@@ -15,7 +15,7 @@ import logging
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from weekly_aggregator import WeeklyAggregator, WeeklyDigest
+from src.content.weekly_aggregator import WeeklyAggregator
 
 # Configure logging
 logging.basicConfig(

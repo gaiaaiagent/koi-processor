@@ -27,7 +27,41 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Isolated Tables**: Separates sensor data from scraped content
 - ✅ **Production Embeddings**: Model-agnostic embedding server (currently BGE-large-en-v1.5)
 - ✅ **MCP Integration**: Semantic search via Model Context Protocol
-- 🚧 **Daily Content Curator** (Planned): Processor component for content curation and X bot integration
+- ✅ **Content Operations Dashboard**: Web-based monitoring for Daily Bot and Weekly Digest
+- ✅ **Daily Content Curator**: Automated content curation for daily X posts
+- ✅ **Weekly Aggregator**: Weekly digest generation with podcast support
+
+## Project Structure
+
+```
+koi-processor/
+├── src/                    # Source code
+│   ├── core/              # Core KOI processing
+│   │   ├── koi_event_bridge_v2.py
+│   │   ├── koi_types.py
+│   │   ├── koi_permissions_api.py
+│   │   └── bge_server.py
+│   ├── content/           # Content generation & monitoring
+│   │   ├── content_dashboard.py
+│   │   ├── daily_curator.py
+│   │   ├── weekly_aggregator.py
+│   │   └── quality_control.py
+│   ├── audio/             # Podcast generation
+│   │   ├── audio_pipeline_enhanced.py
+│   │   └── podcast_integration.py
+│   └── utils/             # Utilities & helpers
+├── scripts/               # Operational scripts
+│   ├── setup.sh          # One-command setup
+│   ├── run_migrations.sh # Database migrations
+│   └── run_daily_curator.py
+├── migrations/            # Database migrations
+├── docs/                  # Documentation
+├── tests/                 # Test suite
+├── config/                # Configuration files
+├── static/                # Dashboard static files
+├── templates/             # Dashboard templates
+└── requirements.txt       # Python dependencies
+```
 
 ## Architecture
 
@@ -158,106 +192,92 @@ QUERY/ACCESS LAYER:
 - **Permission filtering**: Agent-specific content access control
 
 ### 📊 Isolated Storage
-- **Separated tables**: `koi_memories` for sensor data, `memories` for legacy
+- **Dual-table pattern**: `koi_memories` for source documents, `memories` for chunked content
 - **No contamination**: Clean separation of data sources
 - **Migration support**: Gradual transition from legacy systems
+- **Full documentation**: See [STORAGE_ARCHITECTURE.md](docs/STORAGE_ARCHITECTURE.md) for details
 
-## Installation
-
-### Quick Start (New Users)
-
-If you're cloning this repository for the first time:
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/RegenAI/koi-processor.git
-cd koi-processor
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Run database migrations (REQUIRED)
-./scripts/run_migrations.sh
-
-# 4. Start the processor
-python koi_event_bridge_v2.py
-```
-
-### Database Setup
-
-**Important**: The database requires migrations to be run before first use. See [MIGRATION_SETUP.md](MIGRATION_SETUP.md) for detailed instructions.
-
-**Quick migration command:**
-```bash
-# Automated setup (recommended)
-./scripts/run_migrations.sh
-
-# Or manual setup
-psql postgresql://postgres:postgres@localhost:5433/eliza -f migrations/*.sql
-```
-
-### Daily Content Curator
-
-The Daily Content Curator is a new component that aggregates content for social media posts:
-
-```bash
-# Run migration first (if not already done)
-python scripts/run_daily_curator.py migrate
-
-# Check content status
-python scripts/run_daily_curator.py status
-
-# Generate daily thread
-python scripts/run_daily_curator.py daily
-```
-
-See [DAILY_CURATOR_README.md](DAILY_CURATOR_README.md) for full documentation.
+## Quick Start
 
 ### Prerequisites
 - Python 3.8+
-- PostgreSQL 14+ with pgvector extension
-- Bun (for TypeScript MCP server)
-- Apache Jena Fuseki 4.x
+- PostgreSQL with pgvector extension (or Docker)
 - 4GB+ RAM recommended
 
-### Step 1: Clone Repository
+### Installation
+
 ```bash
+# Clone the repository
 git clone https://github.com/yourusername/koi-processor.git
 cd koi-processor
+
+# Run the setup script
+chmod +x scripts/setup.sh
+./scripts/setup.sh
 ```
 
-### Step 2: Python Environment
+The setup script will:
+- ✅ Check Python version
+- ✅ Create virtual environment
+- ✅ Install all dependencies
+- ✅ Set up PostgreSQL (optionally with Docker)
+- ✅ Run database migrations
+- ✅ Create configuration files
+- ✅ Set up the monitoring dashboard
+
+## Running the System
+
+### 1. Start the Monitoring Dashboard
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+source venv/bin/activate
+python src/content/content_dashboard.py
+# Open http://localhost:8400 in your browser
 ```
 
-### Step 3: Database Setup
+### 2. Run Daily Content Curator
+```bash
+source venv/bin/activate
+python scripts/run_daily_curator.py
+```
+
+### 3. Check System Status
+```bash
+source venv/bin/activate
+python scripts/run_daily_curator.py status
+```
+
+## Advanced Setup
+
+### Manual Installation
+
+If you prefer to set up components manually:
+
+#### Database
 ```bash
 # Create database
 createdb -U postgres eliza
 
-# Enable pgvector extension
+# Enable pgvector extension  
 psql -U postgres -d eliza -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# Run migrations
+# Run migrations individually
 psql -U postgres -d eliza < migrations/001_create_transformation_receipts.sql
 psql -U postgres -d eliza < migrations/002_create_agent_knowledge_permissions.sql
 psql -U postgres -d eliza < migrations/003_create_isolated_koi_tables.sql
+psql -U postgres -d eliza < migrations/004_add_publication_dates.sql
+psql -U postgres -d eliza < migrations/005_create_dashboard_tables.sql
 ```
 
-### Step 4: Embedding Server Setup
+#### Embedding Server (Optional)
 ```bash
-# Option 1: Use the mock embedding server (for testing)
-python bge_server.py  # Note: filename kept for compatibility
+# For testing/development
+python bge_server.py
 
-# Option 2: Use real embedding model (requires GPU)
-# Currently configured for BAAI/bge-large-en-v1.5
+# For production (requires GPU)
 # See bge_server_real.py for Hugging Face implementation
 ```
 
-### Step 5: Apache Jena Fuseki Setup
+#### Apache Jena Fuseki (Optional)
 ```bash
 # Download and extract Fuseki
 wget https://dlcdn.apache.org/jena/binaries/apache-jena-fuseki-4.10.0.tar.gz
@@ -572,10 +592,33 @@ GROUP BY rid
 HAVING COUNT(*) > 1;
 ```
 
-## Planned Components
+## Milestone B Components
 
-### Daily Content Curator
-**Status**: Architecture Defined (Session 7 of Milestone B)
+### ✅ Podcast Publishing System (Session 14 - COMPLETE)
+**Status**: Fully Implemented and Tested
+
+The podcast publishing system generates weekly audio digests from aggregated content using automated audio generation (Podcastfy) or manual export (NotebookLM).
+
+**Key Components**:
+- `podcast_publisher.py` - RSS 2.0 feed generation with iTunes extensions
+- `podcastfy_generator.py` - Automated audio generation (no manual steps)
+- `podcast_integration.py` - Complete pipeline orchestration
+- `PODCAST_HOSTING_GUIDE.md` - Comprehensive documentation
+
+**Features**:
+- Automated audio generation from weekly digests
+- RSS feed with full podcast metadata
+- Google Drive backup integration (optional)
+- Episode management and versioning
+- Configurable voices and conversation styles
+
+### ✅ Weekly Aggregator (Session 8 - COMPLETE)
+**Status**: Fully Implemented
+
+Aggregates content from past 7 days and generates comprehensive weekly digests.
+
+### ✅ Daily Content Curator (Sessions 7, 9-13 - COMPLETE)
+**Status**: Fully Implemented
 
 The Daily Content Curator will be a specialized processor component that aggregates and curates content for daily X posts and weekly digests.
 

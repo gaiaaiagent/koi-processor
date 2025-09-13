@@ -1,0 +1,25 @@
+[Unit]
+Description=KOI Coordinator Service
+After=network.target
+PartOf=koi-pipeline.service
+
+[Service]
+Type=simple
+User=darren
+Group=gaia-devs
+WorkingDirectory=/opt/projects/koi-sensors
+Environment="PYTHONPATH=/opt/projects/koi-sensors:$PYTHONPATH"
+
+# Start coordinator
+ExecStart=/usr/bin/python3 /opt/projects/koi-sensors/koi_protocol/coordinator/run_coordinator.py
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=append:/opt/projects/koi-processor/logs/coordinator.log
+StandardError=append:/opt/projects/koi-processor/logs/coordinator.log
+
+[Install]
+WantedBy=koi-pipeline.service

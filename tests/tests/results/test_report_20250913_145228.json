@@ -1,0 +1,331 @@
+{
+  "started_at": "2025-09-13T21:52:28.507878+00:00",
+  "config": {
+    "test_mode": true,
+    "test_database": "sqlite:///tests/test_data.db",
+    "production_database": "postgresql://postgres:postgres@localhost:5433/eliza",
+    "time_settings": {
+      "hours_lookback_primary": 24,
+      "hours_lookback_secondary": 72,
+      "test_duration_days": 7
+    },
+    "content_limits": {
+      "max_daily_posts": 5,
+      "min_daily_posts": 3,
+      "weekly_brief_min_words": 800,
+      "weekly_brief_max_words": 1200,
+      "test_audio_duration_seconds": 60
+    },
+    "test_data_sources": {
+      "twitter": {
+        "enabled": true,
+        "data_file": "../koi-sensors/sensors/twitter/output/regen_tweets_20250910_203238.json",
+        "limit": 10
+      },
+      "medium": {
+        "enabled": true,
+        "data_file": "../koi-sensors/sensors/medium/medium_articles_test.json",
+        "limit": 5
+      },
+      "discourse": {
+        "enabled": true,
+        "generate_count": 10,
+        "topics": [
+          "governance",
+          "ecocredits",
+          "marketplace",
+          "community"
+        ]
+      },
+      "github": {
+        "enabled": true,
+        "generate_count": 15,
+        "repos": [
+          "regen-ledger",
+          "regen-web",
+          "regenie-corpus"
+        ]
+      },
+      "websites": {
+        "enabled": true,
+        "generate_count": 20,
+        "sites": [
+          "docs.regen.network",
+          "guides.regen.network",
+          "registry.regen.network"
+        ]
+      },
+      "ledger": {
+        "enabled": true,
+        "generate_blocks": 10,
+        "generate_proposals": 3,
+        "generate_credits": 5
+      }
+    },
+    "components": {
+      "daily_curator": {
+        "enabled": true,
+        "test_runs": 3,
+        "validate_output": true
+      },
+      "weekly_aggregator": {
+        "enabled": true,
+        "test_runs": 1,
+        "validate_brief": true
+      },
+      "quality_control": {
+        "enabled": true,
+        "min_score": 0.7,
+        "check_speculation": true,
+        "check_links": true
+      },
+      "audio_pipeline": {
+        "enabled": true,
+        "use_mock_generator": true,
+        "generate_rss": true
+      },
+      "monitoring_dashboard": {
+        "enabled": true,
+        "test_endpoints": true,
+        "check_websocket": false
+      }
+    },
+    "performance": {
+      "max_pipeline_duration_seconds": 30,
+      "max_query_response_ms": 2000,
+      "max_memory_usage_mb": 1024
+    },
+    "output": {
+      "test_results_dir": "tests/results",
+      "test_data_dir": "tests/data",
+      "test_logs_dir": "tests/logs",
+      "generate_report": true,
+      "report_format": "html"
+    },
+    "validation": {
+      "check_rids": true,
+      "check_embeddings": true,
+      "check_deduplication": true,
+      "check_publication_dates": true,
+      "check_content_hash": true
+    },
+    "error_handling": {
+      "continue_on_sensor_failure": true,
+      "max_retries": 2,
+      "retry_delay_seconds": 1,
+      "capture_stack_traces": true
+    },
+    "mock_services": {
+      "koi_coordinator": {
+        "enabled": true,
+        "port": 8005
+      },
+      "bge_embeddings": {
+        "enabled": true,
+        "port": 8090,
+        "mock_dimension": 1024
+      },
+      "event_bridge": {
+        "enabled": true,
+        "port": 8100
+      }
+    },
+    "scenarios": [
+      {
+        "name": "happy_path",
+        "description": "All components working normally",
+        "failures": []
+      },
+      {
+        "name": "sensor_failures",
+        "description": "Some sensors fail to collect data",
+        "failures": [
+          "discord",
+          "notion"
+        ]
+      },
+      {
+        "name": "database_failure",
+        "description": "Database becomes unavailable mid-process",
+        "failures": [
+          "database_disconnect"
+        ]
+      },
+      {
+        "name": "quality_rejection",
+        "description": "Content fails quality checks",
+        "failures": [
+          "low_quality_score"
+        ]
+      }
+    ]
+  },
+  "tests": {
+    "environment_setup": {
+      "status": "passed",
+      "duration": 0.017678022384643555,
+      "database_info": {
+        "database": "SQLite",
+        "path": "tests/test_data.db",
+        "tables": [
+          "daily_posts",
+          "koi_memories",
+          "pipeline_logs",
+          "quality_reviews",
+          "sqlite_sequence",
+          "weekly_digests"
+        ],
+        "record_counts": {
+          "daily_posts": 0,
+          "koi_memories": 63,
+          "pipeline_logs": 0,
+          "quality_reviews": 0,
+          "sqlite_sequence": 0,
+          "weekly_digests": 0
+        }
+      },
+      "test_data_summary": {
+        "total_items": 73,
+        "sources": [
+          "generated_at",
+          "config",
+          "twitter",
+          "discourse",
+          "github",
+          "websites",
+          "ledger"
+        ],
+        "time_range": {
+          "start": "2025-09-06T21:52:28.528619+00:00",
+          "end": "2025-09-13T21:52:28.528620+00:00"
+        }
+      }
+    },
+    "daily_curator": {
+      "status": "passed",
+      "tests": [
+        {
+          "name": "fetch_recent_content",
+          "status": "passed",
+          "content_count": 10
+        },
+        {
+          "name": "generate_thread",
+          "status": "passed",
+          "post_count": 4
+        },
+        {
+          "name": "generate_stats",
+          "status": "passed",
+          "stats": {
+            "credits_issued": 1000,
+            "proposals": 3,
+            "validators": 110
+          }
+        }
+      ],
+      "duration": 0.00039696693420410156
+    },
+    "weekly_aggregator": {
+      "status": "passed",
+      "tests": [
+        {
+          "name": "aggregate_content",
+          "status": "passed",
+          "content_count": 50
+        },
+        {
+          "name": "generate_brief",
+          "status": "failed",
+          "word_count": 273
+        },
+        {
+          "name": "extract_themes",
+          "status": "passed",
+          "theme_count": 5
+        }
+      ],
+      "duration": 0.0003829002380371094
+    },
+    "quality_control": {
+      "status": "passed",
+      "tests": [
+        {
+          "name": "speculation_good",
+          "status": "passed",
+          "detected": false,
+          "expected": false
+        },
+        {
+          "name": "speculation_bad",
+          "status": "passed",
+          "detected": true,
+          "expected": true
+        },
+        {
+          "name": "link_validation",
+          "link": "https://regen.network",
+          "status": "passed",
+          "valid": true
+        },
+        {
+          "name": "link_validation",
+          "link": "https://invalid-domain-12345.com",
+          "status": "passed",
+          "valid": true
+        },
+        {
+          "name": "link_validation",
+          "link": "not-a-url",
+          "status": "passed",
+          "valid": false
+        },
+        {
+          "name": "quality_score",
+          "status": "passed",
+          "score": 1.0
+        }
+      ],
+      "duration": 0.0003750324249267578
+    },
+    "end_to_end_pipeline": {
+      "status": "passed",
+      "pipeline_stages": [
+        {
+          "stage": "data_collection",
+          "status": "passed",
+          "records": 63
+        },
+        {
+          "stage": "daily_curation",
+          "status": "passed",
+          "posts_generated": 4
+        },
+        {
+          "stage": "weekly_aggregation",
+          "status": "passed",
+          "word_count": 273
+        },
+        {
+          "stage": "quality_control",
+          "status": "passed",
+          "average_score": 0.9
+        },
+        {
+          "stage": "performance",
+          "status": "passed",
+          "duration": 0.0007760524749755859,
+          "max_allowed": 30
+        }
+      ],
+      "total_duration": 0.0007989406585693359
+    }
+  },
+  "summary": {
+    "total_tests": 5,
+    "passed": 5,
+    "failed": 0,
+    "success_rate": 100.0,
+    "completed_at": "2025-09-13T21:52:28.533547+00:00"
+  }
+}

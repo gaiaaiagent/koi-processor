@@ -100,8 +100,33 @@ async def extract_text_from_bundle(bundle: KOIBundle) -> str:
     """Extract text content from KOI bundle"""
     content = bundle.content
     
+    print(f"\n🔧 EXTRACTING CONTENT FROM BUNDLE", flush=True)
+    print(f"   Type: {type(content)}", flush=True)
+    print(f"   Keys: {list(content.keys()) if isinstance(content, dict) else 'Not a dict'}", flush=True)
+    logger.info(f"Bundle content type: {type(content)}")
+    logger.info(f"Bundle content keys: {content.keys() if isinstance(content, dict) else 'Not a dict'}")
+    
     if isinstance(content, dict):
-        # Try common content keys
+        # Check if content is wrapped in a document structure (from koi-sensors)
+        if 'document' in content and isinstance(content['document'], dict):
+            doc = content['document']
+            print(f"   ✅ Found 'document' structure!", flush=True)
+            print(f"   Document keys: {list(doc.keys())}", flush=True)
+            logger.info(f"Found document structure, keys: {doc.keys()}")
+            # Extract content from the document
+            if 'content' in doc:
+                extracted = str(doc['content'])
+                print(f"   🎯 CONTENT FOUND IN document.content!", flush=True)
+                print(f"   Length: {len(extracted)}", flush=True)
+                print(f"   Preview: {extracted[:100]}...", flush=True)
+                logger.info(f"Extracting content from document.content")
+                return extracted
+            # Fallback to other fields in document
+            for key in ['text', 'body', 'description']:
+                if key in doc:
+                    return str(doc[key])
+        
+        # Try common content keys at root level
         for key in ['text', 'content', 'body', 'description']:
             if key in content:
                 return str(content[key])
@@ -344,6 +369,11 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 # Extract text content
                 text_content = await extract_text_from_bundle(event.bundle)
                 
+                # Debug logging
+                logger.info(f"Extracted text content length: {len(text_content) if text_content else 0}")
+                if text_content:
+                    logger.info(f"Content preview: {text_content[:200]}")
+                
                 if not text_content or len(text_content.strip()) < 50:
                     return ProcessingResult(
                         success=False,
@@ -467,6 +497,18 @@ async def root():
 @app.post("/process-koi-event", response_model=ProcessingResult)
 async def process_event_endpoint(event: KOIEvent):
     """Process a KOI event from the coordinator"""
+    print("\n" + "="*60, flush=True)
+    print(f"⚡ NEW EVENT RECEIVED - {event.event_type}", flush=True)
+    print(f"📦 RID: {event.bundle.rid}", flush=True)
+    print(f"🔍 Bundle content type: {type(event.bundle.content)}", flush=True)
+    print(f"🔑 Bundle content keys: {list(event.bundle.content.keys()) if isinstance(event.bundle.content, dict) else 'Not a dict'}", flush=True)
+    if isinstance(event.bundle.content, dict) and 'document' in event.bundle.content:
+        doc = event.bundle.content['document']
+        print(f"📄 Document found! Keys: {list(doc.keys()) if isinstance(doc, dict) else 'Not a dict'}", flush=True)
+        if isinstance(doc, dict) and 'content' in doc:
+            content_preview = str(doc['content'])[:100]
+            print(f"✅ Content found in document! Preview: {content_preview}", flush=True)
+    print("="*60 + "\n", flush=True)
     logger.info(f"[KOI Bridge v2] Received {event.event_type} event for RID: {event.bundle.rid}")
     
     # Process the event
@@ -541,10 +583,14 @@ async def get_stats():
 if __name__ == "__main__":
     import uvicorn
     
-    print("[KOI Event Bridge v2] Starting...")
-    print(f"[KOI Event Bridge v2] Database: {DB_URL}")
-    print(f"[KOI Event Bridge v2] BGE API: {BGE_API_URL}")
-    print(f"[KOI Event Bridge v2] Using isolated tables: {USE_ISOLATED_TABLES}")
-    print("[KOI Event Bridge v2] Features: Deduplication, Versioning, Isolated Tables")
+    print("\n" + "="*70)
+    print("🚀 KOI EVENT BRIDGE v2 STARTING")
+    print("="*70)
+    print(f"📊 Database: {DB_URL}")
+    print(f"🤖 BGE API: {BGE_API_URL}")
+    print(f"📁 Using isolated tables: {USE_ISOLATED_TABLES}")
+    print("✨ Features: Deduplication, Versioning, Isolated Tables")
+    print("🔍 DEBUG MODE: Enhanced logging enabled")
+    print("="*70 + "\n")
     
-    uvicorn.run(app, host="0.0.0.0", port=8100, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8100, log_level="info", access_log=True)

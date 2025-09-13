@@ -1,0 +1,30 @@
+[Unit]
+Description=KOI Event Bridge v2 Service
+After=network.target postgresql.service
+Requires=postgresql.service
+PartOf=koi-pipeline.service
+
+[Service]
+Type=simple
+User=darren
+Group=gaia-devs
+WorkingDirectory=/opt/projects/koi-processor
+
+# Environment
+Environment="POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza"
+Environment="BGE_API_URL=http://localhost:8090/encode"
+Environment="USE_ISOLATED_TABLES=true"
+
+# Start Event Bridge
+ExecStart=/usr/bin/python3 /opt/projects/koi-processor/koi_event_bridge_v2.py
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=append:/opt/projects/koi-processor/logs/event_bridge.log
+StandardError=append:/opt/projects/koi-processor/logs/event_bridge.log
+
+[Install]
+WantedBy=koi-pipeline.service

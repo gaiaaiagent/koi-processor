@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Milestone B Content Operations Dashboard</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    
+    <style>
+        body {
+            background-color: #f8f9fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        .dashboard-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem 0;
+            margin-bottom: 2rem;
+        }
+        .metric-card {
+            border-radius: 10px;
+            border: none;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        .metric-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        .status-healthy { background-color: #d4edda; color: #155724; }
+        .status-warning { background-color: #fff3cd; color: #856404; }
+        .status-error { background-color: #f8d7da; color: #721c24; }
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #495057;
+        }
+        .metric-label {
+            color: #6c757d;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .content-preview {
+            background-color: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-radius: 4px;
+        }
+        .refresh-indicator {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .tab-content {
+            padding-top: 1.5rem;
+        }
+        .alert-item {
+            border-left: 4px solid;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background-color: white;
+            border-radius: 4px;
+        }
+        .alert-error { border-left-color: #dc3545; }
+        .alert-warning { border-left-color: #ffc107; }
+        .alert-info { border-left-color: #0dcaf0; }
+        .live-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background-color: #28a745;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+            margin-right: 0.5rem;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="dashboard-header">
+        <div class="container-fluid">
+            <div class="row align-items-center">
+                <div class="col-md-8">
+                    <h1 class="mb-0">
+                        <i class="bi bi-speedometer2"></i> Milestone B Content Operations
+                    </h1>
+                    <p class="mb-0 mt-2 opacity-75">Real-time monitoring for Daily Bot and Weekly Digest</p>
+                </div>
+                <div class="col-md-4 text-end">
+                    <div class="d-inline-block me-3">
+                        <span class="live-indicator"></span>
+                        <span id="connection-status">Connected</span>
+                    </div>
+                    <button class="btn btn-light" onclick="refreshDashboard()">
+                        <i class="bi bi-arrow-clockwise" id="refresh-icon"></i> Refresh
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container-fluid">
+        <!-- Overview Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card metric-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <div class="metric-label">System Health</div>
+                                <div class="mt-2">
+                                    <span class="status-badge status-healthy" id="health-status">Healthy</span>
+                                </div>
+                            </div>
+                            <i class="bi bi-heart-pulse text-success" style="font-size: 2rem;"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card metric-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <div class="metric-label">Pending Reviews</div>
+                                <div class="metric-value" id="pending-count">0</div>
+                            </div>
+                            <i class="bi bi-clock-history text-warning" style="font-size: 2rem;"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card metric-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <div class="metric-label">Daily Posts (7d)</div>
+                                <div class="metric-value" id="daily-posts-count">0</div>
+                            </div>
+                            <i class="bi bi-chat-square-text text-primary" style="font-size: 2rem;"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card metric-card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <div class="metric-label">KOI Pipeline</div>
+                                <div class="mt-2">
+                                    <span class="status-badge status-healthy" id="koi-status">Active</span>
+                                </div>
+                            </div>
+                            <i class="bi bi-diagram-3 text-info" style="font-size: 2rem;"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content Tabs -->
+        <ul class="nav nav-tabs" id="dashboardTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="daily-tab" data-bs-toggle="tab" data-bs-target="#daily" type="button">
+                    <i class="bi bi-calendar-day"></i> Daily Bot
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="weekly-tab" data-bs-toggle="tab" data-bs-target="#weekly" type="button">
+                    <i class="bi bi-calendar-week"></i> Weekly Digest
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="quality-tab" data-bs-toggle="tab" data-bs-target="#quality" type="button">
+                    <i class="bi bi-shield-check"></i> Quality Control
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="schedule-tab" data-bs-toggle="tab" data-bs-target="#schedule" type="button">
+                    <i class="bi bi-calendar3"></i> Schedule
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="alerts-tab" data-bs-toggle="tab" data-bs-target="#alerts" type="button">
+                    <i class="bi bi-exclamation-triangle"></i> Alerts
+                    <span class="badge bg-danger ms-1" id="alert-count" style="display: none;">0</span>
+                </button>
+            </li>
+        </ul>
+
+        <div class="tab-content" id="dashboardTabContent">
+            <!-- Daily Bot Tab -->
+            <div class="tab-pane fade show active" id="daily" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Today's Draft Thread</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="daily-draft-content">
+                                    <div class="text-center text-muted py-4">
+                                        <i class="bi bi-file-text" style="font-size: 3rem;"></i>
+                                        <p>No draft generated yet today</p>
+                                    </div>
+                                </div>
+                                <div class="mt-3" id="daily-actions" style="display: none;">
+                                    <button class="btn btn-success me-2" onclick="approveContent('daily')">
+                                        <i class="bi bi-check-circle"></i> Approve
+                                    </button>
+                                    <button class="btn btn-warning me-2" onclick="requestRevision('daily')">
+                                        <i class="bi bi-pencil"></i> Request Revision
+                                    </button>
+                                    <button class="btn btn-danger" onclick="rejectContent('daily')">
+                                        <i class="bi bi-x-circle"></i> Reject
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h6 class="mb-0">Performance (7 Days)</h6>
+                            </div>
+                            <div class="card-body">
+                                <canvas id="dailyPerformanceChart" height="200"></canvas>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0">Sources Used</h6>
+                            </div>
+                            <div class="card-body">
+                                <ul class="list-unstyled mb-0" id="daily-sources">
+                                    <li><i class="bi bi-check-circle text-success"></i> Forum posts</li>
+                                    <li><i class="bi bi-check-circle text-success"></i> Ledger data</li>
+                                    <li><i class="bi bi-check-circle text-success"></i> Governance</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Weekly Digest Tab -->
+            <div class="tab-pane fade" id="weekly" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">Current Week's Digest</h5>
+                                <div class="progress" style="width: 200px; height: 20px;">
+                                    <div class="progress-bar" id="weekly-progress" role="progressbar" style="width: 0%">0%</div>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div id="weekly-digest-content">
+                                    <div class="text-center text-muted py-4">
+                                        <i class="bi bi-journal-text" style="font-size: 3rem;"></i>
+                                        <p>Weekly digest in progress...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h6 class="mb-0">Content Statistics</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <div class="d-flex justify-content-between">
+                                        <span>Word Count</span>
+                                        <strong id="word-count">0 / 800-1200</strong>
+                                    </div>
+                                </div>
+                                <div class="mb-3">
+                                    <div class="d-flex justify-content-between">
+                                        <span>Sources</span>
+                                        <strong id="source-count">0</strong>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="d-flex justify-content-between">
+                                        <span>Content Items</span>
+                                        <strong id="content-count">0</strong>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0">Podcast Status</h6>
+                            </div>
+                            <div class="card-body">
+                                <div id="podcast-status">
+                                    <p class="text-muted mb-0">No podcast generated yet</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quality Control Tab -->
+            <div class="tab-pane fade" id="quality" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Pending Reviews</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="pending-reviews-list">
+                                    <p class="text-muted">No pending reviews</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Quality Metrics (30 Days)</h5>
+                            </div>
+                            <div class="card-body">
+                                <canvas id="qualityChart" height="150"></canvas>
+                                <div class="row mt-3">
+                                    <div class="col-6 text-center">
+                                        <div class="metric-value text-success" id="approval-rate">0%</div>
+                                        <div class="metric-label">Approval Rate</div>
+                                    </div>
+                                    <div class="col-6 text-center">
+                                        <div class="metric-value text-primary" id="avg-style-score">0.0</div>
+                                        <div class="metric-label">Avg Style Score</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Schedule Tab -->
+            <div class="tab-pane fade" id="schedule" role="tabpanel">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Upcoming Runs</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="list-group" id="schedule-list">
+                                    <div class="list-group-item">
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <div>
+                                                <h6 class="mb-1">Daily Bot</h6>
+                                                <p class="mb-0 text-muted">Next run: <span id="next-daily">Loading...</span></p>
+                                            </div>
+                                            <button class="btn btn-sm btn-outline-primary" onclick="triggerManualRun('daily')">
+                                                <i class="bi bi-play-circle"></i> Run Now
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="list-group-item">
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <div>
+                                                <h6 class="mb-1">Weekly Digest</h6>
+                                                <p class="mb-0 text-muted">Next run: <span id="next-weekly">Loading...</span></p>
+                                            </div>
+                                            <button class="btn btn-sm btn-outline-primary" onclick="triggerManualRun('weekly')">
+                                                <i class="bi bi-play-circle"></i> Run Now
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Publishing Calendar</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="calendar-view">
+                                    <!-- Simple calendar view would go here -->
+                                    <p class="text-muted">Calendar view coming soon...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Alerts Tab -->
+            <div class="tab-pane fade" id="alerts" role="tabpanel">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Recent Alerts & Errors</h5>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="clearAlerts()">
+                            <i class="bi bi-trash"></i> Clear Resolved
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="alerts-list">
+                            <p class="text-muted">No recent alerts</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Dashboard JavaScript -->
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>
