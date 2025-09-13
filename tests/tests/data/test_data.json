@@ -1,0 +1,879 @@
+{
+  "generated_at": "2025-09-13T21:47:52.680630+00:00",
+  "config": {
+    "test_mode": true,
+    "test_database": "sqlite:///tests/test_data.db",
+    "production_database": "postgresql://postgres:postgres@localhost:5433/eliza",
+    "time_settings": {
+      "hours_lookback_primary": 24,
+      "hours_lookback_secondary": 72,
+      "test_duration_days": 7
+    },
+    "content_limits": {
+      "max_daily_posts": 5,
+      "min_daily_posts": 3,
+      "weekly_brief_min_words": 800,
+      "weekly_brief_max_words": 1200,
+      "test_audio_duration_seconds": 60
+    },
+    "test_data_sources": {
+      "twitter": {
+        "enabled": true,
+        "data_file": "../koi-sensors/sensors/twitter/output/regen_tweets_20250910_203238.json",
+        "limit": 10
+      },
+      "medium": {
+        "enabled": true,
+        "data_file": "../koi-sensors/sensors/medium/medium_articles_test.json",
+        "limit": 5
+      },
+      "discourse": {
+        "enabled": true,
+        "generate_count": 10,
+        "topics": [
+          "governance",
+          "ecocredits",
+          "marketplace",
+          "community"
+        ]
+      },
+      "github": {
+        "enabled": true,
+        "generate_count": 15,
+        "repos": [
+          "regen-ledger",
+          "regen-web",
+          "regenie-corpus"
+        ]
+      },
+      "websites": {
+        "enabled": true,
+        "generate_count": 20,
+        "sites": [
+          "docs.regen.network",
+          "guides.regen.network",
+          "registry.regen.network"
+        ]
+      },
+      "ledger": {
+        "enabled": true,
+        "generate_blocks": 10,
+        "generate_proposals": 3,
+        "generate_credits": 5
+      }
+    },
+    "components": {
+      "daily_curator": {
+        "enabled": true,
+        "test_runs": 3,
+        "validate_output": true
+      },
+      "weekly_aggregator": {
+        "enabled": true,
+        "test_runs": 1,
+        "validate_brief": true
+      },
+      "quality_control": {
+        "enabled": true,
+        "min_score": 0.7,
+        "check_speculation": true,
+        "check_links": true
+      },
+      "audio_pipeline": {
+        "enabled": true,
+        "use_mock_generator": true,
+        "generate_rss": true
+      },
+      "monitoring_dashboard": {
+        "enabled": true,
+        "test_endpoints": true,
+        "check_websocket": false
+      }
+    },
+    "performance": {
+      "max_pipeline_duration_seconds": 30,
+      "max_query_response_ms": 2000,
+      "max_memory_usage_mb": 1024
+    },
+    "output": {
+      "test_results_dir": "tests/results",
+      "test_data_dir": "tests/data",
+      "test_logs_dir": "tests/logs",
+      "generate_report": true,
+      "report_format": "html"
+    },
+    "validation": {
+      "check_rids": true,
+      "check_embeddings": true,
+      "check_deduplication": true,
+      "check_publication_dates": true,
+      "check_content_hash": true
+    },
+    "error_handling": {
+      "continue_on_sensor_failure": true,
+      "max_retries": 2,
+      "retry_delay_seconds": 1,
+      "capture_stack_traces": true
+    },
+    "mock_services": {
+      "koi_coordinator": {
+        "enabled": true,
+        "port": 8005
+      },
+      "bge_embeddings": {
+        "enabled": true,
+        "port": 8090,
+        "mock_dimension": 1024
+      },
+      "event_bridge": {
+        "enabled": true,
+        "port": 8100
+      }
+    },
+    "scenarios": [
+      {
+        "name": "happy_path",
+        "description": "All components working normally",
+        "failures": []
+      },
+      {
+        "name": "sensor_failures",
+        "description": "Some sensors fail to collect data",
+        "failures": [
+          "discord",
+          "notion"
+        ]
+      },
+      {
+        "name": "database_failure",
+        "description": "Database becomes unavailable mid-process",
+        "failures": [
+          "database_disconnect"
+        ]
+      },
+      {
+        "name": "quality_rejection",
+        "description": "Content fails quality checks",
+        "failures": [
+          "low_quality_score"
+        ]
+      }
+    ]
+  },
+  "twitter": [
+    {
+      "text": "\ud83c\udf0d Project-43 just retired 8106 tons of carbon credits on Regen Ledger. Every action counts!",
+      "timestamp": "2025-09-09T10:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 383,
+      "retweets": 12,
+      "replies": 24,
+      "id": "tweet_0_8547542"
+    },
+    {
+      "text": "\ud83c\udf31 Exciting news! Our latest carbon credit methodology just went live. Check it out at https://regen.network/credits/22",
+      "timestamp": "2025-09-11T17:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 230,
+      "retweets": 43,
+      "replies": 29,
+      "id": "tweet_1_2791120"
+    },
+    {
+      "text": "\ud83c\udf31 Exciting news! Our latest carbon credit methodology just went live. Check it out at https://regen.network/credits/36",
+      "timestamp": "2025-09-08T12:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 216,
+      "retweets": 39,
+      "replies": 3,
+      "id": "tweet_2_8370754"
+    },
+    {
+      "text": "\ud83d\udd2c New research paper on soil carbon published. Read more: https://regen.network/credits/28",
+      "timestamp": "2025-09-11T19:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 153,
+      "retweets": 78,
+      "replies": 3,
+      "id": "tweet_3_2824545"
+    },
+    {
+      "text": "\ud83d\udcca New governance proposal #34 is up for voting. Have your say in shaping Regen Network's future!",
+      "timestamp": "2025-09-07T16:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 244,
+      "retweets": 55,
+      "replies": 17,
+      "id": "tweet_4_6178321"
+    },
+    {
+      "text": "\ud83d\udc9a Community call tomorrow at 3PM ET. Join us to discuss soil carbon",
+      "timestamp": "2025-09-07T23:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 137,
+      "retweets": 91,
+      "replies": 32,
+      "id": "tweet_5_7419972"
+    },
+    {
+      "text": "\ud83d\udd2c New research paper on biodiversity published. Read more: https://regen.network/credits/98",
+      "timestamp": "2025-09-12T19:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 30,
+      "retweets": 80,
+      "replies": 29,
+      "id": "tweet_6_2753027"
+    },
+    {
+      "text": "\ud83c\udf31 Exciting news! Our latest carbon credit methodology just went live. Check it out at https://regen.network/credits/48",
+      "timestamp": "2025-09-11T21:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 31,
+      "retweets": 44,
+      "replies": 31,
+      "id": "tweet_7_8319934"
+    },
+    {
+      "text": "\ud83d\udd2c New research paper on biodiversity published. Read more: https://regen.network/credits/27",
+      "timestamp": "2025-09-12T22:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 470,
+      "retweets": 94,
+      "replies": 17,
+      "id": "tweet_8_3236928"
+    },
+    {
+      "text": "\ud83d\udc9a Community call tomorrow at 3PM ET. Join us to discuss water quality",
+      "timestamp": "2025-09-10T04:47:52.680845+00:00",
+      "author": "regen_network",
+      "likes": 46,
+      "retweets": 24,
+      "replies": 42,
+      "id": "tweet_9_5663629"
+    }
+  ],
+  "discourse": [
+    {
+      "id": "discourse_0_1980",
+      "title": "New Credit Class: C923",
+      "content": "Introducing C753, designed for measuring soil organic carbon in agricultural lands. Methodology available at https://forum.regen.network/t/703.",
+      "category": "ecocredits",
+      "author": "user_54",
+      "created_at": "2025-09-13T12:47:52.681029+00:00",
+      "views": 642,
+      "replies": 49,
+      "likes": 48
+    },
+    {
+      "id": "discourse_1_2202",
+      "title": "New Credit Class: C488",
+      "content": "Introducing C882, designed for measuring soil organic carbon in agricultural lands. Methodology available at https://forum.regen.network/t/532.",
+      "category": "ecocredits",
+      "author": "user_61",
+      "created_at": "2025-09-10T17:47:52.681029+00:00",
+      "views": 252,
+      "replies": 5,
+      "likes": 45
+    },
+    {
+      "id": "discourse_2_6327",
+      "title": "Proposal 77: Carbon Methodology",
+      "content": "This proposal aims to increase validator commission rates. We believe this will improve network security and sustainability. Please review and provide feedback.",
+      "category": "governance",
+      "author": "user_99",
+      "created_at": "2025-09-09T10:47:52.681029+00:00",
+      "views": 613,
+      "replies": 27,
+      "likes": 37
+    },
+    {
+      "id": "discourse_3_1336",
+      "title": "Proposal 87: Grant Program",
+      "content": "This proposal aims to increase validator commission rates. We believe this will improve network security and sustainability. Please review and provide feedback.",
+      "category": "governance",
+      "author": "user_80",
+      "created_at": "2025-09-07T15:47:52.681029+00:00",
+      "views": 230,
+      "replies": 8,
+      "likes": 25
+    },
+    {
+      "id": "discourse_4_8087",
+      "title": "Community Update: Validator Requirements",
+      "content": "Dear community, we're excited to share launching a new grants program. This means more funding opportunities for developers for our ecosystem.",
+      "category": "community",
+      "author": "user_7",
+      "created_at": "2025-09-11T08:47:52.681029+00:00",
+      "views": 317,
+      "replies": 45,
+      "likes": 73
+    },
+    {
+      "id": "discourse_5_7751",
+      "title": "New Credit Class: C216",
+      "content": "Introducing C518, designed for measuring soil organic carbon in agricultural lands. Methodology available at https://forum.regen.network/t/607.",
+      "category": "ecocredits",
+      "author": "user_87",
+      "created_at": "2025-09-13T00:47:52.681029+00:00",
+      "views": 921,
+      "replies": 7,
+      "likes": 69
+    },
+    {
+      "id": "discourse_6_1933",
+      "title": "New Credit Class: C683",
+      "content": "Introducing C567, designed for measuring soil organic carbon in agricultural lands. Methodology available at https://forum.regen.network/t/274.",
+      "category": "ecocredits",
+      "author": "user_99",
+      "created_at": "2025-09-12T05:47:52.681029+00:00",
+      "views": 685,
+      "replies": 23,
+      "likes": 18
+    },
+    {
+      "id": "discourse_7_5429",
+      "title": "Community Update: Validator Requirements",
+      "content": "Dear community, we're excited to share launching a new grants program. This means more funding opportunities for developers for our ecosystem.",
+      "category": "community",
+      "author": "user_80",
+      "created_at": "2025-09-09T10:47:52.681029+00:00",
+      "views": 834,
+      "replies": 36,
+      "likes": 100
+    },
+    {
+      "id": "discourse_8_5567",
+      "title": "New Credit Class: C731",
+      "content": "Introducing C654, designed for measuring soil organic carbon in agricultural lands. Methodology available at https://forum.regen.network/t/874.",
+      "category": "ecocredits",
+      "author": "user_9",
+      "created_at": "2025-09-11T11:47:52.681029+00:00",
+      "views": 59,
+      "replies": 13,
+      "likes": 93
+    },
+    {
+      "id": "discourse_9_1817",
+      "title": "Proposal 75: Grant Program",
+      "content": "This proposal aims to increase validator commission rates. We believe this will improve network security and sustainability. Please review and provide feedback.",
+      "category": "governance",
+      "author": "user_1",
+      "created_at": "2025-09-08T04:47:52.681029+00:00",
+      "views": 542,
+      "replies": 32,
+      "likes": 37
+    }
+  ],
+  "github": [
+    {
+      "type": "commit",
+      "repo": "regen-ledger",
+      "sha": "e2f4461e",
+      "message": "fix: resolve timeout in handler",
+      "author": "developer_9",
+      "timestamp": "2025-09-11T11:47:52.681195+00:00",
+      "files_changed": 8
+    },
+    {
+      "type": "pull_request",
+      "repo": "regen-web",
+      "number": 180,
+      "title": "Add support for GraphQL API",
+      "description": "This PR implements GraphQL API to enable faster and more flexible data queries",
+      "author": "developer_3",
+      "created_at": "2025-09-08T10:47:52.681195+00:00",
+      "state": "merged"
+    },
+    {
+      "type": "pull_request",
+      "repo": "regen-ledger",
+      "number": 456,
+      "title": "Add support for rate limiting",
+      "description": "This PR implements GraphQL API to enable faster and more flexible data queries",
+      "author": "developer_14",
+      "created_at": "2025-09-13T01:47:52.681195+00:00",
+      "state": "open"
+    },
+    {
+      "type": "commit",
+      "repo": "regen-ledger",
+      "sha": "2867365e",
+      "message": "docs: update troubleshooting documentation",
+      "author": "developer_15",
+      "timestamp": "2025-09-08T11:47:52.681195+00:00",
+      "files_changed": 2
+    },
+    {
+      "type": "pull_request",
+      "repo": "mcp",
+      "number": 110,
+      "title": "Add support for GraphQL API",
+      "description": "This PR implements GraphQL API to enable faster and more flexible data queries",
+      "author": "developer_17",
+      "created_at": "2025-09-12T01:47:52.681195+00:00",
+      "state": "open"
+    },
+    {
+      "type": "commit",
+      "repo": "regen-web",
+      "sha": "6eacf0d5",
+      "message": "feat: add filtering to auth",
+      "author": "developer_18",
+      "timestamp": "2025-09-07T00:47:52.681195+00:00",
+      "files_changed": 6
+    },
+    {
+      "type": "pull_request",
+      "repo": "regenie-corpus",
+      "number": 119,
+      "title": "Add support for rate limiting",
+      "description": "This PR implements GraphQL API to enable faster and more flexible data queries",
+      "author": "developer_14",
+      "created_at": "2025-09-08T21:47:52.681195+00:00",
+      "state": "merged"
+    },
+    {
+      "type": "pull_request",
+      "repo": "regenie-corpus",
+      "number": 170,
+      "title": "Add support for batch processing",
+      "description": "This PR implements GraphQL API to enable faster and more flexible data queries",
+      "author": "developer_19",
+      "created_at": "2025-09-10T01:47:52.681195+00:00",
+      "state": "closed"
+    },
+    {
+      "type": "commit",
+      "repo": "regen-web",
+      "sha": "f8990a51",
+      "message": "fix: resolve memory leak in parser",
+      "author": "developer_17",
+      "timestamp": "2025-09-08T18:47:52.681195+00:00",
+      "files_changed": 2
+    },
+    {
+      "type": "pull_request",
+      "repo": "regen-web",
+      "number": 273,
+      "title": "Add support for GraphQL API",
+      "description": "This PR implements GraphQL API to enable faster and more flexible data queries",
+      "author": "developer_6",
+      "created_at": "2025-09-07T04:47:52.681195+00:00",
+      "state": "open"
+    },
+    {
+      "type": "commit",
+      "repo": "regen-ledger",
+      "sha": "358e69bd",
+      "message": "docs: update deployment documentation",
+      "author": "developer_11",
+      "timestamp": "2025-09-08T06:47:52.681195+00:00",
+      "files_changed": 2
+    },
+    {
+      "type": "commit",
+      "repo": "mcp",
+      "sha": "17a0111c",
+      "message": "feat: add filtering to api",
+      "author": "developer_5",
+      "timestamp": "2025-09-10T03:47:52.681195+00:00",
+      "files_changed": 4
+    },
+    {
+      "type": "commit",
+      "repo": "regenie-corpus",
+      "sha": "8aefe097",
+      "message": "docs: update deployment documentation",
+      "author": "developer_7",
+      "timestamp": "2025-09-08T09:47:52.681195+00:00",
+      "files_changed": 6
+    },
+    {
+      "type": "commit",
+      "repo": "regen-web",
+      "sha": "7ab14b89",
+      "message": "docs: update API documentation",
+      "author": "developer_12",
+      "timestamp": "2025-09-08T20:47:52.681195+00:00",
+      "files_changed": 5
+    },
+    {
+      "type": "commit",
+      "repo": "regen-web",
+      "sha": "c999d06c",
+      "message": "fix: resolve race condition in router",
+      "author": "developer_4",
+      "timestamp": "2025-09-10T03:47:52.681195+00:00",
+      "files_changed": 7
+    }
+  ],
+  "websites": [
+    {
+      "id": "web_0_6679",
+      "site": "registry.regen.network",
+      "url": "https://registry.regen.network/page-0",
+      "title": "How to submit a proposal",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-13T13:47:52.681439+00:00",
+      "word_count": 596
+    },
+    {
+      "id": "web_1_3007",
+      "site": "docs.regen.network",
+      "url": "https://guides.regen.network/page-1",
+      "title": "Understanding Staking",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-13T18:47:52.681439+00:00",
+      "word_count": 1282
+    },
+    {
+      "id": "web_2_8909",
+      "site": "registry.regen.network",
+      "url": "https://docs.regen.network/page-2",
+      "title": "Understanding Carbon Credits",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-07T23:47:52.681439+00:00",
+      "word_count": 921
+    },
+    {
+      "id": "web_3_6975",
+      "site": "docs.regen.network",
+      "url": "https://registry.regen.network/page-3",
+      "title": "Understanding Carbon Credits",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-10T08:47:52.681439+00:00",
+      "word_count": 345
+    },
+    {
+      "id": "web_4_9540",
+      "site": "docs.regen.network",
+      "url": "https://registry.regen.network/page-4",
+      "title": "How to stake REGEN",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-12T10:47:52.681439+00:00",
+      "word_count": 244
+    },
+    {
+      "id": "web_5_9267",
+      "site": "registry.regen.network",
+      "url": "https://registry.regen.network/page-5",
+      "title": "Understanding Validators",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-07T09:47:52.681439+00:00",
+      "word_count": 1373
+    },
+    {
+      "id": "web_6_2774",
+      "site": "regen.foundation",
+      "url": "https://guides.regen.network/page-6",
+      "title": "How to stake REGEN",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-11T05:47:52.681439+00:00",
+      "word_count": 940
+    },
+    {
+      "id": "web_7_9070",
+      "site": "guides.regen.network",
+      "url": "https://guides.regen.network/page-7",
+      "title": "How to submit a proposal",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-09T04:47:52.681439+00:00",
+      "word_count": 547
+    },
+    {
+      "id": "web_8_1083",
+      "site": "registry.regen.network",
+      "url": "https://docs.regen.network/page-8",
+      "title": "Understanding Validators",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-07T03:47:52.681439+00:00",
+      "word_count": 999
+    },
+    {
+      "id": "web_9_7472",
+      "site": "guides.regen.network",
+      "url": "https://docs.regen.network/page-9",
+      "title": "Farm-66 Case Study",
+      "content": "Learn how Wilmot Farms achieved 50% increase in soil carbon using Regen Network. Impact: 1000 tons CO2 sequestered.",
+      "last_modified": "2025-09-09T20:47:52.681439+00:00",
+      "word_count": 575
+    },
+    {
+      "id": "web_10_5474",
+      "site": "guides.regen.network",
+      "url": "https://docs.regen.network/page-10",
+      "title": "Understanding Staking",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-08T13:47:52.681439+00:00",
+      "word_count": 616
+    },
+    {
+      "id": "web_11_6312",
+      "site": "registry.regen.network",
+      "url": "https://guides.regen.network/page-11",
+      "title": "Farm-91 Case Study",
+      "content": "Learn how Wilmot Farms achieved 50% increase in soil carbon using Regen Network. Impact: 1000 tons CO2 sequestered.",
+      "last_modified": "2025-09-10T07:47:52.681439+00:00",
+      "word_count": 581
+    },
+    {
+      "id": "web_12_8613",
+      "site": "regen.foundation",
+      "url": "https://regen.foundation/page-12",
+      "title": "How to submit a proposal",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-08T22:47:52.681439+00:00",
+      "word_count": 1999
+    },
+    {
+      "id": "web_13_2315",
+      "site": "registry.regen.network",
+      "url": "https://guides.regen.network/page-13",
+      "title": "Farm-36 Case Study",
+      "content": "Learn how Wilmot Farms achieved 50% increase in soil carbon using Regen Network. Impact: 1000 tons CO2 sequestered.",
+      "last_modified": "2025-09-12T14:47:52.681439+00:00",
+      "word_count": 776
+    },
+    {
+      "id": "web_14_9268",
+      "site": "registry.regen.network",
+      "url": "https://docs.regen.network/page-14",
+      "title": "How to stake REGEN",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-13T04:47:52.681439+00:00",
+      "word_count": 1929
+    },
+    {
+      "id": "web_15_1226",
+      "site": "regen.foundation",
+      "url": "https://registry.regen.network/page-15",
+      "title": "Understanding Carbon Credits",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-08T15:47:52.681439+00:00",
+      "word_count": 844
+    },
+    {
+      "id": "web_16_9287",
+      "site": "regen.foundation",
+      "url": "https://registry.regen.network/page-16",
+      "title": "How to stake REGEN",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-10T11:47:52.681439+00:00",
+      "word_count": 886
+    },
+    {
+      "id": "web_17_7607",
+      "site": "guides.regen.network",
+      "url": "https://docs.regen.network/page-17",
+      "title": "How to create a credit class",
+      "content": "Step-by-step instructions for stake REGEN tokens. Prerequisites: REGEN tokens, Keplr wallet. Steps: 1. Connect wallet, 2. Select validator, 3. Enter amount.",
+      "last_modified": "2025-09-07T13:47:52.681439+00:00",
+      "word_count": 1874
+    },
+    {
+      "id": "web_18_2813",
+      "site": "guides.regen.network",
+      "url": "https://docs.regen.network/page-18",
+      "title": "Understanding Validators",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-12T12:47:52.681439+00:00",
+      "word_count": 1240
+    },
+    {
+      "id": "web_19_9005",
+      "site": "guides.regen.network",
+      "url": "https://docs.regen.network/page-19",
+      "title": "Understanding Staking",
+      "content": "This guide explains carbon credits and how it relates to ecological regeneration. Key points include measurement, verification, issuance.",
+      "last_modified": "2025-09-12T07:47:52.681439+00:00",
+      "word_count": 346
+    }
+  ],
+  "ledger": {
+    "blocks": [
+      {
+        "height": 23000000,
+        "hash": "6687392d5c7b86ec15f5e0ed25ccebde399851b55927117f709fc143d6c7669e",
+        "timestamp": "2025-09-13T21:47:52.681631+00:00",
+        "txs": 26,
+        "proposer": "validator_22"
+      },
+      {
+        "height": 23000001,
+        "hash": "30e096d36b8170db1b74521d278472a68e61019c681b4323b8a651bbf5680f04",
+        "timestamp": "2025-09-13T21:42:52.681637+00:00",
+        "txs": 42,
+        "proposer": "validator_92"
+      },
+      {
+        "height": 23000002,
+        "hash": "ea4aea70fd1c87d3d14b22429fb8fc9a19f4696c1127775ccd1547972e2006a1",
+        "timestamp": "2025-09-13T21:37:52.681641+00:00",
+        "txs": 21,
+        "proposer": "validator_50"
+      },
+      {
+        "height": 23000003,
+        "hash": "981225b4e4e731a195ebbbd006fc421bd462cc5a23bce656bd35413a54c3dbe8",
+        "timestamp": "2025-09-13T21:32:52.681644+00:00",
+        "txs": 27,
+        "proposer": "validator_82"
+      },
+      {
+        "height": 23000004,
+        "hash": "676cb9610748fdfd8575a90b238fd0f71c3e4208a158e52b50a29d802ec0782a",
+        "timestamp": "2025-09-13T21:27:52.681647+00:00",
+        "txs": 0,
+        "proposer": "validator_69"
+      },
+      {
+        "height": 23000005,
+        "hash": "54b116ae6463ae4d678dea531c32d1190b219a2ae6e66d6909cfa87c84f8f8b8",
+        "timestamp": "2025-09-13T21:22:52.681649+00:00",
+        "txs": 22,
+        "proposer": "validator_23"
+      },
+      {
+        "height": 23000006,
+        "hash": "f401a41d8e7105e9be022074e44244e697715cd5b6ee66826bf4002ffcbacd67",
+        "timestamp": "2025-09-13T21:17:52.681652+00:00",
+        "txs": 25,
+        "proposer": "validator_50"
+      },
+      {
+        "height": 23000007,
+        "hash": "c86f845045e8d8cc7eae27a94d9785e05baa1e1ed9ce4dd8b05fa0d30a595463",
+        "timestamp": "2025-09-13T21:12:52.681657+00:00",
+        "txs": 32,
+        "proposer": "validator_15"
+      },
+      {
+        "height": 23000008,
+        "hash": "75f43379fdbf42c18f4d6aeac0122309f4f149845efb4b02d2f1611961777955",
+        "timestamp": "2025-09-13T21:07:52.681660+00:00",
+        "txs": 49,
+        "proposer": "validator_22"
+      },
+      {
+        "height": 23000009,
+        "hash": "e1880b3d8d241d608d2ecefff843002f1d87bf16b3af4806648c102939deaf74",
+        "timestamp": "2025-09-13T21:02:52.681662+00:00",
+        "txs": 26,
+        "proposer": "validator_23"
+      }
+    ],
+    "proposals": [
+      {
+        "id": 50,
+        "title": "Proposal 50: Increase block size",
+        "status": "rejected",
+        "yes_votes": 1102635,
+        "no_votes": 2569462,
+        "abstain_votes": 483773,
+        "submit_time": "2025-09-08T21:47:52.681666+00:00",
+        "voting_end_time": "2025-09-18T21:47:52.681668+00:00"
+      },
+      {
+        "id": 51,
+        "title": "Proposal 51: Add new credit class",
+        "status": "passed",
+        "yes_votes": 9152234,
+        "no_votes": 4261760,
+        "abstain_votes": 928995,
+        "submit_time": "2025-08-17T21:47:52.681671+00:00",
+        "voting_end_time": "2025-09-14T21:47:52.681673+00:00"
+      },
+      {
+        "id": 52,
+        "title": "Proposal 52: Increase block size",
+        "status": "voting",
+        "yes_votes": 1500929,
+        "no_votes": 670655,
+        "abstain_votes": 17211,
+        "submit_time": "2025-08-25T21:47:52.681676+00:00",
+        "voting_end_time": "2025-09-25T21:47:52.681677+00:00"
+      }
+    ],
+    "credit_classes": [
+      {
+        "id": "C100",
+        "name": "Carbon Credit Class 0",
+        "admin": "regen173960427b31b11cba2d19a46021562f602ff04e",
+        "metadata": {
+          "methodology": "https://regen.network/methodology/C100",
+          "credit_type": "soil"
+        },
+        "supply": "469657",
+        "created_at": "2025-06-22T21:47:52.681681+00:00"
+      },
+      {
+        "id": "C101",
+        "name": "Carbon Credit Class 1",
+        "admin": "regen1fa0fdd6f1c979d680cd19cd9a6c7b78cd1422ff",
+        "metadata": {
+          "methodology": "https://regen.network/methodology/C101",
+          "credit_type": "carbon"
+        },
+        "supply": "341320",
+        "created_at": "2025-07-04T21:47:52.681684+00:00"
+      },
+      {
+        "id": "C102",
+        "name": "Carbon Credit Class 2",
+        "admin": "regen133e4fec78e1813a1cc4e9c7a0c3564f7fdda804",
+        "metadata": {
+          "methodology": "https://regen.network/methodology/C102",
+          "credit_type": "water"
+        },
+        "supply": "820314",
+        "created_at": "2024-11-22T21:47:52.681686+00:00"
+      },
+      {
+        "id": "C103",
+        "name": "Carbon Credit Class 3",
+        "admin": "regen16ee50ce49b2a6e8cafdd6c926b510155152b4a1",
+        "metadata": {
+          "methodology": "https://regen.network/methodology/C103",
+          "credit_type": "biodiversity"
+        },
+        "supply": "859587",
+        "created_at": "2024-12-24T21:47:52.681689+00:00"
+      },
+      {
+        "id": "C104",
+        "name": "Carbon Credit Class 4",
+        "admin": "regen1dbf96d2379ef4fb5c62255d7f8519f32a3df954",
+        "metadata": {
+          "methodology": "https://regen.network/methodology/C104",
+          "credit_type": "carbon"
+        },
+        "supply": "214333",
+        "created_at": "2025-07-21T21:47:52.681697+00:00"
+      }
+    ],
+    "statistics": {
+      "total_credits_issued": 2705211,
+      "active_proposals": 1,
+      "total_validators": 110,
+      "bonded_tokens": "45000000",
+      "inflation_rate": "7.5%",
+      "community_pool": "5000000 REGEN"
+    }
+  },
+  "summary": {
+    "total_items": 73,
+    "sources": [
+      "generated_at",
+      "config",
+      "twitter",
+      "discourse",
+      "github",
+      "websites",
+      "ledger"
+    ],
+    "time_range": {
+      "start": "2025-09-06T21:47:52.681705+00:00",
+      "end": "2025-09-13T21:47:52.681707+00:00"
+    }
+  }
+}

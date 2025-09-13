@@ -1,0 +1,146 @@
+# Integration Test Configuration
+# Session 17: End-to-End Pipeline Testing
+
+# Test environment settings
+test_mode: true
+test_database: "sqlite:///tests/test_data.db"  # Use SQLite for isolated testing
+production_database: "postgresql://postgres:postgres@localhost:5433/eliza"  # For reference
+
+# Time windows for testing (shorter than production)
+time_settings:
+  hours_lookback_primary: 24      # 24 hours instead of 48
+  hours_lookback_secondary: 72    # 3 days instead of 7
+  test_duration_days: 7           # Generate 7 days of test data
+
+# Content generation limits
+content_limits:
+  max_daily_posts: 5
+  min_daily_posts: 3
+  weekly_brief_min_words: 800
+  weekly_brief_max_words: 1200
+  test_audio_duration_seconds: 60  # Short test audio
+
+# Test data sources
+test_data_sources:
+  # Real data (cached from previous runs)
+  twitter:
+    enabled: true
+    data_file: "../koi-sensors/sensors/twitter/output/regen_tweets_20250910_203238.json"
+    limit: 10
+  
+  medium:
+    enabled: true
+    data_file: "../koi-sensors/sensors/medium/medium_articles_test.json"
+    limit: 5
+  
+  # Simulated data
+  discourse:
+    enabled: true
+    generate_count: 10
+    topics: ["governance", "ecocredits", "marketplace", "community"]
+  
+  github:
+    enabled: true
+    generate_count: 15
+    repos: ["regen-ledger", "regen-web", "regenie-corpus"]
+  
+  websites:
+    enabled: true
+    generate_count: 20
+    sites: ["docs.regen.network", "guides.regen.network", "registry.regen.network"]
+  
+  ledger:
+    enabled: true
+    generate_blocks: 10
+    generate_proposals: 3
+    generate_credits: 5
+
+# Component testing
+components:
+  daily_curator:
+    enabled: true
+    test_runs: 3
+    validate_output: true
+  
+  weekly_aggregator:
+    enabled: true
+    test_runs: 1
+    validate_brief: true
+  
+  quality_control:
+    enabled: true
+    min_score: 0.7
+    check_speculation: true
+    check_links: true
+  
+  audio_pipeline:
+    enabled: true
+    use_mock_generator: true  # Use mock instead of actual Podcastfy
+    generate_rss: true
+  
+  monitoring_dashboard:
+    enabled: true
+    test_endpoints: true
+    check_websocket: false  # Skip WebSocket in tests
+
+# Performance requirements
+performance:
+  max_pipeline_duration_seconds: 30
+  max_query_response_ms: 2000
+  max_memory_usage_mb: 1024
+
+# Output settings
+output:
+  test_results_dir: "tests/results"
+  test_data_dir: "tests/data"
+  test_logs_dir: "tests/logs"
+  generate_report: true
+  report_format: "html"  # html or markdown
+
+# Validation settings
+validation:
+  check_rids: true
+  check_embeddings: true
+  check_deduplication: true
+  check_publication_dates: true
+  check_content_hash: true
+
+# Error handling
+error_handling:
+  continue_on_sensor_failure: true
+  max_retries: 2
+  retry_delay_seconds: 1
+  capture_stack_traces: true
+
+# Mock services (for testing without external dependencies)
+mock_services:
+  koi_coordinator:
+    enabled: true
+    port: 8005
+  
+  bge_embeddings:
+    enabled: true
+    port: 8090
+    mock_dimension: 1024
+  
+  event_bridge:
+    enabled: true
+    port: 8100
+
+# Test scenarios
+scenarios:
+  - name: "happy_path"
+    description: "All components working normally"
+    failures: []
+  
+  - name: "sensor_failures"
+    description: "Some sensors fail to collect data"
+    failures: ["discord", "notion"]
+  
+  - name: "database_failure"
+    description: "Database becomes unavailable mid-process"
+    failures: ["database_disconnect"]
+  
+  - name: "quality_rejection"
+    description: "Content fails quality checks"
+    failures: ["low_quality_score"]
