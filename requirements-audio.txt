@@ -1,0 +1,30 @@
+# Audio Generation Requirements for Regen Network Weekly Podcast
+
+# Core Podcastfy package
+podcastfy>=0.4.0
+
+# Required by Podcastfy dependencies
+openai>=1.0.0  # For TTS and transcript generation
+google-generativeai>=0.3.0  # For Gemini models
+anthropic>=0.20.0  # Optional: For Claude models
+
+# Audio processing
+pydub>=0.25.0  # Audio manipulation
+ffmpeg-python>=0.2.0  # FFmpeg wrapper
+
+# Additional dependencies
+python-dotenv>=1.0.0  # Environment variable management
+requests>=2.31.0  # HTTP requests
+numpy>=1.24.0  # Numerical operations
+
+# Optional: Local LLM support
+# transformers>=4.30.0  # For HuggingFace models
+# torch>=2.0.0  # For local model inference
+
+# Optional: Alternative TTS providers
+# elevenlabs>=0.2.0  # ElevenLabs TTS
+# edge-tts>=6.1.0  # Microsoft Edge TTS
+
+# Note: Also requires system dependencies:
+# - ffmpeg (install with: brew install ffmpeg on Mac, apt-get install ffmpeg on Linux)
+# - Python 3.11 or higher

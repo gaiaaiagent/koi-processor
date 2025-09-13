@@ -2,7 +2,7 @@
 
 🚀 **Production-Ready Knowledge Organization Infrastructure Pipeline**
 
-A comprehensive sensor-to-agent pipeline that processes real-time content from KOI sensors, generates BGE embeddings, handles deduplication and versioning, and provides immediate semantic search capabilities for AI agents.
+A comprehensive sensor-to-agent pipeline that processes real-time content from KOI sensors, generates embeddings, handles deduplication and versioning, and provides immediate semantic search capabilities for AI agents.
 
 ## 📋 Table of Contents
 - [Overview](#overview)
@@ -25,39 +25,120 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
 - ✅ **Version Control**: Tracks content updates with full audit trail
 - ✅ **Isolated Tables**: Separates sensor data from scraped content
-- ✅ **BGE-large-en-v1.5**: Production-grade 1024-dimensional embeddings
+- ✅ **Production Embeddings**: Model-agnostic embedding server (currently BGE-large-en-v1.5)
 - ✅ **MCP Integration**: Semantic search via Model Context Protocol
 - 🚧 **Daily Content Curator** (Planned): Processor component for content curation and X bot integration
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ KOI Sensors │────▶│ Coordinator  │────▶│ Event Bridge │────▶│ BGE Server   │
-│  (Various)  │     │  (Port 8200) │     │  (Port 8100) │     │  (Port 8090) │
-└─────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
-                                                   │                    │
-                                                   ▼                    ▼
-                                          ┌──────────────┐     ┌──────────────┐
-                                          │ PostgreSQL   │     │ MCP Server   │
-                                          │  (pgvector)  │────▶│  (Search)    │
-                                          └──────────────┘     └──────────────┘
+DATA INGESTION PIPELINE:
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐
+│ KOI Sensors │────▶│ Coordinator  │────▶│ Event Bridge │
+│  (Various)  │     │  (Port 8200) │     │  (Port 8100) │
+└─────────────┘     └──────────────┘     └──────────────┘
                                                    │
-                                                   ▼
-                                          ┌──────────────┐
-                                          │ Eliza Agents │
-                                          │    (RAG)     │
-                                          └──────────────┘
+                                    ┌──────────────┴──────────────┐
+                                    │                             │
+                                    ▼                             ▼
+                            ┌──────────────┐            ┌──────────────────┐
+                            │  Embedding   │            │ Entity Extractor │
+                            │   Server     │            │  (JSON-LD/RDF)   │
+                            │  (Port 8090) │            │    [PLANNED]     │
+                            └──────────────┘            └──────────────────┘
+                                    │                              │
+                                    ▼                              ▼
+                            ┌──────────────┐            ┌──────────────────┐
+                            │ PostgreSQL   │            │  Apache Jena     │
+                            │  (pgvector)  │            │    Fuseki        │
+                            │ • Embeddings │            │  (Port 3030)     │
+                            └──────────────┘            │ • RDF Triples    │
+                                                        │ • Ontologies     │
+                                                        └──────────────────┘
+
+QUERY/ACCESS LAYER:
+                            ┌───────────────────────────────────┐
+                            │         PostgreSQL                │
+                            │  • koi_memories (KOI knowledge)   │
+                            │  • koi_embeddings (pgvector)      │
+                            │  • memories (agent state)         │
+                            │  • conversations (agent history)  │
+                            └───────────────────────────────────┘
+                                               │
+                                               ▼
+                            ┌─────────────────────────────────┐
+                            │         Eliza Agents            │
+                            │        (5 AI Agents)            │
+                            │                                 │
+                            │ • Direct SQL for state          │
+                            │ • MCP tools for external data   │
+                            └─────────────────────────────────┘
+                                     ▲             ▲
+                                     │             │
+                        ┌────────────┴───┐    ┌────┴──────────┐
+                        │ Knowledge MCP  │    │  Regen MCP    │
+                        │     Server     │    │    Server     │
+                        │                │    │               │
+                        │ Routes to:     │    │ Connects to:  │
+                        │ • PostgreSQL   │    │ • Regen       │
+                        │   (pgvector)   │    │   Ledger      │
+                        │ • Apache Jena  │    │ • Blockchain  │
+                        │   Fuseki       │    │   data        │
+                        └────────────────┘    └───────────────┘
+                                ▲                     ▲
+                                │                     │
+                        ┌───────┴────────┐            │
+                        │                │            │
+                  PostgreSQL      Apache Jena    Regen Ledger
+                  (pgvector)        Fuseki       (Blockchain)
 ```
 
 ### Component Description
 
+#### Data Ingestion Pipeline:
 1. **KOI Sensors**: Monitor websites, documents, and other sources
 2. **KOI Coordinator** (`port 8200`): Routes events to processing pipeline
-3. **KOI Event Bridge v2** (`port 8100`): Handles deduplication, versioning, chunking
-4. **BGE Server** (`port 8090`): Generates BAAI/bge-large-en-v1.5 embeddings
-5. **PostgreSQL**: Stores content and vectors with pgvector extension
-6. **MCP Server**: Provides semantic search API for agents
+3. **KOI Event Bridge v2** (`port 8100`): Distributes content to processors
+   - Handles deduplication, versioning, chunking
+   - Routes to both embedding and entity extraction paths
+
+4. **Embedding Server** (`port 8090`): Generates semantic embeddings
+   - Currently using BAAI/bge-large-en-v1.5 (1024 dimensions)
+   - Model-agnostic API allows swapping to other models
+   - Stores embeddings in PostgreSQL pgvector
+
+5. **Entity Extractor** (PLANNED): Extracts structured data
+   - Processes content into JSON-LD/RDF format
+   - Extracts entities, relationships, and ontological information
+   - Uses unified metabolic ontology (36 classes)
+   - Loads RDF triples directly into Apache Jena
+
+#### Storage Layer:
+6. **PostgreSQL**: Dual-purpose database
+   - Stores KOI knowledge (koi_memories, koi_embeddings with pgvector)
+   - Stores agent state (memories, conversations, relationships)
+
+7. **Apache Jena Fuseki** (`port 3030`): SPARQL triplestore
+   - Stores RDF triples and OWL ontologies
+   - Populated by Entity Extractor (when implemented)
+   - Handles complex ontological/semantic reasoning queries
+
+#### Query/Access Layer:
+8. **Knowledge MCP Server**: KOI knowledge query API for agents
+   - Routes semantic searches to PostgreSQL pgvector
+   - Routes ontological queries to Apache Jena Fuseki
+   - Provides unified knowledge interface via stdio transport
+
+9. **Regen MCP Server**: Blockchain data API for agents
+   - Connects to Regen Ledger blockchain
+   - Provides access to on-chain data (carbon credits, ecological state, etc.)
+   - Handles blockchain queries and transactions
+   - Separate from knowledge infrastructure
+
+10. **Eliza Agents**: Three connection patterns
+    - **Direct PostgreSQL**: For agent state, conversations, memories
+    - **Via Knowledge MCP**: For KOI knowledge queries (embeddings and ontologies)
+    - **Via Regen MCP**: For blockchain/ledger queries
 
 ## Key Features
 
@@ -72,7 +153,7 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - **Event types**: NEW, UPDATE, FORGET with appropriate handling
 
 ### 🔍 Semantic Search
-- **BGE embeddings**: State-of-the-art 1024-dimensional vectors
+- **Production embeddings**: State-of-the-art semantic vectors
 - **MCP integration**: Standard protocol for agent tool use
 - **Permission filtering**: Agent-specific content access control
 
@@ -83,10 +164,60 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 
 ## Installation
 
+### Quick Start (New Users)
+
+If you're cloning this repository for the first time:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/RegenAI/koi-processor.git
+cd koi-processor
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Run database migrations (REQUIRED)
+./scripts/run_migrations.sh
+
+# 4. Start the processor
+python koi_event_bridge_v2.py
+```
+
+### Database Setup
+
+**Important**: The database requires migrations to be run before first use. See [MIGRATION_SETUP.md](MIGRATION_SETUP.md) for detailed instructions.
+
+**Quick migration command:**
+```bash
+# Automated setup (recommended)
+./scripts/run_migrations.sh
+
+# Or manual setup
+psql postgresql://postgres:postgres@localhost:5433/eliza -f migrations/*.sql
+```
+
+### Daily Content Curator
+
+The Daily Content Curator is a new component that aggregates content for social media posts:
+
+```bash
+# Run migration first (if not already done)
+python scripts/run_daily_curator.py migrate
+
+# Check content status
+python scripts/run_daily_curator.py status
+
+# Generate daily thread
+python scripts/run_daily_curator.py daily
+```
+
+See [DAILY_CURATOR_README.md](DAILY_CURATOR_README.md) for full documentation.
+
 ### Prerequisites
 - Python 3.8+
 - PostgreSQL 14+ with pgvector extension
 - Bun (for TypeScript MCP server)
+- Apache Jena Fuseki 4.x
 - 4GB+ RAM recommended
 
 ### Step 1: Clone Repository
@@ -116,20 +247,41 @@ psql -U postgres -d eliza < migrations/002_create_agent_knowledge_permissions.sq
 psql -U postgres -d eliza < migrations/003_create_isolated_koi_tables.sql
 ```
 
-### Step 4: BGE Server Setup
+### Step 4: Embedding Server Setup
 ```bash
-# Option 1: Use the mock BGE server (for testing)
-python bge_server.py
+# Option 1: Use the mock embedding server (for testing)
+python bge_server.py  # Note: filename kept for compatibility
 
-# Option 2: Use real BGE model (requires GPU)
+# Option 2: Use real embedding model (requires GPU)
+# Currently configured for BAAI/bge-large-en-v1.5
 # See bge_server_real.py for Hugging Face implementation
 ```
 
-### Step 5: MCP Server Setup
+### Step 5: Apache Jena Fuseki Setup
+```bash
+# Download and extract Fuseki
+wget https://dlcdn.apache.org/jena/binaries/apache-jena-fuseki-4.10.0.tar.gz
+tar -xzf apache-jena-fuseki-4.10.0.tar.gz
+cd apache-jena-fuseki-4.10.0
+
+# Start Fuseki server
+./fuseki-server --loc=/path/to/data --port=3030 /koi
+
+# Or use Docker
+docker run -p 3030:3030 -e ADMIN_PASSWORD=admin stain/jena-fuseki
+```
+
+### Step 6: Knowledge MCP Server Setup
 ```bash
 cd bge-mcp-ts
 bun install
 bun run bge-server.ts
+```
+
+### Step 7: Regen MCP Server Setup (Optional)
+```bash
+# See separate Regen MCP repository for blockchain integration
+# https://github.com/yourusername/regen-mcp-server
 ```
 
 ## Configuration
@@ -141,7 +293,7 @@ Create a `.env` file in the project root:
 # Database
 POSTGRES_URL=postgresql://postgres:postgres@localhost:5433/eliza
 
-# BGE Server
+# Embedding Server
 BGE_API_URL=http://localhost:8090/encode
 
 # Event Bridge Configuration
@@ -156,18 +308,19 @@ LOG_LEVEL=INFO
 ```
 
 ### Service Ports
-- **8090**: BGE Embedding Server
+- **8090**: Embedding Server
 - **8100**: KOI Event Bridge
 - **8200**: KOI Coordinator
-- **3000**: MCP Server (optional)
+- **3000**: MCP Server (stdio transport)
+- **3030**: Apache Jena Fuseki SPARQL endpoint
 
 ## Usage
 
 ### Starting Services
 
-#### 1. Start BGE Server
+#### 1. Start Embedding Server
 ```bash
-python bge_server.py
+python bge_server.py  # Currently using BGE model
 # Server will run on http://localhost:8090
 ```
 
@@ -177,10 +330,23 @@ USE_ISOLATED_TABLES=true python koi_event_bridge_v2.py
 # Server will run on http://localhost:8100
 ```
 
-#### 3. Start MCP Server (optional)
+#### 3. Start Apache Jena Fuseki
+```bash
+./fuseki-server --loc=/path/to/data --port=3030 /koi
+# SPARQL endpoint will be at http://localhost:3030/koi
+```
+
+#### 4. Start Knowledge MCP Server
 ```bash
 cd bge-mcp-ts
 bun run bge-server.ts
+# Knowledge MCP server handles query routing to PostgreSQL and Apache Jena
+```
+
+#### 5. Start Regen MCP Server (if needed)
+```bash
+# See Regen MCP repository for setup
+# Provides blockchain data access to agents
 ```
 
 ### Sending Events
@@ -242,11 +408,41 @@ curl http://localhost:8100/
 # Pipeline statistics
 curl http://localhost:8100/stats
 
-# BGE server test
+# Embedding server test
 curl -X POST http://localhost:8090/encode \
   -H "Content-Type: application/json" \
   -d '{"text": "test embedding"}'
+
+# Apache Jena SPARQL test
+curl http://localhost:3030/koi/sparql \
+  -H "Content-Type: application/sparql-query" \
+  -d "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```
+
+### Agent Query Flow
+
+The dual MCP Server architecture provides specialized query interfaces:
+
+#### Knowledge MCP Server:
+1. **Semantic Search** (via PostgreSQL pgvector):
+   - Agent sends: `{"tool": "bge_search", "query": "regenerative agriculture"}`
+   - Routes to PostgreSQL for embedding similarity search
+   - Returns relevant documents with similarity scores
+
+2. **Ontological Query** (via Apache Jena):
+   - Agent sends: `{"tool": "sparql_query", "query": "SELECT ?entity WHERE..."}`
+   - Routes to Apache Jena Fuseki
+   - Returns RDF triples and relationships
+
+3. **Hybrid Query**:
+   - Combines results from both systems
+   - Semantic context from embeddings + ontological relationships
+
+#### Regen MCP Server:
+4. **Blockchain Query**:
+   - Agent sends: `{"tool": "ledger_query", "query": "carbon_credits"}`
+   - Connects to Regen Ledger
+   - Returns on-chain data (credits, attestations, ecological state)
 
 ## API Documentation
 
@@ -302,10 +498,10 @@ Processes a KOI event with deduplication and versioning.
 #### `GET /stats` - Pipeline Statistics
 Returns current pipeline metrics.
 
-### BGE Server API
+### Embedding Server API
 
 #### `POST /encode` - Generate Embedding
-Generates BGE embedding for text.
+Generates semantic embedding for text (currently using BGE model).
 
 **Request:**
 ```json
@@ -348,7 +544,7 @@ CREATE TABLE koi_memories (
 CREATE TABLE koi_embeddings (
     id SERIAL PRIMARY KEY,
     memory_id UUID REFERENCES koi_memories(id),
-    dim_768 vector(768),   -- For embeddinggemma
+    dim_768 vector(768),   -- For alternative models
     dim_1024 vector(1024), -- For BGE
     dim_1536 vector(1536), -- For OpenAI
     created_at TIMESTAMP,
@@ -390,7 +586,7 @@ The Daily Content Curator will be a specialized processor component that aggrega
 
 **Key Features**:
 - Query PostgreSQL for recent koi_memories (24-48 hours)
-- BGE similarity search for trending topic identification
+- Embedding similarity search for trending topic identification
 - Stats aggregation from ledger sensor data
 - Thread generation (3-5 posts with headline, stat, links, CTA)
 - Style guide compliance checking
@@ -436,7 +632,7 @@ psql -U postgres -d eliza -c "SELECT * FROM koi_pipeline_stats;"
 
 1. **Use environment variables** for all configuration
 2. **Enable SSL** for PostgreSQL connections
-3. **Use real BGE model** instead of mock server
+3. **Use real embedding model** instead of mock server
 4. **Set up monitoring** (Prometheus metrics available at `/metrics`)
 5. **Configure log rotation** for production logs
 
@@ -471,8 +667,8 @@ WantedBy=multi-user.target
 
 ### Common Issues
 
-#### "BGE server not responding"
-- Check if BGE server is running: `curl http://localhost:8090/encode -d '{"text":"test"}'`
+#### "Embedding server not responding"
+- Check if embedding server is running: `curl http://localhost:8090/encode -d '{"text":"test"}'`
 - Verify BGE_API_URL environment variable
 - Check firewall rules for port 8090
 
@@ -481,9 +677,9 @@ WantedBy=multi-user.target
 - Use UPDATE event type for changed content
 - Check RID uniqueness before sending NEW events
 
-#### "No BGE embeddings created"
+#### "No embeddings created"
 - Verify pgvector extension: `\dx` in psql
-- Check embedding dimension matches (1024 for BGE)
+- Check embedding dimension matches model output
 - Review Event Bridge logs for errors
 
 #### "Memory/CPU usage high"
