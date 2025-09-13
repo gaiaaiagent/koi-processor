@@ -158,9 +158,10 @@ QUERY/ACCESS LAYER:
 - **Permission filtering**: Agent-specific content access control
 
 ### 📊 Isolated Storage
-- **Separated tables**: `koi_memories` for sensor data, `memories` for legacy
+- **Dual-table pattern**: `koi_memories` for source documents, `memories` for chunked content
 - **No contamination**: Clean separation of data sources
 - **Migration support**: Gradual transition from legacy systems
+- **Full documentation**: See [STORAGE_ARCHITECTURE.md](docs/STORAGE_ARCHITECTURE.md) for details
 
 ## Installation
 
