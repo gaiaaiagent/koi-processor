@@ -13,6 +13,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 import uuid
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 # FastAPI app
 app = FastAPI(title="KOI Event Bridge v2", version="2.0.0")
+
+# Add CORS middleware to allow dashboard access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:5433/eliza')
@@ -510,7 +520,8 @@ async def root():
 @app.post("/process-koi-event", response_model=ProcessingResult)
 async def process_event_endpoint(event: KOIEvent):
     """Process a KOI event from the coordinator"""
-    logger.info(f"[KOI Bridge v2] Received {event.event_type} event for RID: {event.bundle.rid}")
+    rid = event.bundle.rid if event.bundle else event.rid
+    logger.info(f"[KOI Bridge v2] Received {event.event_type} event for RID: {rid}")
     
     # Process the event
     result = await process_koi_event(event)
