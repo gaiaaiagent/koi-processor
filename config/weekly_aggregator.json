@@ -1,8 +1,8 @@
 {
   "database": {
     "host": "localhost",
-    "port": 5432,
-    "database": "koi_knowledge",
+    "port": 5433,
+    "database": "eliza",
     "user": "postgres",
     "password": "postgres"
   },

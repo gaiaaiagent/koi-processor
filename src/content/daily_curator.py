@@ -217,31 +217,17 @@ class DailyCurator:
         Returns:
             Dictionary of statistics
         """
-        try:
-            # Import the stats aggregator from koi-sensors
-            import sys
-            sys.path.append('/Users/darrenzal/projects/RegenAI/koi-sensors')
-            from sensors.ledger.stats_aggregator import StatsAggregator
-            
-            aggregator = StatsAggregator()
-            
-            # Get daily stats
-            daily_stats = await aggregator.get_daily_stats()
-            
-            # Format for curator
-            return {
-                'new_credits': daily_stats.get('new_credits_issued', 0),
-                'total_credits': daily_stats.get('total_credits', 0),
-                'active_proposals': daily_stats.get('active_proposals', 0),
-                'new_batches': daily_stats.get('new_batches_24h', 0),
-                'marketplace_volume': daily_stats.get('marketplace_volume_24h', 0),
-                'validator_count': daily_stats.get('validator_count', 0),
-                'block_height': daily_stats.get('latest_block', 0)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting ledger stats: {e}")
-            return {}
+        # Ledger stats temporarily disabled - requires StatsAggregator initialization parameters
+        # TODO: Initialize with proper governance, ecocredit, consensus modules
+        return {
+            'new_credits': 0,
+            'total_credits': 0,
+            'active_proposals': 0,
+            'new_batches': 0,
+            'marketplace_volume': 0,
+            'validator_count': 0,
+            'block_height': 0
+        }
     
     async def generate_daily_thread(self) -> Dict[str, Any]:
         """
