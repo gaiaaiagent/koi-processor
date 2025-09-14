@@ -20,7 +20,9 @@ from functools import wraps
 from loguru import logger
 
 # Initialize Flask app
-app = Flask(__name__)
+app = Flask(__name__, 
+            template_folder='../../templates',
+            static_folder='../../static')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")

@@ -54,6 +54,7 @@ validation_results.json
 # Output directories
 output/
 db-backups/
+backups/
 
 # Environment
 .env

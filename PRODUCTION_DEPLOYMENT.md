@@ -97,7 +97,26 @@ This starts:
 - MCP Knowledge Server (port 8200)
 - Content Dashboard (port 8400)
 
-### 5. Verify Deployment
+### 5. Configure Web Access (Optional)
+
+To set up HTTPS access at a custom domain (e.g., https://regen.gaiaai.xyz/digests):
+
+```bash
+# Run the nginx setup script
+sudo bash /opt/projects/koi-processor/setup_nginx_digests.sh
+```
+
+This will:
+- Install nginx (if needed)
+- Configure SSL with Let's Encrypt
+- Set up proxy from https://regen.gaiaai.xyz/digests to localhost:8400
+- Enable WebSocket support for real-time updates
+
+The configuration files are provided:
+- `nginx_config_digests.conf` - Nginx configuration template
+- `setup_nginx_digests.sh` - Automated setup script
+
+### 6. Verify Deployment
 
 ```bash
 # Run validation

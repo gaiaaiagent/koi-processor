@@ -206,6 +206,51 @@ QUERY/ACCESS LAYER:
 
 ### Installation
 
+### Quick Start
+
+1. **Clone and setup**:
+```bash
+cd /opt/projects/koi-processor
+git pull origin regen-prod
+bash scripts/setup.sh
+```
+
+2. **Configure environment**:
+```bash
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY (required for podcast generation)
+```
+
+3. **Run migrations**:
+```bash
+bash scripts/run_migrations_with_backup.sh
+```
+
+4. **Start services**:
+```bash
+bash scripts/start_all_services.sh
+```
+
+5. **Access dashboard**:
+Open http://localhost:8400 in your browser
+
+### Web Access Setup (HTTPS)
+
+To set up HTTPS access at `https://regen.gaiaai.xyz/digests`:
+
+```bash
+# Run the nginx setup script
+sudo bash /opt/projects/koi-processor/setup_nginx_digests.sh
+```
+
+This will:
+- Install nginx (if needed)
+- Configure SSL with Let's Encrypt
+- Set up proxy from https://regen.gaiaai.xyz/digests to localhost:8400
+- Enable WebSocket support for real-time updates
+
+After setup, the dashboard will be accessible at: **https://regen.gaiaai.xyz/digests**
+
 ```bash
 # Clone the repository
 git clone https://github.com/yourusername/koi-processor.git

@@ -29,19 +29,28 @@ DB_URL = os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:543
 BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
 USE_ISOLATED_TABLES = os.getenv('USE_ISOLATED_TABLES', 'true').lower() == 'true'
 
-# Pydantic models
+# Pydantic models - KOI Protocol compliant
+class KOIManifest(BaseModel):
+    rid: str
+    timestamp: str
+    content_hash: str
+    size_bytes: int
+    content_type: str
+    version: str = "1.0"
+    metadata: Optional[Dict[str, Any]] = None
+
 class KOIBundle(BaseModel):
     rid: str
-    cid: str
-    content: Dict[str, Any]
-    metadata: Dict[str, Any]
-    manifest: Dict[str, Any]
+    manifest: KOIManifest
+    contents: Dict[str, Any]  # KOI protocol uses 'contents' not 'content'
 
 class KOIEvent(BaseModel):
     event_type: str  # NEW, UPDATE, FORGET
-    source_sensor: str
+    rid: str
+    source_node: str  # KOI protocol uses 'source_node' not 'source_sensor'
     timestamp: str
-    bundle: KOIBundle
+    bundle: Optional[KOIBundle] = None  # Bundle is optional for FORGET events
+    reason: Optional[str] = None  # For FORGET events
 
 class ProcessingResult(BaseModel):
     success: bool
@@ -98,11 +107,8 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
 
 async def extract_text_from_bundle(bundle: KOIBundle) -> str:
     """Extract text content from KOI bundle"""
-    content = bundle.content
+    content = bundle.contents
     
-    print(f"\n🔧 EXTRACTING CONTENT FROM BUNDLE", flush=True)
-    print(f"   Type: {type(content)}", flush=True)
-    print(f"   Keys: {list(content.keys()) if isinstance(content, dict) else 'Not a dict'}", flush=True)
     logger.info(f"Bundle content type: {type(content)}")
     logger.info(f"Bundle content keys: {content.keys() if isinstance(content, dict) else 'Not a dict'}")
     
@@ -110,15 +116,10 @@ async def extract_text_from_bundle(bundle: KOIBundle) -> str:
         # Check if content is wrapped in a document structure (from koi-sensors)
         if 'document' in content and isinstance(content['document'], dict):
             doc = content['document']
-            print(f"   ✅ Found 'document' structure!", flush=True)
-            print(f"   Document keys: {list(doc.keys())}", flush=True)
             logger.info(f"Found document structure, keys: {doc.keys()}")
             # Extract content from the document
             if 'content' in doc:
                 extracted = str(doc['content'])
-                print(f"   🎯 CONTENT FOUND IN document.content!", flush=True)
-                print(f"   Length: {len(extracted)}", flush=True)
-                print(f"   Preview: {extracted[:100]}...", flush=True)
                 logger.info(f"Extracting content from document.content")
                 return extracted
             # Fallback to other fields in document
@@ -177,6 +178,9 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
     """Create a new version of a memory"""
     memory_id = str(uuid.uuid4())
     
+    # Generate CID from manifest content_hash
+    cid = f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else None
+    
     if USE_ISOLATED_TABLES:
         # Determine version number
         version = (previous['version'] + 1) if previous else 1
@@ -196,11 +200,11 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
         content_hash = None
         
         # Try to extract from metadata first
-        if 'published_at' in event.bundle.metadata:
-            published_at = event.bundle.metadata['published_at']
-            published_confidence = event.bundle.metadata.get('published_confidence', 0.9)
-        elif 'created_at' in event.bundle.metadata:
-            published_at = event.bundle.metadata['created_at']
+        if 'published_at' in event.bundle.manifest.metadata:
+            published_at = event.bundle.manifest.metadata['published_at']
+            published_confidence = event.bundle.manifest.metadata.get('published_confidence', 0.9)
+        elif 'created_at' in event.bundle.manifest.metadata:
+            published_at = event.bundle.manifest.metadata['created_at']
             published_confidence = 0.8
         
         # Calculate content hash for deduplication
@@ -217,19 +221,19 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
         """, 
             memory_id,
             event.bundle.rid,
-            event.bundle.cid,
+            cid or event.bundle.rid,
             version,
             previous_id,
             event.event_type,
-            event.source_sensor,
+            event.source_node,
             json.dumps({
                 "text": text_content,
-                **event.bundle.content
+                **event.bundle.contents
             }),
             json.dumps({
-                **event.bundle.metadata,
+                **event.bundle.manifest.metadata,
                 "koi_timestamp": event.timestamp,
-                "koi_manifest": event.bundle.manifest
+                "koi_manifest": event.bundle.manifest.dict()
             }),
             published_at,
             published_confidence,
@@ -248,10 +252,10 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
             json.dumps({
                 "text": text_content,
                 "rid": event.bundle.rid,
-                "cid": event.bundle.cid,
-                "source_sensor": event.source_sensor,
+                "cid": event.bundle.rid,
+                "source_sensor": event.source_node,
                 "event_type": event.event_type,
-                **event.bundle.metadata
+                **event.bundle.manifest.metadata
             }),
             agent_id
         )
@@ -335,7 +339,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         return ProcessingResult(
                             success=True,
                             rid=event.bundle.rid,
-                            cid=event.bundle.cid,
+                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                             chunks_created=0,
                             embeddings_created=0
                         )
@@ -344,7 +348,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         return ProcessingResult(
                             success=True,
                             rid=event.bundle.rid,
-                            cid=event.bundle.cid,
+                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                             chunks_created=0,
                             embeddings_created=0
                         )
@@ -355,7 +359,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                     return ProcessingResult(
                         success=True,
                         rid=event.bundle.rid,
-                        cid=event.bundle.cid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                         chunks_created=0,
                         embeddings_created=0,
                         error="Already exists"
@@ -378,7 +382,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                     return ProcessingResult(
                         success=False,
                         rid=event.bundle.rid,
-                        cid=event.bundle.cid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                         chunks_created=0,
                         embeddings_created=0,
                         error="Content too short or empty"
@@ -391,7 +395,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                     return ProcessingResult(
                         success=False,
                         rid=event.bundle.rid,
-                        cid=event.bundle.cid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                         chunks_created=0,
                         embeddings_created=0,
                         error="No chunks created"
@@ -404,21 +408,30 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 for i, chunk in enumerate(chunks):
                     # Create memory for chunk
                     chunk_rid = f"{event.bundle.rid}#chunk{i}"
+                    # Calculate chunk content hash for CID
+                    chunk_hash = hashlib.sha256(chunk.encode()).hexdigest()
                     chunk_event = KOIEvent(
                         event_type=event.event_type,
-                        source_sensor=event.source_sensor,
+                        rid=chunk_rid,
+                        source_node=event.source_node,
                         timestamp=event.timestamp,
                         bundle=KOIBundle(
                             rid=chunk_rid,
-                            cid=f"{event.bundle.cid}#chunk{i}",
-                            content={"text": chunk},
-                            metadata={
-                                **event.bundle.metadata,
-                                "chunk_index": i,
-                                "chunk_total": len(chunks),
-                                "parent_rid": event.bundle.rid
-                            },
-                            manifest=event.bundle.manifest
+                            manifest=KOIManifest(
+                                rid=chunk_rid,
+                                timestamp=event.timestamp,
+                                content_hash=chunk_hash,
+                                size_bytes=len(chunk.encode()),
+                                content_type="text/plain",
+                                version="1.0",
+                                metadata={
+                                    **event.bundle.manifest.metadata,
+                                    "chunk_index": i,
+                                    "chunk_total": len(chunks),
+                                    "parent_rid": event.bundle.rid
+                                }
+                            ),
+                            contents={"text": chunk}
                         )
                     )
                     
@@ -459,7 +472,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 return ProcessingResult(
                     success=True,
                     rid=event.bundle.rid,
-                    cid=event.bundle.cid,
+                    cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                     chunks_created=len(memory_ids),
                     embeddings_created=embeddings_created,
                     version=version,
@@ -471,7 +484,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
         return ProcessingResult(
             success=False,
             rid=event.bundle.rid,
-            cid=event.bundle.cid,
+            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
             chunks_created=0,
             embeddings_created=0,
             error=str(e)
@@ -497,18 +510,6 @@ async def root():
 @app.post("/process-koi-event", response_model=ProcessingResult)
 async def process_event_endpoint(event: KOIEvent):
     """Process a KOI event from the coordinator"""
-    print("\n" + "="*60, flush=True)
-    print(f"⚡ NEW EVENT RECEIVED - {event.event_type}", flush=True)
-    print(f"📦 RID: {event.bundle.rid}", flush=True)
-    print(f"🔍 Bundle content type: {type(event.bundle.content)}", flush=True)
-    print(f"🔑 Bundle content keys: {list(event.bundle.content.keys()) if isinstance(event.bundle.content, dict) else 'Not a dict'}", flush=True)
-    if isinstance(event.bundle.content, dict) and 'document' in event.bundle.content:
-        doc = event.bundle.content['document']
-        print(f"📄 Document found! Keys: {list(doc.keys()) if isinstance(doc, dict) else 'Not a dict'}", flush=True)
-        if isinstance(doc, dict) and 'content' in doc:
-            content_preview = str(doc['content'])[:100]
-            print(f"✅ Content found in document! Preview: {content_preview}", flush=True)
-    print("="*60 + "\n", flush=True)
     logger.info(f"[KOI Bridge v2] Received {event.event_type} event for RID: {event.bundle.rid}")
     
     # Process the event
@@ -583,14 +584,12 @@ async def get_stats():
 if __name__ == "__main__":
     import uvicorn
     
-    print("\n" + "="*70)
-    print("🚀 KOI EVENT BRIDGE v2 STARTING")
-    print("="*70)
-    print(f"📊 Database: {DB_URL}")
-    print(f"🤖 BGE API: {BGE_API_URL}")
-    print(f"📁 Using isolated tables: {USE_ISOLATED_TABLES}")
-    print("✨ Features: Deduplication, Versioning, Isolated Tables")
-    print("🔍 DEBUG MODE: Enhanced logging enabled")
-    print("="*70 + "\n")
+    logger.info("="*70)
+    logger.info("KOI EVENT BRIDGE v2 STARTING")
+    logger.info(f"Database: {DB_URL}")
+    logger.info(f"BGE API: {BGE_API_URL}")
+    logger.info(f"Using isolated tables: {USE_ISOLATED_TABLES}")
+    logger.info(f"Features: Deduplication, Versioning, Isolated Tables")
+    logger.info("="*70)
     
     uvicorn.run(app, host="0.0.0.0", port=8100, log_level="info", access_log=True)
