@@ -26,6 +26,7 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
 - ✅ **Version Control**: Tracks content updates with full audit trail
+- ✅ **CAT Receipts**: Complete provenance tracking for all transformations
 - ✅ **Isolated Tables**: Separates sensor data from scraped content
 - ✅ **Production Embeddings**: Model-agnostic embedding server (currently BGE-large-en-v1.5)
 - ✅ **MCP Integration**: Semantic search via Model Context Protocol

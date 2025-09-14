@@ -17,6 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 import uuid
+import time
+
+# Import CAT receipt creation
+from create_cat_receipt import create_cat_receipt, create_embedding_receipt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -330,6 +334,7 @@ async def store_embedding(conn: asyncpg.Connection, memory_id: str,
 
 async def process_koi_event(event: KOIEvent) -> ProcessingResult:
     """Process a KOI event with deduplication and versioning"""
+    start_time = time.time()
     try:
         async with asyncpg.create_pool(DB_URL) as pool:
             async with pool.acquire() as conn:
@@ -457,12 +462,39 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         continue  # Skip if already exists
                     
                     memory_ids.append(memory_id)
-                    
+
+                    # Create CAT receipt for memory creation
+                    await create_cat_receipt(
+                        conn=conn,
+                        transformation_type="koi_to_memory",
+                        input_rid=event.bundle.rid,
+                        output_rid=chunk_rid,
+                        input_cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else None,
+                        output_cid=f"cid:sha256:{chunk_hash}",
+                        chunks_created=1,
+                        source_sensor=event.source_node,
+                        event_type=event.event_type,
+                        metadata={"chunk_index": i, "chunk_total": len(chunks)}
+                    )
+
                     # Generate and store embedding
+                    embedding_start = time.time()
                     embedding = await generate_embedding_bge(chunk)
                     if embedding and await store_embedding(conn, memory_id, embedding):
                         embeddings_created += 1
-                    
+                        embedding_time_ms = int((time.time() - embedding_start) * 1000)
+
+                        # Create CAT receipt for embedding generation
+                        await create_embedding_receipt(
+                            conn=conn,
+                            memory_id=memory_id,
+                            rid=chunk_rid,
+                            embedding_model="bge-large-en-v1.5",
+                            embedding_dim=len(embedding),
+                            source_sensor=event.source_node,
+                            processing_time_ms=embedding_time_ms
+                        )
+
                     # Brief delay to avoid overwhelming the embedding server
                     await asyncio.sleep(0.05)
                 
@@ -479,6 +511,27 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         version = result['version']
                         previous_version_id = str(result['previous_version_id']) if result['previous_version_id'] else None
                 
+                # Calculate total processing time
+                processing_time_ms = int((time.time() - start_time) * 1000)
+
+                # Create overall transformation receipt
+                if memory_ids and USE_ISOLATED_TABLES:
+                    await create_cat_receipt(
+                        conn=conn,
+                        transformation_type="koi_event_processing",
+                        input_rid=event.bundle.rid,
+                        output_rid=event.bundle.rid,
+                        chunks_created=len(memory_ids),
+                        embeddings_created=embeddings_created,
+                        source_sensor=event.source_node,
+                        event_type=event.event_type,
+                        processing_duration_ms=processing_time_ms,
+                        metadata={
+                            "version": version,
+                            "chunks_processed": len(memory_ids)
+                        }
+                    )
+
                 return ProcessingResult(
                     success=True,
                     rid=event.bundle.rid,
