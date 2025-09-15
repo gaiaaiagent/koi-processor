@@ -47,7 +47,7 @@ async def forward_events():
                             try:
                                 # Post to Event Bridge
                                 eb_response = await client.post(
-                                    f"{EVENT_BRIDGE_URL}/process_event",
+                                    f"{EVENT_BRIDGE_URL}/process-koi-event",
                                     json=event
                                 )
                                 

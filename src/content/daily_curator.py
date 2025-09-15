@@ -87,7 +87,7 @@ class DailyCurator:
             async with pool.acquire() as conn:
                 # Query for recently published content
                 query = """
-                    SELECT 
+                    SELECT
                         km.id,
                         km.rid,
                         km.cid,
@@ -104,6 +104,16 @@ class DailyCurator:
                       AND km.event_type != 'FORGET'
                       AND km.published_at >= NOW() - INTERVAL '%s hours'
                       AND km.published_confidence >= $1
+                      AND km.source_sensor IN (
+                          SELECT DISTINCT source_sensor
+                          FROM koi_memories
+                          WHERE source_sensor LIKE '%%discourse%%'
+                             OR source_sensor LIKE '%%github%%'
+                             OR source_sensor LIKE '%%gitlab%%'
+                             OR source_sensor LIKE '%%medium%%'
+                             OR source_sensor LIKE '%%website%%'
+                      )
+                      AND km.content::text NOT LIKE '%%sensor_heartbeat%%'
                     ORDER BY km.published_at DESC
                     LIMIT 100
                 """ % hours  # Use string formatting for INTERVAL
@@ -209,25 +219,49 @@ class DailyCurator:
     
     async def get_ledger_stats(self, hours: int = 24) -> Dict[str, Any]:
         """
-        Get blockchain statistics from ledger sensor data
-        
+        Get blockchain statistics from Regen MCP
+
         Args:
             hours: Time window for stats
-        
+
         Returns:
             Dictionary of statistics
         """
-        # Ledger stats temporarily disabled - requires StatsAggregator initialization parameters
-        # TODO: Initialize with proper governance, ecocredit, consensus modules
-        return {
-            'new_credits': 0,
-            'total_credits': 0,
-            'active_proposals': 0,
-            'new_batches': 0,
-            'marketplace_volume': 0,
-            'validator_count': 0,
-            'block_height': 0
-        }
+        try:
+            # Use Regen MCP client for ledger stats
+            import sys
+            import os
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from integrations.regen_mcp_client import RegenMCPClient
+
+            mcp_client = RegenMCPClient()
+            stats = await mcp_client.query_ledger_stats()
+
+            # Get recent activity for the time window
+            recent = await mcp_client.get_recent_activity(hours)
+
+            # Count new items
+            new_credits = sum(1 for a in recent if a['type'] == 'credit_issuance')
+            new_batches = new_credits  # Batches are credit issuances
+
+            # Update stats with recent activity
+            stats['new_credits'] = new_credits * 10000  # Mock average credits per batch
+            stats['new_batches'] = new_batches
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error getting ledger stats from MCP: {e}")
+            # Fallback to empty stats
+            return {
+                'new_credits': 0,
+                'total_credits': 0,
+                'active_proposals': 0,
+                'new_batches': 0,
+                'marketplace_volume': 0,
+                'validator_count': 0,
+                'block_height': 0
+            }
     
     async def generate_daily_thread(self) -> Dict[str, Any]:
         """
@@ -237,8 +271,9 @@ class DailyCurator:
             Thread structure with posts and metadata
         """
         # Get content from different time windows
-        new_content = await self.get_recent_published_content(hours=24, min_confidence=0.7)
-        recent_content = await self.get_recent_published_content(hours=48, min_confidence=0.6)
+        # Expand window due to limited content availability
+        new_content = await self.get_recent_published_content(hours=168, min_confidence=0.7)  # 7 days
+        recent_content = await self.get_recent_published_content(hours=336, min_confidence=0.6)  # 14 days
         
         # Get trending topics
         trending = await self.get_trending_topics(hours=24)
@@ -318,24 +353,36 @@ class DailyCurator:
         
         return '\n'.join(lines)
     
-    def _select_content_links(self, 
-                             new_content: List[Dict[str, Any]], 
+    def _select_content_links(self,
+                             new_content: List[Dict[str, Any]],
                              recent_content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Select the most relevant content for link posts
-        
+
         Prioritizes:
         1. Governance proposals
         2. New credit batches/classes
         3. Blog posts and announcements
         4. Forum discussions
         """
+        import re
+
         selected = []
-        
+
         # Combine and deduplicate content
         all_content = new_content + [c for c in recent_content if c not in new_content]
-        
-        # Priority keywords for selection
+
+        # Priority sources and keywords
+        source_priorities = {
+            'discourse': 10,
+            'forum': 10,
+            'github': 8,
+            'gitlab': 7,
+            'medium': 6,
+            'website': 5,
+            'notion': 3,
+        }
+
         priority_keywords = {
             'governance': 10,
             'proposal': 10,
@@ -348,51 +395,174 @@ class DailyCurator:
             'blog': 4,
             'discussion': 3
         }
-        
+
         # Score and sort content
         for item in all_content:
             score = 0
-            content_text = str(item.get('content', '')).lower()
-            
+            content_data = item.get('content', {})
+
+            # Extract text content
+            if isinstance(content_data, dict):
+                content_text = str(content_data.get('text', '')).lower()
+            else:
+                content_text = str(content_data).lower()
+
+            # Apply source priority
+            source = item.get('source_sensor', '').lower()
+            for src_key, weight in source_priorities.items():
+                if src_key in source:
+                    score += weight
+                    break
+
             # Calculate relevance score
             for keyword, weight in priority_keywords.items():
                 if keyword in content_text:
                     score += weight
-            
+
             # Boost recent content
             hours_old = item.get('hours_old', 48)
             if hours_old < 24:
                 score += 5
             elif hours_old < 48:
                 score += 2
-            
+
             # Add to selection with score
             item['relevance_score'] = score
             selected.append(item)
-        
+
         # Sort by relevance score
         selected.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-        
+
         # Format top items as link posts
         link_posts = []
-        for item in selected[:3]:
+        for item in selected[:5]:  # Get top 5 for better selection
             content_data = item.get('content', {})
+            metadata = item.get('metadata', {})
+
+            # Extract text and URL
             text = ''
             url = ''
-            
+
             if isinstance(content_data, dict):
-                text = content_data.get('title', '') or content_data.get('text', '')[:100]
+                # Try to get title or snippet
+                text = content_data.get('title', '') or content_data.get('text', '')
                 url = content_data.get('url', '') or content_data.get('link', '')
-            
+            elif isinstance(content_data, str):
+                # Try to parse as JSON string
+                try:
+                    import json
+                    parsed = json.loads(content_data)
+                    if isinstance(parsed, dict):
+                        text = parsed.get('text', content_data)
+                except:
+                    text = content_data
+
+            # Clean up text - extract meaningful content
             if text:
+                # Remove JSON formatting
+                if text.startswith('{"text"'):
+                    try:
+                        import json
+                        parsed = json.loads(text)
+                        text = parsed.get('text', text)
+                    except:
+                        pass
+
+                # Extract title from markdown headers
+                title_match = re.search(r'^#+ (.+?)$', text, re.MULTILINE)
+                if title_match:
+                    title = title_match.group(1)
+                    # Extract first post content
+                    post_match = re.search(r'Post by (\w+) \([^)]+\)\n(.+?)(?:\n\n|$)', text, re.DOTALL)
+                    if post_match:
+                        author = post_match.group(1)
+                        post_content = post_match.group(2)[:100]
+                        text = f"{title} - {author}: {post_content}"
+                    else:
+                        text = title
+
+                # Limit length
+                text = text[:200] if len(text) > 200 else text
+
+            # Extract URL from text if not found
+            if not url and text:
+                url_match = re.search(r'https?://[^\s<>"{}|\\^`\[\]]+', text)
+                if url_match:
+                    url = url_match.group(0)
+
+            # Extract URL from metadata or construct from RID
+            if not url:
+                # Try metadata first
+                if isinstance(metadata, dict):
+                    # Check for source URL in metadata
+                    if 'koi_manifest' in metadata and isinstance(metadata['koi_manifest'], dict):
+                        manifest_meta = metadata['koi_manifest'].get('metadata', {})
+                        if isinstance(manifest_meta, dict):
+                            url = manifest_meta.get('url', '') or manifest_meta.get('source_url', '')
+
+                    # Direct metadata URL
+                    if not url:
+                        url = metadata.get('url', '') or metadata.get('source_url', '')
+
+                # Construct URL from RID if available
+                if not url:
+                    rid = item.get('rid', '')
+                    if 'forum.regen.network' in rid:
+                        # Extract topic ID from RID (e.g., forum.regen.network_512)
+                        match = re.search(r'forum\.regen\.network_(\d+)', rid)
+                        if match:
+                            topic_id = match.group(1)
+                            url = f'https://forum.regen.network/t/{topic_id}'
+                    elif 'github.com' in rid:
+                        # Extract repo and issue/PR from RID
+                        parts = rid.split(':')
+                        if len(parts) > 1:
+                            url = f'https://{parts[1].replace("_", "/").replace("#chunk0", "")}'
+
+            # Clean and format text
+            if text:
+                # Remove URLs from text
+                text = re.sub(r'https?://[^\s]+', '', text)
+                # Clean whitespace
+                text = ' '.join(text.split())
+                # Truncate for tweet length
+                if len(text) > 150:
+                    text = text[:147] + '...'
+
+                # Format based on source
+                source = item.get('source_sensor', '')
+                if 'discourse' in source.lower() or 'forum' in source.lower():
+                    emoji = '💬'
+                    prefix = 'Forum Discussion: '
+                elif 'github' in source.lower() or 'gitlab' in source.lower():
+                    emoji = '🔧'
+                    prefix = 'Development Update: '
+                elif 'medium' in source.lower():
+                    emoji = '📝'
+                    prefix = 'Article: '
+                elif 'governance' in text.lower():
+                    emoji = '🗳️'
+                    prefix = 'Governance: '
+                else:
+                    emoji = '🌱'
+                    prefix = ''
+
+                formatted_text = f"{emoji} {prefix}{text}"
+
+                # Add URL if available
+                if url:
+                    formatted_text += f"\n\n🔗 {url}"
+
                 link_posts.append({
-                    'text': text,
+                    'text': formatted_text,
                     'url': url,
-                    'source': item.get('source_sensor', ''),
-                    'published_at': item.get('published_at', '')
+                    'source': source,
+                    'published_at': str(item.get('published_at', '')),
+                    'score': item.get('relevance_score', 0)
                 })
-        
-        return link_posts
+
+        # Return top 2-3 posts
+        return link_posts[:2]
     
     async def generate_weekly_digest(self) -> Dict[str, Any]:
         """

@@ -214,11 +214,38 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
         content_hash = None
         
         # Try to extract from metadata first
+        # DEBUG: Log metadata to see what's coming through
+        logger.info(f"DEBUG: Processing RID {event.bundle.rid}, metadata keys: {list(event.bundle.manifest.metadata.keys())}")
         if 'published_at' in event.bundle.manifest.metadata:
-            published_at = event.bundle.manifest.metadata['published_at']
+            logger.info(f"DEBUG: Found published_at: {event.bundle.manifest.metadata['published_at']}")
+
+        if 'published_at' in event.bundle.manifest.metadata:
+            # Convert string date to datetime object if needed
+            date_str = event.bundle.manifest.metadata['published_at']
+            if isinstance(date_str, str):
+                try:
+                    from datetime import datetime
+                    # Parse ISO format datetime string
+                    published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    logger.info(f"Converted published_at string to datetime: {date_str} -> {published_at}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse published_at date '{date_str}': {e}")
+                    published_at = None
+            else:
+                published_at = date_str
             published_confidence = event.bundle.manifest.metadata.get('published_confidence', 0.9)
         elif 'created_at' in event.bundle.manifest.metadata:
-            published_at = event.bundle.manifest.metadata['created_at']
+            # Convert string date to datetime object if needed
+            date_str = event.bundle.manifest.metadata['created_at']
+            if isinstance(date_str, str):
+                try:
+                    from datetime import datetime
+                    published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except Exception as e:
+                    logger.warning(f"Failed to parse created_at date '{date_str}': {e}")
+                    published_at = None
+            else:
+                published_at = date_str
             published_confidence = 0.8
         
         # Calculate content hash for deduplication

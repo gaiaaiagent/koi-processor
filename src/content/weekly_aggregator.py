@@ -15,7 +15,7 @@ import os
 import sys
 import logging
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 import requests
@@ -140,20 +140,21 @@ class WeeklyAggregator:
         start_date = end_date - timedelta(days=days_back)
         
         query = """
-        SELECT 
+        SELECT
             rid as id,
             content,
             metadata->>'title' as title,
-            metadata->>'source' as source,
+            source_sensor as source,
             metadata->>'url' as url,
-            publication_date,
-            publication_confidence as confidence,
+            published_at as publication_date,
+            published_confidence as confidence,
             metadata->>'tags' as tags
         FROM koi_memories
-        WHERE publication_date >= %s 
-            AND publication_date <= %s
-            AND publication_confidence >= %s
-        ORDER BY publication_date DESC, publication_confidence DESC
+        WHERE published_at >= %s
+            AND published_at <= %s
+            AND published_confidence >= %s
+            AND content::text NOT LIKE '%%sensor_heartbeat%%'
+        ORDER BY published_at DESC, published_confidence DESC
         LIMIT %s
         """
         
@@ -168,10 +169,29 @@ class WeeklyAggregator:
             
             for row in cursor.fetchall():
                 tags = json.loads(row['tags']) if row['tags'] else []
+
+                # Extract content text
+                content_text = ""
+                if isinstance(row['content'], dict):
+                    content_text = row['content'].get('text', '') or str(row['content'])
+                else:
+                    content_text = str(row['content'])
+
+                # Extract title
+                title = row['title'] or "Untitled"
+                if not title or title == "Untitled":
+                    # Try to extract title from content
+                    if '# ' in content_text:
+                        lines = content_text.split('\n')
+                        for line in lines:
+                            if line.startswith('# '):
+                                title = line[2:].strip()
+                                break
+
                 items.append(ContentItem(
                     id=row['id'],
-                    content=row['content'][:1000],  # Truncate for processing
-                    title=row['title'] or "Untitled",
+                    content=content_text[:1000],  # Truncate for processing
+                    title=title,
                     source=row['source'] or "unknown",
                     url=row['url'],
                     publication_date=row['publication_date'],
@@ -256,7 +276,11 @@ class WeeklyAggregator:
                 score *= 1.5
             
             # Boost for recent content
-            days_old = (datetime.now() - item.publication_date).days
+            # Handle timezone-aware and naive datetimes
+            if item.publication_date.tzinfo is not None:
+                days_old = (datetime.now(item.publication_date.tzinfo) - item.publication_date).days
+            else:
+                days_old = (datetime.now() - item.publication_date).days
             recency_boost = max(0, 1 - (days_old / 7))
             score *= (1 + recency_boost * 0.5)
             

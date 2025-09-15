@@ -16,6 +16,7 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.content.weekly_aggregator import WeeklyAggregator
+from typing import Dict, Any
 
 # Configure logging
 logging.basicConfig(
@@ -24,34 +25,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def preview_digest(digest: WeeklyDigest):
+def preview_digest(digest):
     """Print a preview of the digest to console"""
     print("\n" + "="*80)
     print("WEEKLY DIGEST PREVIEW")
     print("="*80)
-    print(f"Period: {digest.week_start.strftime('%B %d')} - {digest.week_end.strftime('%B %d, %Y')}")
-    print(f"Total Items: {digest.total_items}")
-    print(f"Clusters: {len(digest.clusters)}")
-    print(f"Word Count: {len(digest.brief.split())} words")
-    print("\n" + "-"*40 + " TOP STORIES " + "-"*40)
-    
-    for i, story in enumerate(digest.top_stories[:5], 1):
-        print(f"\n{i}. {story.title}")
-        print(f"   Source: {story.source} | Score: {story.relevance_score:.2f}")
-        print(f"   Date: {story.publication_date.strftime('%Y-%m-%d')}")
-        if story.tags:
-            print(f"   Tags: {', '.join(story.tags[:5])}")
-    
-    print("\n" + "-"*40 + " THEMES " + "-"*40)
-    for cluster in digest.clusters[:5]:
-        print(f"\n• {cluster['theme']} ({cluster['size']} items)")
-        for item in cluster['items'][:3]:
-            print(f"  - {item['title']}")
-    
-    print("\n" + "-"*40 + " STATISTICS " + "-"*40)
-    for key, value in digest.stats.items():
-        if key != 'source_distribution':
-            print(f"{key}: {value}")
+
+    # Handle WeeklyDigest dataclass
+    if hasattr(digest, 'week_start'):
+        print(f"Period: {digest.week_start.strftime('%B %d')} - {digest.week_end.strftime('%B %d, %Y')}")
+        print(f"Total Items: {digest.total_items}")
+        if hasattr(digest, 'clusters'):
+            print(f"Clusters: {len(digest.clusters)}")
+        if hasattr(digest, 'brief'):
+            print(f"Word Count: {len(digest.brief.split())} words")
+
+        if hasattr(digest, 'top_stories') and digest.top_stories:
+            print("\n" + "-"*40 + " TOP STORIES " + "-"*40)
+            for i, story in enumerate(digest.top_stories[:5], 1):
+                print(f"\n{i}. {story.title}")
+                print(f"   Source: {story.source}")
+                if hasattr(story, 'publication_date'):
+                    print(f"   Date: {story.publication_date}")
+
+        if hasattr(digest, 'clusters') and digest.clusters:
+            print("\n" + "-"*40 + " THEMES " + "-"*40)
+            for cluster in digest.clusters[:5]:
+                if isinstance(cluster, dict):
+                    print(f"\n• {cluster.get('theme', 'Unknown')} ({cluster.get('size', 0)} items)")
+
+        if hasattr(digest, 'brief') and digest.brief:
+            print("\n" + "-"*40 + " SUMMARY " + "-"*40)
+            print(digest.brief[:500] + "...")
+
+        if hasattr(digest, 'stats') and digest.stats:
+            print("\n" + "-"*40 + " STATISTICS " + "-"*40)
+            for key, value in digest.stats.items():
+                if key != 'source_distribution':
+                    print(f"{key}: {value}")
     
     print("\n" + "="*80 + "\n")
 
