@@ -1,11 +1,11 @@
 # Milestone B Deployment Status
 
-## Last Updated: September 12, 2025
+## Last Updated: September 17, 2025
 
 ## ✅ Working Features
 
 ### Sessions 1-3: Core Infrastructure ✅
-- **KOI Coordinator**: http://localhost:8000 (redirects to admin)
+- **KOI Coordinator**: http://localhost:8005 (receives sensor events)
 - **Event routing**: Fully operational
 - **Event deduplication**: Working with versioning
 
@@ -13,6 +13,12 @@
 - **Event processing**: Operational (minimum content length enforced)
 - **Version control**: Implemented with database tracking
 - **Memory storage**: PostgreSQL with isolated tables
+
+### Batch Processing Pipeline (OpenAI GPT-4o-mini) ✅
+- **Batch Queue System**: PostgreSQL-backed queue management
+- **Manual Processing**: Web interface with "Process Batch" button
+- **Cost-Effective**: ~$0.0003 per document with batch API
+- **Dashboard Integration**: Available at https://regen.gaiaai.xyz/digests → "Batch Queue" tab
 
 ### Sessions 7-9: BGE Embeddings ✅
 - **BGE Server**: http://localhost:8090
@@ -51,6 +57,7 @@
 1. **Quality Pipeline**: XDailyBot missing some methods (workaround in place)
 2. **Audio Pipeline**: Podcastfy not installed (optional, fallback working)
 3. **Content Length**: Minimum content length enforced (feature, not bug)
+4. **OpenAI Rate Limits**: Consider batch API timing for large volumes
 
 ## 🚀 Deployment Instructions
 
@@ -105,9 +112,12 @@ All configuration files are in the `config/` directory:
 
 | Service | URL | Purpose |
 |---------|-----|---------|
+| KOI Coordinator | http://localhost:8005 | Sensor event hub |
+| Batch Queue API | http://localhost:8006 | Batch processing queue |
+| Semantic Bridge | http://localhost:8004 | Event processing bridge |
 | BGE Server | http://localhost:8090 | Embedding generation |
 | Event Bridge | http://localhost:8100 | Event processing |
-| Coordinator | http://localhost:8000 | Main coordinator |
+| Content Dashboard | http://localhost:8400 | Web dashboard with batch UI |
 | Quality API | http://localhost:8001 | Quality control (if running) |
 
 ### Testing
@@ -125,6 +135,51 @@ The system uses PostgreSQL with the following key tables:
 - `koi_memories`: Main memory storage with embeddings
 - `koi_transformation_receipts`: CAT provenance tracking
 - `koi_quality_reviews`: Quality control reviews
+- `llm_batch_queue`: OpenAI batch processing queue
+
+### Batch Processing Pipeline
+
+The batch processing system provides cost-effective semantic extraction using OpenAI GPT-4o-mini:
+
+**Components:**
+- **Batch Queue API** (Port 8006): Queue management system
+- **OpenAI Extractor**: GPT-4o-mini based extraction with structured output
+- **Web Interface**: Manual batch processing at https://regen.gaiaai.xyz/digests
+
+**API Endpoints:**
+```bash
+# Add item to queue
+POST /queue/add
+{
+  "rid": "orn:koi:content:abc123",
+  "content": "...",
+  "source_type": "website",
+  "metadata": {}
+}
+
+# Get queue statistics
+GET /queue/stats
+
+# Process batch manually
+POST /queue/process-batch
+{
+  "max_items": 100
+}
+```
+
+**Cost Management:**
+- Input: $0.15 per 1M tokens
+- Output: $0.60 per 1M tokens
+- Batch API: 50% discount on above rates
+- Estimated cost per document: ~$0.0003
+
+**Configuration:**
+```bash
+# Environment variables
+OPENAI_API_KEY=your-api-key
+DATABASE_URL=postgresql://postgres:postgres@localhost:5433/eliza
+USE_BATCH_API=false  # Set to true for batch mode
+```
 
 ### Monitoring
 
@@ -160,8 +215,38 @@ tail -f logs/*.log
 - No authentication on endpoints (add nginx proxy for production)
 - Database uses standard PostgreSQL security
 
+## 📅 Metadata Extraction for Content Filtering
+
+Critical for daily posts and weekly digests, the system extracts and preserves published dates:
+
+### Source-Specific Date Extraction
+- **Discourse Forums**: Post timestamps from API responses
+- **Twitter/X**: Tweet creation timestamps
+- **Websites**: Article dates, meeting dates, publication dates
+- **Notion**: Page creation/modification dates
+- **Medium**: Article publication dates
+
+### Content Filtering Rules
+- **Daily Posts**: Content from past 24 hours only
+- **Weekly Digests**: Content from past 7 days only
+- **Undated Content**: Excluded from time-based aggregations
+- **Quality Threshold**: Minimum confidence score of 0.7
+
+### Testing Date Extraction
+```bash
+# Check recent content with dates
+psql -h localhost -p 5433 -U postgres -d eliza -c "
+SELECT rid, source_type,
+       metadata->>'published_date' as published_date,
+       created_at
+FROM llm_batch_queue
+WHERE metadata->>'published_date' IS NOT NULL
+ORDER BY created_at DESC LIMIT 10;"
+```
+
 ## 📚 Additional Resources
 
 - [KOI Protocol Documentation](https://github.com/gaiaaiagent/koi-protocol)
 - [BGE Model Information](https://huggingface.co/BAAI/bge-large-en-v1.5)
 - [PostgreSQL pgvector](https://github.com/pgvector/pgvector)
+- [OpenAI Batch API](https://platform.openai.com/docs/guides/batch)

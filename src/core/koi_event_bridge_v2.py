@@ -446,7 +446,15 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 # Process each chunk
                 embeddings_created = 0
                 memory_ids = []
-                
+
+                # Extract document metadata if it exists
+                doc_metadata = {}
+                if isinstance(event.bundle.contents, dict):
+                    if 'document' in event.bundle.contents and isinstance(event.bundle.contents['document'], dict):
+                        doc = event.bundle.contents['document']
+                        if 'metadata' in doc and isinstance(doc['metadata'], dict):
+                            doc_metadata = doc['metadata']
+
                 for i, chunk in enumerate(chunks):
                     # Create memory for chunk
                     chunk_rid = f"{event.bundle.rid}#chunk{i}"
@@ -468,6 +476,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                                 version="1.0",
                                 metadata={
                                     **event.bundle.manifest.metadata,
+                                    **doc_metadata,  # Include document metadata (post details, etc.)
                                     "chunk_index": i,
                                     "chunk_total": len(chunks),
                                     "parent_rid": event.bundle.rid

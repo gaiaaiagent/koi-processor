@@ -15,14 +15,30 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import tempfile
 import shutil
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Podcastfy imports
 try:
-    from podcastfy import Podcastfy
+    import podcastfy
+    from podcastfy.client import PodcastClient
     PODCASTFY_AVAILABLE = True
 except ImportError:
-    PODCASTFY_AVAILABLE = False
-    print("Warning: Podcastfy not installed. Install with: pip install podcastfy")
+    try:
+        # Try alternative import
+        import podcastfy
+        PODCASTFY_AVAILABLE = True
+        # Create a simple wrapper if the client isn't available
+        class PodcastClient:
+            def __init__(self, *args, **kwargs):
+                pass
+            def create_podcast(self, *args, **kwargs):
+                raise NotImplementedError("Podcastfy client not properly installed")
+    except ImportError:
+        PODCASTFY_AVAILABLE = False
+        print("Warning: Podcastfy not installed. Install with: pip install podcastfy")
 
 # Configure logging
 logging.basicConfig(
@@ -114,15 +130,21 @@ class PodcastfyGenerator:
         if not api_key:
             raise ValueError(f"API key not found in environment variable: {api_key_env}")
         
-        # Initialize Podcastfy
-        podcastfy = Podcastfy(
-            model=podcastfy_config.get("model", "gpt-4o-mini"),
-            api_key=api_key,
-            tts_provider=podcastfy_config.get("tts_provider", "openai"),
-            tts_model=podcastfy_config.get("tts_model", "tts-1")
-        )
-        
-        return podcastfy
+        # Initialize Podcastfy client
+        try:
+            # Try using the client if available
+            client = PodcastClient(
+                api_key=api_key,
+                model=podcastfy_config.get("model", "gpt-4o-mini"),
+                tts_provider=podcastfy_config.get("tts_provider", "openai"),
+                tts_model=podcastfy_config.get("tts_model", "tts-1")
+            )
+        except:
+            # Fallback to basic initialization
+            client = None
+            logger.warning("Podcastfy client initialization failed, using fallback")
+
+        return client
     
     def generate_podcast_from_digest(self, 
                                     digest: Dict[str, Any],

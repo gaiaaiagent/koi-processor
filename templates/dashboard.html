@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Milestone B Content Operations Dashboard</title>
+    <title>Information Pipelines Dashboard</title>
     
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -105,7 +105,7 @@
             <div class="row align-items-center">
                 <div class="col-md-8">
                     <h1 class="mb-0">
-                        <i class="bi bi-speedometer2"></i> Milestone B Content Operations
+                        <i class="bi bi-speedometer2"></i> Information Pipelines Dashboard
                     </h1>
                     <p class="mb-0 mt-2 opacity-75">Real-time monitoring for Daily Bot and Weekly Digest</p>
                 </div>
@@ -167,19 +167,21 @@
                 </div>
             </div>
             <div class="col-md-3">
-                <div class="card metric-card">
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-start">
-                            <div>
-                                <div class="metric-label">KOI Pipeline</div>
-                                <div class="mt-2">
-                                    <span class="status-badge status-healthy" id="koi-status">Active</span>
+                <a href="https://regen.gaiaai.xyz/koi" style="text-decoration: none; color: inherit;">
+                    <div class="card metric-card" style="cursor: pointer;">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <div class="metric-label">KOI Pipeline</div>
+                                    <div class="mt-2">
+                                        <span class="status-badge status-healthy" id="koi-status">Active</span>
+                                    </div>
                                 </div>
+                                <i class="bi bi-diagram-3 text-info" style="font-size: 2rem;"></i>
                             </div>
-                            <i class="bi bi-diagram-3 text-info" style="font-size: 2rem;"></i>
                         </div>
                     </div>
-                </div>
+                </a>
             </div>
         </div>
 
@@ -206,9 +208,21 @@
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link" id="drafts-tab" data-bs-toggle="tab" data-bs-target="#drafts" type="button">
+                    <i class="bi bi-file-earmark-text"></i> Drafts
+                    <span class="badge bg-info ms-1" id="draft-count">0</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" id="alerts-tab" data-bs-toggle="tab" data-bs-target="#alerts" type="button">
                     <i class="bi bi-exclamation-triangle"></i> Alerts
                     <span class="badge bg-danger ms-1" id="alert-count" style="display: none;">0</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="batch-tab" data-bs-toggle="tab" data-bs-target="#batch" type="button">
+                    <i class="bi bi-cpu"></i> Batch Queue
+                    <span class="badge bg-warning ms-1" id="batch-queue-count">0</span>
                 </button>
             </li>
         </ul>
@@ -419,6 +433,82 @@
                 </div>
             </div>
 
+            <!-- Drafts Tab -->
+            <div class="tab-pane fade" id="drafts" role="tabpanel">
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5>Draft Management</h5>
+                            <div class="btn-group" role="group">
+                                <button class="btn btn-sm btn-outline-primary" onclick="refreshDrafts()">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                                <button class="btn btn-sm btn-primary" onclick="generateNewDraft('daily')">
+                                    <i class="bi bi-plus-circle"></i> New Daily
+                                </button>
+                                <button class="btn btn-sm btn-primary" onclick="generateNewDraft('weekly')">
+                                    <i class="bi bi-plus-circle"></i> New Weekly
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header">
+                                <ul class="nav nav-tabs card-header-tabs" role="tablist">
+                                    <li class="nav-item">
+                                        <a class="nav-link active" data-bs-toggle="tab" href="#pending-drafts">
+                                            Pending <span class="badge bg-warning" id="pending-drafts-count">0</span>
+                                        </a>
+                                    </li>
+                                    <li class="nav-item">
+                                        <a class="nav-link" data-bs-toggle="tab" href="#approved-drafts">
+                                            Approved <span class="badge bg-success" id="approved-drafts-count">0</span>
+                                        </a>
+                                    </li>
+                                    <li class="nav-item">
+                                        <a class="nav-link" data-bs-toggle="tab" href="#rejected-drafts">
+                                            Rejected <span class="badge bg-danger" id="rejected-drafts-count">0</span>
+                                        </a>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="card-body">
+                                <div class="tab-content">
+                                    <div class="tab-pane fade show active" id="pending-drafts">
+                                        <div id="pending-drafts-list">
+                                            <div class="text-center text-muted py-4">
+                                                <i class="bi bi-inbox" style="font-size: 3rem;"></i>
+                                                <p>No pending drafts</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="tab-pane fade" id="approved-drafts">
+                                        <div id="approved-drafts-list">
+                                            <div class="text-center text-muted py-4">
+                                                <i class="bi bi-check-circle" style="font-size: 3rem;"></i>
+                                                <p>No approved drafts</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="tab-pane fade" id="rejected-drafts">
+                                        <div id="rejected-drafts-list">
+                                            <div class="text-center text-muted py-4">
+                                                <i class="bi bi-x-circle" style="font-size: 3rem;"></i>
+                                                <p>No rejected drafts</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Alerts Tab -->
             <div class="tab-pane fade" id="alerts" role="tabpanel">
                 <div class="card">
@@ -435,6 +525,19 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Batch Queue Tab -->
+            <div class="tab-pane fade" id="batch" role="tabpanel">
+                <div id="batch-queue-content">
+                    <!-- Content will be loaded via AJAX -->
+                    <div class="text-center p-5">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-3">Loading Batch Queue...</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -442,6 +545,141 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
     <!-- Dashboard JavaScript -->
-    <script src="/static/dashboard.js"></script>
+    <script src="static/dashboard.js"></script>
+
+    <!-- Inline backup for critical functions -->
+    <script>
+        // Handle Batch Queue tab loading
+        document.addEventListener('DOMContentLoaded', function() {
+            const batchTab = document.getElementById('batch-tab');
+            const batchQueueContent = document.getElementById('batch-queue-content');
+            let batchQueueLoaded = false;
+
+            batchTab.addEventListener('shown.bs.tab', function() {
+                if (!batchQueueLoaded) {
+                    // Load the batch queue component
+                    const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+                    fetch(`${basePath}/batch-queue`)
+                        .then(response => response.text())
+                        .then(html => {
+                            batchQueueContent.innerHTML = html;
+                            // Initialize the Batch Queue JavaScript after loading
+                            if (typeof BQ !== 'undefined') {
+                                BQ.init();
+                            }
+                            batchQueueLoaded = true;
+                        })
+                        .catch(error => {
+                            console.error('Error loading batch queue:', error);
+                            batchQueueContent.innerHTML = `
+                                <div class="alert alert-danger">
+                                    Failed to load batch queue component. Please refresh the page.
+                                </div>
+                            `;
+                        });
+                }
+            });
+
+            // Update batch queue count periodically
+            function updateBatchQueueCount() {
+                fetch('http://localhost:8006/queue/stats')
+                    .then(response => response.json())
+                    .then(data => {
+                        const count = data.queued_count || 0;
+                        document.getElementById('batch-queue-count').textContent = count;
+                    })
+                    .catch(error => {
+                        console.error('Failed to fetch batch queue stats:', error);
+                    });
+            }
+
+            updateBatchQueueCount();
+            setInterval(updateBatchQueueCount, 30000); // Update every 30 seconds
+        });
+
+        // Define triggerManualRun function
+        window.triggerManualRun = function(type) {
+            if (confirm(`Generate ${type} content now as a draft?`)) {
+                console.log('Triggering manual run for:', type);
+
+                // Show loading notification
+                const alertDiv = document.createElement('div');
+                alertDiv.className = 'alert alert-info alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
+                alertDiv.style.zIndex = '9999';
+                alertDiv.innerHTML = `
+                    <span class="spinner-border spinner-border-sm me-2"></span>
+                    Starting ${type} draft generation...
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                `;
+                document.body.appendChild(alertDiv);
+
+                // Make API call to generate draft content
+                // Use correct path whether accessed directly or through /digests/
+                const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+                fetch(`${basePath}/api/dashboard/trigger_manual_run`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            type: type,
+                            draft_mode: true,
+                            skip_audio: type === 'weekly'
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        // Remove loading alert
+                        alertDiv.remove();
+
+                        // Show result
+                        const resultDiv = document.createElement('div');
+                        const isSuccess = data.success;
+                        resultDiv.className = `alert alert-${isSuccess ? 'success' : 'danger'} alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3`;
+                        resultDiv.style.zIndex = '9999';
+                        resultDiv.innerHTML = `
+                            ${isSuccess ? '✓' : '✗'} ${data.message || (isSuccess ? `${type} generation started!` : 'Generation failed')}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        `;
+                        document.body.appendChild(resultDiv);
+
+                        // Auto-remove after 5 seconds
+                        setTimeout(() => resultDiv.remove(), 5000);
+
+                        // Refresh page after successful generation
+                        if (isSuccess) {
+                            setTimeout(() => location.reload(), 6000);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alertDiv.remove();
+
+                        // Show error
+                        const errorDiv = document.createElement('div');
+                        errorDiv.className = 'alert alert-danger alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-3';
+                        errorDiv.style.zIndex = '9999';
+                        errorDiv.innerHTML = `
+                            ✗ Error: ${error.message}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        `;
+                        document.body.appendChild(errorDiv);
+                        setTimeout(() => errorDiv.remove(), 5000);
+                    });
+            }
+        };
+
+        // Define other required functions
+        window.refreshDashboard = function() {
+            location.reload();
+        };
+
+        window.clearAlerts = function() {
+            const alertsList = document.getElementById('alerts-list');
+            if (alertsList) {
+                alertsList.innerHTML = '<p class="text-muted">No recent alerts</p>';
+            }
+        };
+    </script>
 </body>
 </html>

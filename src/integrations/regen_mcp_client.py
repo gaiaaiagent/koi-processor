@@ -101,14 +101,18 @@ class RegenMCPClient:
     async def _query_block_info(self) -> Dict[str, Any]:
         """Query latest block information"""
         try:
-            # Use MCP client to query block info
-            result = await self._execute_mcp_tool("cosmos_bank_query", {
-                "query_type": "params"
-            })
+            # Query real block info via MCP
+            result = await self._execute_mcp_tool("query_block", {})
 
-            # For now, return mock data until MCP integration is complete
+            if result:
+                return {
+                    'block_height': result.get('height', 0),
+                    'chain_id': result.get('chain_id', 'regen-1')
+                }
+
+            # Fallback data
             return {
-                'block_height': 19234567,
+                'block_height': 0,
                 'chain_id': 'regen-1'
             }
         except Exception as e:

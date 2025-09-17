@@ -266,14 +266,13 @@ class DailyCurator:
     async def generate_daily_thread(self) -> Dict[str, Any]:
         """
         Generate a daily thread for X/Twitter with 3-5 posts
-        
+
         Returns:
             Thread structure with posts and metadata
         """
-        # Get content from different time windows
-        # Expand window due to limited content availability
-        new_content = await self.get_recent_published_content(hours=168, min_confidence=0.7)  # 7 days
-        recent_content = await self.get_recent_published_content(hours=336, min_confidence=0.6)  # 14 days
+        # Get ALL content from past 24 hours (strict) and recent week
+        new_content = await self.get_recent_published_content(hours=24, min_confidence=0.5)  # Last 24h - lower threshold to get ALL
+        recent_content = await self.get_recent_published_content(hours=168, min_confidence=0.6)  # Last week for context
         
         # Get trending topics
         trending = await self.get_trending_topics(hours=24)
@@ -295,10 +294,11 @@ class DailyCurator:
             }
         }
         
-        # Post 1: Headline
+        # Post 1: Dynamic headline with context
+        headline = await self._generate_dynamic_headline(new_content, stats, trending)
         thread['posts'].append({
             'type': 'headline',
-            'content': '🌱 Regen Network Daily Update',
+            'content': headline,
             'metadata': {'priority': 'high', 'position': 1}
         })
         
@@ -336,22 +336,38 @@ class DailyCurator:
         return thread
     
     def _format_stat_post(self, stats: Dict[str, Any]) -> str:
-        """Format statistics into a tweet-friendly post"""
-        lines = ['📊 24h Network Activity:']
-        
-        if stats.get('new_batches'):
-            lines.append(f"• {stats['new_batches']} new credit batches")
-        
-        if stats.get('new_credits'):
-            lines.append(f"• {stats['new_credits']:,} credits issued")
-        
+        """Format statistics into a full 280 character tweet"""
+        # Build comprehensive stats tweet
+        parts = []
+
+        if stats.get('new_batches') or stats.get('new_credits'):
+            credits_text = f"{stats.get('new_credits', 0):,} ecological credits issued"
+            if stats.get('new_batches'):
+                credits_text += f" across {stats['new_batches']} new batches"
+            parts.append(credits_text)
+
         if stats.get('marketplace_volume'):
-            lines.append(f"• ${stats['marketplace_volume']:,.0f} marketplace volume")
-        
+            parts.append(f"${stats['marketplace_volume']:,.0f} in marketplace volume")
+
         if stats.get('active_proposals'):
-            lines.append(f"• {stats['active_proposals']} governance proposals")
-        
-        return '\n'.join(lines)
+            parts.append(f"{stats['active_proposals']} active governance proposals shaping our regenerative future")
+
+        if stats.get('validator_count'):
+            parts.append(f"{stats['validator_count']} validators securing the network")
+
+        # Combine into engaging tweet
+        tweet = "📊 Today's #RegenNetwork highlights: "
+        tweet += ", ".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "Network growing steadily")
+
+        # Add call to action if space
+        if len(tweet) < 220:
+            tweet += " 🌍 Building the infrastructure for planetary regeneration."
+
+        # Ensure we use close to 280 chars
+        if len(tweet) < 250:
+            tweet += " #ReFi #ClimateAction"
+
+        return tweet[:280]  # Ensure we don't exceed limit
     
     def _select_content_links(self,
                              new_content: List[Dict[str, Any]],
@@ -369,8 +385,35 @@ class DailyCurator:
 
         selected = []
 
-        # Combine and deduplicate content
-        all_content = new_content + [c for c in recent_content if c not in new_content]
+        # Combine and deduplicate content using content_hash
+        seen_hashes = set()
+        seen_texts = set()
+        all_content = []
+
+        # Process all content and remove duplicates
+        for item in new_content + recent_content:
+            # Check content hash
+            content_hash = item.get('content_hash', '')
+            if content_hash and content_hash in seen_hashes:
+                continue
+
+            # Check text similarity (first 200 chars)
+            content_data = item.get('content', {})
+            if isinstance(content_data, dict):
+                content_text = str(content_data.get('text', ''))[:200].lower().strip()
+            else:
+                content_text = str(content_data)[:200].lower().strip()
+
+            # Skip if very similar text already seen
+            if content_text and content_text in seen_texts:
+                continue
+
+            # Add to deduped list
+            if content_hash:
+                seen_hashes.add(content_hash)
+            if content_text:
+                seen_texts.add(content_text)
+            all_content.append(item)
 
         # Priority sources and keywords
         source_priorities = {
@@ -561,8 +604,33 @@ class DailyCurator:
                     'score': item.get('relevance_score', 0)
                 })
 
-        # Return top 2-3 posts
-        return link_posts[:2]
+        # Deduplicate link posts based on URL and text similarity
+        unique_posts = []
+        seen_urls = set()
+        seen_texts = set()
+
+        for post in link_posts:
+            # Skip if URL already seen (and not empty)
+            if post['url'] and post['url'] in seen_urls:
+                continue
+
+            # Skip if text is too similar to already selected posts
+            text_key = post['text'][:100].lower().strip()
+            if text_key in seen_texts:
+                continue
+
+            # Add to unique posts
+            unique_posts.append(post)
+            if post['url']:
+                seen_urls.add(post['url'])
+            seen_texts.add(text_key)
+
+            # Stop when we have enough unique posts
+            if len(unique_posts) >= 2:
+                break
+
+        # Return 2 unique posts, or whatever we have
+        return unique_posts[:2]
     
     async def generate_weekly_digest(self) -> Dict[str, Any]:
         """

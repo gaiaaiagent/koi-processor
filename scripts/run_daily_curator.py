@@ -17,7 +17,13 @@ import asyncpg
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.content.daily_curator import DailyCurator
+# Try to use LLM version if available, fallback to basic version
+try:
+    from src.content.daily_curator_llm import DailyCuratorLLM as DailyCurator
+    print("Using LLM-enhanced curator")
+except ImportError:
+    from src.content.daily_curator import DailyCurator
+    print("Using basic curator (LLM not available)")
 
 
 def setup_logging(verbose: bool = False):

@@ -1,0 +1,68 @@
+## KOI Content Scheduling Configuration
+## Last Updated: 2025-09-16
+
+scheduling:
+  daily_curator:
+    enabled: true
+    schedule: "0 12 * * 1-5"  # 12:00 PM ET, Monday-Friday
+    description: "Daily content thread generation"
+    command: "cd /opt/projects/koi-processor && source venv/bin/activate && python scripts/run_daily_curator.py daily"
+    output: "logs/daily_curator.log"
+    auto_publish: false  # Set to true after initial review period
+    review_period_days: 7  # Days to run in draft mode before auto-publishing
+
+  weekly_aggregator:
+    enabled: true
+    schedule: "0 14 * * 5"  # 2:00 PM ET, Fridays
+    description: "Weekly digest and podcast generation"
+    command: "cd /opt/projects/koi-processor && source venv/bin/activate && python scripts/run_weekly_aggregator.py"
+    output: "logs/weekly_aggregator.log"
+    auto_publish: false  # Set to true after initial review period
+    review_period_days: 7  # Days to run in draft mode before auto-publishing
+    podcast:
+      enabled: true
+      primary: "podcastfy"  # Primary podcast generation method
+      secondary: "notebooklm"  # Fallback method
+      auto_generate: false  # Set to true when ready for automation
+
+  monitoring:
+    enabled: true
+    schedule: "0 */6 * * *"  # Every 6 hours
+    description: "System health and content pipeline monitoring"
+    command: "cd /opt/projects/koi-processor && python src/utils/monitor_pipeline.py"
+    output: "logs/monitoring.log"
+
+notification:
+  enabled: false  # Enable when ready
+  channels:
+    - type: "email"
+      recipients: []
+    - type: "webhook"
+      url: ""
+
+review:
+  initial_review_period: true  # Currently in review period
+  start_date: "2025-09-16"
+  end_date: "2025-09-23"
+  reviewers: []
+
+publishing:
+  platforms:
+    twitter:
+      enabled: false  # Enable after review period
+      account: "@regen_network"
+    discord:
+      enabled: false
+      webhook: ""
+    forum:
+      enabled: false
+      api_url: "https://forum.regen.network"
+
+quality_control:
+  style_guide_check: true
+  link_validation: true
+  content_deduplication: true
+  min_confidence_score: 0.7
+  max_post_length: 280  # Twitter character limit
+  min_digest_words: 800
+  max_digest_words: 1200

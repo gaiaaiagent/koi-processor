@@ -204,34 +204,33 @@ class WeeklyAggregator:
     
     def get_embeddings(self, items: List[ContentItem]) -> None:
         """Get BGE embeddings for content items"""
-        try:
-            # Batch process embeddings
-            texts = [item.content for item in items]
-            
-            response = requests.post(
-                f"{self.bge_url}/embed",
-                json={"texts": texts}
-            )
-            
-            if response.status_code == 200:
-                embeddings = response.json()["embeddings"]
-                for item, embedding in zip(items, embeddings):
-                    item.embedding = np.array(embedding)
-                logger.info(f"Generated embeddings for {len(items)} items")
-            else:
-                logger.warning(f"BGE server error: {response.status_code}")
-                # Fallback to mock embeddings for testing
-                for item in items:
+        embeddings_generated = 0
+        for item in items:
+            try:
+                # Process each item individually since BGE server doesn't support batch
+                response = requests.post(
+                    f"{self.bge_url}/encode",
+                    json={"text": item.content[:5000]}  # Limit text length
+                )
+
+                if response.status_code == 200:
+                    embedding_data = response.json()
+                    item.embedding = np.array(embedding_data["embedding"])
+                    embeddings_generated += 1
+                else:
+                    logger.warning(f"BGE server error for item: {response.status_code}")
+                    # Fallback to mock embedding for this item
                     item.embedding = np.random.randn(1024)
-        except Exception as e:
-            logger.error(f"Error getting embeddings: {e}")
-            # Use mock embeddings
-            for item in items:
+            except Exception as e:
+                logger.error(f"Error getting embedding for item: {e}")
+                # Use mock embedding for this item
                 item.embedding = np.random.randn(1024)
+
+        logger.info(f"Generated {embeddings_generated}/{len(items)} BGE embeddings")
     
     def cluster_content(self, items: List[ContentItem]) -> List[List[ContentItem]]:
         """Cluster similar content using DBSCAN"""
-        if not items or not items[0].embedding is not None:
+        if not items or items[0].embedding is None:
             return [items]  # Return single cluster if no embeddings
         
         # Stack embeddings

@@ -16,8 +16,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Initialize WebSocket connection
 function initializeSocket() {
-    socket = io();
-    
+    // Determine base path for socket connection
+    const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+    socket = io(basePath ? {path: basePath + '/socket.io/'} : {});
+
     socket.on('connect', function() {
         console.log('Connected to dashboard server');
         updateConnectionStatus(true);
@@ -139,7 +141,11 @@ async function loadDashboardData() {
 
 // Fetch data from API
 async function fetchAPI(endpoint) {
-    const response = await fetch(endpoint);
+    // Determine base path based on current location
+    const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+    const url = basePath + endpoint;
+
+    const response = await fetch(url);
     if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -526,7 +532,38 @@ function reviewContent(id) {
 function triggerManualRun(type) {
     if (confirm(`Are you sure you want to manually trigger the ${type} bot?`)) {
         console.log('Triggering manual run:', type);
-        // TODO: Implement manual trigger API call
+
+        // Show loading state
+        showNotification(`Starting ${type} generation...`, 'info');
+
+        // Determine base path based on current location
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+
+        // Make API call to trigger generation
+        fetch(`${basePath}/api/dashboard/generate/${type}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                draft_mode: true,
+                manual_trigger: true
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showNotification(`${type.charAt(0).toUpperCase() + type.slice(1)} generation started successfully!`, 'success');
+                // Refresh dashboard after a delay
+                setTimeout(() => refreshDashboard(), 5000);
+            } else {
+                showNotification(`Failed to start ${type} generation: ${data.error || 'Unknown error'}`, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error triggering manual run:', error);
+            showNotification(`Error: ${error.message}`, 'error');
+        });
     }
 }
 
@@ -541,3 +578,385 @@ function clearAlerts() {
         // TODO: Implement clear alerts API call
     }
 }
+// ==================== DRAFT MANAGEMENT FUNCTIONS ====================
+
+// Global variable to store current drafts
+let currentDrafts = [];
+
+// Load all drafts
+async function loadDrafts() {
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/drafts/list`);
+        const data = await response.json();
+
+        if (data.success) {
+            currentDrafts = data.drafts;
+            updateDraftCounts(data.drafts);
+            renderDraftLists(data.drafts);
+        }
+    } catch (error) {
+        console.error('Error loading drafts:', error);
+        showNotification('Error loading drafts', 'error');
+    }
+}
+
+// Update draft counts in badges
+function updateDraftCounts(drafts) {
+    const pending = drafts.filter(d => d.status === 'draft' || d.status === 'pending_review');
+    const approved = drafts.filter(d => d.status === 'approved');
+    const rejected = drafts.filter(d => d.status === 'rejected');
+
+    const draftCount = document.getElementById('draft-count');
+    const pendingCount = document.getElementById('pending-drafts-count');
+    const approvedCount = document.getElementById('approved-drafts-count');
+    const rejectedCount = document.getElementById('rejected-drafts-count');
+
+    if (draftCount) draftCount.textContent = pending.length;
+    if (pendingCount) pendingCount.textContent = pending.length;
+    if (approvedCount) approvedCount.textContent = approved.length;
+    if (rejectedCount) rejectedCount.textContent = rejected.length;
+}
+
+// Other draft management functions
+function renderDraftLists(drafts) {
+    renderDraftList(drafts.filter(d => d.status === 'draft' || d.status === 'pending_review'), 'pending-drafts-list');
+    renderDraftList(drafts.filter(d => d.status === 'approved'), 'approved-drafts-list');
+    renderDraftList(drafts.filter(d => d.status === 'rejected'), 'rejected-drafts-list');
+}
+
+function renderDraftList(drafts, containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (drafts.length === 0) {
+        return;
+    }
+
+    let html = '<div class="list-group">';
+    drafts.forEach((draft, index) => {
+        const typeIcon = draft.type === 'daily_thread' ? 'chat-dots' : 'journal-text';
+        const typeBadge = draft.type === 'daily_thread' ? 'primary' : 'info';
+        const created = new Date(draft.created_at).toLocaleString();
+        const draftId = `draft-${draft.id || index}`;
+
+        // Extract provenance information
+        let sourceCount = 0;
+        let platforms = [];
+        let sources = [];
+        let themes = [];
+        let trending = [];
+
+        if (draft.provenance && Object.keys(draft.provenance).length > 0) {
+            sourceCount = draft.provenance.source_count || 0;
+            platforms = draft.provenance.platforms || [];
+            sources = draft.provenance.sources || [];
+
+            if (draft.provenance.generation_metadata) {
+                themes = draft.provenance.generation_metadata.themes || [];
+                trending = draft.provenance.generation_metadata.trending || [];
+            }
+        }
+
+        // Extract content preview
+        let contentPreview = '';
+        let postCount = 0;
+        if (draft.content) {
+            if (draft.content.posts && Array.isArray(draft.content.posts)) {
+                postCount = draft.content.posts.length;
+                // Show first post as preview
+                if (postCount > 0 && draft.content.posts[0].content) {
+                    contentPreview = draft.content.posts[0].content.substring(0, 200) + '...';
+                }
+            } else if (draft.content.sections && Array.isArray(draft.content.sections)) {
+                // Weekly digest format
+                postCount = draft.content.sections.length;
+                if (postCount > 0 && draft.content.sections[0].content) {
+                    contentPreview = draft.content.sections[0].content.substring(0, 200) + '...';
+                }
+            }
+        }
+
+        // Build provenance display
+        let provenanceHtml = '';
+        if (sourceCount > 0) {
+            provenanceHtml = `
+                <small class="text-muted d-block">
+                    <i class="bi bi-database me-1"></i>
+                    <strong>${sourceCount} sources</strong>
+                </small>`;
+
+            if (platforms.length > 0) {
+                provenanceHtml += `
+                <small class="text-muted d-block">
+                    <i class="bi bi-diagram-3 me-1"></i>
+                    Platforms: ${platforms.join(', ')}
+                </small>`;
+            }
+        } else {
+            provenanceHtml = `
+                <small class="text-muted d-block">
+                    <i class="bi bi-database me-1"></i>
+                    No source tracking
+                </small>`;
+        }
+
+        html += `
+            <div class="list-group-item">
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <div>
+                            <div class="d-flex align-items-center mb-2">
+                                <i class="bi bi-${typeIcon} me-2"></i>
+                                <span class="badge bg-${typeBadge} me-2">
+                                    ${draft.type === 'daily_thread' ? 'Daily Thread' : 'Weekly Digest'}
+                                </span>
+                                <small class="text-muted">${created}</small>
+                                ${postCount > 0 ? `<span class="badge bg-secondary ms-2">${postCount} ${draft.type === 'daily_thread' ? 'posts' : 'sections'}</span>` : ''}
+                            </div>
+                            <div class="provenance-info mb-2">
+                                ${provenanceHtml}
+                            </div>
+                        </div>
+                        <div>
+                            ${renderDraftActions(draft)}
+                        </div>
+                    </div>
+
+                    <!-- Content Preview -->
+                    ${contentPreview ? `
+                        <div class="content-preview mb-2">
+                            <p class="text-muted small mb-2" style="font-style: italic;">
+                                ${escapeHtml(contentPreview)}
+                            </p>
+                        </div>
+                    ` : ''}
+
+                    <!-- Expandable Details -->
+                    <div class="mt-2">
+                        <button class="btn btn-sm btn-outline-secondary" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#${draftId}-details">
+                            <i class="bi bi-chevron-down"></i> View Details
+                        </button>
+
+                        <div class="collapse mt-2" id="${draftId}-details">
+                            <div class="card card-body small">
+                                ${draft.provenance && draft.provenance.detailed_sources ? `
+                                    <h6 class="mb-3">Detailed Source References:</h6>
+                                    <div class="ms-3 mb-3">
+                                        ${draft.provenance.detailed_sources.map(src => `
+                                            <div class="border-start border-3 ps-3 mb-3">
+                                                <div class="d-flex justify-content-between align-items-start">
+                                                    <div>
+                                                        <strong>${src.title}</strong>
+                                                        <span class="badge bg-secondary ms-2">${src.type}</span>
+                                                    </div>
+                                                    <small class="text-muted">${src.platform}</small>
+                                                </div>
+                                                ${src.author ? `<small class="text-muted d-block">By ${src.author}</small>` : ''}
+                                                ${src.channel ? `<small class="text-muted d-block">Channel: ${src.channel}</small>` : ''}
+                                                ${src.url ? `<small class="d-block"><a href="${src.url}" target="_blank">${src.url}</a></small>` : ''}
+                                                ${src.tx_hash ? `<small class="text-muted d-block">TX: ${src.tx_hash}</small>` : ''}
+                                                ${src.amount ? `<small class="text-muted d-block">Amount: ${src.amount}</small>` : ''}
+                                                ${src.timestamp ? `<small class="text-muted d-block">Time: ${new Date(src.timestamp).toLocaleString()}</small>` : ''}
+                                                ${src.excerpt ? `<p class="mt-2 mb-0"><em>"${src.excerpt}"</em></p>` : ''}
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                ` : sources.length > 0 ? `
+                                    <h6 class="mb-2">Source Platforms:</h6>
+                                    <ul class="list-unstyled ms-3">
+                                        ${sources.map(s => `<li><i class="bi bi-link-45deg"></i> ${s}</li>`).join('')}
+                                    </ul>
+                                ` : ''}
+
+                                ${themes.length > 0 ? `
+                                    <h6 class="mb-2">Themes:</h6>
+                                    <ul class="list-unstyled ms-3">
+                                        ${themes.map(t => `<li><i class="bi bi-tag"></i> ${t}</li>`).join('')}
+                                    </ul>
+                                ` : ''}
+
+                                ${trending.length > 0 ? `
+                                    <h6 class="mb-2">Trending Topics:</h6>
+                                    <ul class="list-unstyled ms-3">
+                                        ${trending.map(t => `<li><i class="bi bi-trending-up"></i> ${t}</li>`).join('')}
+                                    </ul>
+                                ` : ''}
+
+                                ${draft.content && draft.content.posts ? `
+                                    <h6 class="mb-2">All Posts:</h6>
+                                    <div class="ms-3">
+                                        ${draft.content.posts.map((post, i) => `
+                                            <div class="mb-2">
+                                                <strong>Post ${i + 1}:</strong>
+                                                <p class="mb-1">${escapeHtml(post.content)}</p>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function renderDraftActions(draft) {
+    let html = '<div class="btn-group btn-group-sm">';
+
+    if (draft.status === 'draft' || draft.status === 'pending_review') {
+        html += `
+            <button class="btn btn-success" onclick="approveDraft('${draft.id}')">
+                <i class="bi bi-check"></i>
+            </button>
+            <button class="btn btn-danger" onclick="rejectDraft('${draft.id}')">
+                <i class="bi bi-x"></i>
+            </button>
+        `;
+
+        if (draft.type === 'weekly_digest' && !draft.metadata?.audio_generated) {
+            html += `
+                <button class="btn btn-info" onclick="generateAudio('${draft.id}')">
+                    <i class="bi bi-mic"></i>
+                </button>
+            `;
+        }
+    }
+
+    html += '</div>';
+    return html;
+}
+
+async function approveDraft(draftId) {
+    if (!confirm('Approve this draft?')) return;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/approve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reviewer: 'dashboard_user' })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            loadDrafts();
+        }
+    } catch (error) {
+        console.error('Error approving draft:', error);
+    }
+}
+
+async function rejectDraft(draftId) {
+    const reason = prompt('Rejection reason (optional):');
+    if (reason === null) return;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/reject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                reviewer: 'dashboard_user',
+                notes: reason || 'Rejected via dashboard'
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            loadDrafts();
+        }
+    } catch (error) {
+        console.error('Error rejecting draft:', error);
+    }
+}
+
+async function generateAudio(draftId) {
+    if (!confirm('Generate audio? This may take a few minutes.')) return;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/generate_audio`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            loadDrafts();
+        }
+    } catch (error) {
+        console.error('Error generating audio:', error);
+    }
+}
+
+async function generateNewDraft(type) {
+    if (!confirm(`Generate new ${type} draft?`)) return;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/trigger_manual_run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: type,
+                draft_mode: true,
+                skip_audio: type === 'weekly'
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            setTimeout(() => loadDrafts(), 2000);
+        }
+    } catch (error) {
+        console.error('Error generating draft:', error);
+    }
+}
+
+function refreshDrafts() {
+    loadDrafts();
+}
+
+function showNotification(message, type = 'info') {
+    console.log(`[${type}] ${message}`);
+}
+
+// Ensure drafts load when tab is shown
+document.addEventListener('DOMContentLoaded', function() {
+    // Load drafts when drafts tab is clicked
+    const draftsTab = document.getElementById('drafts-tab');
+    if (draftsTab) {
+        draftsTab.addEventListener('shown.bs.tab', function() {
+            loadDrafts();
+        });
+    }
+
+    // Also handle manual refresh button
+    const refreshBtn = document.querySelector('[onclick="refreshDrafts()"]');
+    if (refreshBtn) {
+        refreshBtn.onclick = function() {
+            refreshDrafts();
+        };
+    }
+
+    // Load drafts initially if the drafts tab is active
+    if (draftsTab && draftsTab.classList.contains('active')) {
+        loadDrafts();
+    }
+});
+
+// Export functions to global scope for HTML onclick handlers
+// This must be at the end after all functions are defined
+window.loadDrafts = loadDrafts;
+window.approveDraft = approveDraft;
+window.rejectDraft = rejectDraft;
+window.generateAudio = generateAudio;
+window.refreshDrafts = refreshDrafts;
+window.triggerManualRun = triggerManualRun;
+window.updateDraftCounts = updateDraftCounts;
+window.renderDraftLists = renderDraftLists;

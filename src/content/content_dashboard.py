@@ -12,6 +12,8 @@ from psycopg2.extras import RealDictCursor
 import os
 import json
 import yaml
+import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -93,6 +95,12 @@ def index():
     """Main dashboard page"""
     return render_template('dashboard.html', config=config)
 
+@app.route('/batch-queue')
+@require_auth
+def batch_queue():
+    """Batch queue component page"""
+    return render_template('batch_queue_component.html')
+
 @app.route('/api/dashboard/overview')
 @require_auth
 def get_overview():
@@ -104,9 +112,9 @@ def get_overview():
         # Get recent daily bot activity
         cur.execute("""
             SELECT COUNT(*) as total_daily_posts,
-                   AVG(CAST(metadata->>'style_score' AS FLOAT)) as avg_style_score,
-                   COUNT(CASE WHEN status = 'published' THEN 1 END) as published_count
-            FROM content_reviews
+                   AVG(style_score) as avg_style_score,
+                   COUNT(CASE WHEN approval_status = 'published' THEN 1 END) as published_count
+            FROM quality_reviews
             WHERE content_type = 'daily_thread'
             AND created_at > NOW() - INTERVAL '7 days'
         """)
@@ -115,8 +123,8 @@ def get_overview():
         # Get recent weekly digest activity
         cur.execute("""
             SELECT COUNT(*) as total_weekly_digests,
-                   AVG(CAST(metadata->>'word_count' AS INT)) as avg_word_count
-            FROM content_reviews
+                   AVG(CAST(content_data->>'word_count' AS INT)) as avg_word_count
+            FROM quality_reviews
             WHERE content_type = 'weekly_digest'
             AND created_at > NOW() - INTERVAL '30 days'
         """)
@@ -125,8 +133,8 @@ def get_overview():
         # Get pending reviews
         cur.execute("""
             SELECT COUNT(*) as pending_count
-            FROM content_reviews
-            WHERE status IN ('draft', 'pending_review')
+            FROM quality_reviews
+            WHERE approval_status IN ('draft', 'pending_review')
         """)
         pending = cur.fetchone()
         
@@ -174,24 +182,28 @@ def get_daily_stats():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get today's draft
+        # Get ALL pending daily drafts (not just today's)
         cur.execute("""
-            SELECT id, status, content, metadata, created_at, updated_at
-            FROM content_reviews
+            SELECT review_id as id, approval_status as status, content_data as content,
+                   quality_issues as metadata, created_at, reviewed_at as updated_at
+            FROM quality_reviews
             WHERE content_type = 'daily_thread'
-            AND DATE(created_at) = CURRENT_DATE
+            AND approval_status IN ('draft', 'pending_review')
             ORDER BY created_at DESC
-            LIMIT 1
+            LIMIT 10
         """)
-        today_draft = cur.fetchone()
+        all_drafts = cur.fetchall()
+
+        # Get today's draft separately
+        today_draft = all_drafts[0] if all_drafts and all_drafts[0]['created_at'].date() == datetime.now(timezone.utc).date() else None
         
         # Get last 7 days performance
         cur.execute("""
             SELECT DATE(created_at) as date,
                    COUNT(*) as posts_count,
-                   AVG(CAST(metadata->>'style_score' AS FLOAT)) as avg_style,
-                   COUNT(CASE WHEN status = 'published' THEN 1 END) as published
-            FROM content_reviews
+                   AVG(style_score) as avg_style,
+                   COUNT(CASE WHEN approval_status = 'published' THEN 1 END) as published
+            FROM quality_reviews
             WHERE content_type = 'daily_thread'
             AND created_at > NOW() - INTERVAL '7 days'
             GROUP BY DATE(created_at)
@@ -210,6 +222,7 @@ def get_daily_stats():
         
         return jsonify({
             'success': True,
+            'all_drafts': all_drafts,  # Return ALL pending drafts
             'today': {
                 'draft': today_draft,
                 'sources': sources_used,
@@ -226,20 +239,20 @@ def get_daily_stats():
 @app.route('/api/dashboard/daily/drafts')
 @require_auth
 def get_daily_drafts():
-    """Get current draft threads"""
+    """Get all pending draft threads"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Get recent drafts
+
+        # Get ALL pending drafts
         cur.execute("""
-            SELECT id, status, content, metadata, created_at, 
-                   reviewer, review_notes
-            FROM content_reviews
+            SELECT review_id as id, approval_status as status, content_data as content,
+                   quality_issues as metadata, created_at,
+                   reviewed_by as reviewer, reviewer_notes as review_notes
+            FROM quality_reviews
             WHERE content_type = 'daily_thread'
-            AND status IN ('draft', 'pending_review')
+            AND approval_status IN ('draft', 'pending_review')
             ORDER BY created_at DESC
-            LIMIT 10
         """)
         drafts = cur.fetchall()
         
@@ -280,16 +293,20 @@ def get_weekly_stats():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get current week's digest
+        # Get ALL pending weekly digests
         cur.execute("""
-            SELECT id, status, content, metadata, created_at
-            FROM content_reviews
+            SELECT review_id as id, approval_status as status, content_data as content,
+                   quality_issues as metadata, created_at
+            FROM quality_reviews
             WHERE content_type = 'weekly_digest'
-            AND created_at > date_trunc('week', CURRENT_DATE)
+            AND approval_status IN ('draft', 'pending_review')
             ORDER BY created_at DESC
-            LIMIT 1
+            LIMIT 10
         """)
-        current_digest = cur.fetchone()
+        all_digests = cur.fetchall()
+
+        # Get current week's digest separately
+        current_digest = all_digests[0] if all_digests else None
         
         # Get content collection progress
         cur.execute("""
@@ -303,10 +320,10 @@ def get_weekly_stats():
         # Get last 4 weeks history
         cur.execute("""
             SELECT DATE(created_at) as week_date,
-                   status,
-                   CAST(metadata->>'word_count' AS INT) as word_count,
-                   CAST(metadata->>'source_count' AS INT) as source_count
-            FROM content_reviews
+                   approval_status as status,
+                   CAST(content_data->>'word_count' AS INT) as word_count,
+                   CAST(content_data->>'source_count' AS INT) as source_count
+            FROM quality_reviews
             WHERE content_type = 'weekly_digest'
             AND created_at > NOW() - INTERVAL '30 days'
             ORDER BY created_at DESC
@@ -326,6 +343,7 @@ def get_weekly_stats():
         
         return jsonify({
             'success': True,
+            'all_digests': all_digests,  # Return ALL pending digests
             'current_week': {
                 'digest': current_digest,
                 'progress_percentage': progress_pct,
@@ -348,12 +366,12 @@ def get_pending_reviews():
         cur = conn.cursor()
         
         cur.execute("""
-            SELECT id, content_type, status, 
-                   CAST(metadata->>'style_score' AS FLOAT) as style_score,
-                   CAST(metadata->>'validation_passed' AS BOOLEAN) as validation_passed,
+            SELECT review_id as id, content_type, approval_status as status, 
+                   style_score,
+                   auto_publish_eligible as validation_passed,
                    created_at
-            FROM content_reviews
-            WHERE status IN ('draft', 'pending_review')
+            FROM quality_reviews
+            WHERE approval_status IN ('draft', 'pending_review')
             ORDER BY created_at DESC
         """)
         pending = cur.fetchall()
@@ -380,11 +398,11 @@ def get_quality_history():
         cur = conn.cursor()
         
         cur.execute("""
-            SELECT id, content_type, status, reviewer, 
-                   review_notes, approved_at, created_at
-            FROM content_reviews
-            WHERE status IN ('approved', 'rejected', 'published', 'rolled_back')
-            ORDER BY COALESCE(approved_at, created_at) DESC
+            SELECT review_id as id, content_type, approval_status as status, reviewed_by as reviewer,
+                   reviewer_notes as review_notes, reviewed_at as approved_at, created_at
+            FROM quality_reviews
+            WHERE approval_status IN ('approved', 'rejected', 'published', 'rolled_back')
+            ORDER BY COALESCE(reviewed_at, created_at) DESC
             LIMIT 50
         """)
         history = cur.fetchall()
@@ -392,11 +410,11 @@ def get_quality_history():
         # Get approval statistics
         cur.execute("""
             SELECT 
-                COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_count,
-                COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_count,
-                COUNT(CASE WHEN status = 'published' THEN 1 END) as published_count,
-                AVG(CAST(metadata->>'style_score' AS FLOAT)) as avg_style_score
-            FROM content_reviews
+                COUNT(CASE WHEN approval_status = 'approved' THEN 1 END) as approved_count,
+                COUNT(CASE WHEN approval_status = 'rejected' THEN 1 END) as rejected_count,
+                COUNT(CASE WHEN approval_status = 'published' THEN 1 END) as published_count,
+                AVG(style_score) as avg_style_score
+            FROM quality_reviews
             WHERE created_at > NOW() - INTERVAL '30 days'
         """)
         stats = cur.fetchone()
@@ -557,6 +575,440 @@ def get_errors():
         logger.error(f"Error getting errors: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/dashboard/trigger_manual_run', methods=['POST'])
+@require_auth
+def trigger_manual_run():
+    """Trigger manual generation of daily or weekly content as drafts with provenance"""
+    import subprocess
+
+    try:
+        data = request.json
+        run_type = data.get('type', 'daily')
+        draft_mode = data.get('draft_mode', True)  # Always create as draft by default
+        skip_audio = data.get('skip_audio', True)  # Skip audio generation for weekly by default
+
+        logger.info(f"Manual run triggered for: {run_type}")
+
+        if run_type == 'daily':
+            # Generate daily thread
+            output_file = f'/tmp/daily_thread_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+
+            # Set environment variable for OpenAI
+            env = os.environ.copy()
+            env['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', '')
+            env['GENERATE_AS_DRAFT'] = 'true' if draft_mode else 'false'
+            env['INCLUDE_PROVENANCE'] = 'true'  # Always include source provenance
+
+            # The script will automatically create drafts based on the environment variables
+            result = subprocess.run([
+                'python3',
+                '/opt/projects/koi-processor/scripts/run_daily_curator.py',
+                'daily',
+                '--output', output_file
+            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=120)
+
+            if result.returncode == 0 and os.path.exists(output_file):
+                # Submit to review queue
+                submit_result = subprocess.run([
+                    'python3',
+                    '/opt/projects/koi-processor/scripts/submit_to_review.py',
+                    output_file,
+                    'daily_thread'
+                ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=30)
+
+                if submit_result.returncode == 0:
+                    # Broadcast update to refresh dashboard
+                    socketio.emit('dashboard_update', {
+                        'type': 'daily_generated',
+                        'message': 'New daily thread generated and submitted for review'
+                    })
+
+                    return jsonify({
+                        'success': True,
+                        'message': 'Daily thread generated successfully',
+                        'file': output_file
+                    })
+                else:
+                    logger.error(f"Failed to submit to review: {submit_result.stderr}")
+                    return jsonify({
+                        'success': False,
+                        'message': 'Generated but failed to submit for review',
+                        'error': submit_result.stderr
+                    }), 500
+            else:
+                error_msg = result.stderr if result.stderr else "Generation failed"
+                logger.error(f"Daily generation failed: {error_msg}")
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to generate daily thread',
+                    'error': error_msg
+                }), 500
+
+        elif run_type == 'weekly':
+            # Generate weekly digest
+            output_file = f'/tmp/weekly_digest_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+
+            # Set environment variables
+            env = os.environ.copy()
+            env['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', '')
+            env['GENERATE_AS_DRAFT'] = 'true' if draft_mode else 'false'
+            env['INCLUDE_PROVENANCE'] = 'true'
+            env['SKIP_AUDIO_GENERATION'] = 'true' if skip_audio else 'false'
+
+            # The script will create drafts based on environment variables
+            result = subprocess.run([
+                'python3',
+                '/opt/projects/koi-processor/scripts/run_daily_curator.py',
+                'weekly',
+                '--output', output_file
+            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=180)
+
+            if result.returncode == 0 and os.path.exists(output_file):
+                # Submit to review queue
+                submit_result = subprocess.run([
+                    'python3',
+                    '/opt/projects/koi-processor/scripts/submit_to_review.py',
+                    output_file,
+                    'weekly_digest'
+                ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=30)
+
+                if submit_result.returncode == 0:
+                    # Broadcast update
+                    socketio.emit('dashboard_update', {
+                        'type': 'weekly_generated',
+                        'message': 'New weekly digest generated and submitted for review'
+                    })
+
+                    return jsonify({
+                        'success': True,
+                        'message': 'Weekly digest generated successfully',
+                        'file': output_file
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Generated but failed to submit for review'
+                    }), 500
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to generate weekly digest',
+                    'error': result.stderr if result.stderr else 'Unknown error'
+                }), 500
+        else:
+            return jsonify({'success': False, 'message': f'Unknown type: {run_type}'}), 400
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Generation timeout for {run_type}")
+        return jsonify({
+            'success': False,
+            'message': 'Generation timed out - this may indicate insufficient content or an API issue'
+        }), 500
+    except Exception as e:
+        logger.error(f"Error triggering manual run: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dashboard/drafts/list')
+@require_auth
+def list_all_drafts():
+    """List all drafts (both daily and weekly) with full provenance"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get all drafts
+        cur.execute("""
+            SELECT
+                review_id,
+                content_type,
+                content_data,
+                quality_issues as metadata,
+                approval_status,
+                created_at,
+                reviewed_at,
+                reviewer_notes,
+                provenance
+            FROM quality_reviews
+            WHERE approval_status IN ('draft', 'pending_review')
+            ORDER BY created_at DESC
+            LIMIT 50
+        """)
+
+        drafts = cur.fetchall()
+
+        # Process drafts to extract provenance
+        processed_drafts = []
+        for draft in drafts if drafts else []:
+            # Handle JSON data properly
+            content_data = draft['content_data'] if draft else {}
+            if isinstance(content_data, str):
+                try:
+                    content = json.loads(content_data)
+                except json.JSONDecodeError:
+                    content = {'error': 'Invalid JSON content'}
+            elif isinstance(content_data, dict):
+                content = content_data
+            else:
+                content = {}
+
+            # Handle provenance field from database
+            provenance_data = draft.get('provenance')
+            if isinstance(provenance_data, str):
+                try:
+                    provenance = json.loads(provenance_data)
+                except json.JSONDecodeError:
+                    provenance = {}
+            elif isinstance(provenance_data, dict):
+                provenance = provenance_data
+            else:
+                provenance = {}
+
+            # Handle metadata field
+            metadata = draft.get('metadata')
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+            elif not isinstance(metadata, dict):
+                metadata = {}
+
+            processed_drafts.append({
+                'id': str(draft['review_id']),
+                'type': draft['content_type'],
+                'status': draft['approval_status'],
+                'created_at': draft['created_at'].isoformat() if draft['created_at'] else None,
+                'reviewed_at': draft['reviewed_at'].isoformat() if draft['reviewed_at'] else None,
+                'content': content,
+                'provenance': provenance,  # Use provenance directly from DB
+                'metadata': metadata,
+                'reviewer_notes': draft.get('reviewer_notes')
+            })
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'drafts': processed_drafts,
+            'total': len(processed_drafts)
+        })
+
+    except Exception as e:
+        logger.error(f"Error listing drafts: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dashboard/drafts/<draft_id>/approve', methods=['POST'])
+@require_auth
+def approve_draft(draft_id):
+    """Approve a draft for publication"""
+    try:
+        data = request.json
+        reviewer = data.get('reviewer', 'dashboard_user')
+        notes = data.get('notes', '')
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Update draft status
+        cur.execute("""
+            UPDATE quality_reviews
+            SET
+                approval_status = 'approved',
+                reviewed_at = NOW(),
+                reviewed_by = %s,
+                reviewer_notes = %s
+            WHERE review_id = %s
+            RETURNING content_type, content_data
+        """, (reviewer, notes, draft_id))
+
+        result = cur.fetchone()
+        conn.commit()
+
+        if result:
+            # Trigger publication based on content type
+            content_type = result['content_type']
+
+            # Broadcast update
+            broadcast_update('draft_approved', {
+                'draft_id': draft_id,
+                'content_type': content_type
+            })
+
+            cur.close()
+            conn.close()
+
+            return jsonify({
+                'success': True,
+                'message': f'Draft {draft_id} approved successfully',
+                'content_type': content_type
+            })
+        else:
+            cur.close()
+            conn.close()
+            return jsonify({'success': False, 'message': 'Draft not found'}), 404
+
+    except Exception as e:
+        logger.error(f"Error approving draft: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dashboard/drafts/<draft_id>/reject', methods=['POST'])
+@require_auth
+def reject_draft(draft_id):
+    """Reject a draft"""
+    try:
+        data = request.json
+        reviewer = data.get('reviewer', 'dashboard_user')
+        notes = data.get('notes', '')
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Update draft status
+        cur.execute("""
+            UPDATE quality_reviews
+            SET
+                approval_status = 'rejected',
+                reviewed_at = NOW(),
+                reviewed_by = %s,
+                reviewer_notes = %s
+            WHERE review_id = %s
+        """, (reviewer, notes, draft_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Broadcast update
+        broadcast_update('draft_rejected', {
+            'draft_id': draft_id
+        })
+
+        return jsonify({
+            'success': True,
+            'message': f'Draft {draft_id} rejected'
+        })
+
+    except Exception as e:
+        logger.error(f"Error rejecting draft: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dashboard/drafts/<draft_id>/edit', methods=['POST'])
+@require_auth
+def edit_draft(draft_id):
+    """Edit a draft content"""
+    try:
+        data = request.json
+        edited_content = data.get('content')
+        editor_notes = data.get('notes', '')
+
+        if not edited_content:
+            return jsonify({'success': False, 'message': 'No content provided'}), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Update draft content
+        cur.execute("""
+            UPDATE quality_reviews
+            SET
+                content_data = %s,
+                reviewer_notes = COALESCE(reviewer_notes, '') || E'\\n[Edit] ' || %s,
+                reviewed_at = NOW()
+            WHERE review_id = %s
+        """, (json.dumps(edited_content), editor_notes, draft_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Broadcast update
+        broadcast_update('draft_edited', {
+            'draft_id': draft_id
+        })
+
+        return jsonify({
+            'success': True,
+            'message': f'Draft {draft_id} updated successfully'
+        })
+
+    except Exception as e:
+        logger.error(f"Error editing draft: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dashboard/drafts/<draft_id>/generate_audio', methods=['POST'])
+@require_auth
+def generate_audio_for_draft(draft_id):
+    """Generate audio for a weekly digest draft (optional)"""
+    import subprocess
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get draft content
+        cur.execute("""
+            SELECT content_type, content_data
+            FROM quality_reviews
+            WHERE review_id = %s AND content_type = 'weekly_digest'
+        """, (draft_id,))
+
+        result = cur.fetchone()
+
+        if not result:
+            cur.close()
+            conn.close()
+            return jsonify({'success': False, 'message': 'Weekly digest draft not found'}), 404
+
+        content = result['content_data'] if isinstance(result['content_data'], dict) else json.loads(result['content_data'])
+
+        # Save content to temp file for audio generation
+        temp_file = f'/tmp/weekly_digest_for_audio_{draft_id}.json'
+        with open(temp_file, 'w') as f:
+            json.dump(content, f)
+
+        # Run audio generation
+        env = os.environ.copy()
+        result = subprocess.run([
+            'python3',
+            '/opt/projects/koi-processor/src/audio/podcast_generator.py',
+            temp_file,
+            '--output-dir', '/opt/projects/koi-processor/podcast_audio'
+        ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=180)
+
+        if result.returncode == 0:
+            # Update draft metadata with audio status
+            cur.execute("""
+                UPDATE quality_reviews
+                SET
+                    quality_issues = jsonb_set(
+                        COALESCE(quality_issues, '{}'::jsonb),
+                        '{audio_generated}',
+                        'true'
+                    )
+                WHERE review_id = %s
+            """, (draft_id,))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            return jsonify({
+                'success': True,
+                'message': 'Audio generated successfully'
+            })
+        else:
+            cur.close()
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': 'Audio generation failed',
+                'error': result.stderr
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error generating audio: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # WebSocket events
 @socketio.on('connect')
 def handle_connect():
@@ -659,6 +1111,77 @@ def logout():
     """Logout user"""
     session.pop('user', None)
     return redirect(url_for('login'))
+
+@app.route('/api/dashboard/generate/daily', methods=['POST'])
+@require_auth
+def generate_daily():
+    """Generate daily thread"""
+    import subprocess
+    import threading
+
+    def run_generation():
+        try:
+            # Run the daily curator script
+            output_file = f'/tmp/daily_thread_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            result = subprocess.run([
+                'python3',
+                '/opt/projects/koi-processor/scripts/run_daily_curator.py',
+                'daily',
+                '--output', output_file
+            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor')
+
+            if result.returncode == 0:
+                # Submit to review queue
+                submit_result = subprocess.run([
+                    'python3',
+                    '/opt/projects/koi-processor/scripts/submit_to_review.py',
+                    output_file,
+                    'daily_thread'
+                ], capture_output=True, text=True, cwd='/opt/projects/koi-processor')
+
+                if submit_result.returncode == 0:
+                    socketio.emit('generation_completed', {'type': 'daily', 'success': True, 'review': 'submitted'})
+                else:
+                    socketio.emit('generation_completed', {'type': 'daily', 'success': True, 'review': 'failed'})
+            else:
+                socketio.emit('generation_error', {'type': 'daily', 'error': result.stderr})
+        except Exception as e:
+            socketio.emit('generation_error', {'type': 'daily', 'error': str(e)})
+
+    # Start generation in background thread
+    thread = threading.Thread(target=run_generation)
+    thread.start()
+
+    return jsonify({'success': True, 'message': 'Daily generation started'})
+
+@app.route('/api/dashboard/generate/weekly', methods=['POST'])
+@require_auth
+def generate_weekly():
+    """Generate weekly digest"""
+    import subprocess
+    import threading
+
+    def run_generation():
+        try:
+            # Run the weekly aggregator script
+            result = subprocess.run([
+                'python3',
+                '/opt/projects/koi-processor/scripts/run_weekly_aggregator.py',
+                '--output', '/tmp/'
+            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor')
+
+            if result.returncode == 0:
+                socketio.emit('generation_completed', {'type': 'weekly', 'success': True})
+            else:
+                socketio.emit('generation_error', {'type': 'weekly', 'error': result.stderr})
+        except Exception as e:
+            socketio.emit('generation_error', {'type': 'weekly', 'error': str(e)})
+
+    # Start generation in background thread
+    thread = threading.Thread(target=run_generation)
+    thread.start()
+
+    return jsonify({'success': True, 'message': 'Weekly generation started'})
 
 if __name__ == '__main__':
     port = config['dashboard'].get('port', 8400)
