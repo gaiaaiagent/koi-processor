@@ -154,6 +154,7 @@ class WeeklyAggregator:
             AND published_at <= %s
             AND published_confidence >= %s
             AND content::text NOT LIKE '%%sensor_heartbeat%%'
+            AND rid NOT LIKE '%%heartbeat%%'
         ORDER BY published_at DESC, published_confidence DESC
         LIMIT %s
         """

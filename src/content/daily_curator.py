@@ -114,6 +114,7 @@ class DailyCurator:
                              OR source_sensor LIKE '%%website%%'
                       )
                       AND km.content::text NOT LIKE '%%sensor_heartbeat%%'
+                      AND km.rid NOT LIKE '%%heartbeat%%'
                     ORDER BY km.published_at DESC
                     LIMIT 100
                 """ % hours  # Use string formatting for INTERVAL

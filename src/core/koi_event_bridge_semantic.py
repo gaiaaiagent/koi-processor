@@ -45,6 +45,20 @@ from core.koi_event_bridge_v2 import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Helper function to serialize objects to JSON with datetime handling
+def json_serialize(obj):
+    """Convert an object to JSON-serializable format, handling datetime objects"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: json_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [json_serialize(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(json_serialize(item) for item in obj)
+    else:
+        return obj
+
 # FastAPI app
 app = FastAPI(title="KOI Event Bridge Semantic", version="3.0.0")
 
@@ -377,40 +391,121 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                 enhanced_metadata = extraction_result["metadata"]
                 cat_receipt_rid = extraction_result["cat_receipt_rid"]
                 
-                # Store chunks with enhanced metadata
+                # Implement three-layer storage architecture
                 chunks_created = 0
                 embeddings_created = 0
-                
-                for i, chunk in enumerate(chunks):
-                    # Generate unique ID for chunk
-                    chunk_id = str(uuid.uuid4())
-                    
-                    # Store chunk memory with enhanced metadata
-                    chunk_metadata = {
-                        **enhanced_metadata,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "cat_receipt_rid": cat_receipt_rid,
-                        "extraction_report": extraction_result.get("extraction_report"),
-                        "kg_report": extraction_result.get("kg_report")
-                    }
-                    
-                    await store_memory_chunk(
+
+                # Get original metadata from the bundle
+                original_metadata = event.bundle.manifest.metadata or {}
+
+                # Layer 1: Store raw content in koi_content
+                raw_content = json.dumps(event.bundle.contents)  # Store original bundle contents
+                content_type = "json"  # Could be enhanced to detect HTML/text
+                content_rid = f"content:{event.bundle.rid}"
+
+                if USE_ISOLATED_TABLES:
+                    await store_raw_content(
                         conn,
-                        chunk_id,
-                        event.bundle.rid,
-                        f"chunk_{i}",
-                        chunk,
-                        chunk_metadata,
+                        content_rid,
+                        raw_content,
+                        content_type,
+                        original_metadata,
                         event
                     )
+
+                # Layer 2: Store processed document in koi_memories
+                document_rid = event.bundle.rid
+
+                # Merge original and enhanced metadata for document
+                document_metadata = {
+                    **original_metadata,
+                    **enhanced_metadata,
+                    "url": original_metadata.get("url") or enhanced_metadata.get("url"),
+                    "title": original_metadata.get("title") or enhanced_metadata.get("title"),
+                    "cat_receipt_rid": cat_receipt_rid,
+                    "extraction_report": extraction_result.get("extraction_report"),
+                    "kg_report": extraction_result.get("kg_report")
+                }
+
+                # Promote LLM-extracted published date to root metadata fields
+                # Check if LLM extracted a date in sources.llm.published_date
+                if "sources" in document_metadata and "llm" in document_metadata["sources"]:
+                    llm_data = document_metadata["sources"]["llm"]
+                    if "published_date" in llm_data and llm_data["published_date"]:
+                        # Only set if not already set at root level
+                        if not document_metadata.get("published_at"):
+                            document_metadata["published_at"] = llm_data["published_date"]
+                            logger.info(f"Promoted LLM date to published_at: {llm_data['published_date']}")
+
+                # Promote confidence score if available
+                if "confidence_scores" in document_metadata:
+                    date_confidence = document_metadata["confidence_scores"].get("published_date")
+                    if date_confidence and not document_metadata.get("published_confidence"):
+                        document_metadata["published_confidence"] = date_confidence
+                        logger.info(f"Promoted date confidence: {date_confidence}")
+
+                if USE_ISOLATED_TABLES:
+                    await store_processed_document(
+                        conn,
+                        document_rid,
+                        content_rid,
+                        text_content,
+                        document_metadata,
+                        event
+                    )
+
+                # Layer 3: Store chunks in koi_memory_chunks
+                for i, chunk in enumerate(chunks):
+                    chunk_rid = f"{event.bundle.rid}:chunk_{i}"
+
+                    # Preserve key metadata in chunks for temporal filtering
+                    chunk_metadata = {
+                        **document_metadata,
+                        "chunk_index": i,
+                        "total_chunks": len(chunks)
+                    }
+
+                    if USE_ISOLATED_TABLES:
+                        chunk_id = await store_memory_chunk(
+                            conn,
+                            chunk_rid,
+                            document_rid,
+                            content_rid,
+                            i,
+                            len(chunks),
+                            chunk,
+                            chunk_metadata
+                        )
+                    else:
+                        # Legacy storage for non-isolated tables
+                        chunk_id = str(uuid.uuid4())
+                        await store_legacy_memory_chunk(
+                            conn,
+                            chunk_id,
+                            event.bundle.rid,
+                            f"chunk_{i}",
+                            chunk,
+                            chunk_metadata,
+                            event
+                        )
+
                     chunks_created += 1
-                    
+
                     # Generate embedding
                     embedding = await generate_embedding_bge(chunk)
                     if embedding:
-                        await store_embedding(conn, chunk_id, embedding)
-                        
+                        # Store embedding linked to chunk
+                        if USE_ISOLATED_TABLES:
+                            # Update chunk table with embedding
+                            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+                            await conn.execute("""
+                                UPDATE koi_memory_chunks
+                                SET embedding = $1::vector(1024)
+                                WHERE chunk_rid = $2
+                            """, embedding_str, chunk_rid)
+                        else:
+                            await store_embedding(conn, chunk_id, embedding)
+
                         # Create embedding CAT receipt
                         await cat_chain.create_embedding_receipt(
                             parent_rid=cat_receipt_rid,
@@ -483,7 +578,168 @@ def extract_text_from_bundle(bundle: KOIBundle) -> str:
     
     return '\n\n'.join(text_parts)
 
+async def store_raw_content(
+    conn: asyncpg.Connection,
+    content_rid: str,
+    raw_content: str,
+    content_type: str,
+    metadata: Dict[str, Any],
+    event: KOIEvent
+) -> None:
+    """Store raw content in koi_content table (Layer 1)"""
+    content_hash = hashlib.sha256(raw_content.encode('utf-8')).hexdigest()
+
+    # Check if content already exists with same hash
+    existing = await conn.fetchrow("""
+        SELECT rid FROM koi_content WHERE content_hash = $1
+    """, content_hash)
+
+    if existing:
+        logger.info(f"Content already exists with same hash, skipping raw storage: {existing['rid']}")
+        return
+
+    # Store raw content
+    await conn.execute("""
+        INSERT INTO koi_content (
+            rid, raw_content, content_type, content_hash, scraped_at, metadata
+        ) VALUES ($1, $2, $3, $4, NOW(), $5)
+        ON CONFLICT (rid) DO UPDATE SET
+            raw_content = $2,
+            content_type = $3,
+            content_hash = $4,
+            scraped_at = NOW(),
+            metadata = $5
+    """, content_rid, raw_content, content_type, content_hash, json.dumps(json_serialize(metadata)))
+
+    logger.info(f"Stored raw content in koi_content: {content_rid}")
+
+
+async def store_processed_document(
+    conn: asyncpg.Connection,
+    document_rid: str,
+    source_content_rid: str,
+    text_content: str,
+    metadata: Dict[str, Any],
+    event: KOIEvent
+) -> None:
+    """Store processed document in koi_memories (Layer 2)"""
+    # Extract publication date from metadata
+    published_at = None
+    published_confidence = 0.0
+
+    logger.debug(f"Processing metadata for document {document_rid}: keys={list(metadata.keys())}")
+
+    # Try published_date first (from sensor/LLM extraction)
+    if 'published_date' in metadata:
+        date_str = metadata['published_date']
+        if isinstance(date_str, str):
+            try:
+                # Handle various date formats
+                if 'T' in date_str or ' ' in date_str:
+                    # ISO format with time
+                    published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                else:
+                    # Date only format (YYYY-MM-DD)
+                    published_at = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                published_confidence = metadata.get('published_confidence', 0.8)
+            except Exception as e:
+                logger.debug(f"Could not parse published_date: {date_str}, error: {e}")
+
+    # Fall back to published_at if no published_date
+    elif 'published_at' in metadata:
+        date_str = metadata['published_at']
+        if isinstance(date_str, str):
+            try:
+                published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                published_confidence = metadata.get('published_confidence', 0.9)
+            except Exception as e:
+                logger.debug(f"Could not parse published_at: {date_str}, error: {e}")
+
+    # Calculate content hash for document
+    content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
+
+    # Store document in koi_memories (not chunks)
+    await conn.execute("""
+        INSERT INTO koi_memories (
+            id, rid, cid, version, event_type, source_sensor,
+            content, metadata, published_at, published_confidence,
+            content_hash, source_content_rid, is_chunk
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE)
+        ON CONFLICT (rid) DO UPDATE SET
+            content = $7,
+            metadata = $8,
+            published_at = $9,
+            published_confidence = $10,
+            content_hash = $11,
+            source_content_rid = $12,
+            updated_at = NOW()
+    """,
+        str(uuid.uuid4()),
+        document_rid,
+        f"cid:sha256:{content_hash}",
+        1,
+        event.event_type,
+        event.source_node,
+        json.dumps({"text": text_content, "title": metadata.get('title', '')}),
+        json.dumps(json_serialize(metadata)),
+        published_at,
+        published_confidence,
+        content_hash,
+        source_content_rid
+    )
+
+    logger.info(f"Stored processed document in koi_memories: {document_rid}")
+
+
 async def store_memory_chunk(
+    conn: asyncpg.Connection,
+    chunk_rid: str,
+    document_rid: str,
+    source_content_rid: str,
+    chunk_index: int,
+    total_chunks: int,
+    content: str,
+    metadata: Dict[str, Any]
+) -> str:
+    """Store a memory chunk in koi_memory_chunks table (Layer 3)"""
+    chunk_id = str(uuid.uuid4())
+
+    # Preserve key metadata fields for temporal filtering
+    chunk_metadata = {
+        "url": metadata.get("url"),
+        "title": metadata.get("title"),
+        "published_at": metadata.get("published_at") or metadata.get("published_date"),
+        "published_confidence": metadata.get("published_confidence", 0.0),
+        "chunk_index": chunk_index,
+        "total_chunks": total_chunks,
+        **{k: v for k, v in metadata.items() if k not in ['published_at', 'published_date']}
+    }
+
+    # Store chunk in new koi_memory_chunks table
+    await conn.execute("""
+        INSERT INTO koi_memory_chunks (
+            chunk_rid, document_rid, source_content_rid, chunk_index, total_chunks,
+            content, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (chunk_rid) DO UPDATE SET
+            content = $6,
+            metadata = $7,
+            created_at = NOW()
+    """,
+        chunk_rid,
+        document_rid,
+        source_content_rid,
+        chunk_index,
+        total_chunks,
+        json.dumps({"text": content}),
+        json.dumps(json_serialize(chunk_metadata))
+    )
+
+    logger.info(f"Stored chunk {chunk_index}/{total_chunks} in koi_memory_chunks: {chunk_rid}")
+    return chunk_id
+
+
+async def store_legacy_memory_chunk(
     conn: asyncpg.Connection,
     memory_id: str,
     rid: str,
@@ -492,24 +748,42 @@ async def store_memory_chunk(
     metadata: Dict[str, Any],
     event: KOIEvent
 ) -> None:
-    """Store a memory chunk with metadata"""
+    """Store a memory chunk with metadata (legacy format)"""
     if USE_ISOLATED_TABLES:
-        # Extract publication date
+        # Extract publication date - check both published_date and published_at
         published_at = None
         published_confidence = 0.0
-        
-        if 'published_at' in metadata:
+
+        # Try published_date first (from sensor/LLM extraction)
+        if 'published_date' in metadata:
+            date_str = metadata['published_date']
+            if isinstance(date_str, str):
+                try:
+                    # Handle various date formats
+                    if 'T' in date_str or ' ' in date_str:
+                        # ISO format with time
+                        published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    else:
+                        # Date only format (YYYY-MM-DD)
+                        from datetime import datetime, timezone
+                        published_at = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                    published_confidence = metadata.get('published_confidence', 0.8)
+                except Exception as e:
+                    logger.debug(f"Could not parse published_date: {date_str}, error: {e}")
+
+        # Fall back to published_at if no published_date
+        elif 'published_at' in metadata:
             date_str = metadata['published_at']
             if isinstance(date_str, str):
                 try:
                     published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                     published_confidence = metadata.get('published_confidence', 0.9)
-                except:
-                    pass
-        
+                except Exception as e:
+                    logger.debug(f"Could not parse published_at: {date_str}, error: {e}")
+
         # Calculate content hash
         content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
-        
+
         # Store in koi_memories
         await conn.execute("""
             INSERT INTO koi_memories (
@@ -526,7 +800,7 @@ async def store_memory_chunk(
             event.event_type,
             event.source_node,
             json.dumps({"text": content}),
-            json.dumps(metadata),
+            json.dumps(json_serialize(metadata)),
             published_at,
             published_confidence,
             content_hash
@@ -549,13 +823,13 @@ async def store_memory_chunk(
         )
 
 async def store_embedding(conn: asyncpg.Connection, memory_id: str, embedding: List[float]) -> bool:
-    """Store embedding in database"""
+    """Store embedding in database (legacy format)"""
     if not embedding:
         return False
-    
+
     embedding_str = '[' + ','.join(map(str, embedding)) + ']'
     embedding_dim = len(embedding)
-    
+
     try:
         if USE_ISOLATED_TABLES:
             if embedding_dim == 768:

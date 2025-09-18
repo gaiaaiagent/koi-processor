@@ -1,5 +1,8 @@
 # KOI Storage Architecture
 
+
+see ../IMPROVED_STORAGE_ARCHITECTURE.md
+
 ## Overview
 
 The KOI pipeline uses a **dual-table storage pattern** to optimize for both data integrity and agent accessibility. This document explains how data flows through the system and where it's stored.

@@ -147,6 +147,7 @@ def get_overview():
             SELECT COUNT(*) as recent_events
             FROM koi_memories
             WHERE created_at > NOW() - INTERVAL '1 hour'
+              AND rid NOT LIKE '%heartbeat%'
         """)
         koi_activity = cur.fetchone()
         
@@ -314,6 +315,8 @@ def get_weekly_stats():
                    COUNT(DISTINCT content->>'source_type') as unique_sources
             FROM koi_memories
             WHERE created_at > date_trunc('week', CURRENT_DATE)
+              AND rid NOT LIKE '%heartbeat%'
+              AND content::text NOT LIKE '%sensor_heartbeat%'
         """)
         collection_progress = cur.fetchone()
         

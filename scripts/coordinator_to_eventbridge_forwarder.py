@@ -18,16 +18,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("koi.forwarder")
 
 COORDINATOR_URL = "http://localhost:8005"
-EVENT_BRIDGE_URL = "http://localhost:8100"
-POLL_INTERVAL = 5  # seconds
+EVENT_BRIDGE_URL = "http://localhost:8004"  # Semantic event bridge port
+POLL_INTERVAL = 2  # seconds - faster for testing
 NODE_ID = "event-bridge-forwarder"
 
 async def forward_events():
     """Poll coordinator for events and forward to Event Bridge"""
-    
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         logger.info(f"Starting event forwarder: {COORDINATOR_URL} -> {EVENT_BRIDGE_URL}")
-        
+
         while True:
             try:
                 # Poll coordinator for events
@@ -35,40 +35,69 @@ async def forward_events():
                     f"{COORDINATOR_URL}/events/poll",
                     params={"node_id": NODE_ID}
                 )
-                
+
                 if response.status_code == 200:
-                    events = response.json()
-                    
-                    if events and isinstance(events, list):
+                    poll_response = response.json()
+
+                    # Extract events and event IDs from the EventPollResponse structure
+                    events = poll_response.get("events", [])
+                    event_ids = poll_response.get("event_ids", [])
+
+                    if events:
                         logger.info(f"Received {len(events)} events from coordinator")
-                        
+
+                        # Track successfully processed events for confirmation
+                        successfully_processed = []
+
                         # Forward each event to Event Bridge
-                        for event in events:
+                        for i, event in enumerate(events):
                             try:
                                 # Post to Event Bridge
                                 eb_response = await client.post(
-                                    f"{EVENT_BRIDGE_URL}/process-koi-event",
+                                    f"{EVENT_BRIDGE_URL}/events/process",
                                     json=event
                                 )
-                                
+
                                 if eb_response.status_code == 200:
                                     logger.info(f"Successfully forwarded event: {event.get('rid', 'unknown')}")
+                                    # Track this event as successfully processed
+                                    if i < len(event_ids):
+                                        successfully_processed.append(event_ids[i])
                                 else:
                                     logger.error(f"Event Bridge error {eb_response.status_code}: {eb_response.text}")
-                                    
+
                             except Exception as e:
                                 logger.error(f"Error forwarding event: {e}")
-                    else:
-                        logger.debug("No new events from coordinator")
-                        
+
+                        # Confirm delivery for successfully processed events
+                        if successfully_processed:
+                            try:
+                                confirm_response = await client.post(
+                                    f"{COORDINATOR_URL}/events/confirm",
+                                    json={
+                                        "node_id": NODE_ID,
+                                        "event_ids": successfully_processed,
+                                        "timestamp": datetime.now().isoformat()
+                                    }
+                                )
+
+                                if confirm_response.status_code == 200:
+                                    confirm_data = confirm_response.json()
+                                    logger.info(f"Confirmed delivery of {confirm_data.get('confirmed_count', 0)} events")
+                                else:
+                                    logger.error(f"Failed to confirm delivery: {confirm_response.status_code}")
+
+                            except Exception as e:
+                                logger.error(f"Error confirming delivery: {e}")
+
                 elif response.status_code == 404:
                     logger.debug("No events available")
                 else:
                     logger.error(f"Coordinator poll error: {response.status_code}")
-                    
+
             except Exception as e:
                 logger.error(f"Error polling coordinator: {e}")
-            
+
             await asyncio.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":

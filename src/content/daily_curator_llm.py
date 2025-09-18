@@ -72,6 +72,7 @@ class DailyCuratorLLM:
                     WHERE superseded_at IS NULL
                       AND event_type != 'FORGET'
                       AND content::text NOT LIKE '%sensor_heartbeat%'
+                      AND rid NOT LIKE '%heartbeat%'
                       -- ONLY content actually PUBLISHED in last 24 hours
                       AND published_at IS NOT NULL
                       AND published_at >= NOW() - INTERVAL '24 hours'
