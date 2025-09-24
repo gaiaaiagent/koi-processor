@@ -150,11 +150,23 @@ class WeeklyAggregator:
             published_confidence as confidence,
             metadata->>'tags' as tags
         FROM koi_memories
-        WHERE published_at >= %s
-            AND published_at <= %s
-            AND published_confidence >= %s
+        WHERE superseded_at IS NULL
+            AND event_type != 'FORGET'
+            -- Exclude all heartbeat content
             AND content::text NOT LIKE '%%sensor_heartbeat%%'
+            AND content::text NOT LIKE '%%heartbeat%%'
             AND rid NOT LIKE '%%heartbeat%%'
+            -- Exclude system/operational messages
+            AND content::text NOT LIKE '%%Sensor initialized%%'
+            AND content::text NOT LIKE '%%Monitoring active%%'
+            AND content::text NOT LIKE '%%Starting sensor%%'
+            AND content::text NOT LIKE '%%KOI system%%'
+            -- ONLY content actually PUBLISHED in the specified window
+            AND published_at IS NOT NULL
+            AND published_at >= %s
+            AND published_at <= %s
+            -- Require reasonable confidence in the published date
+            AND published_confidence >= %s
         ORDER BY published_at DESC, published_confidence DESC
         LIMIT %s
         """
@@ -366,7 +378,12 @@ class WeeklyAggregator:
         # Citations
         lines.append("\n## References\n")
         for i, citation in enumerate(digest.citations[:10], 1):
-            lines.append(f"{i}. {citation['title']} - {citation['source']} ({citation['date']})\n")
+            if citation.get('url'):
+                # Make title clickable if URL is available
+                lines.append(f"{i}. [{citation['title']}]({citation['url']}) - {citation['source']} ({citation['date']})\n")
+            else:
+                # No URL available, just show title
+                lines.append(f"{i}. {citation['title']} - {citation['source']} ({citation['date']})\n")
         
         # Footer
         lines.append("\n---\n")

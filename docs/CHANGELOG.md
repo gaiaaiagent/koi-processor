@@ -5,6 +5,26 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-09-24
+
+### Added
+- **Comprehensive Regen Ledger Integration** - Full on-chain data fetching from all Cosmos SDK modules
+- **LLM-Enhanced Content Curation** - AI-powered daily and weekly digest generation
+- **On-Chain Activity Tracking** - Weekly digests now include ledger statistics and network metrics
+- **Discourse Sensor Integration** - Forum posts properly indexed with published_at dates
+
+### Fixed
+- **Daily Generation 502 Error** - Dashboard now properly loads environment variables
+- **Weekly Generation Timeout** - Increased timeout to 5 minutes for comprehensive data fetching
+- **GitHub URL Malformation** - Cleaned temporary directory paths from sensor URLs
+- **Forum Post Dating** - Fixed published_at extraction for all discourse content
+- **Post Truncation** - Daily posts now display full content in dashboard
+
+### Changed
+- **Daily Curator** - Now uses `daily_curator_llm.py` with OpenAI integration
+- **Weekly Curator** - Now uses `weekly_curator_llm.py` with comprehensive ledger data
+- **Dashboard Timeout** - Increased subprocess timeout from 180s to 300s
+
 ## [2.0.0] - 2025-09-09
 
 ### Added

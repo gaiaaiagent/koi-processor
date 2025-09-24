@@ -31,8 +31,8 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Production Embeddings**: Model-agnostic embedding server (currently BGE-large-en-v1.5)
 - ✅ **MCP Integration**: Semantic search via Model Context Protocol
 - ✅ **Content Operations Dashboard**: Web-based monitoring for Daily Bot and Weekly Digest
-- ✅ **Daily Content Curator**: Automated content curation for daily X posts
-- ✅ **Weekly Aggregator**: Weekly digest generation with podcast support
+- ✅ **Daily Content Curator**: LLM-enhanced daily X posts with comprehensive ledger integration
+- ✅ **Weekly Aggregator**: AI-powered weekly digest with on-chain activity tracking
 
 ## Project Structure
 
@@ -46,12 +46,15 @@ koi-processor/
 │   │   └── bge_server.py
 │   ├── content/           # Content generation & monitoring
 │   │   ├── content_dashboard.py
-│   │   ├── daily_curator.py
-│   │   ├── weekly_aggregator.py
+│   │   ├── daily_curator_llm.py
+│   │   ├── weekly_curator_llm.py
 │   │   └── quality_control.py
 │   ├── audio/             # Podcast generation
 │   │   ├── audio_pipeline_enhanced.py
 │   │   └── podcast_integration.py
+│   ├── services/          # External service integrations
+│   │   ├── regen_ledger.py
+│   │   └── regen_ledger_comprehensive.py
 │   └── utils/             # Utilities & helpers
 ├── scripts/               # Operational scripts
 │   ├── setup.sh          # One-command setup

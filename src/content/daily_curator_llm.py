@@ -9,6 +9,7 @@ import asyncpg
 import httpx
 import json
 import yaml
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
@@ -54,6 +55,18 @@ class DailyCuratorLLM:
             logger.warning(f"Config file {config_path} not found, using defaults")
             return {}
 
+    def clean_url(self, url: str) -> str:
+        """Clean malformed GitHub URLs and other URL issues"""
+        if not url:
+            return url
+
+        # Fix GitHub sensor URLs that include temporary directory paths
+        if 'github.com' in url and 'github_sensor_' in url:
+            # Remove the github_sensor_XXXXX directory from the path
+            url = re.sub(r'/github_sensor_[^/]+/', '/', url)
+
+        return url
+
     async def get_all_24h_content(self) -> List[Dict[str, Any]]:
         """
         Get ALL content PUBLISHED in the past 24 hours
@@ -71,8 +84,15 @@ class DailyCuratorLLM:
                     FROM koi_memories
                     WHERE superseded_at IS NULL
                       AND event_type != 'FORGET'
+                      -- Exclude all heartbeat content
                       AND content::text NOT LIKE '%sensor_heartbeat%'
+                      AND content::text NOT LIKE '%heartbeat%'
                       AND rid NOT LIKE '%heartbeat%'
+                      -- Exclude system/operational messages
+                      AND content::text NOT LIKE '%Sensor initialized%'
+                      AND content::text NOT LIKE '%Monitoring active%'
+                      AND content::text NOT LIKE '%Starting sensor%'
+                      AND content::text NOT LIKE '%KOI system%'
                       -- ONLY content actually PUBLISHED in last 24 hours
                       AND published_at IS NOT NULL
                       AND published_at >= NOW() - INTERVAL '24 hours'
@@ -136,7 +156,7 @@ Keep the summary under 300 words."""
             logger.error(f"Error summarizing content: {e}")
             return ""
 
-    async def generate_tweet_from_content(self, content_items: List[Dict], tweet_type: str, position: int) -> str:
+    async def generate_tweet_from_content(self, content_items: List[Dict], tweet_type: str, position: int, stats: Optional[Dict] = None) -> str:
         """
         Generate a specific tweet using LLM based on all content
 
@@ -144,6 +164,7 @@ Keep the summary under 300 words."""
             content_items: All content from past 24h
             tweet_type: Type of tweet (headline, stats, highlight, community, cta)
             position: Position in thread (1-5)
+            stats: Optional ledger statistics
         """
         # First, get a summary if content is large
         if len(content_items) > 50:
@@ -178,9 +199,16 @@ Requirements:
             'stats': f"""Create a statistics tweet highlighting Regen Network's 24h metrics.
 Context: {context}
 
+Ledger Statistics:
+{stats.get('ledger_summary', '') if stats else 'No ledger data available'}
+- Active Proposals: {stats.get('active_proposals', 0) if stats else 0}
+- New Credit Batches: {stats.get('new_credits', 0) if stats else 0}
+- Marketplace Orders: {stats.get('marketplace_volume', 0) if stats else 0}
+- Credit Classes: {stats.get('credit_classes', 0) if stats else 0}
+
 Requirements:
 - Start with 📊 emoji
-- Include specific numbers and metrics
+- Include specific numbers from the ledger statistics above
 - Mention new credits, proposals, validator count, or volume
 - Make numbers compelling with context
 - Use exactly 260-280 characters
@@ -189,9 +217,14 @@ Requirements:
             'governance': f"""Create a governance-focused tweet about Regen Network proposals and decisions.
 Context: {context}
 
+Governance Activity:
+- Active Proposals: {stats.get('active_proposals', 0) if stats else 0}
+- Total Proposals: {stats.get('total_proposals', 0) if stats else 0}
+{f"Active Proposal Titles: {', '.join(stats.get('active_proposal_titles', [])[:2])}" if stats and stats.get('active_proposal_titles') else ''}
+
 Requirements:
 - Start with 🗳️ emoji
-- Highlight active proposals or recent votes
+- Highlight active proposals or recent votes (use the data above)
 - Emphasize community participation
 - Include specific proposal details if available
 - Use exactly 260-280 characters
@@ -235,9 +268,10 @@ Requirements:
 
             tweet = response.choices[0].message.content.strip()
 
-            # Ensure tweet is within limits
-            if len(tweet) > 280:
-                tweet = tweet[:277] + "..."
+            # For dashboard display, we want the full content
+            # Only truncate if tweet is extremely long (likely an error)
+            if len(tweet) > 500:
+                tweet = tweet[:497] + "..."
             elif len(tweet) < 200:
                 # Too short, add context
                 tweet += " Join us in building regenerative finance infrastructure. #RegenNetwork"
@@ -293,14 +327,37 @@ Provide a JSON response with:
             }
 
     async def get_ledger_stats(self) -> Dict[str, Any]:
-        """Get blockchain statistics"""
+        """Get blockchain statistics from Regen ledger"""
         try:
             import sys
             sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from integrations.regen_mcp_client import RegenMCPClient
+            from services.regen_ledger import RegenLedgerClient
 
-            mcp_client = RegenMCPClient()
-            stats = await mcp_client.query_ledger_stats()
+            ledger_client = RegenLedgerClient()
+            summary = await ledger_client.get_ledger_summary()
+
+            # Format stats for daily thread - include ALL comprehensive data
+            stats = {
+                'new_credits': summary['statistics'].get('total_credit_batches', 0),
+                'active_proposals': summary['statistics'].get('active_proposals', 0),
+                'total_proposals': summary['statistics'].get('total_proposals', 0),
+                'validator_count': summary['statistics'].get('total_validators', 0),
+                'marketplace_volume': summary['statistics'].get('active_sell_orders', 0),
+                'credit_classes': summary['statistics'].get('total_credit_classes', 0),
+                'baskets': summary['statistics'].get('total_baskets', 0),
+                'total_validators': summary['statistics'].get('total_validators', 0),
+                'ibc_channels': summary['statistics'].get('ibc_channels', 0),
+                'avg_tx_per_block': summary['statistics'].get('avg_tx_per_block', 0),
+                'total_bonded': summary['statistics'].get('total_bonded', '0'),
+                'ledger_summary': await ledger_client.format_for_daily_post()
+            }
+
+            # Add proposal details if any
+            if summary.get('proposals'):
+                active = [p for p in summary['proposals'] if p.get('status') == 'VOTING_PERIOD']
+                if active:
+                    stats['active_proposal_titles'] = [p['title'] for p in active[:2]]
+
             return stats
         except Exception as e:
             logger.error(f"Error getting ledger stats: {e}")
@@ -308,7 +365,8 @@ Provide a JSON response with:
                 'new_credits': 0,
                 'active_proposals': 0,
                 'validator_count': 75,
-                'marketplace_volume': 0
+                'marketplace_volume': 0,
+                'ledger_summary': ''
             }
 
     async def generate_daily_thread(self) -> Dict[str, Any]:
@@ -346,7 +404,7 @@ Provide a JSON response with:
         # Generate tweets based on content and themes
 
         # Post 1: Dynamic headline based on main theme
-        headline = await self.generate_tweet_from_content(all_content, 'headline', 1)
+        headline = await self.generate_tweet_from_content(all_content, 'headline', 1, stats)
         thread['posts'].append({
             'type': 'headline',
             'content': headline,
@@ -354,11 +412,11 @@ Provide a JSON response with:
         })
 
         # Post 2: Stats or governance based on what's most active
-        if themes.get('key_governance_items'):
-            tweet = await self.generate_tweet_from_content(all_content, 'governance', 2)
+        if themes.get('key_governance_items') or stats.get('active_proposals', 0) > 0:
+            tweet = await self.generate_tweet_from_content(all_content, 'governance', 2, stats)
             tweet_type = 'governance'
         else:
-            tweet = await self.generate_tweet_from_content(all_content, 'stats', 2)
+            tweet = await self.generate_tweet_from_content(all_content, 'stats', 2, stats)
             tweet_type = 'stats'
 
         thread['posts'].append({
@@ -368,7 +426,7 @@ Provide a JSON response with:
         })
 
         # Post 3: Community highlight
-        community_tweet = await self.generate_tweet_from_content(all_content, 'community', 3)
+        community_tweet = await self.generate_tweet_from_content(all_content, 'community', 3, stats)
         thread['posts'].append({
             'type': 'community',
             'content': community_tweet,
@@ -376,12 +434,12 @@ Provide a JSON response with:
         })
 
         # Post 4: Additional highlight based on themes
-        if themes.get('new_credits_summary'):
+        if themes.get('new_credits_summary') or stats.get('new_credits', 0) > 0:
             # Focus on credits if there are new ones
-            extra_tweet = await self.generate_tweet_from_content(all_content, 'stats', 4)
+            extra_tweet = await self.generate_tweet_from_content(all_content, 'stats', 4, stats)
         else:
             # Otherwise another community/governance post
-            extra_tweet = await self.generate_tweet_from_content(all_content, 'community', 4)
+            extra_tweet = await self.generate_tweet_from_content(all_content, 'community', 4, stats)
 
         thread['posts'].append({
             'type': 'highlight',
@@ -390,7 +448,7 @@ Provide a JSON response with:
         })
 
         # Post 5: Call to action
-        cta = await self.generate_tweet_from_content(all_content, 'cta', 5)
+        cta = await self.generate_tweet_from_content(all_content, 'cta', 5, stats)
         thread['posts'].append({
             'type': 'cta',
             'content': cta,

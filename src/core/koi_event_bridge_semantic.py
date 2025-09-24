@@ -398,6 +398,17 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                 # Get original metadata from the bundle
                 original_metadata = event.bundle.manifest.metadata or {}
 
+                # Also merge metadata from bundle contents if available
+                content_metadata = {}
+                if event.bundle and event.bundle.contents:
+                    if isinstance(event.bundle.contents, dict):
+                        # Check for metadata field in contents
+                        if 'metadata' in event.bundle.contents:
+                            content_metadata = event.bundle.contents['metadata']
+                            logger.info(f"Found metadata in bundle contents with keys: {list(content_metadata.keys())}")
+                            if 'published_at' in content_metadata:
+                                logger.info(f"Found published_at in content metadata: {content_metadata['published_at']}")
+
                 # Layer 1: Store raw content in koi_content
                 raw_content = json.dumps(event.bundle.contents)  # Store original bundle contents
                 content_type = "json"  # Could be enhanced to detect HTML/text
@@ -409,33 +420,72 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                         content_rid,
                         raw_content,
                         content_type,
-                        original_metadata,
+                        {**original_metadata, **content_metadata},
                         event
                     )
 
                 # Layer 2: Store processed document in koi_memories
                 document_rid = event.bundle.rid
 
+                # Extract URL and title from bundle contents
+                url = None
+                title = None
+                if event.bundle and event.bundle.contents:
+                    if isinstance(event.bundle.contents, dict):
+                        # Try to get URL from document field
+                        if 'document' in event.bundle.contents:
+                            doc = event.bundle.contents['document']
+                            if isinstance(doc, dict):
+                                url = doc.get('url', '')
+                                title = doc.get('title', '')
+                        # Also check top-level URL
+                        if not url:
+                            url = event.bundle.contents.get('url', '')
+                        if not title:
+                            title = event.bundle.contents.get('title', '')
+
                 # Merge original and enhanced metadata for document
                 document_metadata = {
                     **original_metadata,
+                    **content_metadata,
                     **enhanced_metadata,
-                    "url": original_metadata.get("url") or enhanced_metadata.get("url"),
-                    "title": original_metadata.get("title") or enhanced_metadata.get("title"),
+                    "url": url or original_metadata.get("url") or enhanced_metadata.get("url"),
+                    "title": title or original_metadata.get("title") or enhanced_metadata.get("title"),
                     "cat_receipt_rid": cat_receipt_rid,
                     "extraction_report": extraction_result.get("extraction_report"),
                     "kg_report": extraction_result.get("kg_report")
                 }
 
-                # Promote LLM-extracted published date to root metadata fields
-                # Check if LLM extracted a date in sources.llm.published_date
-                if "sources" in document_metadata and "llm" in document_metadata["sources"]:
-                    llm_data = document_metadata["sources"]["llm"]
-                    if "published_date" in llm_data and llm_data["published_date"]:
-                        # Only set if not already set at root level
-                        if not document_metadata.get("published_at"):
-                            document_metadata["published_at"] = llm_data["published_date"]
-                            logger.info(f"Promoted LLM date to published_at: {llm_data['published_date']}")
+                # Promote published date from various sources to root metadata fields
+                published_at = document_metadata.get("published_at")
+
+                # First check sensor data (most reliable)
+                if not published_at and "sources" in document_metadata:
+                    if "sensor" in document_metadata["sources"]:
+                        sensor_data = document_metadata["sources"]["sensor"]
+                        if "published_at" in sensor_data and sensor_data["published_at"]:
+                            published_at = sensor_data["published_at"]
+                            logger.info(f"Using sensor date for published_at: {sensor_data['published_at']}")
+
+                    # Fall back to LLM extracted date if no sensor date
+                    if not published_at and "llm" in document_metadata["sources"]:
+                        llm_data = document_metadata["sources"]["llm"]
+                        if "published_date" in llm_data and llm_data["published_date"]:
+                            published_at = llm_data["published_date"]
+                            logger.info(f"Using LLM date for published_at: {llm_data['published_date']}")
+
+                # Also check top-level sensor fields
+                if not published_at:
+                    if "sensor_published_at" in document_metadata:
+                        published_at = document_metadata["sensor_published_at"]
+                        logger.info(f"Using sensor_published_at: {published_at}")
+                    elif "published_date" in document_metadata:
+                        published_at = document_metadata["published_date"]
+                        logger.info(f"Using published_date: {published_at}")
+
+                # Set the final published_at value
+                if published_at and not document_metadata.get("published_at"):
+                    document_metadata["published_at"] = published_at
 
                 # Promote confidence score if available
                 if "confidence_scores" in document_metadata:
@@ -598,20 +648,45 @@ async def store_raw_content(
         logger.info(f"Content already exists with same hash, skipping raw storage: {existing['rid']}")
         return
 
-    # Store raw content
+    # Extract URL from bundle contents if available
+    url = None
+    title = None
+    if event.bundle and event.bundle.contents:
+        if isinstance(event.bundle.contents, dict):
+            # Try to get URL from document field
+            if 'document' in event.bundle.contents:
+                doc = event.bundle.contents['document']
+                if isinstance(doc, dict):
+                    url = doc.get('url', '')
+                    title = doc.get('title', '')
+            # Also check top-level URL
+            if not url:
+                url = event.bundle.contents.get('url', '')
+            if not title:
+                title = event.bundle.contents.get('title', '')
+
+    # Fall back to metadata if no URL in bundle
+    if not url:
+        url = metadata.get('url', '')
+    if not title:
+        title = metadata.get('title', '')
+
+    # Store raw content with URL and title
     await conn.execute("""
         INSERT INTO koi_content (
-            rid, raw_content, content_type, content_hash, scraped_at, metadata
-        ) VALUES ($1, $2, $3, $4, NOW(), $5)
+            rid, raw_content, content_type, content_hash, scraped_at, metadata, url, title
+        ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7)
         ON CONFLICT (rid) DO UPDATE SET
             raw_content = $2,
             content_type = $3,
             content_hash = $4,
             scraped_at = NOW(),
-            metadata = $5
-    """, content_rid, raw_content, content_type, content_hash, json.dumps(json_serialize(metadata)))
+            metadata = $5,
+            url = $6,
+            title = $7
+    """, content_rid, raw_content, content_type, content_hash, json.dumps(json_serialize(metadata)), url, title)
 
-    logger.info(f"Stored raw content in koi_content: {content_rid}")
+    logger.info(f"Stored raw content in koi_content: {content_rid} with URL: {url}")
 
 
 async def store_processed_document(
@@ -680,7 +755,13 @@ async def store_processed_document(
         1,
         event.event_type,
         event.source_node,
-        json.dumps({"text": text_content, "title": metadata.get('title', '')}),
+        json.dumps({
+            "text": text_content,
+            "title": metadata.get('title', ''),
+            "url": metadata.get('url', ''),
+            "source_type": metadata.get('source_type', ''),
+            "source_id": metadata.get('source_id', '')
+        }),
         json.dumps(json_serialize(metadata)),
         published_at,
         published_confidence,

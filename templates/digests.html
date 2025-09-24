@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regen Network - Content Digest Dashboard</title>
+    <meta name="description" content="Real-time monitoring for Daily Bot and Weekly Digest">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        .status {
+            background: #f0f4f8;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .buttons {
+            display: flex;
+            gap: 20px;
+            margin: 30px 0;
+        }
+        button {
+            flex: 1;
+            padding: 15px 30px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 600;
+        }
+        .btn-daily {
+            background: linear-gradient(135deg, #fbbf24, #f59e0b);
+            color: white;
+        }
+        .btn-weekly {
+            background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+            color: white;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .output {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .success {
+            color: #10b981;
+            font-weight: 600;
+        }
+        .error {
+            color: #ef4444;
+            font-weight: 600;
+        }
+        .info {
+            background: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 15px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌿 Regen Network Content Digest Generator</h1>
+
+        <div class="info">
+            <strong>ℹ️ How it works:</strong><br>
+            • Daily Digest: Generates a 5-tweet thread with key metrics and links<br>
+            • Weekly Digest: Creates an 800-1200 word summary with citations and real source URLs<br>
+            • All content includes proper attribution with clickable links to sources
+        </div>
+
+        <div class="status">
+            <strong>System Status:</strong> <span id="status" class="success">Ready</span><br>
+            <strong>API Endpoint:</strong> http://localhost:8400<br>
+            <strong>Last Updated:</strong> <span id="lastUpdate">Never</span>
+        </div>
+
+        <div class="buttons">
+            <button class="btn-daily" onclick="generateDigest('daily')">
+                ☀️ Generate Daily Digest
+            </button>
+            <button class="btn-weekly" onclick="generateDigest('weekly')">
+                📅 Generate Weekly Digest
+            </button>
+        </div>
+
+        <div id="output" class="output" style="display: none;">
+            <strong>Output:</strong><br>
+            <div id="outputContent"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8400';
+
+        async function generateDigest(type) {
+            const btn = event.target;
+            const outputDiv = document.getElementById('output');
+            const outputContent = document.getElementById('outputContent');
+            const statusSpan = document.getElementById('status');
+
+            // Disable button and show loading
+            btn.disabled = true;
+            btn.textContent = `⏳ Generating ${type} digest...`;
+            statusSpan.textContent = 'Processing...';
+            statusSpan.className = '';
+
+            outputDiv.style.display = 'block';
+            outputContent.textContent = `Starting ${type} digest generation...\n`;
+
+            try {
+                const response = await fetch(`${API_URL}/api/dashboard/trigger_manual_run`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        type: type,
+                        draft_mode: true,
+                        skip_audio: type === 'weekly'
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    statusSpan.textContent = 'Success!';
+                    statusSpan.className = 'success';
+                    outputContent.textContent = `✅ ${data.message}\n\nFile: ${data.file}\n\n`;
+
+                    // Try to load and display the generated content
+                    if (data.file) {
+                        outputContent.textContent += 'Generated content preview will appear here...';
+                    }
+                } else {
+                    statusSpan.textContent = 'Failed';
+                    statusSpan.className = 'error';
+                    outputContent.textContent = `❌ Error: ${data.message || data.error}`;
+                }
+            } catch (error) {
+                statusSpan.textContent = 'Error';
+                statusSpan.className = 'error';
+                outputContent.textContent = `❌ Error: ${error.message}`;
+            } finally {
+                // Re-enable button
+                btn.disabled = false;
+                btn.textContent = type === 'daily' ? '☀️ Generate Daily Digest' : '📅 Generate Weekly Digest';
+
+                // Update last update time
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleString();
+            }
+        }
+
+        // Update status on load
+        window.addEventListener('load', () => {
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleString();
+        });
+    </script>
+</body>
+</html>

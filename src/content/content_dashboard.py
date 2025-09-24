@@ -20,6 +20,10 @@ from typing import Dict, Any, List, Optional
 import asyncio
 from functools import wraps
 from loguru import logger
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__, 
@@ -175,6 +179,38 @@ def get_overview():
         logger.error(f"Error getting overview: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/dashboard/daily/current')
+@require_auth
+def get_current_daily():
+    """Get current daily digest from file"""
+    import glob
+    try:
+        # Find the latest daily digest file
+        daily_files = glob.glob('/opt/projects/koi-processor/output/daily/daily_digest_*.json')
+        if not daily_files:
+            # No daily digest exists, return empty
+            return jsonify({
+                'success': True,
+                'digest': None,
+                'message': 'No daily digest available for today'
+            })
+
+        latest_file = max(daily_files, key=lambda x: os.path.getmtime(x))
+
+        with open(latest_file, 'r') as f:
+            digest_data = json.load(f)
+
+        return jsonify({
+            'success': True,
+            'digest': digest_data,
+            'filename': os.path.basename(latest_file),
+            'generated_at': datetime.fromtimestamp(os.path.getmtime(latest_file)).isoformat()
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting current daily digest: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/dashboard/daily/stats')
 @require_auth
 def get_daily_stats():
@@ -286,6 +322,41 @@ def get_daily_drafts():
         logger.error(f"Error getting drafts: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/dashboard/weekly/current')
+@require_auth
+def get_current_weekly():
+    """Get current weekly digest from file"""
+    import glob
+    try:
+        # Find the latest weekly digest file
+        weekly_files = glob.glob('/opt/projects/koi-processor/output/weekly/weekly_digest_*.json')
+        if not weekly_files:
+            return jsonify({'success': False, 'error': 'No weekly digest found'}), 404
+
+        latest_file = max(weekly_files, key=lambda x: os.path.getmtime(x))
+
+        with open(latest_file, 'r') as f:
+            digest_data = json.load(f)
+
+        # Also get the markdown version
+        md_file = latest_file.replace('.json', '.md')
+        digest_text = ""
+        if os.path.exists(md_file):
+            with open(md_file, 'r') as f:
+                digest_text = f.read()
+
+        return jsonify({
+            'success': True,
+            'digest': digest_data,
+            'markdown': digest_text,
+            'filename': os.path.basename(latest_file),
+            'generated_at': datetime.fromtimestamp(os.path.getmtime(latest_file)).isoformat()
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting current weekly digest: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/dashboard/weekly/stats')
 @require_auth
 def get_weekly_stats():
@@ -339,8 +410,38 @@ def get_weekly_stats():
         # Calculate progress percentage
         progress_pct = 0
         if current_digest:
-            metadata = current_digest['metadata'] if isinstance(current_digest['metadata'], dict) else json.loads(current_digest.get('metadata', '{}'))
-            word_count = metadata.get('word_count', 0)
+            # metadata might be None (quality_issues column)
+            metadata = current_digest.get('metadata')
+            if metadata:
+                if isinstance(metadata, dict):
+                    pass  # Already a dict
+                elif isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except:
+                        metadata = {}
+                else:
+                    metadata = {}
+            else:
+                metadata = {}
+
+            # Try to get word count from content data instead
+            content_data = current_digest.get('content')
+            if content_data:
+                if isinstance(content_data, str):
+                    try:
+                        content_data = json.loads(content_data)
+                    except:
+                        content_data = {}
+                elif not isinstance(content_data, dict):
+                    content_data = {}
+
+                # Check if brief exists and count words
+                brief = content_data.get('brief', '')
+                word_count = len(brief.split()) if brief else 0
+            else:
+                word_count = 0
+
             target = config['thresholds']['weekly_digest']['min_word_count']
             progress_pct = min(100, (word_count / target * 100) if target > 0 else 0)
         
@@ -598,13 +699,34 @@ def trigger_manual_run():
 
             # Set environment variable for OpenAI
             env = os.environ.copy()
-            env['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', '')
+
+            # Make sure we have the OpenAI API key
+            openai_key = os.getenv('OPENAI_API_KEY', '')
+            if not openai_key:
+                logger.error("OPENAI_API_KEY not found in environment")
+                return jsonify({
+                    'success': False,
+                    'message': 'OpenAI API key not configured',
+                    'error': 'OPENAI_API_KEY environment variable is not set'
+                }), 500
+
+            env['OPENAI_API_KEY'] = openai_key
             env['GENERATE_AS_DRAFT'] = 'true' if draft_mode else 'false'
             env['INCLUDE_PROVENANCE'] = 'true'  # Always include source provenance
 
+            # Also ensure we have the Notion API key if needed
+            notion_key = os.getenv('NOTION_API_KEY', '')
+            if notion_key:
+                env['NOTION_API_KEY'] = notion_key
+
+            # Use venv Python to ensure all dependencies are available
+            python_path = '/opt/projects/koi-processor/venv/bin/python3'
+            if not os.path.exists(python_path):
+                python_path = 'python3'
+
             # The script will automatically create drafts based on the environment variables
             result = subprocess.run([
-                'python3',
+                python_path,
                 '/opt/projects/koi-processor/scripts/run_daily_curator.py',
                 'daily',
                 '--output', output_file
@@ -649,49 +771,56 @@ def trigger_manual_run():
 
         elif run_type == 'weekly':
             # Generate weekly digest
-            output_file = f'/tmp/weekly_digest_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            output_file = f'/opt/projects/koi-processor/output/weekly/weekly_digest_{date_str}.json'
 
             # Set environment variables
             env = os.environ.copy()
-            env['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', '')
+
+            # Make sure we have the OpenAI API key
+            openai_key = os.getenv('OPENAI_API_KEY', '')
+            if not openai_key:
+                logger.error("OPENAI_API_KEY not found in environment")
+                return jsonify({
+                    'success': False,
+                    'message': 'OpenAI API key not configured',
+                    'error': 'OPENAI_API_KEY environment variable is not set'
+                }), 500
+
+            env['OPENAI_API_KEY'] = openai_key
             env['GENERATE_AS_DRAFT'] = 'true' if draft_mode else 'false'
             env['INCLUDE_PROVENANCE'] = 'true'
             env['SKIP_AUDIO_GENERATION'] = 'true' if skip_audio else 'false'
 
-            # The script will create drafts based on environment variables
+            # Also ensure we have the Notion API key if needed
+            notion_key = os.getenv('NOTION_API_KEY', '')
+            if notion_key:
+                env['NOTION_API_KEY'] = notion_key
+
+            # Use the NEW LLM weekly curator wrapper script that includes ALL content
+            # Use venv Python if available, otherwise system Python
+            python_path = '/opt/projects/koi-processor/venv/bin/python3'
+            if not os.path.exists(python_path):
+                python_path = 'python3'
+
             result = subprocess.run([
-                'python3',
-                '/opt/projects/koi-processor/scripts/run_daily_curator.py',
-                'weekly',
-                '--output', output_file
-            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=180)
+                python_path,
+                '/opt/projects/koi-processor/scripts/run_weekly_curator_llm.py'
+            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=300)
 
-            if result.returncode == 0 and os.path.exists(output_file):
-                # Submit to review queue
-                submit_result = subprocess.run([
-                    'python3',
-                    '/opt/projects/koi-processor/scripts/submit_to_review.py',
-                    output_file,
-                    'weekly_digest'
-                ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=30)
+            if result.returncode == 0:
+                # No need to submit to review - weekly_curator_llm.py already saves to database
+                # Just broadcast the update
+                socketio.emit('dashboard_update', {
+                    'type': 'weekly_generated',
+                    'message': 'New weekly digest generated and submitted for review'
+                })
 
-                if submit_result.returncode == 0:
-                    # Broadcast update
-                    socketio.emit('dashboard_update', {
-                        'type': 'weekly_generated',
-                        'message': 'New weekly digest generated and submitted for review'
-                    })
-
-                    return jsonify({
-                        'success': True,
-                        'message': 'Weekly digest generated successfully',
-                        'file': output_file
-                    })
-                else:
-                    return jsonify({
-                        'success': False,
-                        'message': 'Generated but failed to submit for review'
-                    }), 500
+                return jsonify({
+                    'success': True,
+                    'message': 'Weekly digest generated successfully',
+                    'file': output_file
+                })
             else:
                 return jsonify({
                     'success': False,
@@ -939,6 +1068,115 @@ def edit_draft(draft_id):
         logger.error(f"Error editing draft: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/dashboard/drafts/<draft_id>/generate_podcast', methods=['POST'])
+@require_auth
+def generate_podcast_for_draft(draft_id):
+    """Generate podcast (text + audio) for a weekly digest draft"""
+    import subprocess
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get draft content
+        cur.execute("""
+            SELECT content_type, content_data
+            FROM quality_reviews
+            WHERE review_id = %s AND content_type = 'weekly_digest'
+        """, (draft_id,))
+
+        result = cur.fetchone()
+
+        if not result:
+            cur.close()
+            conn.close()
+            return jsonify({'success': False, 'message': 'Weekly digest draft not found'}), 404
+
+        content = result['content_data'] if isinstance(result['content_data'], dict) else json.loads(result['content_data'])
+
+        # Generate podcast text version (20-minute script)
+        podcast_text = generate_podcast_script(content)
+
+        # Save both versions
+        temp_file = f'/tmp/weekly_digest_for_audio_{draft_id}.json'
+        with open(temp_file, 'w') as f:
+            content['podcast_script'] = podcast_text
+            json.dump(content, f)
+
+        # Run audio generation
+        env = os.environ.copy()
+        result = subprocess.run([
+            'python3',
+            '/opt/projects/koi-processor/src/audio/podcast_generator.py',
+            temp_file,
+            '--output-dir', '/opt/projects/koi-processor/podcast_audio'
+        ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=180)
+
+        if result.returncode == 0:
+            # Update draft metadata with podcast status
+            cur.execute("""
+                UPDATE quality_reviews
+                SET
+                    quality_issues = jsonb_set(
+                        COALESCE(quality_issues, '{}'::jsonb),
+                        '{podcast_generated}',
+                        'true'
+                    ),
+                    content_data = content_data || %s::jsonb
+                WHERE review_id = %s
+            """, (json.dumps({'podcast_script': podcast_text}), draft_id))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            return jsonify({
+                'success': True,
+                'message': 'Podcast (text + audio) generated successfully'
+            })
+        else:
+            cur.close()
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': 'Podcast generation failed',
+                'error': result.stderr
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error generating podcast: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+def generate_podcast_script(content):
+    """Generate a 20-minute podcast script from weekly digest content"""
+    brief = content.get('brief_content', '')
+    themes = content.get('themes', {})
+
+    # Create a conversational podcast script
+    script = f"""
+# Weekly Podcast Script
+## Duration: ~20 minutes
+
+### Opening (2 minutes)
+Welcome to the Regen Network Weekly Podcast, where we explore the latest developments in regenerative finance and ecological economics. This week, we're covering the period from {content.get('week_start', 'this week')}.
+
+### Main Content (15 minutes)
+{brief}
+
+### Key Themes Discussion (2 minutes)
+Let's dive deeper into the key themes that emerged this week:
+"""
+
+    for theme, topics in themes.items():
+        script += f"\n- {theme}: {', '.join(topics) if isinstance(topics, list) else topics}"
+
+    script += """
+
+### Closing (1 minute)
+That's all for this week's Regen Network podcast. Join us next week as we continue to explore the cutting edge of regenerative economics and blockchain innovation. Until then, stay regenerative!
+"""
+
+    return script
+
 @app.route('/api/dashboard/drafts/<draft_id>/generate_audio', methods=['POST'])
 @require_auth
 def generate_audio_for_draft(draft_id):
@@ -1125,12 +1363,9 @@ def generate_daily():
     def run_generation():
         try:
             # Run the daily curator script
-            output_file = f'/tmp/daily_thread_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
             result = subprocess.run([
                 'python3',
-                '/opt/projects/koi-processor/scripts/run_daily_curator.py',
-                'daily',
-                '--output', output_file
+                '/opt/projects/koi-processor/src/content/daily_curator_llm.py'
             ], capture_output=True, text=True, cwd='/opt/projects/koi-processor')
 
             if result.returncode == 0:
@@ -1166,19 +1401,26 @@ def generate_weekly():
 
     def run_generation():
         try:
-            # Run the weekly aggregator script
+            # Run the NEW weekly curator with LLM (includes ALL content from week)
+            # Use venv Python if available
+            python_path = '/opt/projects/koi-processor/venv/bin/python3'
+            if not os.path.exists(python_path):
+                python_path = 'python3'
+
             result = subprocess.run([
-                'python3',
-                '/opt/projects/koi-processor/scripts/run_weekly_aggregator.py',
-                '--output', '/tmp/'
+                python_path,
+                '/opt/projects/koi-processor/src/content/weekly_curator_llm.py'
             ], capture_output=True, text=True, cwd='/opt/projects/koi-processor')
 
             if result.returncode == 0:
                 socketio.emit('generation_completed', {'type': 'weekly', 'success': True})
+                logger.info("Weekly digest with LLM generated successfully - includes ALL content")
             else:
                 socketio.emit('generation_error', {'type': 'weekly', 'error': result.stderr})
+                logger.error(f"Weekly generation failed: {result.stderr}")
         except Exception as e:
             socketio.emit('generation_error', {'type': 'weekly', 'error': str(e)})
+            logger.error(f"Weekly generation error: {e}")
 
     # Start generation in background thread
     thread = threading.Thread(target=run_generation)

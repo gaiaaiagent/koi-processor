@@ -8,31 +8,47 @@ let refreshInterval = null;
 
 // Initialize dashboard on page load
 document.addEventListener('DOMContentLoaded', function() {
-    initializeSocket();
+    // Disable websocket to prevent refresh issues
+    // initializeSocket();
     initializeCharts();
     loadDashboardData();
-    startAutoRefresh();
+    // Disable auto-refresh to prevent navigation issues
+    // startAutoRefresh();
 });
 
 // Initialize WebSocket connection
 function initializeSocket() {
-    // Determine base path for socket connection
-    const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
-    socket = io(basePath ? {path: basePath + '/socket.io/'} : {});
+    try {
+        // Check if io is defined (socket.io library loaded)
+        if (typeof io === 'undefined') {
+            console.log('Socket.io not available, running in offline mode');
+            return;
+        }
 
-    socket.on('connect', function() {
-        console.log('Connected to dashboard server');
-        updateConnectionStatus(true);
-    });
-    
-    socket.on('disconnect', function() {
-        console.log('Disconnected from dashboard server');
-        updateConnectionStatus(false);
-    });
-    
-    socket.on('dashboard_update', function(data) {
-        handleDashboardUpdate(data);
-    });
+        // Determine base path for socket connection
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        socket = io(basePath ? {path: basePath + '/socket.io/'} : {});
+
+        socket.on('connect', function() {
+            console.log('Connected to dashboard server');
+            updateConnectionStatus(true);
+        });
+
+        socket.on('disconnect', function() {
+            console.log('Disconnected from dashboard server');
+            updateConnectionStatus(false);
+        });
+
+        socket.on('dashboard_update', function(data) {
+            handleDashboardUpdate(data);
+        });
+
+        socket.on('connect_error', function(error) {
+            console.log('Socket connection error:', error.message);
+        });
+    } catch (error) {
+        console.log('Socket initialization skipped:', error.message);
+    }
 }
 
 // Initialize Chart.js charts
@@ -244,67 +260,87 @@ function updateDailySection(data) {
 
 // Update weekly digest section
 async function updateWeeklySection(data) {
-    // First fetch the actual current weekly digest
-    const currentWeekly = await fetchAPI('/api/dashboard/weekly/current');
+    // Store weekly drafts from database
+    if (data && data.all_digests) {
+        currentWeeklyDrafts = data.all_digests;
+    }
 
-    if (currentWeekly.success && currentWeekly.digest) {
-        // Use real digest data
-        const digest = currentWeekly.digest;
+    // Display drafts from database
+    const weeklyDraftsList = document.getElementById('weekly-drafts-list');
+    if (weeklyDraftsList && currentWeeklyDrafts.length > 0) {
+        let html = '<div class="list-group">';
 
-        // Update progress bar (100% if we have a digest)
-        const progressBar = document.getElementById('weekly-progress');
-        if (progressBar) {
-            progressBar.style.width = '100%';
-            progressBar.textContent = '100%';
-        }
-    
-        // Update content statistics from real digest
-        const wordCount = document.getElementById('word-count');
-        const sourceCount = document.getElementById('source-count');
-        const contentCount = document.getElementById('content-count');
-
-        if (wordCount) {
-            // Count words in markdown
-            const wordCountNum = currentWeekly.markdown ? currentWeekly.markdown.split(/\s+/).length : 0;
-            wordCount.textContent = `${wordCountNum} / 800-1200`;
-        }
-        if (sourceCount) {
-            // Count unique sources from clusters
-            const sources = new Set();
-            if (digest.clusters) {
-                digest.clusters.forEach(c => {
-                    if (c.items) c.items.forEach(i => {
-                        if (i.source) sources.add(i.source.split('-')[0]);
-                    });
-                });
+        currentWeeklyDrafts.forEach((draft, index) => {
+            // Parse the content data
+            let content = draft.content;
+            if (typeof content === 'string') {
+                try {
+                    content = JSON.parse(content);
+                } catch (e) {
+                    console.error('Error parsing weekly draft content:', e);
+                }
             }
-            sourceCount.textContent = sources.size;
-        }
-        if (contentCount) {
-            contentCount.textContent = digest.total_items || 0;
-        }
 
-        // Update digest content preview
-        const digestContent = document.getElementById('weekly-digest-content');
-        if (digestContent) {
-            let html = `
-                <div class="mb-3">
-                    <span class="badge bg-success me-2">Status: generated</span>
-                    <span class="badge bg-secondary">Word Count: ${currentWeekly.markdown ? currentWeekly.markdown.split(/\s+/).length : 0}</span>
-                </div>
-                <div class="content-preview">
-                    <h6>Weekly Brief Preview</h6>
-                    <p>${escapeHtml(currentWeekly.markdown ? currentWeekly.markdown.substring(0, 500) : '')}...</p>
+            const createdDate = new Date(draft.created_at);
+            const weekStart = content.week_start ? new Date(content.week_start).toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) : '';
+            const weekEnd = content.week_end ? new Date(content.week_end).toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) : '';
+
+            html += `
+                <div class="list-group-item">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="mb-0">Weekly Digest: ${weekStart} - ${weekEnd}</h6>
+                        <span class="badge bg-${draft.status === 'draft' ? 'warning' : 'primary'}">${draft.status}</span>
+                    </div>
+                    <p class="mb-2 text-muted small">Created: ${createdDate.toLocaleString()}</p>
+                    <button class="btn btn-sm btn-primary me-2" onclick="viewWeeklyDraft('${draft.id}')">View Details</button>
+                    <button class="btn btn-sm btn-success me-2" onclick="approveWeeklyDraft('${draft.id}')">Approve</button>
+                    <button class="btn btn-sm btn-danger" onclick="rejectWeeklyDraft('${draft.id}')">Reject</button>
+                    <div id="weekly-draft-content-${draft.id}" class="mt-3" style="display: none;"></div>
                 </div>
             `;
-            digestContent.innerHTML = html;
+        });
+
+        html += '</div>';
+        weeklyDraftsList.innerHTML = html;
+    } else if (weeklyDraftsList) {
+        weeklyDraftsList.innerHTML = '<p class="text-muted">No weekly drafts available. Click "Run Now" to generate one.</p>';
+    }
+
+    // Also try to fetch the current weekly digest from file
+    try {
+        const currentWeekly = await fetchAPI('/api/dashboard/weekly/current');
+
+        if (currentWeekly.success && currentWeekly.digest) {
+            // Use real digest data
+            const digest = currentWeekly.digest;
+
+            // Update progress bar (100% if we have a digest)
+            const progressBar = document.getElementById('weekly-progress');
+            if (progressBar) {
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+            }
+
+            // Update content statistics from real digest
+            const wordCount = document.getElementById('word-count');
+            const sourceCount = document.getElementById('source-count');
+            const contentCount = document.getElementById('content-count');
+
+            if (wordCount) {
+                // Count words in markdown
+                const wordCountNum = currentWeekly.markdown ? currentWeekly.markdown.split(/\s+/).length : 0;
+                wordCount.textContent = `${wordCountNum} / 800-1200`;
+            }
+            if (sourceCount) {
+                // Count unique sources from statistics
+                sourceCount.textContent = digest.statistics?.active_sources || 0;
+            }
+            if (contentCount) {
+                contentCount.textContent = digest.total_items || 0;
+            }
         }
-    } else {
-        // No digest available
-        const digestContent = document.getElementById('weekly-digest-content');
-        if (digestContent) {
-            digestContent.innerHTML = '<p class="text-muted">No weekly digest generated yet</p>';
-        }
+    } catch (error) {
+        console.log('No current weekly digest file found');
     }
 }
 
@@ -492,6 +528,7 @@ function updateConnectionStatus(connected) {
 
 // Utility functions
 function escapeHtml(text) {
+    if (!text) return '';
     const map = {
         '&': '&amp;',
         '<': '&lt;',
@@ -499,7 +536,7 @@ function escapeHtml(text) {
         '"': '&quot;',
         "'": '&#039;'
     };
-    return text.replace(/[&<>"']/g, m => map[m]);
+    return String(text).replace(/[&<>"']/g, m => map[m]);
 }
 
 function formatDate(dateStr) {
@@ -543,9 +580,25 @@ function reviewContent(id) {
     // TODO: Implement review modal or redirect
 }
 
+// Track generation in progress to prevent duplicates
+let generationInProgress = false;
+
 function triggerManualRun(type) {
-    if (confirm(`Are you sure you want to manually trigger the ${type} bot?`)) {
+    // Prevent double-clicks
+    if (generationInProgress) {
+        showNotification('Generation already in progress, please wait...', 'warning');
+        return;
+    }
+
+    if (confirm(`Are you sure you want to manually generate a ${type} digest?`)) {
         console.log('Triggering manual run:', type);
+
+        // Set flag to prevent duplicate requests
+        generationInProgress = true;
+
+        // Disable the button temporarily
+        const buttons = document.querySelectorAll(`[onclick*="triggerManualRun"]`);
+        buttons.forEach(btn => btn.disabled = true);
 
         // Show loading state
         showNotification(`Starting ${type} generation...`, 'info');
@@ -553,15 +606,16 @@ function triggerManualRun(type) {
         // Determine base path based on current location
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
 
-        // Make API call to trigger generation
-        fetch(`${basePath}/api/dashboard/generate/${type}`, {
+        // Use the single trigger_manual_run endpoint to avoid duplicates
+        fetch(`${basePath}/api/dashboard/trigger_manual_run`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
+                type: type,
                 draft_mode: true,
-                manual_trigger: true
+                skip_audio: type === 'weekly'
             })
         })
         .then(response => response.json())
@@ -569,7 +623,13 @@ function triggerManualRun(type) {
             if (data.success) {
                 showNotification(`${type.charAt(0).toUpperCase() + type.slice(1)} generation started successfully!`, 'success');
                 // Refresh dashboard after a delay
-                setTimeout(() => refreshDashboard(), 5000);
+                setTimeout(() => {
+                    refreshDashboard();
+                    // If it's weekly, also refresh the weekly section
+                    if (type === 'weekly') {
+                        fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
+                    }
+                }, 5000);
             } else {
                 showNotification(`Failed to start ${type} generation: ${data.error || 'Unknown error'}`, 'error');
             }
@@ -577,6 +637,12 @@ function triggerManualRun(type) {
         .catch(error => {
             console.error('Error triggering manual run:', error);
             showNotification(`Error: ${error.message}`, 'error');
+        })
+        .finally(() => {
+            // Reset flag and re-enable buttons
+            generationInProgress = false;
+            const buttons = document.querySelectorAll(`[onclick*="triggerManualRun"]`);
+            buttons.forEach(btn => btn.disabled = false);
         });
     }
 }
@@ -594,20 +660,28 @@ function clearAlerts() {
 }
 // ==================== DRAFT MANAGEMENT FUNCTIONS ====================
 
-// Global variable to store current drafts
+// Global variables to store current drafts
 let currentDrafts = [];
+let currentWeeklyDrafts = [];
 
 // Load all drafts
 async function loadDrafts() {
+    console.log('Loading drafts...');
     try {
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
-        const response = await fetch(`${basePath}/api/dashboard/drafts/list`);
+        const url = `${basePath}/api/dashboard/drafts/list`;
+        console.log('Fetching from:', url);
+        const response = await fetch(url);
         const data = await response.json();
+        console.log('API response:', data);
 
         if (data.success) {
+            console.log(`Loaded ${data.drafts.length} drafts`);
             currentDrafts = data.drafts;
             updateDraftCounts(data.drafts);
             renderDraftLists(data.drafts);
+        } else {
+            console.error('API returned success=false');
         }
     } catch (error) {
         console.error('Error loading drafts:', error);
@@ -641,13 +715,109 @@ function renderDraftLists(drafts) {
 
 function renderDraftList(drafts, containerId) {
     const container = document.getElementById(containerId);
-    if (!container) return;
-
-    if (drafts.length === 0) {
+    console.log(`Rendering ${drafts.length} drafts to ${containerId}`, drafts);
+    if (!container) {
+        console.error(`Container ${containerId} not found!`);
         return;
     }
 
-    let html = '<div class="list-group">';
+    if (drafts.length === 0) {
+        console.log(`No drafts for ${containerId}, keeping placeholder`);
+        // Keep the placeholder text when no drafts
+        return;
+    }
+
+    console.log(`Building simplified HTML for ${drafts.length} drafts in ${containerId}`);
+
+    // Build a simpler HTML structure first
+    let html = '';
+
+    try {
+        drafts.forEach((draft, index) => {
+            console.log(`Processing draft ${index}:`, draft);
+            const created = new Date(draft.created_at).toLocaleString();
+            const typeLabel = draft.type === 'daily_thread' ? 'Daily Thread' : 'Weekly Digest';
+
+            // Extract content preview
+            let contentPreview = '';
+            let itemCount = 0;
+
+            if (draft.type === 'weekly_digest' && draft.content) {
+                if (draft.content.brief) {
+                    // Extract first few lines of brief - plain text only
+                    const lines = draft.content.brief.split('\n').filter(l => l.trim());
+                    contentPreview = lines.slice(0, 3).join(' | ');
+                }
+                if (draft.content.total_items) {
+                    itemCount = draft.content.total_items;
+                }
+            } else if (draft.type === 'daily_thread' && draft.content) {
+                if (draft.content.posts && Array.isArray(draft.content.posts)) {
+                    itemCount = draft.content.posts.length;
+                    if (itemCount > 0 && draft.content.posts[0].content) {
+                        contentPreview = draft.content.posts[0].content.substring(0, 200) + '...';
+                    }
+                }
+            }
+
+            // Build a simple card for each draft with collapsible detail
+            const collapseId = `draft-detail-${draft.id}`;
+            html += `
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>${typeLabel}</strong>
+                                <span class="badge bg-info ms-2">${draft.status}</span>
+                                ${itemCount > 0 ? `<span class="badge bg-secondary ms-2">${itemCount} items</span>` : ''}
+                            </div>
+                            <small class="text-muted">${created}</small>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        ${contentPreview ? `<div class="mb-3 text-muted small">${escapeHtml(contentPreview)}</div>` : ''}
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <small class="text-muted">ID: ${draft.id}</small>
+                            <div>
+                                <button class="btn btn-sm btn-primary" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+                                    <i class="bi bi-eye"></i> View Details
+                                </button>
+                                ${renderDraftActions(draft)}
+                            </div>
+                        </div>
+                        <div class="collapse" id="${collapseId}">
+                            <div class="card card-body mt-3">
+                                <div id="${collapseId}-content" data-draft-id="${draft.id}">
+                                    Loading...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+
+        // Set the HTML
+        container.innerHTML = html;
+        console.log(`Successfully rendered ${drafts.length} drafts to ${containerId}`);
+
+        // Add event listeners for collapse events
+        drafts.forEach(draft => {
+            const collapseId = `draft-detail-${draft.id}`;
+            const collapseEl = document.getElementById(collapseId);
+            if (collapseEl) {
+                collapseEl.addEventListener('shown.bs.collapse', function() {
+                    renderDraftFullContent(draft.id, `${collapseId}-content`);
+                });
+            }
+        });
+    } catch (error) {
+        console.error(`Error rendering drafts:`, error);
+        container.innerHTML = `<div class="alert alert-danger">Error rendering drafts: ${error.message}</div>`;
+    }
+    return; // Early return to skip the complex rendering below
+
+    // Original complex rendering code follows (now skipped)
     drafts.forEach((draft, index) => {
         const typeIcon = draft.type === 'daily_thread' ? 'chat-dots' : 'journal-text';
         const typeBadge = draft.type === 'daily_thread' ? 'primary' : 'info';
@@ -862,32 +1032,38 @@ function renderDraftList(drafts, containerId) {
         `;
     });
     html += '</div>';
-    container.innerHTML = html;
+    console.log(`Setting innerHTML for ${containerId}, HTML length: ${html.length}`);
+    try {
+        container.innerHTML = html;
+        console.log(`Successfully rendered ${drafts.length} drafts to ${containerId}`);
+    } catch (error) {
+        console.error(`Error setting innerHTML for ${containerId}:`, error);
+        console.error('HTML that failed:', html);
+    }
 }
 
 function renderDraftActions(draft) {
-    let html = '<div class="btn-group btn-group-sm">';
+    let html = '';
 
     if (draft.status === 'draft' || draft.status === 'pending_review') {
         html += `
-            <button class="btn btn-success" onclick="approveDraft('${draft.id}')">
+            <button class="btn btn-sm btn-success me-1" onclick="approveDraft('${draft.id}')" title="Approve">
                 <i class="bi bi-check"></i>
             </button>
-            <button class="btn btn-danger" onclick="rejectDraft('${draft.id}')">
+            <button class="btn btn-sm btn-danger me-1" onclick="rejectDraft('${draft.id}')" title="Reject">
                 <i class="bi bi-x"></i>
             </button>
         `;
 
         if (draft.type === 'weekly_digest' && !draft.metadata?.audio_generated) {
             html += `
-                <button class="btn btn-info" onclick="generateAudio('${draft.id}')">
-                    <i class="bi bi-mic"></i>
+                <button class="btn btn-sm btn-info" onclick="generatePodcast('${draft.id}')" title="Generate Podcast">
+                    <i class="bi bi-mic"></i> Podcast
                 </button>
             `;
         }
     }
 
-    html += '</div>';
     return html;
 }
 
@@ -935,22 +1111,33 @@ async function rejectDraft(draftId) {
     }
 }
 
-async function generateAudio(draftId) {
-    if (!confirm('Generate audio? This may take a few minutes.')) return;
+async function generatePodcast(draftId) {
+    if (!confirm('Generate podcast (text + audio)? This may take a few minutes.')) return;
 
     try {
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
-        const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/generate_audio`, {
+        showNotification('Generating podcast brief and audio...', 'info');
+
+        const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/generate_podcast`, {
             method: 'POST'
         });
 
         const data = await response.json();
         if (data.success) {
+            showNotification('Podcast generated successfully!', 'success');
             loadDrafts();
+        } else {
+            showNotification(data.error || 'Failed to generate podcast', 'error');
         }
     } catch (error) {
-        console.error('Error generating audio:', error);
+        console.error('Error generating podcast:', error);
+        showNotification('Error generating podcast', 'error');
     }
+}
+
+// Keep old function for compatibility
+async function generateAudio(draftId) {
+    return generatePodcast(draftId);
 }
 
 async function generateNewDraft(type) {
@@ -1009,6 +1196,198 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// Functions for weekly drafts
+async function viewWeeklyDraft(draftId) {
+    const draft = currentWeeklyDrafts.find(d => d.id === draftId);
+    if (!draft) return;
+
+    const contentDiv = document.getElementById(`weekly-draft-content-${draftId}`);
+    if (!contentDiv) return;
+
+    // Toggle visibility
+    if (contentDiv.style.display === 'block') {
+        contentDiv.style.display = 'none';
+        return;
+    }
+
+    // Parse the content
+    let content = draft.content;
+    if (typeof content === 'string') {
+        try {
+            content = JSON.parse(content);
+        } catch (e) {
+            console.error('Error parsing weekly draft content:', e);
+        }
+    }
+
+    // Convert markdown brief to HTML
+    const briefHtml = content.brief ? convertMarkdownToHtml(content.brief) : '<p>No content available</p>';
+
+    let html = `
+        <div class="mt-3 p-3 bg-light rounded">
+            <h5>Executive Summary</h5>
+            <p>${escapeHtml(content.executive_summary || 'No summary available')}</p>
+
+            <h5>Weekly Brief</h5>
+            <div class="markdown-content">${briefHtml}</div>
+
+            <h5>Statistics</h5>
+            <ul>
+                <li>Total Items: ${content.total_items || 0}</li>
+                <li>Total Discussions: ${content.total_discussions || 0}</li>
+                <li>Active Sources: ${content.statistics?.active_sources || 0}</li>
+            </ul>
+
+            <h5>Top Stories</h5>
+            <ul>
+                ${(content.top_stories || []).map(story =>
+                    `<li><strong>${escapeHtml(story.title)}</strong>: ${escapeHtml(story.summary)}</li>`
+                ).join('')}
+            </ul>
+        </div>
+    `;
+
+    contentDiv.innerHTML = html;
+    contentDiv.style.display = 'block';
+}
+
+async function approveWeeklyDraft(draftId) {
+    if (!confirm('Approve this weekly digest for publication?')) return;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/drafts/approve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ draft_id: draftId })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showNotification('Weekly digest approved successfully', 'success');
+            // Reload the weekly section
+            fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
+        } else {
+            showNotification(data.error || 'Failed to approve digest', 'error');
+        }
+    } catch (error) {
+        console.error('Error approving weekly draft:', error);
+        showNotification('Error approving digest', 'error');
+    }
+}
+
+async function rejectWeeklyDraft(draftId) {
+    const reason = prompt('Please provide a reason for rejection:');
+    if (!reason) return;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        const response = await fetch(`${basePath}/api/dashboard/drafts/reject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                draft_id: draftId,
+                reason: reason
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showNotification('Weekly digest rejected', 'info');
+            // Reload the weekly section
+            fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
+        } else {
+            showNotification(data.error || 'Failed to reject digest', 'error');
+        }
+    } catch (error) {
+        console.error('Error rejecting weekly draft:', error);
+        showNotification('Error rejecting digest', 'error');
+    }
+}
+
+// Function to render full draft content with markdown support
+function renderDraftFullContent(draftId, targetElementId) {
+    const draft = currentDrafts.find(d => d.id === draftId);
+    const targetElement = document.getElementById(targetElementId);
+
+    if (!draft || !targetElement) {
+        console.error('Draft or target element not found:', draftId, targetElementId);
+        return;
+    }
+
+    let content = '';
+
+    if (draft.type === 'weekly_digest' && draft.content) {
+        if (draft.content.brief) {
+            // Convert markdown to HTML (basic conversion)
+            const htmlContent = convertMarkdownToHtml(draft.content.brief);
+            content = `<div class="digest-content">${htmlContent}</div>`;
+        }
+
+        if (draft.content.citations && draft.content.citations.length > 0) {
+            content += `<h5 class="mt-4">Citations (${draft.content.citations.length})</h5><ul class="list-group list-group-flush">`;
+            draft.content.citations.forEach(cite => {
+                // Fix malformed GitHub URLs
+                let url = cite.url || '';
+                if (url.includes('github_sensor_')) {
+                    url = url.replace(/\/github_sensor_[^\/]+\//, '/');
+                }
+
+                content += `<li class="list-group-item">
+                    <strong>${escapeHtml(cite.title || 'Untitled')}</strong><br>
+                    <small class="text-muted">Source: ${escapeHtml(cite.source || 'Unknown')} | Date: ${cite.date || 'N/A'}</small><br>
+                    ${url ? `<a href="${url}" target="_blank" class="small">${url}</a>` : ''}
+                </li>`;
+            });
+            content += '</ul>';
+        }
+    } else if (draft.type === 'daily_thread' && draft.content) {
+        if (draft.content.posts && Array.isArray(draft.content.posts)) {
+            content = `<h5>Daily Thread Posts (${draft.content.posts.length})</h5>`;
+            draft.content.posts.forEach((post, i) => {
+                content += `<div class="card mb-2">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">Post ${i+1}</h6>
+                        <p class="card-text">${escapeHtml(post.content || '')}</p>
+                    </div>
+                </div>`;
+            });
+        }
+    }
+
+    targetElement.innerHTML = content || '<p class="text-muted">No content available</p>';
+}
+
+// Basic markdown to HTML converter
+function convertMarkdownToHtml(markdown) {
+    if (!markdown) return '';
+
+    let html = escapeHtml(markdown);
+
+    // Convert headers
+    html = html.replace(/^### (.*$)/gim, '<h5>$1</h5>');
+    html = html.replace(/^## (.*$)/gim, '<h4>$1</h4>');
+    html = html.replace(/^# (.*$)/gim, '<h3>$1</h3>');
+
+    // Convert bold
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // Convert italic
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Convert links
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+    // Convert line breaks
+    html = html.replace(/\n/g, '<br>');
+
+    // Convert lists
+    html = html.replace(/^\- (.+)$/gim, '<li>$1</li>');
+    html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+
+    return html;
+}
+
 // Export functions to global scope for HTML onclick handlers
 // This must be at the end after all functions are defined
 window.loadDrafts = loadDrafts;
@@ -1019,3 +1398,4 @@ window.refreshDrafts = refreshDrafts;
 window.triggerManualRun = triggerManualRun;
 window.updateDraftCounts = updateDraftCounts;
 window.renderDraftLists = renderDraftLists;
+window.renderDraftFullContent = renderDraftFullContent;

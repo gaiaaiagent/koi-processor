@@ -12,7 +12,8 @@
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Socket.IO -->
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <!-- Disabled to prevent websocket errors and page refreshes -->
+    <!-- <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script> -->
     
     <style>
         body {
@@ -286,9 +287,25 @@
             <div class="tab-pane fade" id="weekly" role="tabpanel">
                 <div class="row">
                     <div class="col-md-8">
+                        <div class="card mb-3">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">Weekly Digest Drafts</h5>
+                                <button class="btn btn-sm btn-primary" onclick="triggerManualRun('weekly')">
+                                    <i class="bi bi-plus-circle"></i> Generate New
+                                </button>
+                            </div>
+                            <div class="card-body">
+                                <div id="weekly-drafts-list">
+                                    <div class="text-center text-muted py-4">
+                                        <i class="bi bi-journal-text" style="font-size: 3rem;"></i>
+                                        <p>Loading weekly drafts...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         <div class="card">
                             <div class="card-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0">Current Week's Digest</h5>
+                                <h5 class="mb-0">Current Published Digest</h5>
                                 <div class="progress" style="width: 200px; height: 20px;">
                                     <div class="progress-bar" id="weekly-progress" role="progressbar" style="width: 0%">0%</div>
                                 </div>
@@ -297,7 +314,7 @@
                                 <div id="weekly-digest-content">
                                     <div class="text-center text-muted py-4">
                                         <i class="bi bi-journal-text" style="font-size: 3rem;"></i>
-                                        <p>Weekly digest in progress...</p>
+                                        <p>No published digest available</p>
                                     </div>
                                 </div>
                             </div>
@@ -408,9 +425,7 @@
                                                 <h6 class="mb-1">Weekly Digest</h6>
                                                 <p class="mb-0 text-muted">Next run: <span id="next-weekly">Loading...</span></p>
                                             </div>
-                                            <button class="btn btn-sm btn-outline-primary" onclick="triggerManualRun('weekly')">
-                                                <i class="bi bi-play-circle"></i> Run Now
-                                            </button>
+                                            <span class="text-muted small">Use Weekly tab to generate</span>
                                         </div>
                                     </div>
                                 </div>
@@ -545,7 +560,7 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
     <!-- Dashboard JavaScript -->
-    <script src="static/dashboard.js"></script>
+    <script src="static/dashboard.v5.js"></script>
 
     <!-- Inline backup for critical functions -->
     <script>
@@ -582,19 +597,29 @@
 
             // Update batch queue count periodically
             function updateBatchQueueCount() {
-                fetch('http://localhost:8006/queue/stats')
-                    .then(response => response.json())
+                fetch('/api/dashboard/queue/stats')
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        return response.json();
+                    })
                     .then(data => {
                         const count = data.queued_count || 0;
-                        document.getElementById('batch-queue-count').textContent = count;
+                        const countEl = document.getElementById('batch-queue-count');
+                        if (countEl) {
+                            countEl.textContent = count;
+                        }
                     })
                     .catch(error => {
-                        console.error('Failed to fetch batch queue stats:', error);
+                        // Silently log the error - don't refresh or show alerts
+                        console.log('Queue stats unavailable:', error.message);
                     });
             }
 
-            updateBatchQueueCount();
-            setInterval(updateBatchQueueCount, 30000); // Update every 30 seconds
+            // Disable queue count updates to prevent 404 errors
+            // updateBatchQueueCount();
+            // setInterval(updateBatchQueueCount, 30000); // Update every 30 seconds
         });
 
         // Define triggerManualRun function
