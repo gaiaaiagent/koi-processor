@@ -388,6 +388,36 @@ def submit_to_review(file_path: str, content_type: str):
     if provenance['source_memories']:
         provenance['source_count'] = max(provenance['source_count'], len(provenance['source_memories']))
 
+    # For daily threads, extract sources from individual posts
+    if content_type == 'daily_thread' and 'posts' in content:
+        post_sources = []
+        for post in content.get('posts', []):
+            if 'sources' in post and post['sources']:
+                for source in post['sources']:
+                    if isinstance(source, dict):
+                        # Extract source information
+                        if source.get('type') == 'aggregated':
+                            # Add sensor breakdown to platforms
+                            if source.get('sensor_breakdown'):
+                                for sensor in source['sensor_breakdown'].keys():
+                                    if sensor not in provenance['platforms']:
+                                        provenance['platforms'].append(sensor)
+                        elif source.get('type') == 'ledger':
+                            if 'ledger_sensor' not in provenance['platforms']:
+                                provenance['platforms'].append('ledger_sensor')
+                        else:
+                            # Regular source with sensor, url, etc.
+                            if source.get('sensor'):
+                                if source['sensor'] not in provenance['platforms']:
+                                    provenance['platforms'].append(source['sensor'])
+                            if source.get('url'):
+                                post_sources.append(source['url'])
+
+        # Add unique post sources
+        if post_sources:
+            provenance['sources'].extend(post_sources)
+            provenance['sources'] = list(set(provenance['sources']))  # Remove duplicates
+
     # For weekly digests, check for additional sources
     if content_type == 'weekly_digest' and 'sections' in content:
         # Count unique sources from weekly sections

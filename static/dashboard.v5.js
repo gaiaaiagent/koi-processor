@@ -1114,24 +1114,53 @@ async function rejectDraft(draftId) {
 async function generatePodcast(draftId) {
     if (!confirm('Generate podcast (text + audio)? This may take a few minutes.')) return;
 
+    // Find the button that was clicked and show loading state
+    const button = event.target.closest('button');
+    const originalContent = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Generating...';
+
     try {
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
-        showNotification('Generating podcast brief and audio...', 'info');
+        showNotification('🎙️ Generating podcast brief and audio...', 'info');
 
         const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/generate_podcast`, {
             method: 'POST'
         });
 
         const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || `Server error: ${response.status}`);
+        }
+
         if (data.success) {
-            showNotification('Podcast generated successfully!', 'success');
-            loadDrafts();
+            // Show detailed success message with file info
+            let successMsg = '✅ ' + data.message;
+            if (data.file_size) {
+                successMsg += ` (${data.file_size})`;
+            }
+            showNotification(successMsg, 'success');
+
+            // Show audio file location if available
+            if (data.audio_file) {
+                console.log('Podcast audio file:', data.audio_file);
+            }
+
+            // Reload drafts to show updated status
+            setTimeout(() => loadDrafts(), 1000);
         } else {
-            showNotification(data.error || 'Failed to generate podcast', 'error');
+            showNotification(`❌ ${data.error || data.message || 'Failed to generate podcast'}`, 'error');
         }
     } catch (error) {
         console.error('Error generating podcast:', error);
-        showNotification('Error generating podcast', 'error');
+        showNotification(`❌ Error: ${error.message || 'Failed to generate podcast'}`, 'error');
+    } finally {
+        // Restore button state
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalContent;
+        }
     }
 }
 
@@ -1318,10 +1347,56 @@ function renderDraftFullContent(draftId, targetElementId) {
     let content = '';
 
     if (draft.type === 'weekly_digest' && draft.content) {
+        // Check if podcast has been generated for weekly digest
+        // Check both metadata (quality_issues) and content for podcast_generated flag
+        const isPodcastGenerated = (draft.metadata && (draft.metadata.podcast_generated || draft.metadata.audio_generated)) ||
+                                   (draft.content && draft.content.audio_file);
+
+        if (isPodcastGenerated) {
+            content += `<div class="alert alert-success mb-3">
+                <h6><i class="bi bi-mic-fill"></i> Podcast Generated</h6>`;
+
+            // Add audio player if file exists
+            if (draft.content && draft.content.audio_file) {
+                const filename = draft.content.audio_file.split('/').pop();
+                // Get the base path for URLs
+                const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+                // Ensure proper URL encoding for special characters
+                const audioUrl = `${basePath}/podcast_audio/${encodeURIComponent(filename)}`;
+                content += `
+                    <audio controls class="w-100 mb-2" preload="metadata">
+                        <source src="${audioUrl}" type="audio/mpeg">
+                        <source src="${audioUrl}" type="audio/mp3">
+                        Your browser does not support the audio element.
+                    </audio>
+                    <div class="btn-group btn-group-sm" role="group">
+                        <a href="${basePath}/podcast_audio/${encodeURIComponent(filename)}" download="${filename}" class="btn btn-outline-primary">
+                            <i class="bi bi-download"></i> Download MP3
+                        </a>
+                        <a href="${basePath}/api/dashboard/drafts/${draft.id}/markdown" download="weekly_digest.md" class="btn btn-outline-secondary">
+                            <i class="bi bi-file-text"></i> Download Markdown for NotebookLM
+                        </a>
+                    </div>`;
+            } else {
+                // Fallback to find the latest audio file for this draft
+                const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+                content += `
+                    <div class="btn-group btn-group-sm" role="group">
+                        <a href="${basePath}/podcast_audio/regen_weekly_2025-09-25T06:08:05.789145+00:00.mp3" download class="btn btn-outline-primary">
+                            <i class="bi bi-download"></i> Download Latest MP3
+                        </a>
+                        <a href="${basePath}/api/dashboard/drafts/${draft.id}/markdown" download="weekly_digest.md" class="btn btn-outline-secondary">
+                            <i class="bi bi-file-text"></i> Download Markdown for NotebookLM
+                        </a>
+                    </div>`;
+            }
+            content += `</div>`;
+        }
+
         if (draft.content.brief) {
             // Convert markdown to HTML (basic conversion)
             const htmlContent = convertMarkdownToHtml(draft.content.brief);
-            content = `<div class="digest-content">${htmlContent}</div>`;
+            content += `<div class="digest-content">${htmlContent}</div>`;
         }
 
         if (draft.content.citations && draft.content.citations.length > 0) {
@@ -1344,12 +1419,78 @@ function renderDraftFullContent(draftId, targetElementId) {
     } else if (draft.type === 'daily_thread' && draft.content) {
         if (draft.content.posts && Array.isArray(draft.content.posts)) {
             content = `<h5>Daily Thread Posts (${draft.content.posts.length})</h5>`;
+            // Check if podcast has been generated
+            if (draft.metadata && draft.metadata.podcast_generated) {
+                content += `<div class="alert alert-success mb-3">
+                    <h6><i class="bi bi-mic-fill"></i> Podcast Generated</h6>`;
+
+                // Add audio player if file exists
+                if (draft.content.audio_file) {
+                    const filename = draft.content.audio_file.split('/').pop();
+                    // Get the base path for URLs
+                    const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+                    // Ensure proper URL encoding for special characters
+                    const audioUrl = `${basePath}/podcast_audio/${encodeURIComponent(filename)}`;
+                    content += `
+                        <audio controls class="w-100 mb-2">
+                            <source src="${audioUrl}" type="audio/mpeg">
+                            Your browser does not support the audio element.
+                        </audio>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <a href="${basePath}/podcast_audio/${encodeURIComponent(filename)}" download="${filename}" class="btn btn-outline-primary">
+                                <i class="bi bi-download"></i> Download MP3
+                            </a>
+                            <a href="${basePath}/api/dashboard/drafts/${draft.id}/markdown" download="weekly_digest.md" class="btn btn-outline-secondary">
+                                <i class="bi bi-file-text"></i> Download Markdown
+                            </a>
+                        </div>`;
+                }
+                content += `</div>`;
+            }
+
             draft.content.posts.forEach((post, i) => {
                 content += `<div class="card mb-2">
                     <div class="card-body">
                         <h6 class="card-subtitle mb-2 text-muted">Post ${i+1}</h6>
-                        <p class="card-text">${escapeHtml(post.content || '')}</p>
-                    </div>
+                        <p class="card-text">${escapeHtml(post.content || '')}</p>`;
+
+                // Display sources if available
+                if (post.sources && post.sources.length > 0) {
+                    content += '<div class="mt-2"><small class="text-muted"><strong>Sources:</strong><ul class="mb-0">';
+                    post.sources.forEach(source => {
+                        if (typeof source === 'object') {
+                            if (source.type === 'aggregated') {
+                                content += `<li>${source.description || 'Aggregated content'}`;
+                                if (source.sensor_breakdown) {
+                                    content += '<ul>';
+                                    for (const [sensor, count] of Object.entries(source.sensor_breakdown)) {
+                                        content += `<li>${sensor}: ${count} items</li>`;
+                                    }
+                                    content += '</ul>';
+                                }
+                                content += '</li>';
+                            } else if (source.type === 'ledger') {
+                                content += `<li>${source.description || 'Ledger data'}</li>`;
+                            } else if (source.type === 'fallback') {
+                                content += `<li>${source.description || 'Fallback content'}</li>`;
+                            } else {
+                                let sourceText = source.sensor || 'Unknown source';
+                                if (source.event_type) sourceText += ` (${source.event_type})`;
+                                if (source.published_at) sourceText += ` - ${source.published_at}`;
+                                content += `<li>${sourceText}`;
+                                if (source.url) {
+                                    content += ` - <a href="${source.url}" target="_blank">Link</a>`;
+                                }
+                                content += '</li>';
+                            }
+                        } else {
+                            content += `<li>${source}</li>`;
+                        }
+                    });
+                    content += '</ul></small></div>';
+                }
+
+                content += `</div>
                 </div>`;
             });
         }

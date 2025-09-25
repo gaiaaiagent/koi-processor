@@ -244,6 +244,10 @@ requests.post('http://localhost:8400/api/dashboard/notify', json={
 - `GET /api/dashboard/podcast/status` - Podcast generation status
 - `GET /api/dashboard/schedule` - Upcoming scheduled runs
 - `GET /api/dashboard/errors` - Recent errors and alerts
+- `GET /api/dashboard/drafts/list` - List all drafts with podcast status
+- `GET /api/dashboard/drafts/<id>/markdown` - Download draft as markdown for NotebookLM
+- `POST /api/dashboard/drafts/<id>/generate_podcast` - Generate podcast audio for draft
+- `GET /podcast_audio/<filename>` - Stream or download podcast audio files
 - `POST /api/dashboard/notify` - Receive notifications from components
 
 ## Configuration

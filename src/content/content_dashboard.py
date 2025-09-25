@@ -1102,17 +1102,40 @@ def generate_podcast_for_draft(draft_id):
             content['podcast_script'] = podcast_text
             json.dump(content, f)
 
-        # Run audio generation
+        # Run audio generation using simple podcast generator
         env = os.environ.copy()
-        result = subprocess.run([
+
+        # Log the command being run
+        cmd = [
             'python3',
-            '/opt/projects/koi-processor/src/audio/podcast_generator.py',
+            '/opt/projects/koi-processor/src/audio/simple_podcast_generator.py',
             temp_file,
             '--output-dir', '/opt/projects/koi-processor/podcast_audio'
-        ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=180)
+        ]
+        logger.info(f"Running podcast generation command: {' '.join(cmd)}")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=180)
+
+        logger.info(f"Podcast generation result - Return code: {result.returncode}")
+        logger.info(f"Podcast generation stdout: {result.stdout}")
+        if result.stderr:
+            logger.error(f"Podcast generation stderr: {result.stderr}")
 
         if result.returncode == 0:
-            # Update draft metadata with podcast status
+            # Parse output to find the generated file
+            audio_file = None
+            if '✅ Podcast generated:' in result.stdout:
+                for line in result.stdout.split('\n'):
+                    if '✅ Podcast generated:' in line:
+                        audio_file = line.split('✅ Podcast generated:')[1].strip()
+                        break
+
+            # Update draft metadata with podcast status and audio file info
+            update_data = {
+                'podcast_script': podcast_text,
+                'audio_file': audio_file
+            }
+
             cur.execute("""
                 UPDATE quality_reviews
                 SET
@@ -1123,15 +1146,37 @@ def generate_podcast_for_draft(draft_id):
                     ),
                     content_data = content_data || %s::jsonb
                 WHERE review_id = %s
-            """, (json.dumps({'podcast_script': podcast_text}), draft_id))
+            """, (json.dumps(update_data), draft_id))
 
             conn.commit()
             cur.close()
             conn.close()
 
+            # Extract file size if mentioned
+            file_size = None
+            if '📊 File size:' in result.stdout:
+                for line in result.stdout.split('\n'):
+                    if '📊 File size:' in line:
+                        file_size = line.split('📊 File size:')[1].strip()
+                        break
+
+            # Also save markdown version for NotebookLM
+            try:
+                markdown = generate_weekly_markdown(content)
+                markdown_file = f'/opt/projects/koi-processor/podcast_audio/weekly_digest_{draft_id[:8]}.md'
+                with open(markdown_file, 'w') as f:
+                    f.write(markdown)
+                logger.info(f"Saved markdown version to {markdown_file}")
+            except Exception as e:
+                logger.error(f"Error saving markdown: {e}")
+
             return jsonify({
                 'success': True,
-                'message': 'Podcast (text + audio) generated successfully'
+                'message': f'Podcast generated successfully! Audio file: {os.path.basename(audio_file) if audio_file else "Check podcast_audio/"}',
+                'audio_file': audio_file,
+                'file_size': file_size,
+                'script_length': len(podcast_text),
+                'markdown_file': f'weekly_digest_{draft_id[:8]}.md'
             })
         else:
             cur.close()
@@ -1177,6 +1222,140 @@ That's all for this week's Regen Network podcast. Join us next week as we contin
 
     return script
 
+@app.route('/podcast_audio/<path:filename>')
+def serve_podcast_audio(filename):
+    """Serve podcast audio files"""
+    import os
+    from flask import send_from_directory
+    from urllib.parse import unquote
+
+    # Decode the filename (in case it was URL encoded)
+    filename = unquote(filename)
+
+    podcast_dir = '/opt/projects/koi-processor/podcast_audio'
+    file_path = os.path.join(podcast_dir, filename)
+
+    # Security check - ensure no path traversal
+    if os.path.commonpath([podcast_dir, file_path]) != podcast_dir:
+        logger.error(f"Path traversal attempt: {filename}")
+        return jsonify({'error': 'Invalid file path'}), 403
+
+    if os.path.exists(file_path):
+        logger.info(f"Serving audio file: {filename}")
+        # Add cache headers for audio files
+        response = send_from_directory(podcast_dir, filename, as_attachment=False, mimetype='audio/mpeg')
+        response.headers['Accept-Ranges'] = 'bytes'
+        return response
+    else:
+        logger.error(f"Audio file not found: {file_path}")
+        return jsonify({'error': 'File not found'}), 404
+
+@app.route('/api/dashboard/drafts/<draft_id>/markdown')
+def get_draft_markdown(draft_id):
+    """Get draft content as markdown for NotebookLM"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT content_type, content_data
+            FROM quality_reviews
+            WHERE review_id = %s
+        """, (draft_id,))
+
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not result:
+            return jsonify({'error': 'Draft not found'}), 404
+
+        content = result['content_data'] if isinstance(result['content_data'], dict) else json.loads(result['content_data'])
+
+        # Generate markdown based on content type
+        if result['content_type'] == 'weekly_digest':
+            markdown = generate_weekly_markdown(content)
+        else:
+            markdown = generate_daily_markdown(content)
+
+        # Return as a downloadable markdown file
+        from flask import Response
+        response = Response(markdown, mimetype='text/markdown')
+        response.headers['Content-Disposition'] = f'attachment; filename={result["content_type"]}_{draft_id[:8]}.md'
+        return response
+
+    except Exception as e:
+        logger.error(f"Error getting markdown: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def generate_weekly_markdown(content):
+    """Generate markdown version of weekly digest for NotebookLM"""
+    markdown = "# Regen Network Weekly Digest\n\n"
+
+    if content.get('week_start'):
+        markdown += f"**Week of:** {content['week_start']}\n\n"
+
+    markdown += "## Executive Summary\n\n"
+    if content.get('brief'):
+        # Brief is already in markdown format
+        markdown += content['brief'] + "\n\n"
+
+    if content.get('themes'):
+        markdown += "## Key Themes\n\n"
+        for theme, topics in content['themes'].items():
+            markdown += f"### {theme}\n"
+            if isinstance(topics, list):
+                for topic in topics:
+                    markdown += f"- {topic}\n"
+            else:
+                markdown += f"{topics}\n"
+            markdown += "\n"
+
+    if content.get('citations'):
+        markdown += "## Sources and Citations\n\n"
+        for cite in content['citations']:
+            markdown += f"- **{cite.get('title', 'Untitled')}**\n"
+            markdown += f"  - Source: {cite.get('source', 'Unknown')}\n"
+            markdown += f"  - Date: {cite.get('date', 'N/A')}\n"
+            if cite.get('url'):
+                markdown += f"  - URL: {cite['url']}\n"
+            markdown += "\n"
+
+    markdown += "---\n"
+    markdown += "*Generated by Regen Network KOI System*\n"
+
+    return markdown
+
+def generate_daily_markdown(content):
+    """Generate markdown version of daily thread"""
+    markdown = "# Regen Network Daily Thread\n\n"
+
+    if content.get('thread_date'):
+        markdown += f"**Date:** {content['thread_date']}\n\n"
+
+    if content.get('posts'):
+        markdown += "## Posts\n\n"
+        for i, post in enumerate(content['posts'], 1):
+            markdown += f"### Post {i}\n\n"
+            markdown += post.get('content', '') + "\n\n"
+
+            if post.get('sources'):
+                markdown += "**Sources:**\n"
+                for source in post['sources']:
+                    if isinstance(source, dict):
+                        if source.get('type') == 'ledger':
+                            markdown += f"- {source.get('description', 'Ledger data')}\n"
+                        elif source.get('url'):
+                            markdown += f"- [{source.get('sensor', 'Source')}]({source['url']})\n"
+                        else:
+                            markdown += f"- {source.get('sensor', 'Unknown source')}\n"
+                markdown += "\n"
+
+    markdown += "---\n"
+    markdown += "*Generated by Regen Network KOI System*\n"
+
+    return markdown
+
 @app.route('/api/dashboard/drafts/<draft_id>/generate_audio', methods=['POST'])
 @require_auth
 def generate_audio_for_draft(draft_id):
@@ -1207,14 +1386,24 @@ def generate_audio_for_draft(draft_id):
         with open(temp_file, 'w') as f:
             json.dump(content, f)
 
-        # Run audio generation
+        # Run audio generation using simple podcast generator
         env = os.environ.copy()
-        result = subprocess.run([
+
+        # Log the command being run
+        cmd = [
             'python3',
-            '/opt/projects/koi-processor/src/audio/podcast_generator.py',
+            '/opt/projects/koi-processor/src/audio/simple_podcast_generator.py',
             temp_file,
             '--output-dir', '/opt/projects/koi-processor/podcast_audio'
-        ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', timeout=180)
+        ]
+        logger.info(f"Running podcast generation command: {' '.join(cmd)}")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=180)
+
+        logger.info(f"Podcast generation result - Return code: {result.returncode}")
+        logger.info(f"Podcast generation stdout: {result.stdout}")
+        if result.stderr:
+            logger.error(f"Podcast generation stderr: {result.stderr}")
 
         if result.returncode == 0:
             # Update draft metadata with audio status

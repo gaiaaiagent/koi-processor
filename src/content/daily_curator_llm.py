@@ -10,6 +10,7 @@ import httpx
 import json
 import yaml
 import re
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
@@ -156,31 +157,65 @@ Keep the summary under 300 words."""
             logger.error(f"Error summarizing content: {e}")
             return ""
 
-    async def generate_tweet_from_content(self, content_items: List[Dict], tweet_type: str, position: int, stats: Optional[Dict] = None) -> str:
+    async def generate_tweet_from_content(self, content_items: List[Dict], tweet_type: str, position: int, stats: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        Generate a specific tweet using LLM based on all content
+        Generate a specific tweet using LLM based on all content with source tracking
 
         Args:
             content_items: All content from past 24h
             tweet_type: Type of tweet (headline, stats, highlight, community, cta)
             position: Position in thread (1-5)
             stats: Optional ledger statistics
+        Returns:
+            Dict with 'content' and 'sources' keys
         """
+        # Track sources for this tweet
+        sources = []
+
         # First, get a summary if content is large
         if len(content_items) > 50:
             summary = await self.summarize_content_batch(content_items)
             context = f"Summary of {len(content_items)} updates:\n{summary}"
+            # Add source tracking for large batches
+            sensor_counts = {}
+            for item in content_items:
+                sensor = item.get('source_sensor', 'unknown')
+                sensor_counts[sensor] = sensor_counts.get(sensor, 0) + 1
+            sources.append({
+                'type': 'aggregated',
+                'description': f"Aggregated from {len(content_items)} items",
+                'sensor_breakdown': sensor_counts
+            })
         else:
             # Use full content for smaller sets
             content_texts = []
             for item in content_items[:30]:  # Limit to prevent token overflow
                 content_data = item.get('content', {})
+                metadata = item.get('metadata', {})
+
                 if isinstance(content_data, dict):
                     text = content_data.get('text', '') or str(content_data.get('content', ''))
                 else:
                     text = str(content_data)
+
                 if text and len(text.strip()) > 10:
                     content_texts.append(text[:200])
+                    # Track individual sources
+                    source_info = {
+                        'sensor': item.get('source_sensor', 'unknown'),
+                        'event_type': item.get('event_type', 'unknown'),
+                        'published_at': item.get('published_at', '').split('T')[0] if item.get('published_at') else 'unknown'
+                    }
+
+                    # Add URL if available
+                    if isinstance(metadata, dict):
+                        if metadata.get('url'):
+                            source_info['url'] = self.clean_url(metadata.get('url'))
+                        elif metadata.get('link'):
+                            source_info['url'] = self.clean_url(metadata.get('link'))
+
+                    sources.append(source_info)
+
             context = "Recent updates:\n" + "\n".join(content_texts)
 
         # Create type-specific prompts
@@ -233,10 +268,16 @@ Requirements:
             'community': f"""Create a community highlight tweet showcasing discussions and contributions.
 Context: {context}
 
+IMPORTANT RULES:
+- NEVER invent fake usernames or handles (like @EcoWarrior123)
+- ONLY mention specific users if they appear in the context above
+- If no specific users are mentioned in context, focus on topics and themes instead
+- Do NOT make up community members that don't exist
+
 Requirements:
 - Start with 💬 emoji
-- Highlight interesting discussions or contributions
-- Mention specific community members or topics if relevant
+- Highlight interesting discussions or contributions from the actual context
+- Focus on real topics and themes, not invented users
 - Encourage participation
 - Use exactly 260-280 characters
 - Include #RegenNetwork""",
@@ -259,7 +300,12 @@ Requirements:
             response = await self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a social media expert for Regen Network, crafting engaging tweets about regenerative finance and ecological credits. Always write tweets that are exactly 260-280 characters."},
+                    {"role": "system", "content": """You are a social media expert for Regen Network, crafting engaging tweets about regenerative finance and ecological credits.
+                    CRITICAL RULES:
+                    1. Always write tweets that are exactly 260-280 characters
+                    2. NEVER invent fake usernames, handles, or specific names that don't appear in the provided context
+                    3. Only reference actual data, statistics, and information from the context provided
+                    4. If you don't have specific data, use general language instead of making up specifics"""},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -276,12 +322,33 @@ Requirements:
                 # Too short, add context
                 tweet += " Join us in building regenerative finance infrastructure. #RegenNetwork"
 
-            return tweet
+            # Add ledger as source for stats tweets
+            if tweet_type == 'stats' and stats:
+                sources.append({
+                    'type': 'ledger',
+                    'description': 'Regen Network ledger statistics',
+                    'sensor': 'ledger_sensor'
+                })
+
+            return {
+                'content': tweet,
+                'sources': sources
+            }
 
         except Exception as e:
             logger.error(f"Error generating tweet: {e}")
-            # Fallback to simple tweet
-            return "🌱 Regen Network is building the infrastructure for planetary regeneration. Join us in creating transparent, verifiable pathways to ecological health. #RegenNetwork #ReFi"
+            # Return a fallback tweet based on type with empty sources
+            fallbacks = {
+                'headline': "🌱 Another day building regenerative finance on #RegenNetwork! Check out today's updates on ecological credits, governance, and our growing community. Together we're creating a sustainable future through blockchain innovation. 🌍",
+                'stats': "📊 Regen Network continues to grow: Active validators securing the network, credit classes expanding, and marketplace activity ongoing. Join us in building the infrastructure for planetary regeneration. #ReFi",
+                'governance': "🗳️ Governance is at the heart of Regen Network. Every voice matters in shaping regenerative finance. Join our community discussions and help guide the future of ecological credits. Your participation makes a difference! #RegenNetwork",
+                'community': "💬 Our community continues to drive innovation in regenerative finance. From technical developments to ecological insights, every contribution shapes our collective impact. Join the conversation! #RegenNetwork",
+                'cta': "🌍 Ready to be part of the regeneration movement? Learn more at regen.network and join our Discord community. Together, we're proving that finance can heal the planet. #ReFi #ClimateAction"
+            }
+            return {
+                'content': fallbacks.get(tweet_type, fallbacks['headline']),
+                'sources': [{'type': 'fallback', 'description': 'Generated fallback due to error'}]
+            }
 
     async def analyze_content_themes(self, content_items: List[Dict]) -> Dict[str, Any]:
         """
@@ -388,6 +455,7 @@ Provide a JSON response with:
 
         # Build thread structure
         thread = {
+            'thread_id': str(uuid.uuid4()),  # Add a unique ID for the thread
             'thread_date': datetime.now(timezone.utc).isoformat(),
             'posts': [],
             'metadata': {
@@ -404,58 +472,99 @@ Provide a JSON response with:
         # Generate tweets based on content and themes
 
         # Post 1: Dynamic headline based on main theme
-        headline = await self.generate_tweet_from_content(all_content, 'headline', 1, stats)
+        headline_result = await self.generate_tweet_from_content(all_content, 'headline', 1, stats)
         thread['posts'].append({
             'type': 'headline',
-            'content': headline,
+            'content': headline_result['content'],
+            'sources': headline_result.get('sources', []),
             'metadata': {'position': 1, 'generated_by': 'llm'}
         })
 
         # Post 2: Stats or governance based on what's most active
         if themes.get('key_governance_items') or stats.get('active_proposals', 0) > 0:
-            tweet = await self.generate_tweet_from_content(all_content, 'governance', 2, stats)
+            tweet_result = await self.generate_tweet_from_content(all_content, 'governance', 2, stats)
             tweet_type = 'governance'
         else:
-            tweet = await self.generate_tweet_from_content(all_content, 'stats', 2, stats)
+            tweet_result = await self.generate_tweet_from_content(all_content, 'stats', 2, stats)
             tweet_type = 'stats'
 
         thread['posts'].append({
             'type': tweet_type,
-            'content': tweet,
+            'content': tweet_result['content'],
+            'sources': tweet_result.get('sources', []),
             'metadata': {'position': 2, 'generated_by': 'llm'}
         })
 
         # Post 3: Community highlight
-        community_tweet = await self.generate_tweet_from_content(all_content, 'community', 3, stats)
+        community_result = await self.generate_tweet_from_content(all_content, 'community', 3, stats)
         thread['posts'].append({
             'type': 'community',
-            'content': community_tweet,
+            'content': community_result['content'],
+            'sources': community_result.get('sources', []),
             'metadata': {'position': 3, 'generated_by': 'llm'}
         })
 
         # Post 4: Additional highlight based on themes
         if themes.get('new_credits_summary') or stats.get('new_credits', 0) > 0:
             # Focus on credits if there are new ones
-            extra_tweet = await self.generate_tweet_from_content(all_content, 'stats', 4, stats)
+            extra_result = await self.generate_tweet_from_content(all_content, 'stats', 4, stats)
         else:
             # Otherwise another community/governance post
-            extra_tweet = await self.generate_tweet_from_content(all_content, 'community', 4, stats)
+            extra_result = await self.generate_tweet_from_content(all_content, 'community', 4, stats)
 
         thread['posts'].append({
             'type': 'highlight',
-            'content': extra_tweet,
+            'content': extra_result['content'],
+            'sources': extra_result.get('sources', []),
             'metadata': {'position': 4, 'generated_by': 'llm'}
         })
 
         # Post 5: Call to action
-        cta = await self.generate_tweet_from_content(all_content, 'cta', 5, stats)
+        cta_result = await self.generate_tweet_from_content(all_content, 'cta', 5, stats)
         thread['posts'].append({
             'type': 'cta',
-            'content': cta,
+            'content': cta_result['content'],
+            'sources': cta_result.get('sources', []),
             'metadata': {'position': 5, 'generated_by': 'llm'}
         })
 
         logger.info(f"Generated thread with {len(thread['posts'])} posts using LLM")
+
+        # Add a text representation with sources for simple displays
+        text_representation = f"ID: {thread.get('thread_id', 'N/A')}\n\n"
+        text_representation += f"Daily Thread Posts ({len(thread['posts'])})\n"
+
+        for i, post in enumerate(thread['posts'], 1):
+            text_representation += f"\nPost {i}\n"
+            text_representation += f"{post['content']}\n"
+
+            # Add sources if available
+            if post.get('sources') and len(post['sources']) > 0:
+                text_representation += "\nSources:\n"
+                for source in post['sources']:
+                    if isinstance(source, dict):
+                        if source.get('type') == 'aggregated':
+                            text_representation += f"  • {source.get('description', 'Aggregated content')}\n"
+                            if source.get('sensor_breakdown'):
+                                for sensor, count in source['sensor_breakdown'].items():
+                                    text_representation += f"    - {sensor}: {count} items\n"
+                        elif source.get('type') == 'ledger':
+                            text_representation += f"  • {source.get('description', 'Ledger data')}\n"
+                        elif source.get('type') == 'fallback':
+                            text_representation += f"  • {source.get('description', 'Fallback content')}\n"
+                        else:
+                            source_text = f"  • {source.get('sensor', 'Unknown')}"
+                            if source.get('event_type'):
+                                source_text += f" ({source['event_type']})"
+                            if source.get('published_at'):
+                                source_text += f" - {source['published_at']}"
+                            if source.get('url'):
+                                source_text += f"\n    URL: {source['url']}"
+                            text_representation += source_text + "\n"
+                    else:
+                        text_representation += f"  • {source}\n"
+
+        thread['text_representation'] = text_representation
         return thread
 
 

@@ -66,6 +66,29 @@ async def generate_daily_thread(curator: DailyCurator, output_path: Optional[str
                 print(f"Link: {post['url']}")
             if post.get('published_at'):
                 print(f"Published: {post['published_at']}")
+
+            # Display sources if available
+            if post.get('sources'):
+                print("\nSources:")
+                for source in post['sources']:
+                    if isinstance(source, dict):
+                        if source.get('type') == 'aggregated':
+                            print(f"  - {source.get('description', 'Aggregated content')}")
+                            if source.get('sensor_breakdown'):
+                                for sensor, count in source['sensor_breakdown'].items():
+                                    print(f"    • {sensor}: {count} items")
+                        elif source.get('type') == 'fallback':
+                            print(f"  - {source.get('description', 'Fallback content')}")
+                        elif source.get('type') == 'ledger':
+                            print(f"  - {source.get('description', 'Ledger data')}")
+                        else:
+                            sensor = source.get('sensor', 'unknown')
+                            event = source.get('event_type', 'unknown')
+                            date = source.get('published_at', 'unknown')
+                            url = source.get('url', '')
+                            print(f"  - {sensor} ({event}) - {date}")
+                            if url:
+                                print(f"    URL: {url}")
         
         # Display metadata
         print("\n--- Metadata ---")

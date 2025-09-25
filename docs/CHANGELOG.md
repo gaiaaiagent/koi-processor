@@ -5,6 +5,27 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2025-09-25
+
+### Added
+- **Source Tracking for Daily Posts** - All daily posts now include source provenance to prevent AI hallucination
+- **Podcast Generation** - Full audio podcast generation using OpenAI TTS with automatic chunking for long content
+- **Markdown Export for NotebookLM** - Weekly digests can be exported as markdown for NotebookLM integration
+- **Audio Player in Dashboard** - Integrated HTML5 audio player with download capabilities
+- **Loading Feedback** - Spinner and status messages during podcast generation
+- **Nginx Configuration** - Added podcast_audio location block for proper file serving
+
+### Fixed
+- **Fake Username Generation** - LLM no longer invents fake usernames like "@EcoWarrior123"
+- **502 Bad Gateway Error** - Fixed nginx proxy configuration for public URL access
+- **Audio File Serving** - Properly encoded URLs and added Accept-Ranges header for streaming
+- **Markdown Download Links** - Fixed base path issues for downloads through public URL
+
+### Changed
+- **Podcast Duration** - Expanded from 1 minute to 8+ minutes with comprehensive content
+- **Daily Curator Prompts** - Added strict rules to prevent fake data generation
+- **Script Generation** - Now uses full digest content including brief_content and podcast_script fields
+
 ## [2.1.0] - 2025-09-24
 
 ### Added
