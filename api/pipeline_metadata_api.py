@@ -320,21 +320,318 @@ async def get_component_detail(component_id: str):
         "outgoing_connections": outgoing
     }
 
-@app.get("/api/koi/graph/provenance/{rid}")
+@app.get("/api/koi/graph/provenance/{rid:path}")
 async def get_document_provenance(rid: str):
     """Get provenance information for a document through the pipeline"""
 
-    # This would query the graph for document flow
-    # For now, return a placeholder
-    return {
-        "rid": rid,
-        "provenance": {
-            "sensed_by": "github-sensor",
-            "processed_by": ["event-bridge", "bge-embeddings"],
-            "stored_in": ["postgresql", "apache-jena"],
-            "timestamp": datetime.utcnow().isoformat()
+    import asyncpg
+    from urllib.parse import unquote
+
+    # Decode the RID if it was URL encoded
+    rid = unquote(rid)
+
+    try:
+        # Connect to database
+        conn = await asyncpg.connect(
+            host='localhost',
+            port=5433,
+            database='eliza',
+            user='postgres',
+            password='postgres'
+        )
+
+        try:
+            # Query transformation receipts for this RID
+            receipts = await conn.fetch("""
+                WITH RECURSIVE chain AS (
+                    -- Find all transformations involving this RID
+                    SELECT DISTINCT * FROM (
+                        SELECT * FROM koi_transformation_receipts
+                        WHERE input_rid = $1 OR output_rid = $1
+
+                        UNION
+
+                        -- Find upstream transformations
+                        SELECT t.* FROM koi_transformation_receipts t
+                        WHERE t.output_rid IN (
+                            SELECT input_rid FROM koi_transformation_receipts
+                            WHERE output_rid = $1
+                        )
+                    ) AS all_receipts
+                )
+                SELECT
+                    receipt_id,
+                    transformation_type,
+                    input_rid,
+                    output_rid,
+                    source_sensor,
+                    event_type,
+                    chunks_created,
+                    embeddings_created,
+                    entities_extracted,
+                    processor_name,
+                    created_at,
+                    metadata
+                FROM chain
+                ORDER BY created_at ASC
+            """, rid)
+
+            # Build provenance timeline
+            timeline = []
+            sensors = set()
+            processors = set()
+            storage = set()
+
+            for receipt in receipts:
+                # Add to timeline
+                timeline.append({
+                    "timestamp": receipt['created_at'].isoformat() if receipt['created_at'] else None,
+                    "type": receipt['transformation_type'],
+                    "receipt_id": receipt['receipt_id'],
+                    "input_rid": receipt['input_rid'],
+                    "output_rid": receipt['output_rid'],
+                    "details": {
+                        "processor": receipt['processor_name'],
+                        "chunks_created": receipt['chunks_created'],
+                        "embeddings_created": receipt['embeddings_created'],
+                        "entities_extracted": receipt['entities_extracted']
+                    }
+                })
+
+                # Track components
+                if receipt['source_sensor']:
+                    sensors.add(receipt['source_sensor'])
+                if receipt['processor_name']:
+                    processors.add(receipt['processor_name'])
+
+                # Infer storage from transformation types
+                if 'embedding' in receipt['transformation_type']:
+                    storage.add('postgresql-pgvector')
+                if 'graph' in receipt['transformation_type']:
+                    storage.add('apache-jena')
+                if 'memory' in receipt['transformation_type']:
+                    storage.add('postgresql')
+
+            # Also check if document exists in koi_content
+            doc = await conn.fetchrow("""
+                SELECT rid as id, title, metadata->>'source' as source_sensor, created_at, content_hash
+                FROM koi_content
+                WHERE rid = $1
+            """, rid)
+
+            if doc:
+                if doc['source_sensor']:
+                    sensors.add(doc['source_sensor'])
+
+            return {
+                "rid": rid,
+                "found": len(receipts) > 0 or doc is not None,
+                "document": {
+                    "title": doc['title'] if doc else None,
+                    "source_sensor": doc['source_sensor'] if doc else None,
+                    "created_at": doc['created_at'].isoformat() if doc and doc['created_at'] else None,
+                    "content_hash": doc['content_hash'] if doc else None
+                } if doc else None,
+                "provenance": {
+                    "sensed_by": list(sensors),
+                    "processed_by": list(processors),
+                    "stored_in": list(storage),
+                    "transformation_count": len(receipts),
+                    "first_seen": timeline[0]["timestamp"] if timeline else None,
+                    "last_updated": timeline[-1]["timestamp"] if timeline else None
+                },
+                "timeline": timeline
+            }
+
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        logger.error(f"Error fetching provenance for {rid}: {e}")
+        return {
+            "rid": rid,
+            "error": str(e),
+            "found": False
         }
-    }
+
+@app.get("/api/koi/rids")
+async def list_available_rids(limit: int = Query(default=50, le=500)):
+    """List available RIDs from the system for testing/browsing"""
+
+    import asyncpg
+
+    try:
+        # Connect to database
+        conn = await asyncpg.connect(
+            host='localhost',
+            port=5433,
+            database='eliza',
+            user='postgres',
+            password='postgres'
+        )
+
+        try:
+            # Get RIDs from documents
+            doc_rids = await conn.fetch("""
+                SELECT DISTINCT
+                    rid,
+                    title,
+                    metadata->>'source' as source_sensor,
+                    created_at
+                FROM koi_content
+                WHERE rid IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT $1
+            """, limit // 2)
+
+            # Get RIDs from transformation receipts
+            receipt_rids = await conn.fetch("""
+                SELECT DISTINCT rid, created_at FROM (
+                    SELECT DISTINCT input_rid as rid, MIN(created_at) as created_at
+                    FROM koi_transformation_receipts
+                    WHERE input_rid IS NOT NULL
+                    GROUP BY input_rid
+
+                    UNION
+
+                    SELECT DISTINCT output_rid as rid, MIN(created_at) as created_at
+                    FROM koi_transformation_receipts
+                    WHERE output_rid IS NOT NULL
+                    GROUP BY output_rid
+                ) AS all_rids
+                ORDER BY created_at DESC
+                LIMIT $1
+            """, limit // 2)
+
+            # Combine and format results
+            rids = []
+            seen = set()
+
+            for doc in doc_rids:
+                if doc['rid'] not in seen:
+                    rids.append({
+                        "rid": doc['rid'],
+                        "title": doc['title'],
+                        "source": doc['source_sensor'],
+                        "type": "document",
+                        "created_at": doc['created_at'].isoformat() if doc['created_at'] else None
+                    })
+                    seen.add(doc['rid'])
+
+            for receipt in receipt_rids:
+                if receipt['rid'] not in seen and len(rids) < limit:
+                    rids.append({
+                        "rid": receipt['rid'],
+                        "title": None,
+                        "source": "transformation",
+                        "type": "receipt",
+                        "created_at": receipt['created_at'].isoformat() if receipt['created_at'] else None
+                    })
+                    seen.add(receipt['rid'])
+
+            return {
+                "rids": rids,
+                "count": len(rids),
+                "total_available": await conn.fetchval("""
+                    SELECT COUNT(DISTINCT rid) FROM (
+                        SELECT rid FROM koi_content WHERE rid IS NOT NULL
+                        UNION
+                        SELECT input_rid as rid FROM koi_transformation_receipts WHERE input_rid IS NOT NULL
+                        UNION
+                        SELECT output_rid as rid FROM koi_transformation_receipts WHERE output_rid IS NOT NULL
+                    ) AS all_rids
+                """)
+            }
+
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        logger.error(f"Error listing RIDs: {e}")
+        return {
+            "error": str(e),
+            "rids": []
+        }
+
+@app.get("/api/koi/cat/chain/{rid:path}")
+async def get_cat_receipt_chain(rid: str):
+    """Get complete CAT receipt chain for a RID using the CATReceiptChain class"""
+
+    from urllib.parse import unquote
+    import sys
+    import os
+
+    # Add parent directory to path to import CAT module
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'cat'))
+
+    try:
+        from cat_receipt_chain import CATReceiptChain
+    except ImportError:
+        logger.error("Could not import CATReceiptChain")
+        return {
+            "rid": rid,
+            "error": "CAT Receipt Chain module not available",
+            "found": False
+        }
+
+    # Decode the RID if it was URL encoded
+    rid = unquote(rid)
+
+    try:
+        # Initialize CAT receipt chain
+        chain = CATReceiptChain()
+        await chain.initialize()
+
+        # Get provenance report
+        report = await chain.get_provenance_report(rid)
+
+        # Verify the chain
+        verification = await chain.verify_chain(rid)
+
+        # Get the complete chain
+        receipts = await chain.get_chain(rid)
+
+        # Format the response
+        formatted_chain = []
+        for receipt in receipts:
+            formatted_chain.append({
+                "rid": receipt.rid,
+                "type": receipt.type,
+                "timestamp": receipt.timestamp,
+                "parent_rid": receipt.parent_rid,
+                "content_cid": receipt.content_cid,
+                "transformation": receipt.transformation,
+                "metadata": receipt.metadata,
+                "hash": receipt.hash,
+                "hash_valid": True  # Will be updated from verification
+            })
+
+        # Add verification status to each receipt
+        for i, receipt_info in enumerate(formatted_chain):
+            if i < len(verification.get("receipts", [])):
+                receipt_info["hash_valid"] = verification["receipts"][i].get("hash_valid", True)
+                receipt_info["parent_valid"] = verification["receipts"][i].get("parent_valid", True)
+
+        return {
+            "rid": rid,
+            "found": len(receipts) > 0,
+            "chain": {
+                "length": len(receipts),
+                "valid": verification.get("valid", False),
+                "receipts": formatted_chain,
+                "errors": verification.get("errors", [])
+            },
+            "report": report,
+            "verification": verification
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching CAT chain for {rid}: {e}")
+        return {
+            "rid": rid,
+            "error": str(e),
+            "found": False
+        }
 
 @app.get("/api/koi/graph/status")
 async def get_pipeline_status():
