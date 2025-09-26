@@ -22,6 +22,9 @@ import time
 # Import CAT receipt creation
 from create_cat_receipt import create_cat_receipt, create_embedding_receipt
 
+# Import provenance to RDF
+from provenance_to_rdf import ProvenanceToRDF
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -551,8 +554,9 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 processing_time_ms = int((time.time() - start_time) * 1000)
 
                 # Create overall transformation receipt
+                cat_receipt_id = None
                 if memory_ids and USE_ISOLATED_TABLES:
-                    await create_cat_receipt(
+                    cat_receipt_id = await create_cat_receipt(
                         conn=conn,
                         transformation_type="koi_event_processing",
                         input_rid=event.bundle.rid,
@@ -567,6 +571,32 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                             "chunks_processed": len(memory_ids)
                         }
                     )
+
+                # Write provenance to RDF knowledge graph
+                try:
+                    prdf = ProvenanceToRDF()
+                    if await prdf.check_fuseki_connection():
+                        # Extract sensor ID from source_node
+                        sensor_id = event.source_node.split(":")[-1] if ":" in event.source_node else event.source_node
+
+                        # Write document provenance
+                        await prdf.write_document_provenance(
+                            rid=event.bundle.rid,
+                            sensor_id=sensor_id,
+                            event_type=event.event_type,
+                            timestamp=event.timestamp,
+                            title=event.bundle.contents.get("title", event.bundle.rid),
+                            content_hash=event.bundle.manifest.content_hash,
+                            processors=["event-bridge", "bge-embeddings"],
+                            storage_locations=["postgresql"],
+                            cat_receipt_id=cat_receipt_id
+                        )
+                        logger.info(f"Wrote provenance to RDF for {event.bundle.rid}")
+                    else:
+                        logger.warning("Apache Jena Fuseki not available for provenance writing")
+                except Exception as e:
+                    logger.error(f"Failed to write provenance to RDF: {e}")
+                    # Don't fail the whole process if RDF writing fails
 
                 return ProcessingResult(
                     success=True,
