@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("koi.forwarder")
 
 COORDINATOR_URL = "http://localhost:8005"
-EVENT_BRIDGE_URL = "http://localhost:8004"  # Semantic event bridge port
+EVENT_BRIDGE_URL = "http://localhost:8100"  # Event Bridge v2 port
 POLL_INTERVAL = 2  # seconds - faster for testing
 NODE_ID = "event-bridge-forwarder"
 
