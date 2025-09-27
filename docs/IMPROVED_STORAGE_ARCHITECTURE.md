@@ -1,5 +1,28 @@
 # Improved KOI Storage Architecture
 
+**Last Updated**: September 27, 2025
+**Status**: IMPLEMENTED ✅
+
+## Recent Provenance Enhancements (September 27, 2025)
+
+### Parent-Child Document Relationships
+- **Parent Documents**: Topics/threads stored with `is_parent: true` metadata
+- **Child Documents**: Individual posts/comments with `parent_rid` reference
+- **URL Preservation**: Both parent_url and direct URLs maintained
+- **Provenance API**: Enables traversal of document hierarchy
+
+### Metadata Structure
+```json
+{
+  "parent_rid": "topic_123_rid",      // Reference to parent document
+  "parent_url": "https://forum.../t/123", // Direct parent URL
+  "is_parent": true/false,            // Parent document flag
+  "is_child": true/false,             // Child document flag
+  "topic_id": "123",                  // Original topic identifier
+  "post_number": 5                    // Position in thread
+}
+```
+
 ## Three-Layer Storage Pattern
 
 ### Layer 1: Raw Artifacts (`koi_content` table)

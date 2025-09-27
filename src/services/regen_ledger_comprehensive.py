@@ -574,6 +574,47 @@ class RegenLedgerComprehensive:
 
         return "\n".join(lines)
 
+    def format_comprehensive_weekly_post(self, summary: Dict[str, Any]) -> str:
+        """
+        Format comprehensive ledger data for WEEKLY social media posts
+        """
+        stats = summary.get("statistics", {})
+        lines = ["📊 **Regen Network 7-Day Update**\n"]
+
+        # Governance
+        gov_stats = stats.get("governance", {})
+        if gov_stats.get("total_proposals", 0) > 0:
+            lines.append(f"🗳️ {gov_stats['total_proposals']} total proposals ({gov_stats.get('active_proposals', 0)} active)")
+            if gov_stats.get("passed_week", 0) > 0:
+                lines.append(f"✅ {gov_stats['passed_week']} passed this week")
+
+        # Credits and marketplace
+        eco_stats = stats.get("ecocredit", {})
+        market_stats = stats.get("marketplace", {})
+        if eco_stats.get("new_batches", 0) > 0:
+            lines.append(f"🌱 {eco_stats['new_batches']} new credit batches issued")
+        if market_stats.get("active_sell_orders", 0) > 0 or market_stats.get("active_buy_orders", 0) > 0:
+            lines.append(f"💱 Marketplace: {market_stats['active_sell_orders']} sell / {market_stats['active_buy_orders']} buy orders")
+
+        # Network activity (7-day average)
+        net_stats = stats.get("network", {})
+        lines.append(f"⛓️ Network: {net_stats.get('avg_tx_per_block', 0):.1f} tx/block avg (7d)")
+
+        # Staking
+        staking_stats = stats.get("staking", {})
+        lines.append(f"🔒 {staking_stats.get('total_validators', 0)} active validators")
+
+        # IBC
+        lines.append(f"🌉 {net_stats.get('ibc_channels', 0)} IBC channels active")
+
+        # Bonded tokens
+        bonded = staking_stats.get("total_bonded", "0")
+        if bonded and bonded != "0":
+            bonded_millions = int(bonded) / 10**6 / 1000000 if isinstance(bonded, str) else bonded / 10**6
+            lines.append(f"💰 {bonded_millions:.1f}M REGEN bonded")
+
+        return "\n".join(lines)
+
     def format_comprehensive_weekly_digest(self, summary: Dict[str, Any]) -> Dict[str, Any]:
         """
         Format comprehensive ledger data for weekly digest
@@ -582,7 +623,7 @@ class RegenLedgerComprehensive:
 
         digest_data = {
             "title": "Regen Network Weekly On-Chain Activity",
-            "summary": self.format_comprehensive_daily_post(summary),
+            "summary": self.format_comprehensive_weekly_post(summary),
             "sections": []
         }
 

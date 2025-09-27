@@ -85,38 +85,76 @@ class DailyCurator:
         """
         async with asyncpg.create_pool(self.db_url) as pool:
             async with pool.acquire() as conn:
-                # Query for recently published content
+                # Query for recently published content with diverse sources
+                # Use a CTE to get a balanced mix from each source
                 query = """
+                    WITH ranked_content AS (
+                        SELECT
+                            km.id,
+                            km.rid,
+                            km.cid,
+                            km.source_sensor,
+                            km.content,
+                            km.metadata,
+                            km.published_at,
+                            km.published_confidence,
+                            km.created_at as ingested_at,
+                            km.content_hash,
+                            EXTRACT(EPOCH FROM (NOW() - km.published_at)) / 3600 as hours_old,
+                            ROW_NUMBER() OVER (PARTITION BY
+                                CASE
+                                    WHEN km.source_sensor LIKE '%%discourse%%' THEN 'forum'
+                                    WHEN km.rid LIKE '%%forum.regen.network%%' THEN 'forum'
+                                    WHEN km.source_sensor LIKE '%%github%%' THEN 'github'
+                                    ELSE 'other'
+                                END
+                                ORDER BY km.published_at DESC
+                            ) as rn
+                        FROM koi_memories km
+                        WHERE km.superseded_at IS NULL
+                          AND km.event_type != 'FORGET'
+                          AND km.published_at >= NOW() - INTERVAL '%s hours'
+                          AND km.published_confidence >= $1
+                          AND (
+                              -- Forum content (discourse sensor)
+                              km.source_sensor LIKE '%%discourse%%'
+                              -- GitHub repos
+                              OR km.source_sensor LIKE '%%github%%'
+                              -- Also include website sensor if it has forum content
+                              OR (km.source_sensor LIKE '%%website%%' AND km.rid LIKE '%%forum.regen.network%%')
+                          )
+                          AND km.content::text NOT LIKE '%%sensor_heartbeat%%'
+                          AND km.rid NOT LIKE '%%heartbeat%%'
+                          -- Exclude code files and dependencies from GitHub (but keep README and important docs)
+                          AND NOT (km.source_sensor LIKE '%%github%%' AND (
+                              km.rid LIKE '%%package-lock.json%%'
+                              OR km.rid LIKE '%%yarn.lock%%'
+                              OR km.rid LIKE '%%Cargo.lock%%'
+                              OR km.rid LIKE '%%Gemfile.lock%%'
+                              OR km.rid LIKE '%%.yaml#%%'  -- Exclude YAML chunks but not full files
+                              OR km.rid LIKE '%%.yml#%%'
+                              OR km.rid LIKE '%%.toml#%%'
+                              OR km.rid LIKE '%%.xml#%%'
+                              OR km.rid LIKE '%%.js#%%'
+                              OR km.rid LIKE '%%.ts#%%'
+                              OR km.rid LIKE '%%.jsx#%%'
+                              OR km.rid LIKE '%%.tsx#%%'
+                              OR km.rid LIKE '%%.py#%%'
+                              OR km.rid LIKE '%%.go#%%'
+                              OR km.rid LIKE '%%.rs#%%'
+                              OR km.rid LIKE '%%.java#%%'
+                              OR km.rid LIKE '%%.sol#%%'
+                              OR km.rid LIKE '%%.json#%%'  -- Exclude JSON chunks
+                          ) AND km.rid NOT LIKE '%%README%%')
+                    )
                     SELECT
-                        km.id,
-                        km.rid,
-                        km.cid,
-                        km.source_sensor,
-                        km.content,
-                        km.metadata,
-                        km.published_at,
-                        km.published_confidence,
-                        km.created_at as ingested_at,
-                        km.content_hash,
-                        EXTRACT(EPOCH FROM (NOW() - km.published_at)) / 3600 as hours_old
-                    FROM koi_memories km
-                    WHERE km.superseded_at IS NULL
-                      AND km.event_type != 'FORGET'
-                      AND km.published_at >= NOW() - INTERVAL '%s hours'
-                      AND km.published_confidence >= $1
-                      AND km.source_sensor IN (
-                          SELECT DISTINCT source_sensor
-                          FROM koi_memories
-                          WHERE source_sensor LIKE '%%discourse%%'
-                             OR source_sensor LIKE '%%github%%'
-                             OR source_sensor LIKE '%%gitlab%%'
-                             OR source_sensor LIKE '%%medium%%'
-                             OR source_sensor LIKE '%%website%%'
-                      )
-                      AND km.content::text NOT LIKE '%%sensor_heartbeat%%'
-                      AND km.rid NOT LIKE '%%heartbeat%%'
-                    ORDER BY km.published_at DESC
-                    LIMIT 100
+                        id, rid, cid, source_sensor, content, metadata,
+                        published_at, published_confidence, ingested_at,
+                        content_hash, hours_old
+                    FROM ranked_content
+                    WHERE rn <= 50  -- Get up to 50 items per source type (GitHub has too many)
+                    ORDER BY published_at DESC
+                    LIMIT 500
                 """ % hours  # Use string formatting for INTERVAL
                 
                 rows = await conn.fetch(query, min_confidence)
@@ -639,7 +677,48 @@ class DailyCurator:
 
         # Return 2 unique posts, or whatever we have
         return unique_posts[:2]
-    
+
+    async def _generate_dynamic_headline(self, new_content: List[Dict], stats: Dict, trending: List[str]) -> str:
+        """
+        Generate a dynamic headline based on current content and trends
+
+        Args:
+            new_content: List of new content items
+            stats: Current statistics
+            trending: List of trending topics
+
+        Returns:
+            Headline text for the daily thread
+        """
+        # Default headline options based on content type
+        headlines = [
+            "🌱 Regen Network Daily Update",
+            "📊 Today in Regenerative Finance",
+            "🌍 Building the Ecological Economy",
+            "💚 Regenerative Finance in Action"
+        ]
+
+        # Check for special content types
+        has_governance = any('governance' in str(item.get('content', '')).lower() for item in new_content[:5])
+        has_credits = any('credit' in str(item.get('content', '')).lower() for item in new_content[:5])
+        has_announcement = any('announcement' in str(item.get('metadata', {}).get('title', '')).lower() for item in new_content[:5])
+
+        # Select headline based on content
+        if has_governance:
+            return "🗳️ Governance Update: New proposals and discussions in the Regen Network community"
+        elif has_credits:
+            return "🌱 Carbon Credit Activity: Latest developments in ecological assets"
+        elif has_announcement:
+            return "📢 Important Announcement: Updates from the Regen Network ecosystem"
+        elif trending and len(trending) > 0:
+            topic = trending[0].replace('_', ' ').title()
+            return f"🔥 Trending: {topic} - Latest updates from Regen Network"
+        else:
+            # Use rotating default based on day
+            from datetime import datetime
+            day_index = datetime.now().day % len(headlines)
+            return headlines[day_index]
+
     async def generate_weekly_digest(self) -> Dict[str, Any]:
         """
         Generate a weekly digest for NotebookLM processing

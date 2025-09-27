@@ -82,6 +82,19 @@ class WeeklyCuratorLLM:
                       AND content::text NOT LIKE '%Monitoring active%'
                       AND content::text NOT LIKE '%Starting sensor%'
                       AND content::text NOT LIKE '%KOI system%'
+                      -- EXCLUDE GITHUB FILE CHUNKS - only want actual activity
+                      -- But allow forum/website chunks which are actual content
+                      AND NOT (source_sensor LIKE '%%github%%' AND rid LIKE '%%#chunk%%')
+                      -- Focus on specific sources for weekly digest
+                      AND (
+                          -- Forum content
+                          source_sensor LIKE '%%discourse%%'
+                          OR rid LIKE '%%forum.regen.network%%'
+                          -- Governance notes from regentokenomics.org
+                          OR rid LIKE '%%regentokenomics%%'
+                          -- GitHub activity (commits, PRs, issues - not file chunks)
+                          OR (source_sensor LIKE '%%github-activity%%')
+                      )
                       -- ONLY content actually PUBLISHED in the specified window
                       AND published_at IS NOT NULL
                       AND published_at >= NOW() - ($1 * INTERVAL '1 day')
@@ -153,19 +166,47 @@ class WeeklyCuratorLLM:
             return source_sensor.split('_sensor_')[0]
         return source_sensor
 
-    def extract_thread_url(self, metadata: Any) -> Optional[str]:
+    def extract_thread_url(self, metadata: Any, rid: str = None) -> Optional[str]:
         """Extract base thread URL for grouping related posts"""
         # Parse metadata if it's a string
         if isinstance(metadata, str):
             try:
                 metadata = json.loads(metadata)
             except:
-                return None
+                metadata = {}
 
         if not isinstance(metadata, dict):
-            return None
+            metadata = {}
 
+        # First try to get URL from metadata
         url = metadata.get('url', '')
+
+        # If no URL but has parent_url, use that
+        if not url and metadata.get('parent_url'):
+            url = metadata.get('parent_url')
+
+        # If still no URL, try to get from parent using provenance API
+        if not url and metadata.get('parent_rid'):
+            parent_rid = metadata.get('parent_rid')
+            try:
+                import requests
+                # Call provenance API to get parent document
+                response = requests.get(f"http://localhost:8002/api/koi/graph/provenance/{parent_rid}", timeout=5)
+                if response.status_code == 200:
+                    provenance_data = response.json()
+                    # Check if parent document has URL
+                    if provenance_data.get('document') and provenance_data['document'].get('metadata'):
+                        parent_metadata = provenance_data['document']['metadata']
+                        if isinstance(parent_metadata, str):
+                            try:
+                                parent_metadata = json.loads(parent_metadata)
+                            except:
+                                parent_metadata = {}
+                        if isinstance(parent_metadata, dict):
+                            url = parent_metadata.get('url', '')
+            except Exception as e:
+                logger.debug(f"Could not fetch provenance for {parent_rid}: {e}")
+
         if not url:
             return None
 
@@ -201,7 +242,9 @@ class WeeklyCuratorLLM:
                 except:
                     metadata = {}
 
-            thread_url = self.extract_thread_url(metadata)
+            # Pass RID to help reconstruct URLs
+            rid = item.get('rid', '')
+            thread_url = self.extract_thread_url(metadata, rid)
 
             if thread_url:
                 thread_groups[thread_url].append(item)

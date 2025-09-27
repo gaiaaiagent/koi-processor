@@ -1,0 +1,29 @@
+# Milestone B: Automated Information Pipelines - DRAFT ONLY MODE
+#
+# This crontab configuration runs the content generation in draft-only mode.
+# All generated content is saved as drafts for manual review and approval.
+#
+# Times are in ET (Eastern Time). The server should be configured for ET or
+# these times should be adjusted based on server timezone.
+
+# Environment setup
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Daily Bot - "Regen Daily"
+# Runs at 12:00 ET (18:00 CEST) on weekdays (Monday-Friday)
+# Generates draft thread with 3-5 posts: headline, stats, 2 links, CTA
+0 18 * * 1-5 /opt/projects/koi-processor/scripts/scheduled_draft_generator.sh daily >> /opt/projects/koi-processor/logs/cron.log 2>&1
+
+# Weekly Digest - "Regen Weekly"
+# Runs at 10:00 ET (16:00 CEST) on Fridays
+# Generates 800-1200 word brief with citations and 20-minute podcast
+0 16 * * 5 /opt/projects/koi-processor/scripts/scheduled_draft_generator.sh weekly >> /opt/projects/koi-processor/logs/cron.log 2>&1
+
+# Optional: Clean up old drafts (keep last 30 days)
+# Runs at 2:00 AM ET daily
+0 2 * * * find /opt/projects/koi-processor/output/drafts -name "*.json" -mtime +30 -delete >> /opt/projects/koi-processor/logs/cron.log 2>&1
+
+# Optional: Clean up old logs (keep last 14 days)
+# Runs at 3:00 AM ET daily
+0 3 * * * find /opt/projects/koi-processor/logs/scheduled -name "*.log" -mtime +14 -delete >> /opt/projects/koi-processor/logs/cron.log 2>&1

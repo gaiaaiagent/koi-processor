@@ -294,6 +294,13 @@ class RegenLedgerClient:
             "avg_tx_per_block": stats.get("network", {}).get("avg_tx_per_block", 0)
         })
 
+        # Include raw data for block explorer links
+        summary['raw_data'] = {
+            'recent_blocks': comprehensive_summary.get('recent_blocks', []),
+            'marketplace': comprehensive_summary.get('marketplace', {}),
+            'proposals': comprehensive_summary.get('proposals', [])
+        }
+
         logger.info(f"Comprehensive ledger summary fetched: {summary['statistics']}")
         return summary
 

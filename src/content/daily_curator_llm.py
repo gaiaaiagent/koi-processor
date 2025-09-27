@@ -56,6 +56,204 @@ class DailyCuratorLLM:
             logger.warning(f"Config file {config_path} not found, using defaults")
             return {}
 
+    async def create_unified_sources(self, all_content: List[Dict], posts: List[Dict]) -> List[Dict]:
+        """
+        Create a unified sources section with actual URLs from all content used
+        """
+        unified = []
+        seen_urls = set()
+        seen_topics = set()  # Track forum topics to avoid duplicates
+
+        # Collect unique sources from content
+        for item in all_content:
+            # Get URL from metadata
+            metadata = item.get('metadata', {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except:
+                    metadata = {}
+
+            # First check content for URL (discourse sensor puts it there)
+            content_data = item.get('content', {})
+
+            # Parse content if it's a JSON string
+            if isinstance(content_data, str):
+                try:
+                    content_data = json.loads(content_data)
+                except:
+                    pass
+
+            if isinstance(content_data, dict):
+                url = content_data.get('url')
+            else:
+                url = None
+
+            # Then check metadata fields
+            if not url:
+                # First check for parent_url (for forum child posts)
+                url = metadata.get('parent_url') or metadata.get('post_url') or metadata.get('topic_url') or metadata.get('url') or metadata.get('source_url') or metadata.get('link')
+
+                # If still no URL, try parent_rid provenance lookup
+                if not url and metadata.get('parent_rid'):
+                    parent_rid = metadata.get('parent_rid')
+                    try:
+                        import requests
+                        response = requests.get(f"http://localhost:8002/api/koi/graph/provenance/{parent_rid}", timeout=2)
+                        if response.status_code == 200:
+                            provenance_data = response.json()
+                            if provenance_data.get('document') and provenance_data['document'].get('metadata'):
+                                parent_metadata = provenance_data['document']['metadata']
+                                if isinstance(parent_metadata, str):
+                                    try:
+                                        parent_metadata = json.loads(parent_metadata)
+                                    except:
+                                        parent_metadata = {}
+                                if isinstance(parent_metadata, dict):
+                                    url = parent_metadata.get('url', '')
+                    except:
+                        pass  # Silently fail for provenance lookup
+
+            # As a last resort, construct URL from RID for known patterns
+            if not url and item.get('rid'):
+                rid = item['rid']
+                # For forum posts, construct from topic ID
+                if 'forum' in rid.lower() or 'discourse' in rid.lower():
+                    import re
+                    topic_match = re.search(r'_(\d+)_post', rid)
+                    if topic_match:
+                        topic_id = topic_match.group(1)
+                        url = f'https://forum.regen.network/t/topic/{topic_id}'
+                        # Deduplicate by topic
+                        if topic_id in seen_topics:
+                            continue
+                        seen_topics.add(topic_id)
+                # For GitHub, use repo name
+                elif 'github' in rid.lower():
+                    # Just use a generic GitHub URL for now
+                    url = 'https://github.com/regen-network'
+
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+
+                # Determine source type
+                source_type = 'unknown'
+                if 'forum.regen.network' in url:
+                    source_type = 'forum'
+                elif 'github.com' in url:
+                    source_type = 'github'
+                elif 'regentokenomics.org' in url:
+                    source_type = 'governance'
+                elif 'discord' in url.lower():
+                    source_type = 'discord'
+                elif 'twitter' in url.lower() or 'x.com' in url:
+                    source_type = 'twitter'
+
+                # Extract title based on source type
+                title = metadata.get('title') or metadata.get('topic_title')
+
+                # Try to get title from content if not in metadata
+                if not title and isinstance(content_data, dict):
+                    title = content_data.get('title')
+
+                # Special handling for GitHub sources
+                if source_type == 'github' and url and url != 'https://github.com/regen-network':
+                    # Extract repo name from URL
+                    parts = url.replace('https://github.com/', '').split('/')
+                    if len(parts) >= 2:
+                        title = f"{parts[1]} repository update"
+                    else:
+                        title = "GitHub repository update"
+                elif source_type == 'forum':
+                    # Use topic title if available
+                    if not title:
+                        title = metadata.get('topic_title', "Forum discussion")
+                elif not title:
+                    # Generic fallback
+                    if isinstance(content_data, dict):
+                        text = content_data.get('text', '')
+                        if isinstance(text, str) and text:
+                            # Take first line or 50 chars
+                            first_line = text.split('\n')[0].strip()
+                            if first_line and not first_line.startswith('{'):
+                                title = first_line[:50] + '...' if len(first_line) > 50 else first_line
+                            else:
+                                title = f"{source_type.title()} content"
+                        else:
+                            title = f"{source_type.title()} content"
+                    else:
+                        title = f"{source_type.title()} content"
+
+                # Clean up title
+                if isinstance(title, str) and len(title) > 100:
+                    title = title[:97] + '...'
+
+                # Handle published_at properly
+                published_at = item.get('published_at')
+                if hasattr(published_at, 'isoformat'):
+                    published_at = published_at.isoformat()
+                elif not isinstance(published_at, str):
+                    published_at = str(published_at) if published_at else None
+
+                unified.append({
+                    'type': source_type,
+                    'title': title,
+                    'url': self.clean_url(url),
+                    'published_at': published_at,
+                    'sensor': item.get('source_sensor', 'unknown')
+                })
+
+        # Add comprehensive ledger sources if stats were included
+        has_stats_post = any(post.get('type') in ['stats', 'highlight'] for post in posts)
+        if has_stats_post:
+            # Main blockchain explorer
+            unified.append({
+                'type': 'ledger',
+                'title': 'Regen Network Blockchain Explorer',
+                'url': 'https://www.mintscan.io/regen',
+                'sensor': 'direct_api'
+            })
+
+            # Check for specific ledger sources from posts
+            for post in posts:
+                if post.get('type') in ['stats', 'highlight']:
+                    for source in post.get('sources', []):
+                        if source.get('type') == 'ledger':
+                            # Add recent blocks if available
+                            if source.get('block_links'):
+                                for block in source['block_links'][:2]:  # Top 2 blocks
+                                    unified.append({
+                                        'type': 'block',
+                                        'title': f"Block #{block.get('height', '')}",
+                                        'url': block.get('url', ''),
+                                        'sensor': 'direct_api'
+                                    })
+
+                            # Add marketplace link if there's activity
+                            if source.get('marketplace_url'):
+                                unified.append({
+                                    'type': 'marketplace',
+                                    'title': 'Marketplace Activity',
+                                    'url': source['marketplace_url'],
+                                    'sensor': 'direct_api'
+                                })
+
+                            # Add validators link
+                            if source.get('validators_url'):
+                                unified.append({
+                                    'type': 'validators',
+                                    'title': 'Active Validators',
+                                    'url': source['validators_url'],
+                                    'sensor': 'direct_api'
+                                })
+                            break
+
+        # Sort by type priority
+        type_priority = {'forum': 0, 'governance': 1, 'ledger': 2, 'github': 3, 'discord': 4, 'twitter': 5}
+        unified.sort(key=lambda x: type_priority.get(x['type'], 99))
+
+        return unified
+
     def clean_url(self, url: str) -> str:
         """Clean malformed GitHub URLs and other URL issues"""
         if not url:
@@ -67,6 +265,37 @@ class DailyCuratorLLM:
             url = re.sub(r'/github_sensor_[^/]+/', '/', url)
 
         return url
+
+    async def get_forum_thread_context(self, conn, recent_post_rid: str) -> List[Dict[str, Any]]:
+        """
+        Get additional context from forum threads
+        If we have a recent post, get other posts from the same thread
+        """
+        # Extract thread ID from the RID (e.g., "forum.regen.network_529_post_1")
+        if '_post_' not in recent_post_rid:
+            return []
+
+        thread_part = recent_post_rid.split('_post_')[0]  # Gets "forum.regen.network_529"
+
+        # Get all posts from this thread (up to last 10 posts)
+        query = """
+            SELECT
+                id, rid, source_sensor, event_type,
+                content, metadata,
+                published_at, published_confidence,
+                created_at
+            FROM koi_memories
+            WHERE rid LIKE %s
+              AND superseded_at IS NULL
+              AND event_type != 'FORGET'
+              AND rid NOT LIKE '%%heartbeat%%'
+            ORDER BY published_at ASC
+            LIMIT 10
+        """
+
+        thread_pattern = f"{thread_part}_post_%"
+        rows = await conn.fetch(query, thread_pattern)
+        return [dict(row) for row in rows]
 
     async def get_all_24h_content(self) -> List[Dict[str, Any]]:
         """
@@ -94,6 +323,9 @@ class DailyCuratorLLM:
                       AND content::text NOT LIKE '%Monitoring active%'
                       AND content::text NOT LIKE '%Starting sensor%'
                       AND content::text NOT LIKE '%KOI system%'
+                      -- EXCLUDE GITHUB FILE CHUNKS - only want actual activity for daily posts
+                      -- But allow forum/website chunks which are actual content
+                      AND NOT (source_sensor LIKE '%github%' AND rid LIKE '%#chunk%')
                       -- ONLY content actually PUBLISHED in last 24 hours
                       AND published_at IS NOT NULL
                       AND published_at >= NOW() - INTERVAL '24 hours'
@@ -104,7 +336,32 @@ class DailyCuratorLLM:
                 """
 
                 rows = await conn.fetch(query)
-                return [dict(row) for row in rows]
+                content_items = [dict(row) for row in rows]
+
+                # For forum posts, get additional thread context
+                forum_posts = [item for item in content_items if 'forum' in item.get('source_sensor', '')]
+                additional_context = []
+
+                for post in forum_posts:
+                    # Get the parent RID if it's a chunk
+                    parent_rid = post.get('metadata', {}).get('parent_rid', post.get('rid', ''))
+
+                    # Get thread context for this post
+                    thread_context = await self.get_forum_thread_context(conn, parent_rid)
+
+                    # Add context posts that aren't already in our 24h list
+                    existing_rids = {item['rid'] for item in content_items}
+                    for context_post in thread_context:
+                        if context_post['rid'] not in existing_rids:
+                            # Mark as context, not primary content
+                            context_post['is_thread_context'] = True
+                            additional_context.append(context_post)
+
+                # Combine primary content with thread context
+                all_content = content_items + additional_context
+
+                logger.info(f"Retrieved {len(content_items)} primary items and {len(additional_context)} context items")
+                return all_content
 
     async def summarize_content_batch(self, content_items: List[Dict]) -> str:
         """
@@ -114,6 +371,15 @@ class DailyCuratorLLM:
         content_texts = []
         for item in content_items:
             content_data = item.get('content', {})
+
+            # Parse content if it's a JSON string
+            if isinstance(content_data, str):
+                try:
+                    content_data = json.loads(content_data)
+                except:
+                    text = str(content_data)
+                    content_data = {}
+
             if isinstance(content_data, dict):
                 text = content_data.get('text', '') or content_data.get('content', '')
             else:
@@ -172,10 +438,14 @@ Keep the summary under 300 words."""
         # Track sources for this tweet
         sources = []
 
+        # Separate primary content from thread context
+        primary_content = [item for item in content_items if not item.get('is_thread_context', False)]
+        thread_context = [item for item in content_items if item.get('is_thread_context', False)]
+
         # First, get a summary if content is large
-        if len(content_items) > 50:
-            summary = await self.summarize_content_batch(content_items)
-            context = f"Summary of {len(content_items)} updates:\n{summary}"
+        if len(primary_content) > 50:
+            summary = await self.summarize_content_batch(primary_content)
+            context = f"Summary of {len(primary_content)} updates:\n{summary}"
             # Add source tracking for large batches
             sensor_counts = {}
             for item in content_items:
@@ -193,6 +463,14 @@ Keep the summary under 300 words."""
                 content_data = item.get('content', {})
                 metadata = item.get('metadata', {})
 
+                # Parse content if it's a JSON string
+                if isinstance(content_data, str):
+                    try:
+                        content_data = json.loads(content_data)
+                    except:
+                        text = str(content_data)
+                        content_data = {}
+
                 if isinstance(content_data, dict):
                     text = content_data.get('text', '') or str(content_data.get('content', ''))
                 else:
@@ -201,18 +479,60 @@ Keep the summary under 300 words."""
                 if text and len(text.strip()) > 10:
                     content_texts.append(text[:200])
                     # Track individual sources
+                    # Handle published_at which may be datetime or string
+                    published_at = item.get('published_at', '')
+                    if hasattr(published_at, 'isoformat'):
+                        # It's a datetime object
+                        published_at = published_at.isoformat().split('T')[0]
+                    elif isinstance(published_at, str) and published_at:
+                        published_at = published_at.split('T')[0]
+                    else:
+                        published_at = 'unknown'
+
                     source_info = {
                         'sensor': item.get('source_sensor', 'unknown'),
                         'event_type': item.get('event_type', 'unknown'),
-                        'published_at': item.get('published_at', '').split('T')[0] if item.get('published_at') else 'unknown'
+                        'published_at': published_at
                     }
 
                     # Add URL if available
                     if isinstance(metadata, dict):
+                        url = None
+
+                        # Try direct URL first
                         if metadata.get('url'):
-                            source_info['url'] = self.clean_url(metadata.get('url'))
+                            url = metadata.get('url')
                         elif metadata.get('link'):
-                            source_info['url'] = self.clean_url(metadata.get('link'))
+                            url = metadata.get('link')
+
+                        # If no URL but has parent_url, use that (for forum posts)
+                        elif metadata.get('parent_url'):
+                            url = metadata.get('parent_url')
+
+                        # If still no URL, try to get from parent using provenance API
+                        elif metadata.get('parent_rid'):
+                            parent_rid = metadata.get('parent_rid')
+                            try:
+                                import requests
+                                # Call provenance API to get parent document
+                                response = requests.get(f"http://localhost:8002/api/koi/graph/provenance/{parent_rid}", timeout=5)
+                                if response.status_code == 200:
+                                    provenance_data = response.json()
+                                    # Check if parent document has URL
+                                    if provenance_data.get('document') and provenance_data['document'].get('metadata'):
+                                        parent_metadata = provenance_data['document']['metadata']
+                                        if isinstance(parent_metadata, str):
+                                            try:
+                                                parent_metadata = json.loads(parent_metadata)
+                                            except:
+                                                parent_metadata = {}
+                                        if isinstance(parent_metadata, dict):
+                                            url = parent_metadata.get('url', '')
+                            except Exception as e:
+                                logger.debug(f"Could not fetch provenance for {parent_rid}: {e}")
+
+                        if url:
+                            source_info['url'] = self.clean_url(url)
 
                     sources.append(source_info)
 
@@ -314,6 +634,29 @@ Requirements:
 
             tweet = response.choices[0].message.content.strip()
 
+            # Add ledger source tracking for stats tweets
+            if tweet_type in ['stats', 'governance'] and stats:
+                # Add ledger source with block explorer links
+                ledger_source = {
+                    'type': 'ledger',
+                    'description': 'Regen Network blockchain data',
+                    'sensor': 'ledger_api'
+                }
+
+                # Add block explorer links if we have them
+                if stats.get('block_explorer_links'):
+                    ledger_source['block_links'] = stats['block_explorer_links'][:3]  # Top 3 blocks
+
+                # Add marketplace explorer link if there's marketplace activity
+                if stats.get('marketplace_volume', 0) > 0:
+                    ledger_source['marketplace_url'] = 'https://mintscan.io/regen/ecosystem'
+
+                # Add validator link if showing validator stats
+                if 'validator' in tweet.lower():
+                    ledger_source['validators_url'] = 'https://mintscan.io/regen/validators'
+
+                sources.append(ledger_source)
+
             # For dashboard display, we want the full content
             # Only truncate if tweet is extremely long (likely an error)
             if len(tweet) > 500:
@@ -403,6 +746,19 @@ Provide a JSON response with:
             ledger_client = RegenLedgerClient()
             summary = await ledger_client.get_ledger_summary()
 
+            # Extract block explorer links if we have block data
+            block_explorer_links = []
+            if 'recent_blocks' in summary.get('raw_data', {}):
+                for block in summary['raw_data']['recent_blocks'][:5]:  # Last 5 blocks
+                    if block.get('hash'):
+                        # Mintscan is the main block explorer for Regen Network
+                        block_explorer_links.append({
+                            'type': 'block',
+                            'height': block.get('height'),
+                            'url': f"https://mintscan.io/regen/blocks/{block.get('height')}",
+                            'tx_count': block.get('tx_count', 0)
+                        })
+
             # Format stats for daily thread - include ALL comprehensive data
             stats = {
                 'new_credits': summary['statistics'].get('total_credit_batches', 0),
@@ -412,6 +768,7 @@ Provide a JSON response with:
                 'marketplace_volume': summary['statistics'].get('active_sell_orders', 0),
                 'credit_classes': summary['statistics'].get('total_credit_classes', 0),
                 'baskets': summary['statistics'].get('total_baskets', 0),
+                'block_explorer_links': block_explorer_links,
                 'total_validators': summary['statistics'].get('total_validators', 0),
                 'ibc_channels': summary['statistics'].get('ibc_channels', 0),
                 'avg_tx_per_block': summary['statistics'].get('avg_tx_per_block', 0),
@@ -529,6 +886,9 @@ Provide a JSON response with:
         })
 
         logger.info(f"Generated thread with {len(thread['posts'])} posts using LLM")
+
+        # Create unified sources section
+        thread['unified_sources'] = await self.create_unified_sources(all_content, thread['posts'])
 
         # Add a text representation with sources for simple displays
         text_representation = f"ID: {thread.get('thread_id', 'N/A')}\n\n"

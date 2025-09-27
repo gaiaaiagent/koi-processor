@@ -159,7 +159,10 @@ async function loadDashboardData() {
 async function fetchAPI(endpoint) {
     // Determine base path based on current location
     const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
-    const url = basePath + endpoint;
+
+    // Build absolute URL without credentials
+    const baseUrl = `${window.location.protocol}//${window.location.host}`;
+    const url = `${baseUrl}${basePath}${endpoint}`;
 
     const response = await fetch(url);
     if (!response.ok) {
@@ -203,23 +206,23 @@ function updateOverview(data) {
 // Update daily bot section
 function updateDailySection(data) {
     if (!data.success) return;
-    
-    // Update today's draft
+
+    // Update today's draft - check if elements exist before using them
     const draftContent = document.getElementById('daily-draft-content');
     const dailyActions = document.getElementById('daily-actions');
-    
+
     if (data.today && data.today.draft) {
         const draft = data.today.draft;
         const content = typeof draft.content === 'string' ? JSON.parse(draft.content) : draft.content;
-        
-        if (content.posts && content.posts.length > 0) {
+
+        if (content.posts && content.posts.length > 0 && draftContent) {
             let html = '<div class="mb-3">';
             html += `<span class="badge bg-info me-2">Status: ${draft.status}</span>`;
             if (draft.metadata && draft.metadata.style_score) {
                 html += `<span class="badge bg-secondary">Style Score: ${(draft.metadata.style_score * 100).toFixed(0)}%</span>`;
             }
             html += '</div>';
-            
+
             content.posts.forEach((post, index) => {
                 html += `
                     <div class="content-preview">
@@ -228,9 +231,11 @@ function updateDailySection(data) {
                     </div>
                 `;
             });
-            
+
             draftContent.innerHTML = html;
-            dailyActions.style.display = draft.status === 'pending_review' ? 'block' : 'none';
+            if (dailyActions) {
+                dailyActions.style.display = draft.status === 'pending_review' ? 'block' : 'none';
+            }
         }
     }
     
@@ -431,10 +436,16 @@ function updateSchedule(data) {
 // Update alerts section
 function updateAlerts(data) {
     if (!data.success) return;
-    
+
     const alertsList = document.getElementById('alerts-list');
     const alertCount = document.getElementById('alert-count');
-    
+
+    // Check if elements exist before using them
+    if (!alertsList || !alertCount) {
+        console.warn('Alert elements not found in DOM');
+        return;
+    }
+
     if (data.alerts && data.alerts.length > 0) {
         let html = '';
         data.alerts.forEach(alert => {
@@ -606,8 +617,12 @@ function triggerManualRun(type) {
         // Determine base path based on current location
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
 
+        // Build absolute URL without credentials
+        const baseUrl = `${window.location.protocol}//${window.location.host}`;
+        const apiUrl = `${baseUrl}${basePath}/api/dashboard/trigger_manual_run`;
+
         // Use the single trigger_manual_run endpoint to avoid duplicates
-        fetch(`${basePath}/api/dashboard/trigger_manual_run`, {
+        fetch(apiUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1448,47 +1463,44 @@ function renderDraftFullContent(draftId, targetElementId) {
                 content += `</div>`;
             }
 
+            // Display unified sources section if available
+            if (draft.content.unified_sources && draft.content.unified_sources.length > 0) {
+                content += '<div class="card mb-3"><div class="card-body">';
+                content += '<h5 class="card-title">Sources</h5>';
+                content += '<ul class="list-group list-group-flush">';
+
+                draft.content.unified_sources.forEach(source => {
+                    let icon = '';
+                    if (source.type === 'forum') icon = '💬';
+                    else if (source.type === 'github') icon = '💻';
+                    else if (source.type === 'ledger') icon = '📊';
+                    else if (source.type === 'governance') icon = '🗳️';
+                    else if (source.type === 'discord') icon = '🎮';
+                    else if (source.type === 'twitter') icon = '🐦';
+
+                    content += '<li class="list-group-item">';
+                    content += `${icon} <strong>${source.type}:</strong> `;
+                    if (source.url) {
+                        content += `<a href="${source.url}" target="_blank">${escapeHtml(source.title || source.url)}</a>`;
+                    } else {
+                        content += escapeHtml(source.title || 'No title');
+                    }
+                    if (source.published_at) {
+                        content += ` <small class="text-muted">(${new Date(source.published_at).toLocaleDateString()})</small>`;
+                    }
+                    content += '</li>';
+                });
+
+                content += '</ul></div></div>';
+            }
+
             draft.content.posts.forEach((post, i) => {
                 content += `<div class="card mb-2">
                     <div class="card-body">
                         <h6 class="card-subtitle mb-2 text-muted">Post ${i+1}</h6>
                         <p class="card-text">${escapeHtml(post.content || '')}</p>`;
 
-                // Display sources if available
-                if (post.sources && post.sources.length > 0) {
-                    content += '<div class="mt-2"><small class="text-muted"><strong>Sources:</strong><ul class="mb-0">';
-                    post.sources.forEach(source => {
-                        if (typeof source === 'object') {
-                            if (source.type === 'aggregated') {
-                                content += `<li>${source.description || 'Aggregated content'}`;
-                                if (source.sensor_breakdown) {
-                                    content += '<ul>';
-                                    for (const [sensor, count] of Object.entries(source.sensor_breakdown)) {
-                                        content += `<li>${sensor}: ${count} items</li>`;
-                                    }
-                                    content += '</ul>';
-                                }
-                                content += '</li>';
-                            } else if (source.type === 'ledger') {
-                                content += `<li>${source.description || 'Ledger data'}</li>`;
-                            } else if (source.type === 'fallback') {
-                                content += `<li>${source.description || 'Fallback content'}</li>`;
-                            } else {
-                                let sourceText = source.sensor || 'Unknown source';
-                                if (source.event_type) sourceText += ` (${source.event_type})`;
-                                if (source.published_at) sourceText += ` - ${source.published_at}`;
-                                content += `<li>${sourceText}`;
-                                if (source.url) {
-                                    content += ` - <a href="${source.url}" target="_blank">Link</a>`;
-                                }
-                                content += '</li>';
-                            }
-                        } else {
-                            content += `<li>${source}</li>`;
-                        }
-                    });
-                    content += '</ul></small></div>';
-                }
+                // Don't display individual sources anymore - they're in the unified section
 
                 content += `</div>
                 </div>`;

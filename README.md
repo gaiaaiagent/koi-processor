@@ -2,6 +2,8 @@
 
 🚀 **Production-Ready Knowledge Organization Infrastructure Pipeline**
 
+✅ **Provenance System Enhanced (Sept 27, 2025)**: Complete parent-child document relationships with full URL preservation through provenance chain.
+
 ✅ **Text Extraction Fixed (Sept 14, 2025)**: Pipeline now processing 100% clean, uncorrupted text after fixing sensor extraction issues.
 
 A comprehensive sensor-to-agent pipeline that processes real-time content from KOI sensors, generates embeddings, handles deduplication and versioning, and provides immediate semantic search capabilities for AI agents.
@@ -28,6 +30,9 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Version Control**: Tracks content updates with full audit trail
 - ✅ **CAT Receipts**: Complete provenance tracking for all transformations
 - ✅ **Isolated Tables**: Separates sensor data from scraped content
+- ✅ **Parent-Child Documents**: Hierarchical relationships for forum topics and posts
+- ✅ **Provenance API**: Navigate document lineage via `/api/koi/graph/provenance/{rid}`
+- ✅ **Enhanced Curators**: Daily/Weekly content curation with proper URL attribution
 - ✅ **Production Embeddings**: Model-agnostic embedding server (currently BGE-large-en-v1.5)
 - ✅ **MCP Integration**: Semantic search via Model Context Protocol
 - ✅ **Content Operations Dashboard**: Web-based monitoring for Daily Bot and Weekly Digest
