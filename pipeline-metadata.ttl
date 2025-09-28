@@ -101,10 +101,10 @@ sensor:discord-sensor a koi:Sensor ;
     koi:rid "koi.sensor:discord-sensor" ;
     koi:sensorType "discord" ;
     koi:endpoint "http://localhost:8005" ;
-    koi:status "active" ;
+    koi:status "offline" ;
     koi:monitors "Regen Network Discord" ;
     koi:sendsTo :coordinator ;
-    dc:description "Monitors Discord server" .
+    dc:description "Monitors Discord server (Not configured yet)" .
 
 sensor:podcast-sensor a koi:Sensor ;
     rdfs:label "Podcast Sensor" ;
@@ -121,10 +121,20 @@ sensor:ledger-sensor a koi:Sensor ;
     koi:rid "koi.sensor:ledger-sensor" ;
     koi:sensorType "ledger" ;
     koi:endpoint "http://localhost:8005" ;
-    koi:status "active" ;
+    koi:status "offline" ;
     koi:monitors <https://mainnet.regen.network> ;
     koi:sendsTo :coordinator ;
-    dc:description "Monitors Regen Ledger blockchain" .
+    dc:description "Monitors Regen Ledger blockchain (Not configured yet)" .
+
+sensor:github-activity-sensor a koi:Sensor ;
+    rdfs:label "GitHub Activity Sensor" ;
+    koi:rid "koi.sensor:github-activity-sensor" ;
+    koi:sensorType "github-activity" ;
+    koi:endpoint "http://localhost:8005" ;
+    koi:status "active" ;
+    koi:monitors <https://github.com/regen-network> ;
+    koi:sendsTo :coordinator ;
+    dc:description "Collects comprehensive GitHub activity (commits, issues, PRs) for daily/weekly curation" .
 
 # ============================================================================
 # Processing Layer
@@ -136,8 +146,18 @@ sensor:ledger-sensor a koi:Sensor ;
     koi:endpoint "http://localhost:8005" ;
     koi:port 8005 ;
     koi:status "active" ;
-    koi:forwardsTo :event-bridge ;
+    koi:forwardsTo :forwarder ;
     dc:description "Central hub for sensor events and routing" .
+
+:forwarder a koi:Processor ;
+    rdfs:label "Event Forwarder" ;
+    koi:rid "koi.infrastructure:forwarder" ;
+    koi:endpoint "http://localhost:8005" ;
+    koi:port 8005 ;
+    koi:status "active" ;
+    koi:receivesFrom :coordinator ;
+    koi:forwardsTo :event-bridge ;
+    dc:description "Polls coordinator and forwards events to Event Bridge" .
 
 :event-bridge a koi:Processor ;
     rdfs:label "KOI Event Bridge v2" ;
@@ -145,7 +165,7 @@ sensor:ledger-sensor a koi:Sensor ;
     koi:endpoint "http://localhost:8100" ;
     koi:port 8100 ;
     koi:status "active" ;
-    koi:receivesFrom :coordinator ;
+    koi:receivesFrom :forwarder ;
     koi:forwardsTo :bge-embeddings ;
     koi:forwardsTo :apache-jena ;
     dc:description "Processes events with deduplication and versioning" .
@@ -189,6 +209,26 @@ sensor:ledger-sensor a koi:Sensor ;
 # ============================================================================
 # Service Layer
 # ============================================================================
+
+:daily-curator a koi:Service ;
+    rdfs:label "Daily Curator" ;
+    koi:rid "koi.infrastructure:daily-curator" ;
+    koi:endpoint "http://localhost:8400" ;
+    koi:port 8400 ;
+    koi:status "idle" ;
+    koi:receivesFrom :postgresql ;
+    koi:writesTo :postgresql ;
+    dc:description "Generates daily content threads (runs at 12:00 ET)" .
+
+:weekly-curator a koi:Service ;
+    rdfs:label "Weekly Curator" ;
+    koi:rid "koi.infrastructure:weekly-curator" ;
+    koi:endpoint "http://localhost:8400" ;
+    koi:port 8400 ;
+    koi:status "idle" ;
+    koi:receivesFrom :postgresql ;
+    koi:writesTo :postgresql ;
+    dc:description "Generates weekly digest posts (runs Fridays at 10:00 ET)" .
 
 :mcp-server a koi:Service ;
     rdfs:label "MCP Knowledge Server" ;
@@ -241,16 +281,20 @@ sensor:ledger-sensor a koi:Sensor ;
 
 # The complete data flow through the pipeline:
 # 1. Sensors → Coordinator (collection)
-# 2. Coordinator → Event Bridge (routing)
-# 3. Event Bridge → BGE Embeddings (processing)
-# 4. Event Bridge → Apache Jena (RDF storage)
-# 5. Event Bridge → Content API (content serving)
-# 6. BGE Embeddings → PostgreSQL (vector storage)
-# 7. PostgreSQL → MCP Server (knowledge access)
-# 8. Apache Jena → MCP Server (graph queries)
-# 9. Apache Jena → Pipeline Metadata API (structure queries)
-# 10. MCP Server → Eliza Agents (RAG)
-# 11. PostgreSQL → Eliza Agents (direct memory access)
+# 2. Coordinator → Forwarder (polling)
+# 3. Forwarder → Event Bridge (forwarding)
+# 4. Event Bridge → BGE Embeddings (processing)
+# 5. Event Bridge → Apache Jena (RDF storage)
+# 6. Event Bridge → Content API (content serving)
+# 7. BGE Embeddings → PostgreSQL (vector storage)
+# 8. PostgreSQL → Daily Curator (content generation)
+# 9. PostgreSQL → Weekly Curator (digest generation)
+# 10. Daily/Weekly Curator → PostgreSQL (storing drafts)
+# 11. PostgreSQL → MCP Server (knowledge access)
+# 12. Apache Jena → MCP Server (graph queries)
+# 13. Apache Jena → Pipeline Metadata API (structure queries)
+# 14. MCP Server → Eliza Agents (RAG)
+# 15. PostgreSQL → Eliza Agents (direct memory access)
 
 # ============================================================================
 # Additional Metadata

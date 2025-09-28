@@ -22,6 +22,9 @@ import time
 # Import CAT receipt creation
 from create_cat_receipt import create_cat_receipt, create_embedding_receipt
 
+# Import event filter
+from koi_event_filter import filter_koi_event
+
 # Import provenance to RDF
 from provenance_to_rdf import ProvenanceToRDF
 
@@ -167,27 +170,53 @@ async def extract_text_from_bundle(bundle: KOIBundle) -> str:
     
     return json.dumps(content)
 
-async def check_existing_memory(conn: asyncpg.Connection, rid: str) -> Optional[Dict]:
-    """Check if a memory with this RID already exists"""
+async def check_existing_memory(conn: asyncpg.Connection, rid: str, content_hash: Optional[str] = None, url: Optional[str] = None) -> Optional[Dict]:
+    """Check if a memory with this RID already exists, optionally with same content hash or URL"""
     if USE_ISOLATED_TABLES:
-        query = """
-            SELECT id, version, superseded_at 
-            FROM koi_memories 
-            WHERE rid = $1 
-            ORDER BY version DESC 
-            LIMIT 1
-        """
+        if url:
+            # For web pages, check by URL instead of RID (URLs can generate different RIDs)
+            query = """
+                SELECT id, version, superseded_at, content_hash, metadata, rid
+                FROM koi_memories
+                WHERE metadata->>'source_url' = $1
+                AND superseded_at IS NULL
+                ORDER BY version DESC
+                LIMIT 1
+            """
+            result = await conn.fetchrow(query, url)
+        elif content_hash:
+            # Check for exact content match
+            query = """
+                SELECT id, version, superseded_at, content_hash, metadata
+                FROM koi_memories
+                WHERE rid = $1 AND content_hash = $2
+                AND superseded_at IS NULL
+                ORDER BY version DESC
+                LIMIT 1
+            """
+            result = await conn.fetchrow(query, rid, content_hash)
+        else:
+            # Check for any version of this RID
+            query = """
+                SELECT id, version, superseded_at, content_hash, metadata
+                FROM koi_memories
+                WHERE rid = $1
+                AND superseded_at IS NULL
+                ORDER BY version DESC
+                LIMIT 1
+            """
+            result = await conn.fetchrow(query, rid)
     else:
         # Legacy table structure
         query = """
-            SELECT id, content 
-            FROM memories 
-            WHERE content->>'rid' = $1 
-            ORDER BY "createdAt" DESC 
+            SELECT id, content
+            FROM memories
+            WHERE content->>'rid' = $1
+            ORDER BY "createdAt" DESC
             LIMIT 1
         """
-    
-    result = await conn.fetchrow(query, rid)
+        result = await conn.fetchrow(query, rid)
+
     return dict(result) if result else None
 
 async def create_new_version(conn: asyncpg.Connection, event: KOIEvent, 
@@ -255,6 +284,17 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
         import hashlib
         content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
         
+        # Include source_url in metadata if available
+        metadata = {
+            **event.bundle.manifest.metadata,
+            "koi_timestamp": event.timestamp,
+            "koi_manifest": event.bundle.manifest.dict()
+        }
+
+        # Ensure source_url is captured for web pages
+        if 'url' in event.bundle.manifest.metadata and 'source_url' not in metadata:
+            metadata['source_url'] = event.bundle.manifest.metadata['url']
+
         # Insert new version with publication tracking
         await conn.execute("""
             INSERT INTO koi_memories (
@@ -262,7 +302,7 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 event_type, source_sensor, content, metadata,
                 published_at, published_confidence, content_hash
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        """, 
+        """,
             memory_id,
             event.bundle.rid,
             cid or event.bundle.rid,
@@ -274,11 +314,7 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 "text": text_content,
                 **event.bundle.contents
             }),
-            json.dumps({
-                **event.bundle.manifest.metadata,
-                "koi_timestamp": event.timestamp,
-                "koi_manifest": event.bundle.manifest.dict()
-            }),
+            json.dumps(metadata),
             published_at,
             published_confidence,
             content_hash
@@ -368,8 +404,18 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
     try:
         async with asyncpg.create_pool(DB_URL) as pool:
             async with pool.acquire() as conn:
-                # Check for existing memory with this RID
-                existing = await check_existing_memory(conn, event.bundle.rid)
+                # Extract URL if this is a web page
+                source_url = None
+                if event.bundle and event.bundle.manifest.metadata:
+                    # Check for URL in metadata
+                    source_url = event.bundle.manifest.metadata.get('url') or event.bundle.manifest.metadata.get('source_url')
+
+                # For web pages, check by URL to handle re-crawls properly
+                if source_url and source_url.startswith('http'):
+                    existing = await check_existing_memory(conn, event.bundle.rid, url=source_url)
+                else:
+                    # Check for existing memory with this RID
+                    existing = await check_existing_memory(conn, event.bundle.rid)
                 
                 # Handle based on event type
                 if event.event_type == "FORGET":
@@ -399,16 +445,19 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         )
                 
                 elif event.event_type == "NEW" and existing:
-                    # Content already exists, skip
-                    logger.info(f"RID {event.bundle.rid} already exists, skipping NEW event")
-                    return ProcessingResult(
-                        success=True,
-                        rid=event.bundle.rid,
-                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
-                        chunks_created=0,
-                        embeddings_created=0,
-                        error="Already exists"
-                    )
+                    # For web pages with URLs, we'll handle this later with content hash checking
+                    if not source_url:
+                        # Only skip if not a web page (no URL)
+                        logger.info(f"RID {event.bundle.rid} already exists (non-web content), skipping NEW event")
+                        return ProcessingResult(
+                            success=True,
+                            rid=event.bundle.rid,
+                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
+                            chunks_created=0,
+                            embeddings_created=0,
+                            error="Already exists"
+                        )
+                    # For web pages, continue to content hash checking below
                 
                 elif event.event_type == "UPDATE" and not existing:
                     # No previous version to update, treat as NEW
@@ -417,12 +466,12 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 
                 # Extract text content
                 text_content = await extract_text_from_bundle(event.bundle)
-                
+
                 # Debug logging
                 logger.info(f"Extracted text content length: {len(text_content) if text_content else 0}")
                 if text_content:
                     logger.info(f"Content preview: {text_content[:200]}")
-                
+
                 if not text_content or len(text_content.strip()) < 50:
                     return ProcessingResult(
                         success=False,
@@ -432,6 +481,55 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         embeddings_created=0,
                         error="Content too short or empty"
                     )
+
+                # Calculate content hash for deduplication
+                content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
+
+                # Check if we have this exact content already (deduplication)
+                if USE_ISOLATED_TABLES:
+                    # For web pages, re-check by URL with the content hash
+                    if source_url:
+                        existing_by_url = await check_existing_memory(conn, event.bundle.rid, url=source_url)
+                        if existing_by_url:
+                            # Check if content changed
+                            if existing_by_url.get('content_hash') == content_hash:
+                                # Content hasn't changed, skip processing
+                                logger.info(f"URL {source_url} has unchanged content (hash: {content_hash[:8]}...), skipping")
+                                return ProcessingResult(
+                                    success=True,
+                                    rid=event.bundle.rid,
+                                    cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
+                                    chunks_created=0,
+                                    embeddings_created=0,
+                                    version=existing_by_url.get('version'),
+                                    error="Content unchanged, skipped processing"
+                                )
+                            else:
+                                # Content changed, treat as UPDATE
+                                logger.info(f"URL {source_url} has new content, converting NEW to UPDATE")
+                                event.event_type = "UPDATE"
+                                existing = existing_by_url  # Use the URL-matched entry as existing
+                    else:
+                        # Non-web content, check by RID and hash
+                        existing_with_same_hash = await check_existing_memory(conn, event.bundle.rid, content_hash)
+
+                        if existing_with_same_hash:
+                            # Content hasn't changed, skip processing
+                            logger.info(f"RID {event.bundle.rid} has unchanged content (hash: {content_hash[:8]}...), skipping")
+                            return ProcessingResult(
+                                success=True,
+                                rid=event.bundle.rid,
+                                cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
+                                chunks_created=0,
+                                embeddings_created=0,
+                                version=existing_with_same_hash.get('version'),
+                                error="Content unchanged, skipped processing"
+                            )
+
+                        # If we have a different version, this should be an UPDATE
+                        if existing and event.event_type == "NEW":
+                            logger.info(f"RID {event.bundle.rid} exists with different content, converting NEW to UPDATE")
+                            event.event_type = "UPDATE"
                 
                 # Chunk the text
                 chunks = chunk_text(text_content)
@@ -502,19 +600,21 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                     
                     memory_ids.append(memory_id)
 
-                    # Create CAT receipt for memory creation
-                    await create_cat_receipt(
-                        conn=conn,
-                        transformation_type="koi_to_memory",
-                        input_rid=event.bundle.rid,
-                        output_rid=chunk_rid,
-                        input_cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else None,
-                        output_cid=f"cid:sha256:{chunk_hash}",
-                        chunks_created=1,
-                        source_sensor=event.source_node,
-                        event_type=event.event_type,
-                        metadata={"chunk_index": i, "chunk_total": len(chunks)}
-                    )
+                    # Create CAT receipt for memory creation (only if transformation occurred)
+                    # Skip if this is just a forwarding operation where input equals output
+                    if event.bundle.rid != chunk_rid:  # Only create receipt if we actually transformed
+                        await create_cat_receipt(
+                            conn=conn,
+                            transformation_type="koi_to_memory",
+                            input_rid=event.bundle.rid,
+                            output_rid=chunk_rid,
+                            input_cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else None,
+                            output_cid=f"cid:sha256:{chunk_hash}",
+                            chunks_created=1,
+                            source_sensor=event.source_node,
+                            event_type=event.event_type,
+                            metadata={"chunk_index": i, "chunk_total": len(chunks)}
+                        )
 
                     # Generate and store embedding
                     embedding_start = time.time()
@@ -553,9 +653,10 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                 # Calculate total processing time
                 processing_time_ms = int((time.time() - start_time) * 1000)
 
-                # Create overall transformation receipt
+                # Create overall transformation receipt (only if we created chunks)
                 cat_receipt_id = None
-                if memory_ids and USE_ISOLATED_TABLES:
+                if memory_ids and USE_ISOLATED_TABLES and len(chunks) > 1:
+                    # Only create overall receipt if we actually chunked the content
                     cat_receipt_id = await create_cat_receipt(
                         conn=conn,
                         transformation_type="koi_event_processing",
@@ -568,7 +669,8 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                         processing_duration_ms=processing_time_ms,
                         metadata={
                             "version": version,
-                            "chunks_processed": len(memory_ids)
+                            "chunks_processed": len(memory_ids),
+                            "content_hash": content_hash[:8] + "..."  # Store abbreviated hash for tracking
                         }
                     )
 
@@ -641,7 +743,20 @@ async def process_event_endpoint(event: KOIEvent):
     """Process a KOI event from the coordinator"""
     rid = event.bundle.rid if event.bundle else event.rid
     logger.info(f"[KOI Bridge v2] Received {event.event_type} event for RID: {rid}")
-    
+
+    # Filter out non-content events (heartbeats, test data, etc.)
+    event_dict = event.dict()
+    if not filter_koi_event(event_dict):
+        logger.info(f"[KOI Bridge v2] Filtered out non-content event: {rid}")
+        return ProcessingResult(
+            success=True,
+            rid=rid,
+            cid="filtered",
+            chunks_created=0,
+            embeddings_created=0,
+            error="Event filtered: non-content (heartbeat/test/monitoring)"
+        )
+
     # Process the event
     result = await process_koi_event(event)
     

@@ -5,6 +5,29 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2025-09-28
+
+### Added
+- **Content-Based Deduplication** - Web pages are now deduplicated based on content hash to prevent reprocessing unchanged content
+- **Event Filtering** - Heartbeats and test data are now filtered at the Event Bridge entry point
+- **GitHub Activity Sensor** - Added github_activity sensor to pipeline metadata for comprehensive GitHub tracking
+- **URL-Based Versioning** - Web pages tracked by URL with superseded_at timestamps for version control
+
+### Fixed
+- **White Text on White Background** - Fixed text visibility issues in Transformation Provenance UI
+- **Test Data in Production** - Cleaned up 1,683 test/heartbeat entries from koi_content table
+- **UI Flash Issue** - Removed hardcoded examples that briefly appeared before real data loaded
+- **Duplicate Processing** - Fixed unnecessary reprocessing of unchanged web page content
+
+### Changed
+- **Removed Sensor Status Tab** - Consolidated sensor information into Overview tab
+- **Pipeline Metadata API** - Enhanced filtering to exclude test/heartbeat/demo data from RID listings
+- **UI Loading States** - Added proper loading spinners instead of placeholder examples
+
+### Cleaned
+- **Database Cleanup** - Removed 1,794 heartbeat memories from koi_memories table
+- **Test Files** - Removed temporary test scripts from koi-processor directory
+
 ## [2.2.0] - 2025-09-25
 
 ### Added

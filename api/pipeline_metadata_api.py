@@ -471,7 +471,7 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
         )
 
         try:
-            # Get RIDs from documents
+            # Get RIDs from documents, filtering out test and heartbeat data
             doc_rids = await conn.fetch("""
                 SELECT DISTINCT
                     rid,
@@ -480,16 +480,22 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
                     created_at
                 FROM koi_content
                 WHERE rid IS NOT NULL
+                    AND rid NOT LIKE '%test_%'
+                    AND rid NOT LIKE '%heartbeat%'
+                    AND rid NOT LIKE '%:demo:%'
+                    AND (title != 'Test Page' OR title IS NULL)
                 ORDER BY created_at DESC
                 LIMIT $1
             """, limit // 2)
 
-            # Get RIDs from transformation receipts
+            # Get RIDs from transformation receipts, filtering out test and heartbeat data
             receipt_rids = await conn.fetch("""
                 SELECT DISTINCT rid, created_at FROM (
                     SELECT DISTINCT input_rid as rid, MIN(created_at) as created_at
                     FROM koi_transformation_receipts
                     WHERE input_rid IS NOT NULL
+                        AND input_rid NOT LIKE '%test_%'
+                        AND input_rid NOT LIKE '%heartbeat%'
                     GROUP BY input_rid
 
                     UNION
@@ -497,6 +503,8 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
                     SELECT DISTINCT output_rid as rid, MIN(created_at) as created_at
                     FROM koi_transformation_receipts
                     WHERE output_rid IS NOT NULL
+                        AND output_rid NOT LIKE '%test_%'
+                        AND output_rid NOT LIKE '%heartbeat%'
                     GROUP BY output_rid
                 ) AS all_rids
                 ORDER BY created_at DESC
