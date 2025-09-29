@@ -483,29 +483,37 @@ class RegenLedgerComprehensive:
             "ibc": results[7] if not isinstance(results[7], Exception) else {}
         }
 
-        # Calculate comprehensive statistics
+        # Calculate comprehensive statistics (with safe access)
+        proposals = summary.get("proposals", [])
+        credit_batches = summary.get("credit_batches", [])
+        baskets = summary.get("baskets", [])
+        marketplace = summary.get("marketplace", {})
+        staking = summary.get("staking", {})
+        recent_blocks = summary.get("recent_blocks", [])
+        ibc = summary.get("ibc", {})
+
         stats = {
             "governance": {
-                "total_proposals": len(summary["proposals"]),
-                "active_proposals": len([p for p in summary["proposals"] if p.get("status") == "VOTING_PERIOD"]),
-                "passed_24h": len([p for p in summary["proposals"] if p.get("status") == "PASSED"])
+                "total_proposals": len(proposals),
+                "active_proposals": len([p for p in proposals if p.get("status") == "VOTING_PERIOD"]),
+                "passed_24h": len([p for p in proposals if p.get("status") == "PASSED"])
             },
             "ecocredit": {
-                "new_batches": len(summary["credit_batches"]),
-                "total_baskets": len(summary["baskets"])
+                "new_batches": len(credit_batches),
+                "total_baskets": len(baskets)
             },
             "marketplace": {
-                "active_sell_orders": summary["marketplace"].get("total_sell_orders", 0),
-                "active_buy_orders": summary["marketplace"].get("total_buy_orders", 0)
+                "active_sell_orders": marketplace.get("total_sell_orders", 0),
+                "active_buy_orders": marketplace.get("total_buy_orders", 0)
             },
             "staking": {
-                "total_validators": summary["staking"].get("total_validators", 0),
-                "total_bonded": summary["staking"].get("total_bonded_tokens", "0")
+                "total_validators": staking.get("total_validators", 0),
+                "total_bonded": staking.get("total_bonded_tokens", "0")
             },
             "network": {
-                "blocks_24h": len(summary["recent_blocks"]),
-                "avg_tx_per_block": sum(b.get("tx_count", 0) for b in summary["recent_blocks"]) / max(len(summary["recent_blocks"]), 1),
-                "ibc_channels": summary["ibc"].get("total_channels", 0)
+                "blocks_24h": len(recent_blocks),
+                "avg_tx_per_block": sum(b.get("tx_count", 0) for b in recent_blocks) / max(len(recent_blocks), 1),
+                "ibc_channels": ibc.get("total_channels", 0)
             }
         }
         summary["statistics"] = stats
@@ -547,36 +555,42 @@ class RegenLedgerComprehensive:
             "transactions": results[8] if not isinstance(results[8], Exception) else {}
         }
 
-        # Calculate comprehensive weekly statistics
+        # Calculate comprehensive weekly statistics (with safe access)
+        proposals = summary.get("proposals", [])
+        credit_batches = summary.get("credit_batches", [])
+        baskets = summary.get("baskets", [])
+        marketplace = summary.get("marketplace", {})
+        staking = summary.get("staking", {})
+
         stats = {
             "governance": {
-                "total_proposals": len(summary["proposals"]),
-                "active_proposals": len([p for p in summary["proposals"] if p.get("status") == "VOTING_PERIOD"]),
-                "passed_week": len([p for p in summary["proposals"] if p.get("status") == "PASSED"]),
-                "rejected_week": len([p for p in summary["proposals"] if p.get("status") == "REJECTED"])
+                "total_proposals": len(proposals),
+                "active_proposals": len([p for p in proposals if p.get("status") == "VOTING_PERIOD"]),
+                "passed_week": len([p for p in proposals if p.get("status") == "PASSED"]),
+                "rejected_week": len([p for p in proposals if p.get("status") == "REJECTED"])
             },
             "ecocredit": {
-                "new_batches": len(summary["credit_batches"]),
-                "total_baskets": len(summary["baskets"]),
-                "basket_names": [b.get("name", "") for b in summary["baskets"]]
+                "new_batches": len(credit_batches),
+                "total_baskets": len(baskets),
+                "basket_names": [b.get("name", "") for b in baskets]
             },
             "marketplace": {
-                "active_sell_orders": summary["marketplace"].get("total_sell_orders", 0),
-                "active_buy_orders": summary["marketplace"].get("total_buy_orders", 0),
-                "total_listings": summary["marketplace"].get("total_sell_orders", 0) + summary["marketplace"].get("total_buy_orders", 0)
+                "active_sell_orders": marketplace.get("total_sell_orders", 0),
+                "active_buy_orders": marketplace.get("total_buy_orders", 0),
+                "total_listings": marketplace.get("total_sell_orders", 0) + marketplace.get("total_buy_orders", 0)
             },
             "staking": {
-                "total_validators": summary["staking"].get("total_validators", 0),
-                "total_bonded": summary["staking"].get("total_bonded_tokens", "0"),
-                "top_validators": [v.get("moniker", "") for v in summary["staking"].get("validators", [])[:5]]
+                "total_validators": staking.get("total_validators", 0),
+                "total_bonded": staking.get("total_bonded_tokens", "0"),
+                "top_validators": [v.get("moniker", "") for v in staking.get("validators", [])[:5]]
             },
             "network": {
-                "blocks_processed": len(summary["recent_blocks"]),
-                "total_transactions": summary["transaction_summary"].get("total_transactions"),
+                "blocks_processed": len(summary.get("recent_blocks", [])),
+                "total_transactions": summary.get("transaction_summary", {}).get("total_transactions"),
                 "avg_tx_per_block": None,  # Can't calculate without proper tx counts
-                "ibc_channels": summary["ibc"].get("total_channels", 0),
-                "ibc_connections": summary["ibc"].get("total_connections", 0),
-                "tx_data_note": summary["transaction_summary"].get("note", "")
+                "ibc_channels": summary.get("ibc", {}).get("total_channels", 0),
+                "ibc_connections": summary.get("ibc", {}).get("total_connections", 0),
+                "tx_data_note": summary.get("transaction_summary", {}).get("note", "")
             }
         }
         summary["statistics"] = stats
@@ -699,7 +713,7 @@ class RegenLedgerComprehensive:
                 "items": [],
                 "stats": stats.get("governance", {})
             }
-            for prop in summary["proposals"][:10]:
+            for prop in summary.get("proposals", [])[:10]:
                 gov_section["items"].append({
                     "title": f"Proposal #{prop['id']}: {prop['title']}",
                     "description": prop.get("summary", "")[:200],
@@ -716,7 +730,7 @@ class RegenLedgerComprehensive:
                 "items": [],
                 "stats": stats.get("ecocredit", {})
             }
-            for batch in summary["credit_batches"][:10]:
+            for batch in summary.get("credit_batches", [])[:10]:
                 credit_section["items"].append({
                     "title": f"Batch: {batch['denom']}",
                     "issuance_date": batch.get("issuance_date", ""),
@@ -774,7 +788,7 @@ class RegenLedgerComprehensive:
                 "title": "🔒 Top Validators",
                 "items": []
             }
-            for val in summary["staking"]["validators"][:5]:
+            for val in summary.get("staking", {}).get("validators", [])[:5]:
                 validator_section["items"].append({
                     "name": val.get("moniker", "Unknown"),
                     "tokens": val.get("tokens", "0"),
