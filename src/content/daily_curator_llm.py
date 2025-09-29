@@ -11,6 +11,7 @@ import json
 import yaml
 import re
 import uuid
+import random
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
@@ -296,6 +297,74 @@ class DailyCuratorLLM:
         thread_pattern = f"{thread_part}_post_%"
         rows = await conn.fetch(query, thread_pattern)
         return [dict(row) for row in rows]
+
+    async def get_recent_forum_threads(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Get the most recent forum threads regardless of date
+        Used as fallback when there's no daily activity
+        Returns list of thread summaries with URLs
+        """
+        async with asyncpg.create_pool(self.db_url) as pool:
+            async with pool.acquire() as conn:
+                query = """
+                    SELECT DISTINCT ON (thread_id)
+                        rid,
+                        source_sensor,
+                        content,
+                        metadata,
+                        published_at,
+                        -- Extract thread ID from RID
+                        SUBSTRING(rid FROM 'forum\\.regen\\.network_([0-9]+)') as thread_id
+                    FROM koi_memories
+                    WHERE source_sensor LIKE '%forum%'
+                      AND rid LIKE 'forum.regen.network_%_post_%'
+                      AND superseded_at IS NULL
+                      AND event_type != 'FORGET'
+                      AND published_at IS NOT NULL
+                    ORDER BY thread_id, published_at DESC
+                    LIMIT %s
+                """
+
+                rows = await conn.fetch(query, limit * 2)  # Get more to filter later
+
+                threads = []
+                for row in rows[:limit]:
+                    content = row['content']
+                    metadata = row['metadata'] or {}
+
+                    # Parse content if JSON
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except:
+                            pass
+
+                    if isinstance(content, dict):
+                        title = content.get('title', '')
+                        text = content.get('text', content.get('content', ''))[:200]
+                    else:
+                        title = ''
+                        text = str(content)[:200]
+
+                    # Get thread URL from metadata
+                    url = metadata.get('url', '')
+                    if not url and row['thread_id']:
+                        # Construct URL from thread ID
+                        url = f"https://forum.regen.network/t/{row['thread_id']}"
+
+                    if url:  # Only add threads with valid URLs
+                        threads.append({
+                            'title': title or f"Forum Thread #{row['thread_id']}",
+                            'url': url,
+                            'preview': text,
+                            'published_at': row['published_at'],
+                            'thread_id': row['thread_id']
+                        })
+
+                # Sort by most recent
+                threads.sort(key=lambda x: x['published_at'] if x['published_at'] else '', reverse=True)
+
+                return threads[:limit]
 
     async def get_all_24h_content(self) -> List[Dict[str, Any]]:
         """
@@ -795,7 +864,9 @@ Provide a JSON response with:
 
     async def generate_daily_thread(self) -> Dict[str, Any]:
         """
-        Generate a daily thread using LLM-powered content curation
+        Generate daily thread with adaptive post count (3-5 posts)
+        Pattern: headline, stat, 1-2 links, CTA
+        Adjusts based on activity level
         """
         logger.info("Generating LLM-powered daily thread...")
 
@@ -810,14 +881,37 @@ Provide a JSON response with:
         themes = await self.analyze_content_themes(all_content)
         logger.info(f"Identified themes: {themes.get('main_themes', [])}")
 
+        # Determine activity level and post count
+        primary_content = [item for item in all_content if not item.get('is_thread_context', False)]
+        activity_level = len(primary_content)
+
+        # Determine post count based on activity
+        # Low activity (0-5 items): 3 posts
+        # Medium activity (6-15 items): 4 posts
+        # High activity (16+ items): 5 posts
+        if activity_level <= 5:
+            post_count = 3
+            activity_category = 'low'
+        elif activity_level <= 15:
+            post_count = 4
+            activity_category = 'medium'
+        else:
+            post_count = 5
+            activity_category = 'high'
+
+        logger.info(f"Activity level: {activity_category} ({activity_level} items) - generating {post_count} posts")
+
         # Build thread structure
         thread = {
-            'thread_id': str(uuid.uuid4()),  # Add a unique ID for the thread
+            'thread_id': str(uuid.uuid4()),
             'thread_date': datetime.now(timezone.utc).isoformat(),
             'posts': [],
             'metadata': {
                 'content_sources': {
                     'total_content_24h': len(all_content),
+                    'primary_content_24h': activity_level,
+                    'activity_level': activity_category,
+                    'post_count': post_count,
                     'themes': themes.get('main_themes', []),
                     'trending': themes.get('trending_topics', [])
                 },
@@ -826,9 +920,21 @@ Provide a JSON response with:
             }
         }
 
-        # Generate tweets based on content and themes
+        # Check if we need fallback content for low activity days
+        need_fallback = activity_level < 3
+        fallback_thread = None
 
-        # Post 1: Dynamic headline based on main theme
+        if need_fallback:
+            # Get recent forum threads as fallback
+            recent_threads = await self.get_recent_forum_threads(limit=5)
+            if recent_threads:
+                # Randomly select one thread
+                fallback_thread = random.choice(recent_threads)
+                logger.info(f"Using fallback forum thread: {fallback_thread.get('title', 'Unknown')}")
+
+        # Generate posts based on activity level
+
+        # Post 1: Always include a headline
         headline_result = await self.generate_tweet_from_content(all_content, 'headline', 1, stats)
         thread['posts'].append({
             'type': 'headline',
@@ -837,7 +943,7 @@ Provide a JSON response with:
             'metadata': {'position': 1, 'generated_by': 'llm'}
         })
 
-        # Post 2: Stats or governance based on what's most active
+        # Post 2: Always include stats or governance
         if themes.get('key_governance_items') or stats.get('active_proposals', 0) > 0:
             tweet_result = await self.generate_tweet_from_content(all_content, 'governance', 2, stats)
             tweet_type = 'governance'
@@ -852,37 +958,63 @@ Provide a JSON response with:
             'metadata': {'position': 2, 'generated_by': 'llm'}
         })
 
-        # Post 3: Community highlight
-        community_result = await self.generate_tweet_from_content(all_content, 'community', 3, stats)
-        thread['posts'].append({
-            'type': 'community',
-            'content': community_result['content'],
-            'sources': community_result.get('sources', []),
-            'metadata': {'position': 3, 'generated_by': 'llm'}
-        })
+        # For low activity (3 posts): headline, stat, CTA
+        # For medium activity (4 posts): headline, stat, link, CTA
+        # For high activity (5 posts): headline, stat, link, link, CTA
 
-        # Post 4: Additional highlight based on themes
-        if themes.get('new_credits_summary') or stats.get('new_credits', 0) > 0:
-            # Focus on credits if there are new ones
-            extra_result = await self.generate_tweet_from_content(all_content, 'stats', 4, stats)
-        else:
-            # Otherwise another community/governance post
-            extra_result = await self.generate_tweet_from_content(all_content, 'community', 4, stats)
+        # Post 3: Only add link/community posts if we have 4+ posts
+        if post_count >= 4:
+            if need_fallback and fallback_thread:
+                # Use fallback forum thread
+                fallback_content = f"💬 Join the discussion: {fallback_thread['title']}\n\n"
+                fallback_content += f"{fallback_thread['preview'][:150]}...\n\n"
+                fallback_content += f"Read more: {fallback_thread['url']}"
 
-        thread['posts'].append({
-            'type': 'highlight',
-            'content': extra_result['content'],
-            'sources': extra_result.get('sources', []),
-            'metadata': {'position': 4, 'generated_by': 'llm'}
-        })
+                thread['posts'].append({
+                    'type': 'community',
+                    'content': fallback_content,
+                    'sources': [{
+                        'type': 'fallback',
+                        'description': f"Recent forum thread (fallback content)",
+                        'url': fallback_thread['url'],
+                        'published_at': fallback_thread.get('published_at', 'recent')
+                    }],
+                    'metadata': {'position': 3, 'generated_by': 'fallback'}
+                })
+            else:
+                # Regular community highlight
+                community_result = await self.generate_tweet_from_content(all_content, 'community', 3, stats)
+                thread['posts'].append({
+                    'type': 'community',
+                    'content': community_result['content'],
+                    'sources': community_result.get('sources', []),
+                    'metadata': {'position': 3, 'generated_by': 'llm'}
+                })
 
-        # Post 5: Call to action
-        cta_result = await self.generate_tweet_from_content(all_content, 'cta', 5, stats)
+        # Post 4: Additional highlight (only for high activity - 5 posts)
+        if post_count >= 5:
+            if themes.get('new_credits_summary') or stats.get('new_credits', 0) > 0:
+                # Focus on credits if there are new ones
+                extra_result = await self.generate_tweet_from_content(all_content, 'stats', 4, stats)
+            else:
+                # Otherwise another community/governance post
+                extra_result = await self.generate_tweet_from_content(all_content, 'community', 4, stats)
+
+            thread['posts'].append({
+                'type': 'highlight',
+                'content': extra_result['content'],
+                'sources': extra_result.get('sources', []),
+                'metadata': {'position': 4, 'generated_by': 'llm'}
+            })
+
+        # Final Post: Call to action (always included as last post)
+        final_position = len(thread['posts']) + 1
+        cta_result = await self.generate_tweet_from_content(all_content, 'cta', final_position, stats)
         thread['posts'].append({
             'type': 'cta',
             'content': cta_result['content'],
             'sources': cta_result.get('sources', []),
-            'metadata': {'position': 5, 'generated_by': 'llm'}
+            'metadata': {'position': final_position, 'generated_by': 'llm'}
         })
 
         logger.info(f"Generated thread with {len(thread['posts'])} posts using LLM")
