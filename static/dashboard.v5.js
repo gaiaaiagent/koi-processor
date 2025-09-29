@@ -1239,9 +1239,23 @@ async function generateNewDraft(type) {
 }
 
 function addDraftLoadingPlaceholder(type) {
-    const containerId = type === 'weekly' ? 'weekly-drafts-container' : 'drafts-container';
-    const container = document.getElementById(containerId);
-    if (!container) return;
+    // The actual container is "pending-drafts-list" not "drafts-container"
+    const containerId = 'pending-drafts-list';
+    let container = document.getElementById(containerId);
+
+    if (!container) {
+        console.log(`Container ${containerId} not found, waiting for DOM...`);
+        // If container doesn't exist yet, try to find the drafts tab and create it
+        const draftsTab = document.getElementById('drafts');
+        if (draftsTab) {
+            container = draftsTab.querySelector('#' + containerId);
+        }
+    }
+
+    if (!container) {
+        console.error(`Could not find container ${containerId} for draft placeholder`);
+        return;
+    }
 
     // Create loading placeholder card
     const placeholderId = `${type}-loading-placeholder`;
