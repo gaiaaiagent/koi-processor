@@ -333,7 +333,15 @@ class DailyCuratorLLM:
                 rows = await conn.fetch(query, limit * 2)  # Get more to filter later
 
                 threads = []
-                for row in rows[:limit]:
+                seen_threads = set()  # Track which threads we've already added
+
+                for row in rows:
+                    thread_id = row['thread_id']
+
+                    # Skip if we've already added this thread
+                    if thread_id in seen_threads:
+                        continue
+
                     content = row['content']
                     metadata = row['metadata'] or {}
 
@@ -360,23 +368,28 @@ class DailyCuratorLLM:
 
                     # Get thread URL from metadata
                     url = metadata.get('url', '') if isinstance(metadata, dict) else ''
-                    if not url and row['thread_id']:
+                    if not url and thread_id:
                         # Construct URL from thread ID
-                        url = f"https://forum.regen.network/t/{row['thread_id']}"
+                        url = f"https://forum.regen.network/t/{thread_id}"
 
-                    if url:  # Only add threads with valid URLs
+                    if url and thread_id:  # Only add threads with valid URLs and IDs
                         threads.append({
-                            'title': title or f"Forum Thread #{row['thread_id']}",
+                            'title': title or f"Recent Forum Discussion",
                             'url': url,
                             'preview': text,
                             'published_at': row['published_at'],
-                            'thread_id': row['thread_id']
+                            'thread_id': thread_id
                         })
+                        seen_threads.add(thread_id)
+
+                        # Stop when we have enough unique threads
+                        if len(threads) >= limit:
+                            break
 
                 # Sort by most recent
                 threads.sort(key=lambda x: x['published_at'] if x['published_at'] else '', reverse=True)
 
-                return threads[:limit]
+                return threads
 
     async def get_all_24h_content(self) -> List[Dict[str, Any]]:
         """
@@ -1018,14 +1031,37 @@ Provide a JSON response with:
             'metadata': {'position': 2, 'generated_by': 'llm'}
         })
 
-        # For low activity (3 posts): headline, stat, CTA
+        # For low activity (3 posts): headline, stat, forum link/CTA
         # For medium activity (4 posts): headline, stat, link, CTA
         # For high activity (5 posts): headline, stat, link, link, CTA
 
-        # Post 3: Only add link/community posts if we have 4+ posts
-        if post_count >= 4:
-            if need_fallback and fallback_thread:
+        # Post 3: For low activity, always try to include a forum thread
+        # For medium/high activity, include regular community content
+        if post_count == 3:
+            # Low activity - try to include forum thread as 3rd post
+            if fallback_thread:
                 # Use fallback forum thread
+                fallback_content = f"💬 Join the discussion: {fallback_thread['title']}\n\n"
+                fallback_content += f"{fallback_thread['preview'][:150]}...\n\n"
+                fallback_content += f"Read more: {fallback_thread['url']}"
+
+                thread['posts'].append({
+                    'type': 'community',
+                    'content': fallback_content,
+                    'sources': [{
+                        'type': 'fallback',
+                        'description': f"Recent forum thread (fallback content)",
+                        'url': fallback_thread['url'],
+                        'published_at': fallback_thread.get('published_at', 'recent')
+                    }],
+                    'metadata': {'position': 3, 'generated_by': 'fallback'}
+                })
+            # If no forum thread available, generate CTA directly (skip to final post)
+
+        elif post_count >= 4:
+            # Medium/high activity - include community content
+            if need_fallback and fallback_thread:
+                # Use fallback forum thread if still no activity
                 fallback_content = f"💬 Join the discussion: {fallback_thread['title']}\n\n"
                 fallback_content += f"{fallback_thread['preview'][:150]}...\n\n"
                 fallback_content += f"Read more: {fallback_thread['url']}"
