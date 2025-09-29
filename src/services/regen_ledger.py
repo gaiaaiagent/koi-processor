@@ -377,8 +377,8 @@ class RegenLedgerClient:
         # Use the comprehensive format method
         digest_data = self.comprehensive_client.format_comprehensive_weekly_digest(comprehensive_summary)
 
-        # Add a formatted summary for the digest
-        digest_data["summary"] = self.comprehensive_client.format_comprehensive_daily_post(comprehensive_summary)
+        # Add a formatted summary for the digest - use WEEKLY format, not daily!
+        digest_data["summary"] = self.comprehensive_client.format_comprehensive_weekly_post(comprehensive_summary)
 
         return digest_data
 

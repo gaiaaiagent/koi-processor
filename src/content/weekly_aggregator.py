@@ -139,35 +139,82 @@ class WeeklyAggregator:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
         
+        # Use a balanced query to get content from all sources
         query = """
+        WITH source_groups AS (
+            SELECT
+                rid as id,
+                content,
+                metadata->>'title' as title,
+                source_sensor as source,
+                metadata->>'url' as url,
+                published_at as publication_date,
+                published_confidence as confidence,
+                metadata->>'tags' as tags,
+                -- Group sources into categories to balance content
+                CASE
+                    WHEN source_sensor LIKE '%%discourse%%' THEN 'forum'
+                    WHEN source_sensor LIKE '%%github-activity%%' THEN 'github'
+                    WHEN source_sensor LIKE '%%gitlab%%' THEN 'gitlab'
+                    WHEN source_sensor LIKE '%%twitter%%' THEN 'twitter'
+                    WHEN source_sensor LIKE '%%telegram%%' THEN 'telegram'
+                    WHEN source_sensor LIKE '%%notion%%' THEN 'notion'
+                    WHEN source_sensor LIKE '%%website%%' THEN 'website'
+                    WHEN source_sensor LIKE '%%medium%%' THEN 'medium'
+                    WHEN source_sensor LIKE '%%podcast%%' THEN 'podcast'
+                    ELSE 'other'
+                END as source_category,
+                ROW_NUMBER() OVER (
+                    PARTITION BY CASE
+                        WHEN source_sensor LIKE '%%discourse%%' THEN 'forum'
+                        WHEN source_sensor LIKE '%%github-activity%%' THEN 'github'
+                        WHEN source_sensor LIKE '%%gitlab%%' THEN 'gitlab'
+                        WHEN source_sensor LIKE '%%twitter%%' THEN 'twitter'
+                        WHEN source_sensor LIKE '%%telegram%%' THEN 'telegram'
+                        WHEN source_sensor LIKE '%%notion%%' THEN 'notion'
+                        WHEN source_sensor LIKE '%%website%%' THEN 'website'
+                        WHEN source_sensor LIKE '%%medium%%' THEN 'medium'
+                        WHEN source_sensor LIKE '%%podcast%%' THEN 'podcast'
+                        ELSE 'other'
+                    END
+                    ORDER BY published_at DESC, published_confidence DESC
+                ) as category_rank
+            FROM koi_memories
+            WHERE superseded_at IS NULL
+                AND event_type != 'FORGET'
+                -- Exclude all heartbeat content
+                AND content::text NOT LIKE '%%sensor_heartbeat%%'
+                AND content::text NOT LIKE '%%heartbeat%%'
+                AND rid NOT LIKE '%%heartbeat%%'
+                -- Exclude system/operational messages
+                AND content::text NOT LIKE '%%Sensor initialized%%'
+                AND content::text NOT LIKE '%%Monitoring active%%'
+                AND content::text NOT LIKE '%%Starting sensor%%'
+                AND content::text NOT LIKE '%%KOI system%%'
+                -- ONLY content actually PUBLISHED in the specified window
+                AND published_at IS NOT NULL
+                AND published_at >= %s
+                AND published_at <= %s
+                -- Require reasonable confidence in the published date
+                AND published_confidence >= %s
+        )
         SELECT
-            rid as id,
-            content,
-            metadata->>'title' as title,
-            source_sensor as source,
-            metadata->>'url' as url,
-            published_at as publication_date,
-            published_confidence as confidence,
-            metadata->>'tags' as tags
-        FROM koi_memories
-        WHERE superseded_at IS NULL
-            AND event_type != 'FORGET'
-            -- Exclude all heartbeat content
-            AND content::text NOT LIKE '%%sensor_heartbeat%%'
-            AND content::text NOT LIKE '%%heartbeat%%'
-            AND rid NOT LIKE '%%heartbeat%%'
-            -- Exclude system/operational messages
-            AND content::text NOT LIKE '%%Sensor initialized%%'
-            AND content::text NOT LIKE '%%Monitoring active%%'
-            AND content::text NOT LIKE '%%Starting sensor%%'
-            AND content::text NOT LIKE '%%KOI system%%'
-            -- ONLY content actually PUBLISHED in the specified window
-            AND published_at IS NOT NULL
-            AND published_at >= %s
-            AND published_at <= %s
-            -- Require reasonable confidence in the published date
-            AND published_confidence >= %s
-        ORDER BY published_at DESC, published_confidence DESC
+            id, content, title, source, url,
+            publication_date, confidence, tags
+        FROM source_groups
+        WHERE
+            -- Get up to 100 items per source category to ensure diversity
+            (source_category = 'forum' AND category_rank <= 100)
+            OR (source_category = 'github' AND category_rank <= 50)  -- Limit GitHub to avoid flooding
+            OR (source_category = 'twitter' AND category_rank <= 50)
+            OR (source_category = 'telegram' AND category_rank <= 50)
+            OR (source_category = 'gitlab' AND category_rank <= 50)
+            OR (source_category = 'notion' AND category_rank <= 50)
+            OR (source_category = 'website' AND category_rank <= 50)
+            OR (source_category = 'medium' AND category_rank <= 50)
+            OR (source_category = 'podcast' AND category_rank <= 50)
+            OR (source_category = 'other' AND category_rank <= 50)
+        ORDER BY publication_date DESC, confidence DESC
         LIMIT %s
         """
         

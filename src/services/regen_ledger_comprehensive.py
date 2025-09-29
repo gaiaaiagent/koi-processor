@@ -61,48 +61,53 @@ class RegenLedgerComprehensive:
         """
         logger.info(f"Fetching all proposals from past {days_back} days...")
 
-        statuses = [
-            "PROPOSAL_STATUS_VOTING_PERIOD",
-            "PROPOSAL_STATUS_PASSED",
-            "PROPOSAL_STATUS_REJECTED",
-            "PROPOSAL_STATUS_FAILED",
-            "PROPOSAL_STATUS_DEPOSIT_PERIOD"
-        ]
+        # Get all proposals (no status filter since it doesn't seem to work)
+        data = await self._make_request(
+            "/cosmos/gov/v1/proposals",
+            params={
+                "pagination.limit": "100",
+                "pagination.reverse": "true"
+            }
+        )
 
         all_proposals = []
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_back)
 
-        for status in statuses:
-            data = await self._make_request(
-                "/cosmos/gov/v1/proposals",
-                params={
-                    "proposal_status": status,
-                    "pagination.limit": "100",
-                    "pagination.reverse": "true"
-                }
-            )
+        if data and "proposals" in data:
+            for proposal in data["proposals"]:
+                # Check if proposal is within our time window (either submit or voting time)
+                submit_time = proposal.get("submit_time", "")
+                voting_end_time = proposal.get("voting_end_time", "")
 
-            if data and "proposals" in data:
-                for proposal in data["proposals"]:
-                    # Check if proposal is within our time window
-                    submit_time = proposal.get("submit_time", "")
-                    if submit_time:
-                        submit_dt = datetime.fromisoformat(submit_time.replace('Z', '+00:00'))
-                        if submit_dt >= cutoff_date:
-                            formatted = {
-                                "id": proposal.get("id"),
-                                "title": proposal.get("title", ""),
-                                "summary": proposal.get("summary", ""),
-                                "status": proposal.get("status", "").replace("PROPOSAL_STATUS_", ""),
-                                "submit_time": submit_time,
-                                "deposit_end_time": proposal.get("deposit_end_time"),
-                                "voting_start_time": proposal.get("voting_start_time"),
-                                "voting_end_time": proposal.get("voting_end_time"),
-                                "total_deposit": proposal.get("total_deposit", []),
-                                "type": "governance_proposal"
-                            }
-                            all_proposals.append(formatted)
+                relevant = False
+                if voting_end_time:
+                    voting_end_dt = datetime.fromisoformat(voting_end_time.replace('Z', '+00:00'))
+                    if voting_end_dt >= cutoff_date:
+                        relevant = True
 
+                if submit_time and not relevant:
+                    submit_dt = datetime.fromisoformat(submit_time.replace('Z', '+00:00'))
+                    if submit_dt >= cutoff_date:
+                        relevant = True
+
+                if relevant:
+                    formatted = {
+                        "id": proposal.get("id"),
+                        "title": proposal.get("title", ""),
+                        "summary": proposal.get("summary", ""),
+                        "status": proposal.get("status", "").replace("PROPOSAL_STATUS_", ""),
+                        "submit_time": submit_time,
+                        "deposit_end_time": proposal.get("deposit_end_time"),
+                        "voting_start_time": proposal.get("voting_start_time"),
+                        "voting_end_time": proposal.get("voting_end_time"),
+                        "total_deposit": proposal.get("total_deposit", []),
+                        "type": "governance_proposal",
+                        "proposer": proposal.get("proposer", ""),
+                        "final_tally": proposal.get("final_tally_result", {})
+                    }
+                    all_proposals.append(formatted)
+
+        logger.info(f"Found {len(all_proposals)} proposals from past {days_back} days")
         return all_proposals
 
     async def get_proposal_votes(self, proposal_id: str) -> Dict[str, Any]:
@@ -362,6 +367,45 @@ class RegenLedgerComprehensive:
 
         return blocks
 
+    async def get_transaction_summary(self, days_back: int = 7) -> Dict[str, Any]:
+        """Get transaction summary for the period"""
+        logger.info(f"Fetching transaction summary for past {days_back} days...")
+
+        # Unfortunately, Cosmos REST API doesn't provide an efficient way to get
+        # total transaction counts for a time period without iterating through all blocks
+        # or having an indexer. We have three options:
+        # 1. Query every block (100,800 blocks/week = impractical)
+        # 2. Use an external indexer service (requires additional infrastructure)
+        # 3. Sample blocks and extrapolate (current approach)
+
+        # For now, we'll acknowledge this limitation and not show misleading stats
+        # In production, you'd want to use an indexer like:
+        # - Mintscan API (requires API key)
+        # - Custom indexer using Cosmos SDK events
+        # - Graph Protocol subgraph
+
+        tx_summary = {
+            "note": "Transaction counts require indexer infrastructure",
+            "total_transactions": None,  # Don't show misleading numbers
+            "estimated": False,
+            "by_type": {
+                # These would need actual transaction querying to break down by type
+                "bank_send": None,
+                "staking_delegate": None,
+                "staking_undelegate": None,
+                "gov_vote": None,
+                "gov_submit_proposal": None,
+                "ecocredit_create_batch": None,
+                "ecocredit_transfer": None,
+                "marketplace_sell": None,
+                "marketplace_buy": None,
+                "ibc_transfer": None
+            },
+            "data_source": "Would require indexer or block iteration"
+        }
+
+        return tx_summary
+
     # ==================== IBC MODULE ====================
 
     async def get_ibc_activity(self) -> Dict[str, Any]:
@@ -485,6 +529,7 @@ class RegenLedgerComprehensive:
             self.get_token_supply(),
             self.get_recent_blocks(limit=100),
             self.get_ibc_activity(),
+            self.get_transaction_summary(days_back=7),
             return_exceptions=True
         )
 
@@ -498,7 +543,8 @@ class RegenLedgerComprehensive:
             "staking": results[4] if not isinstance(results[4], Exception) else {},
             "token_supply": results[5] if not isinstance(results[5], Exception) else {},
             "recent_blocks": results[6] if not isinstance(results[6], Exception) else [],
-            "ibc": results[7] if not isinstance(results[7], Exception) else {}
+            "ibc": results[7] if not isinstance(results[7], Exception) else {},
+            "transactions": results[8] if not isinstance(results[8], Exception) else {}
         }
 
         # Calculate comprehensive weekly statistics
@@ -526,10 +572,11 @@ class RegenLedgerComprehensive:
             },
             "network": {
                 "blocks_processed": len(summary["recent_blocks"]),
-                "total_transactions": sum(b.get("tx_count", 0) for b in summary["recent_blocks"]),
-                "avg_tx_per_block": sum(b.get("tx_count", 0) for b in summary["recent_blocks"]) / max(len(summary["recent_blocks"]), 1),
+                "total_transactions": summary["transaction_summary"].get("total_transactions"),
+                "avg_tx_per_block": None,  # Can't calculate without proper tx counts
                 "ibc_channels": summary["ibc"].get("total_channels", 0),
-                "ibc_connections": summary["ibc"].get("total_connections", 0)
+                "ibc_connections": summary["ibc"].get("total_connections", 0),
+                "tx_data_note": summary["transaction_summary"].get("note", "")
             }
         }
         summary["statistics"] = stats
@@ -581,37 +628,55 @@ class RegenLedgerComprehensive:
         stats = summary.get("statistics", {})
         lines = ["📊 **Regen Network 7-Day Update**\n"]
 
-        # Governance
+        # Governance - Show actual proposals
         gov_stats = stats.get("governance", {})
-        if gov_stats.get("total_proposals", 0) > 0:
-            lines.append(f"🗳️ {gov_stats['total_proposals']} total proposals ({gov_stats.get('active_proposals', 0)} active)")
+        proposals = summary.get("proposals", [])
+        if gov_stats.get("total_proposals", 0) > 0 or len(proposals) > 0:
+            lines.append(f"\n**🗳️ Governance Activity**")
+            if gov_stats.get("active_proposals", 0) > 0:
+                lines.append(f"• {gov_stats['active_proposals']} active proposal(s)")
+                # Show active proposals
+                for prop in proposals:
+                    if prop.get("status") == "VOTING_PERIOD":
+                        lines.append(f"  - #{prop['id']}: {prop['title'][:50]}...")
+                        if prop.get("voting_end_time"):
+                            end_time = prop['voting_end_time'].split('T')[0]
+                            lines.append(f"    Voting ends: {end_time}")
             if gov_stats.get("passed_week", 0) > 0:
-                lines.append(f"✅ {gov_stats['passed_week']} passed this week")
+                lines.append(f"• ✅ {gov_stats['passed_week']} proposal(s) passed")
+                # Show passed proposals
+                for prop in proposals[:2]:  # Limit to 2
+                    if prop.get("status") == "PASSED":
+                        lines.append(f"  - #{prop['id']}: {prop['title'][:50]}")
+            if gov_stats.get("rejected_week", 0) > 0:
+                lines.append(f"• ❌ {gov_stats['rejected_week']} proposal(s) rejected")
 
         # Credits and marketplace
+        lines.append(f"\n**💱 Market & Credits**")
         eco_stats = stats.get("ecocredit", {})
         market_stats = stats.get("marketplace", {})
         if eco_stats.get("new_batches", 0) > 0:
-            lines.append(f"🌱 {eco_stats['new_batches']} new credit batches issued")
-        if market_stats.get("active_sell_orders", 0) > 0 or market_stats.get("active_buy_orders", 0) > 0:
-            lines.append(f"💱 Marketplace: {market_stats['active_sell_orders']} sell / {market_stats['active_buy_orders']} buy orders")
+            lines.append(f"• 🌱 {eco_stats['new_batches']} new credit batches issued")
+        lines.append(f"• 📈 {market_stats.get('active_sell_orders', 0)} sell / {market_stats.get('active_buy_orders', 0)} buy orders")
 
-        # Network activity (7-day average)
+        # Network activity
+        lines.append(f"\n**⛓️ Network Stats**")
         net_stats = stats.get("network", {})
-        lines.append(f"⛓️ Network: {net_stats.get('avg_tx_per_block', 0):.1f} tx/block avg (7d)")
+        # Don't show transaction counts if we don't have accurate data
+        # Only show metrics we can accurately measure
 
         # Staking
         staking_stats = stats.get("staking", {})
-        lines.append(f"🔒 {staking_stats.get('total_validators', 0)} active validators")
-
-        # IBC
-        lines.append(f"🌉 {net_stats.get('ibc_channels', 0)} IBC channels active")
+        lines.append(f"• 🔒 {staking_stats.get('total_validators', 0)} active validators")
 
         # Bonded tokens
         bonded = staking_stats.get("total_bonded", "0")
         if bonded and bonded != "0":
             bonded_millions = int(bonded) / 10**6 / 1000000 if isinstance(bonded, str) else bonded / 10**6
-            lines.append(f"💰 {bonded_millions:.1f}M REGEN bonded")
+            lines.append(f"• 💰 {bonded_millions:.1f}M REGEN bonded")
+
+        # IBC
+        lines.append(f"• 🌉 {net_stats.get('ibc_channels', 0)} IBC channels")
 
         return "\n".join(lines)
 

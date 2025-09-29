@@ -41,7 +41,7 @@ class WeeklyCuratorLLM:
 
         # Content parameters
         self.max_stories = 10
-        self.brief_word_target = 800
+        self.brief_word_target = 1000  # Increased from 800 for more comprehensive coverage
 
     async def get_ledger_data_for_week(self) -> Dict[str, Any]:
         """Get Regen ledger data for the weekly digest"""
@@ -360,14 +360,19 @@ Full week's content ({len(thread_groups)} unique discussions, {total_posts} tota
 {ledger_summary}
 
 Create a comprehensive weekly brief that:
-1. Is 800-1200 words in length
-2. Uses a neutral, professional tone
+1. Is 800-1200 words in length (aim for 1000 words)
+2. Uses a neutral, professional tone suitable for a general audience
 3. Weaves together the week's developments into a coherent narrative
 4. MUST integrate the ledger statistics into the narrative (credit issuances, proposals, marketplace activity, network metrics)
 5. Provides context and analysis, not just summaries
 6. Highlights connections between different discussions and on-chain activity
 7. Identifies emerging patterns and trends from both community discussions and blockchain data
 8. Includes specific examples and details from the discussions and ledger activity
+9. DO NOT escape newlines - use proper markdown formatting
+10. Use natural paragraph breaks without escaped characters
+11. NEVER include technical details like transaction hashes, block numbers, or other cryptographic identifiers
+12. Write for a human audience - avoid overly technical blockchain jargon
+13. When mentioning on-chain activity, focus on the impact and meaning, not the technical details
 
 The brief should flow naturally, integrating all significant developments from the week. Don't use bullet points or numbered lists - write in prose paragraphs. Focus on telling the story of what happened in the Regen Network ecosystem this week.
 
@@ -392,7 +397,7 @@ Format as structured JSON with these exact keys:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=2000,
+                max_tokens=3000,  # Increased to accommodate longer briefs
                 response_format={"type": "json_object"}
             )
 
@@ -451,7 +456,8 @@ Format as structured JSON with these exact keys:
             'total_items': len(items),
             'total_discussions': len(thread_groups),
             'executive_summary': llm_analysis.get('executive_summary', ''),
-            'brief_content': llm_analysis.get('brief_content', ''),
+            # Clean any escaped newlines from LLM response
+            'brief_content': llm_analysis.get('brief_content', '').replace('\\n\\n', '\n\n').replace('\\n', '\n'),
             'themes': llm_analysis.get('themes', {}),
             'community_pulse': llm_analysis.get('community_pulse', {}),
             'key_discussions': llm_analysis.get('key_discussions', []),
@@ -479,11 +485,11 @@ Format as structured JSON with these exact keys:
 {week_start.strftime('%B %d')} - {week_end.strftime('%B %d, %Y')}
 
 ## Executive Summary
-{analysis.get('executive_summary', 'Weekly summary unavailable.')}
+{analysis.get('executive_summary', 'Weekly summary unavailable.').replace('\\n', '\n')}
 
 ---
 
-{analysis.get('brief_content', 'No content available.')}
+{analysis.get('brief_content', 'No content available.').replace('\\n\\n', '\n\n').replace('\\n', '\n')}
 
 ---
 
@@ -547,88 +553,101 @@ Format as structured JSON with these exact keys:
                 brief += ', '.join(trends)
                 brief += "\n"
 
-        # Add sources section
+        # Add sources section with detailed URLs
         if items or thread_groups:
             brief += "\n## Sources\n\n"
 
-            # Collect unique sources with URLs
-            sources_dict = {}
+            # Collect unique sources with URLs and metadata
+            sources_by_type = {}
 
-            # From thread groups (these have URLs)
+            # Process thread groups first for better URL tracking
             if thread_groups:
                 for thread_url, thread_items in thread_groups.items():
                     if thread_url and thread_url != 'untitled':
-                        # Clean source name from first item
-                        source = self.extract_clean_source(thread_items[0].get('source_sensor', '')) if thread_items else 'unknown'
+                        # Get source type from sensor
+                        source_type = self.extract_clean_source(thread_items[0].get('source_sensor', '')) if thread_items else 'unknown'
 
-                        # Add full URL if it looks like a URL
-                        if thread_url.startswith('http'):
-                            sources_dict[thread_url] = {
-                                'source': source,
-                                'count': len(thread_items),
-                                'url': thread_url
-                            }
-                        else:
-                            # It's a title, try to get URL from metadata
-                            for item in thread_items:
-                                metadata = item.get('metadata', {})
-                                if isinstance(metadata, dict):
-                                    url = metadata.get('url') or metadata.get('link')
-                                    if url:
-                                        sources_dict[thread_url] = {
-                                            'source': source,
-                                            'count': len(thread_items),
-                                            'url': url
-                                        }
-                                        break
+                        if source_type not in sources_by_type:
+                            sources_by_type[source_type] = []
 
-            # From individual items (for any missed sources)
-            if items:
-                source_counts = Counter([self.extract_clean_source(item['source_sensor']) for item in items])
+                        # Extract title and dates from metadata
+                        first_item = thread_items[0] if thread_items else {}
+                        metadata = first_item.get('metadata', {})
+                        if isinstance(metadata, str):
+                            try:
+                                metadata = json.loads(metadata)
+                            except:
+                                metadata = {}
 
-                for source, count in source_counts.items():
-                    if source not in [s['source'] for s in sources_dict.values()]:
-                        # Try to find a URL for this source
-                        source_url = None
-                        for item in items:
-                            if self.extract_clean_source(item['source_sensor']) == source:
-                                metadata = item.get('metadata', {})
-                                if isinstance(metadata, dict):
-                                    source_url = metadata.get('url') or metadata.get('link')
-                                    if source_url:
-                                        break
+                        title = metadata.get('title', '') if isinstance(metadata, dict) else ''
 
-                        if source_url:
-                            sources_dict[f"{source}_{count}"] = {
-                                'source': source,
-                                'count': count,
-                                'url': source_url
-                            }
-                        else:
-                            sources_dict[f"{source}_{count}"] = {
-                                'source': source,
-                                'count': count,
-                                'url': None
-                            }
+                        # Get date range for posts
+                        dates = [item.get('published_at') for item in thread_items if item.get('published_at')]
+                        date_range = ''
+                        if dates:
+                            latest = max(dates)
+                            oldest = min(dates)
+                            if latest and oldest:
+                                # Format dates
+                                try:
+                                    latest_str = latest.strftime('%b %d') if hasattr(latest, 'strftime') else str(latest)[:10]
+                                    oldest_str = oldest.strftime('%b %d') if hasattr(oldest, 'strftime') else str(oldest)[:10]
+                                    date_range = f"{oldest_str} - {latest_str}" if oldest_str != latest_str else latest_str
+                                except:
+                                    date_range = 'Past week'
 
-            # Format sources
-            if sources_dict:
-                # Group by source type
-                by_source = {}
-                for key, info in sources_dict.items():
-                    source = info['source']
-                    if source not in by_source:
-                        by_source[source] = []
-                    by_source[source].append(info)
+                        # Determine the actual URL
+                        actual_url = thread_url if thread_url.startswith('http') else None
+                        if not actual_url:
+                            # Try to get from metadata
+                            actual_url = metadata.get('url') or metadata.get('link') if isinstance(metadata, dict) else None
 
-                # Output sources
-                for source_type, source_items in sorted(by_source.items()):
-                    brief += f"### {source_type.replace('_', ' ').title()}\n"
-                    for item in source_items[:5]:  # Limit to 5 per source
+                        sources_by_type[source_type].append({
+                            'title': title or thread_url[:100],
+                            'url': actual_url,
+                            'count': len(thread_items),
+                            'date_range': date_range
+                        })
+
+            # Format sources with better details
+            if sources_by_type:
+                for source_type, source_items in sorted(sources_by_type.items()):
+                    # Clean up source type name
+                    display_name = source_type.replace('_', ' ').replace('-', ' ').title()
+                    if 'discourse' in source_type.lower():
+                        display_name = 'Discourse'
+                    elif 'github-activity' in source_type.lower():
+                        display_name = 'GitHub'
+                    elif 'website' in source_type.lower():
+                        display_name = 'Website'
+
+                    brief += f"### {display_name}\n"
+
+                    # Sort by post count and show top items
+                    source_items.sort(key=lambda x: x['count'], reverse=True)
+
+                    total_posts = sum(item['count'] for item in source_items)
+                    brief += f"- **Total activity**: {total_posts} posts across {len(source_items)} discussions\n"
+
+                    # Show individual items with details
+                    for item in source_items[:5]:  # Show top 5 discussions
                         if item['url']:
-                            brief += f"- [{item['url'][:50]}...]({item['url']}) ({item['count']} posts)\n"
+                            # Truncate long titles
+                            display_title = item['title'][:60] + '...' if len(item['title']) > 60 else item['title']
+                            brief += f"- [{display_title}]({item['url']}) "
                         else:
-                            brief += f"- {source_type} ({item['count']} posts)\n"
+                            display_title = item['title'][:80] + '...' if len(item['title']) > 80 else item['title']
+                            brief += f"- {display_title} "
+
+                        # Add post count and date
+                        brief += f"({item['count']} posts"
+                        if item['date_range']:
+                            brief += f", {item['date_range']}"
+                        brief += ")\n"
+
+                    if len(source_items) > 5:
+                        brief += f"- ...and {len(source_items) - 5} more discussions\n"
+
                     brief += "\n"
 
                 # Add On-Chain Activity section

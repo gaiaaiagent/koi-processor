@@ -118,34 +118,14 @@ class DailyCurator:
                           AND (
                               -- Forum content (discourse sensor)
                               km.source_sensor LIKE '%%discourse%%'
-                              -- GitHub repos
-                              OR km.source_sensor LIKE '%%github%%'
+                              -- GitHub activity sensor (high-level commits, PRs, issues)
+                              OR km.source_sensor LIKE '%%github-activity%%'
                               -- Also include website sensor if it has forum content
                               OR (km.source_sensor LIKE '%%website%%' AND km.rid LIKE '%%forum.regen.network%%')
                           )
                           AND km.content::text NOT LIKE '%%sensor_heartbeat%%'
                           AND km.rid NOT LIKE '%%heartbeat%%'
-                          -- Exclude code files and dependencies from GitHub (but keep README and important docs)
-                          AND NOT (km.source_sensor LIKE '%%github%%' AND (
-                              km.rid LIKE '%%package-lock.json%%'
-                              OR km.rid LIKE '%%yarn.lock%%'
-                              OR km.rid LIKE '%%Cargo.lock%%'
-                              OR km.rid LIKE '%%Gemfile.lock%%'
-                              OR km.rid LIKE '%%.yaml#%%'  -- Exclude YAML chunks but not full files
-                              OR km.rid LIKE '%%.yml#%%'
-                              OR km.rid LIKE '%%.toml#%%'
-                              OR km.rid LIKE '%%.xml#%%'
-                              OR km.rid LIKE '%%.js#%%'
-                              OR km.rid LIKE '%%.ts#%%'
-                              OR km.rid LIKE '%%.jsx#%%'
-                              OR km.rid LIKE '%%.tsx#%%'
-                              OR km.rid LIKE '%%.py#%%'
-                              OR km.rid LIKE '%%.go#%%'
-                              OR km.rid LIKE '%%.rs#%%'
-                              OR km.rid LIKE '%%.java#%%'
-                              OR km.rid LIKE '%%.sol#%%'
-                              OR km.rid LIKE '%%.json#%%'  -- Exclude JSON chunks
-                          ) AND km.rid NOT LIKE '%%README%%')
+                          -- No need for file exclusions since github-activity only tracks commits/PRs/issues
                     )
                     SELECT
                         id, rid, cid, source_sensor, content, metadata,
