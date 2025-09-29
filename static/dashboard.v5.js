@@ -508,11 +508,18 @@ function handleDashboardUpdate(data) {
 
 // Refresh dashboard
 function refreshDashboard() {
+    // If we're on the drafts tab, only refresh drafts
+    const draftsTab = document.getElementById('drafts-tab');
+    if (draftsTab && draftsTab.classList.contains('active')) {
+        refreshDrafts();
+        return;
+    }
+
     const refreshIcon = document.getElementById('refresh-icon');
     if (refreshIcon) {
         refreshIcon.classList.add('refresh-indicator');
     }
-    
+
     loadDashboardData().then(() => {
         setTimeout(() => {
             if (refreshIcon) {
@@ -639,11 +646,10 @@ function triggerManualRun(type) {
                 showNotification(`${type.charAt(0).toUpperCase() + type.slice(1)} generation started successfully!`, 'success');
                 // Only refresh drafts section, don't reload entire dashboard
                 setTimeout(() => {
-                    // Check if drafts tab is active
-                    const draftsTab = document.getElementById('drafts-tab');
-                    if (draftsTab && draftsTab.classList.contains('active')) {
-                        refreshDrafts();
-                    }
+                    // Always refresh drafts when generating from drafts view
+                    // Don't navigate away from current tab
+                    refreshDrafts();
+
                     // If it's weekly, also refresh the weekly section
                     if (type === 'weekly') {
                         fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
