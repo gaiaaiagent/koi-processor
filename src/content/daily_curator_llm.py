@@ -391,6 +391,47 @@ class DailyCuratorLLM:
 
                 return threads
 
+    async def generate_forum_thread_summary(self, thread: Dict[str, Any]) -> str:
+        """
+        Generate an engaging summary of a forum thread for the daily post
+        """
+        try:
+            # Extract thread details
+            title = thread.get('title', 'Forum Discussion')
+            preview = thread.get('preview', '')
+            url = thread.get('url', '')
+
+            prompt = f"""Create an engaging tweet about this Regen Network forum discussion.
+Thread Title: {title}
+Preview: {preview}
+URL: {url}
+
+Requirements:
+- Start with 💬 emoji
+- Briefly summarize the topic in an engaging way
+- Include a call to action to join the discussion
+- Mention specific value or insight from the thread
+- End with the shortened URL
+- Use exactly 260-280 characters
+- Make it inviting and conversational
+- DO NOT just copy the preview text"""
+
+            response = await self.openai_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a community engagement expert for Regen Network."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=100
+            )
+
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"Error generating forum summary: {e}")
+            # Fallback to simple format
+            return f"💬 Join the discussion: {title[:100]}... Check out this engaging forum thread and share your thoughts! {url}"
+
     async def get_all_24h_content(self) -> List[Dict[str, Any]]:
         """
         Get ALL content PUBLISHED in the past 24 hours
@@ -661,10 +702,11 @@ Context: {context}
 Requirements:
 - Start with 🌱 emoji
 - Include #RegenNetwork hashtag
-- Highlight the most important development from the past 24 hours
-- Make it compelling and informative
+- Highlight the overall theme or mood of the day
+- Be welcoming and set the stage for the thread
+- Don't get too specific about stats (those come in post 2)
 - Use exactly 260-280 characters
-- Focus on impact and call to action""",
+- Focus on the community and mission""",
 
             'stats': f"""Create a statistics tweet highlighting Regen Network's 24h metrics.
 Context: {context}
@@ -708,23 +750,27 @@ IMPORTANT RULES:
 - ONLY mention specific users if they appear in the context above
 - If no specific users are mentioned in context, focus on topics and themes instead
 - Do NOT make up community members that don't exist
+- DO NOT repeat ledger statistics that were already mentioned in previous posts
 
 Requirements:
 - Start with 💬 emoji
 - Highlight interesting discussions or contributions from the actual context
 - Focus on real topics and themes, not invented users
-- Encourage participation
+- Encourage participation without repeating stats
 - Use exactly 260-280 characters
 - Include #RegenNetwork""",
 
             'cta': f"""Create a call-to-action tweet to close the daily thread.
 Context: {context}
 
+IMPORTANT: Previous posts have already covered ledger stats. DO NOT repeat specific numbers.
+
 Requirements:
 - Start with 🌍 emoji
 - Include links to regen.network and discord
-- Summarize the day's key theme
-- Inspiring message about regenerative finance
+- Summarize the day's key theme or sentiment (not stats)
+- Inspiring message about regenerative finance and community
+- Focus on the future and invitation to join
 - Use exactly 260-280 characters
 - End with #ReFi #ClimateAction"""
         }
@@ -1040,10 +1086,8 @@ Provide a JSON response with:
         if post_count == 3:
             # Low activity - try to include forum thread as 3rd post
             if fallback_thread:
-                # Use fallback forum thread
-                fallback_content = f"💬 Join the discussion: {fallback_thread['title']}\n\n"
-                fallback_content += f"{fallback_thread['preview'][:150]}...\n\n"
-                fallback_content += f"Read more: {fallback_thread['url']}"
+                # Generate engaging forum thread summary using LLM
+                fallback_content = await self.generate_forum_thread_summary(fallback_thread)
 
                 thread['posts'].append({
                     'type': 'community',
@@ -1054,17 +1098,15 @@ Provide a JSON response with:
                         'url': fallback_thread['url'],
                         'published_at': fallback_thread.get('published_at', 'recent')
                     }],
-                    'metadata': {'position': 3, 'generated_by': 'fallback'}
+                    'metadata': {'position': 3, 'generated_by': 'llm-fallback'}
                 })
             # If no forum thread available, generate CTA directly (skip to final post)
 
         elif post_count >= 4:
             # Medium/high activity - include community content
             if need_fallback and fallback_thread:
-                # Use fallback forum thread if still no activity
-                fallback_content = f"💬 Join the discussion: {fallback_thread['title']}\n\n"
-                fallback_content += f"{fallback_thread['preview'][:150]}...\n\n"
-                fallback_content += f"Read more: {fallback_thread['url']}"
+                # Generate engaging forum thread summary using LLM
+                fallback_content = await self.generate_forum_thread_summary(fallback_thread)
 
                 thread['posts'].append({
                     'type': 'community',
@@ -1075,7 +1117,7 @@ Provide a JSON response with:
                         'url': fallback_thread['url'],
                         'published_at': fallback_thread.get('published_at', 'recent')
                     }],
-                    'metadata': {'position': 3, 'generated_by': 'fallback'}
+                    'metadata': {'position': 3, 'generated_by': 'llm-fallback'}
                 })
             else:
                 # Regular community highlight
