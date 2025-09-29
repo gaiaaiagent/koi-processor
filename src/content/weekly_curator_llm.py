@@ -262,6 +262,18 @@ class WeeklyCuratorLLM:
 
         return dict(thread_groups)
 
+    def count_unique_posts(self, items: List[Dict]) -> int:
+        """Count unique posts, excluding chunks and duplicates"""
+        unique_posts = set()
+        for item in items:
+            rid = item.get('rid', '')
+            # Remove chunk identifiers to get base post ID
+            base_rid = rid.split('#chunk')[0] if rid else ''
+            # Only count posts, not topics or other types
+            if base_rid and '_post_' in base_rid:
+                unique_posts.add(base_rid)
+        return len(unique_posts)
+
     def extract_content_text(self, item: Dict) -> str:
         """Extract readable text from content field"""
         content = item.get('content', {})
@@ -295,7 +307,7 @@ class WeeklyCuratorLLM:
             thread_data = {
                 'url': thread_url,
                 'full_url': thread_url,  # Preserve full URL for LLM to use
-                'post_count': len(items),
+                'post_count': self.count_unique_posts(items),
                 'latest_date': items[0]['published_at'].isoformat() if items else '',
                 'posts': []
             }
@@ -325,7 +337,7 @@ class WeeklyCuratorLLM:
         threads_summary.sort(key=lambda x: x['post_count'], reverse=True)
 
         # Prepare prompt for LLM with ALL content
-        total_posts = sum(len(items) for items in thread_groups.values())
+        total_posts = sum(self.count_unique_posts(items) for items in thread_groups.values())
 
         # Include ALL threads but summarize if too many
         thread_context = threads_summary if len(threads_summary) <= 50 else threads_summary[:50]
@@ -633,7 +645,7 @@ Format as structured JSON with these exact keys:
                         sources_by_type[source_type].append({
                             'title': title or thread_url[:100],
                             'url': actual_url,
-                            'count': len(thread_items),
+                            'count': self.count_unique_posts(thread_items),
                             'date_range': date_range
                         })
 
