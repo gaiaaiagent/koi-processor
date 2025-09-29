@@ -371,32 +371,46 @@ Full week's content ({len(thread_groups)} unique discussions, {total_posts} tota
 
 {ledger_summary}
 
-Create a comprehensive weekly brief that MUST be 800-1200 words (aim for 1000 words minimum). The brief should include:
+CRITICAL REQUIREMENT: The brief_content MUST be 800-1200 words. This is non-negotiable. Count the words!
 
-REQUIRED SECTIONS (integrate seamlessly into the narrative):
+Write a comprehensive weekly digest with these MANDATORY sections (each section MUST meet the minimum word count):
 
-1. **Opening Paragraph** (100-150 words): Set the scene for the week's activities, mention key metrics upfront (e.g., "With X governance proposals passing, Y REGEN tokens bonded, and Z marketplace orders...")
+1. **Opening Overview** (MINIMUM 150 words):
+   Open with: "This week in the Regen Network ecosystem saw [specific metrics]..."
+   Include: The 2 governance proposals (#57 and #56), 110.1M REGEN bonded, 21 validators, 100 IBC channels, 25 marketplace sell orders
 
-2. **Governance & Network Activity** (200-250 words): Discuss the governance proposals that passed, what they mean for the network, validator activity, IBC connections, and staking metrics. Be specific about proposal numbers and their implications.
+2. **Governance Deep Dive** (MINIMUM 200 words):
+   Detail Proposal #57 (Tokenomics working group funding) - explain what it funds, why it matters
+   Detail Proposal #56 (REGEN<>AXELAR client revival) - explain the technical importance, what it enables
+   Connect to the 110.1M REGEN bonded and validator participation
 
-3. **Community Discussions & Development** (200-250 words): Analyze the forum discussions, GitHub activity, and community engagement. Connect these discussions to the on-chain metrics where relevant.
+3. **Community Forum Analysis** (MINIMUM 200 words):
+   Expand on the CryptoTaxCalculator integration discussion - why enterprises need this
+   Discuss the Biocultural Units tokenization proposal - what are BCUs, why tokenize them
+   Analyze the Attention Commons concept - what it means for the ecosystem
+   Link these to the broader regenerative finance movement
 
-4. **Marketplace & Credit Activity** (150-200 words): Detail the marketplace dynamics, credit issuances, trading volumes, and what these patterns suggest about ecosystem adoption.
+4. **Marketplace and Network Metrics** (MINIMUM 200 words):
+   Analyze the 25 sell orders / 0 buy orders - what this imbalance indicates
+   Discuss credit issuance patterns and what they reveal about project activity
+   Examine the 100 IBC channels - which ecosystems are connected, why it matters
+   Connect marketplace activity to the governance proposals
 
-5. **Technical Infrastructure** (150-200 words): Cover any technical developments, integrations, or infrastructure updates mentioned in discussions or visible in network metrics.
+5. **Technical Developments** (MINIMUM 150 words):
+   Detail the Regen Liquid Staking deployment on Neutron
+   Explain how this connects to the AXELAR client revival
+   Discuss infrastructure improvements and their impact
 
-6. **Looking Forward** (100-150 words): Synthesize the week's activities and their implications for the ecosystem's trajectory.
+6. **Synthesis and Outlook** (MINIMUM 150 words):
+   Connect all the threads - governance, community, marketplace, technical
+   Project forward based on current trends
+   Identify key challenges and opportunities
 
-REQUIREMENTS:
-- MUST be 800-1200 words total (count them!)
-- Integrate ALL ledger statistics naturally into the narrative
-- Reference specific proposal numbers, validator counts, bonding amounts, IBC channels
-- Connect community discussions to on-chain activity
-- Use specific numbers and data points throughout
-- Write in flowing prose paragraphs, not bullet points
-- Include transitions between sections
-- Avoid technical jargon while maintaining accuracy
-- Focus on impact and meaning over technical details
+WORD COUNT VERIFICATION:
+- The total brief_content MUST be 800-1200 words
+- Each paragraph should be 50-100 words
+- Use specific data points in EVERY paragraph
+- If your response is under 800 words, you have failed the task
 
 Also provide:
 - A 2-3 sentence executive summary that mentions key metrics
