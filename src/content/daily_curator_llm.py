@@ -395,13 +395,19 @@ class DailyCuratorLLM:
                       -- EXCLUDE GITHUB FILE CHUNKS - only want actual activity for daily posts
                       -- But allow forum/website chunks which are actual content
                       AND NOT (source_sensor LIKE '%github%' AND rid LIKE '%#chunk%')
+                      -- DAILY THREADS: Only forum, GitHub, and ledger sources
+                      -- Exclude Notion, website scrapes, and other sources
+                      AND (
+                          source_sensor LIKE '%forum%'
+                          OR source_sensor LIKE '%github%'
+                          OR source_sensor LIKE '%ledger%'
+                      )
                       -- ONLY content actually PUBLISHED in last 24 hours
                       AND published_at IS NOT NULL
                       AND published_at >= NOW() - INTERVAL '24 hours'
                       AND published_at <= NOW()
-                      -- Require HIGH confidence in the published date for daily threads
-                      -- This filters out incorrectly dated Notion content
-                      AND published_confidence >= 0.9
+                      -- Reasonable confidence in the published date
+                      AND published_confidence >= 0.7
                     ORDER BY published_at DESC
                 """
 
