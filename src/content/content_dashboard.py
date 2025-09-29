@@ -822,10 +822,25 @@ def trigger_manual_run():
                     'file': output_file
                 })
             else:
+                # Parse the error for specific issues
+                error_msg = result.stderr if result.stderr else 'Unknown error'
+
+                # Check for specific error patterns
+                if 'insufficient_quota' in error_msg.lower() or 'rate_limit' in error_msg.lower():
+                    user_message = 'OpenAI API quota exceeded. Please add more credits.'
+                elif 'api_key' in error_msg.lower() or 'authentication' in error_msg.lower():
+                    user_message = 'OpenAI API key is missing or invalid.'
+                elif 'timeout' in error_msg.lower():
+                    user_message = 'Request timed out. Please try again.'
+                elif 'connection' in error_msg.lower():
+                    user_message = 'Unable to connect to OpenAI API.'
+                else:
+                    user_message = 'Failed to generate weekly digest'
+
                 return jsonify({
                     'success': False,
-                    'message': 'Failed to generate weekly digest',
-                    'error': result.stderr if result.stderr else 'Unknown error'
+                    'message': user_message,
+                    'error': error_msg
                 }), 500
         else:
             return jsonify({'success': False, 'message': f'Unknown type: {run_type}'}), 400

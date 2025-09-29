@@ -408,65 +408,34 @@ Format as structured JSON with these exact keys:
 
         except Exception as e:
             logger.error(f"LLM analysis failed: {e}")
-            # Create a basic fallback summary without LLM
-            # Extract basic statistics from the data
-            total_discussions = len(thread_groups)
-            total_posts = sum(len(items) for items in thread_groups.values())
 
-            # Extract key topics from thread titles
-            discussion_topics = []
-            for url, items in list(thread_groups.items())[:5]:  # Top 5 discussions
-                if items and items[0].get('metadata'):
-                    metadata = items[0]['metadata']
-                    if isinstance(metadata, str):
-                        try:
-                            metadata = json.loads(metadata)
-                        except:
-                            continue
-                    if isinstance(metadata, dict) and metadata.get('title'):
-                        discussion_topics.append(metadata['title'])
+            # Parse the error to provide specific feedback
+            error_message = str(e).lower()
 
-            # Build a basic summary
-            executive_summary = f"This week saw {total_discussions} active discussions with {total_posts} total contributions across the Regen Network ecosystem."
-
-            # Create basic content summary
-            brief_content = f"""## Weekly Activity Summary
-
-The Regen Network community maintained steady engagement this week with {total_discussions} discussion threads and {total_posts} total posts.
-
-### Community Discussions
-
-"""
-            if discussion_topics:
-                brief_content += "Key topics included:\n"
-                for topic in discussion_topics[:5]:
-                    brief_content += f"- {topic}\n"
-                brief_content += "\n"
+            if "insufficient_quota" in error_message or "rate_limit" in error_message:
+                error_detail = "OpenAI API quota exceeded. Please add more credits to continue."
+            elif "api_key" in error_message or "authentication" in error_message:
+                error_detail = "OpenAI API key is missing or invalid. Please configure a valid API key."
+            elif "model" in error_message:
+                error_detail = f"OpenAI model '{self.model}' is not available or accessible."
+            elif "timeout" in error_message:
+                error_detail = "OpenAI API request timed out. Please try again later."
+            elif "connection" in error_message:
+                error_detail = "Unable to connect to OpenAI API. Please check your network connection."
             else:
-                brief_content += "Various topics were discussed across the community forums.\n\n"
+                error_detail = f"LLM analysis error: {str(e)}"
 
-            # Add ledger summary if available
-            if ledger_data and ledger_data.get('summary'):
-                brief_content += f"""### On-Chain Activity
+            logger.error(f"Specific error: {error_detail}")
 
-{ledger_data.get('summary', 'No ledger data available.')}
-
-"""
-
-            brief_content += """*Note: Detailed content analysis is temporarily unavailable. Above is a basic summary of weekly activity.*"""
-
+            # Return error structure - no fake data
             return {
-                "executive_summary": executive_summary,
-                "brief_content": brief_content,
-                "themes": {
-                    "Community Activity": [f"{total_discussions} discussions", f"{total_posts} posts"]
-                },
-                "community_pulse": {
-                    "overall_activity": "Active" if total_posts > 20 else "Moderate" if total_posts > 5 else "Light",
-                    "key_focus_areas": discussion_topics[:3] if discussion_topics else ["Community discussions"],
-                    "emerging_trends": ["Content analysis unavailable"]
-                },
-                "key_discussions": []
+                "executive_summary": f"Weekly digest generation failed: {error_detail}",
+                "brief_content": f"## Error Generating Weekly Digest\n\n{error_detail}\n\nPlease resolve the issue and try again.",
+                "themes": {},
+                "community_pulse": {},
+                "key_discussions": [],
+                "error": True,
+                "error_detail": error_detail
             }
 
     async def generate_weekly_digest(self) -> Dict[str, Any]:
@@ -493,6 +462,12 @@ The Regen Network community maintained steady engagement this week with {total_d
 
         # Analyze with LLM, including ledger data
         llm_analysis = await self.analyze_with_llm(thread_groups, ledger_data)
+
+        # Check if LLM analysis failed
+        if llm_analysis.get('error'):
+            logger.error(f"LLM analysis returned error: {llm_analysis.get('error_detail')}")
+            # Don't create a digest with error content
+            return None
 
         # Build the digest structure
         now = datetime.now(timezone.utc)
