@@ -371,30 +371,40 @@ Full week's content ({len(thread_groups)} unique discussions, {total_posts} tota
 
 {ledger_summary}
 
-Create a comprehensive weekly brief that:
-1. Is 800-1200 words in length (aim for 1000 words)
-2. Uses a neutral, professional tone suitable for a general audience
-3. Weaves together the week's developments into a coherent narrative
-4. MUST integrate the ledger statistics into the narrative (credit issuances, proposals, marketplace activity, network metrics)
-5. Provides context and analysis, not just summaries
-6. Highlights connections between different discussions and on-chain activity
-7. Identifies emerging patterns and trends from both community discussions and blockchain data
-8. Includes specific examples and details from the discussions and ledger activity
-9. DO NOT escape newlines - use proper markdown formatting
-10. Use natural paragraph breaks without escaped characters
-11. NEVER include technical details like transaction hashes, block numbers, or other cryptographic identifiers
-12. Write for a human audience - avoid overly technical blockchain jargon
-13. When mentioning on-chain activity, focus on the impact and meaning, not the technical details
+Create a comprehensive weekly brief that MUST be 800-1200 words (aim for 1000 words minimum). The brief should include:
 
-The brief should flow naturally, integrating all significant developments from the week. Don't use bullet points or numbered lists - write in prose paragraphs. Focus on telling the story of what happened in the Regen Network ecosystem this week.
+REQUIRED SECTIONS (integrate seamlessly into the narrative):
+
+1. **Opening Paragraph** (100-150 words): Set the scene for the week's activities, mention key metrics upfront (e.g., "With X governance proposals passing, Y REGEN tokens bonded, and Z marketplace orders...")
+
+2. **Governance & Network Activity** (200-250 words): Discuss the governance proposals that passed, what they mean for the network, validator activity, IBC connections, and staking metrics. Be specific about proposal numbers and their implications.
+
+3. **Community Discussions & Development** (200-250 words): Analyze the forum discussions, GitHub activity, and community engagement. Connect these discussions to the on-chain metrics where relevant.
+
+4. **Marketplace & Credit Activity** (150-200 words): Detail the marketplace dynamics, credit issuances, trading volumes, and what these patterns suggest about ecosystem adoption.
+
+5. **Technical Infrastructure** (150-200 words): Cover any technical developments, integrations, or infrastructure updates mentioned in discussions or visible in network metrics.
+
+6. **Looking Forward** (100-150 words): Synthesize the week's activities and their implications for the ecosystem's trajectory.
+
+REQUIREMENTS:
+- MUST be 800-1200 words total (count them!)
+- Integrate ALL ledger statistics naturally into the narrative
+- Reference specific proposal numbers, validator counts, bonding amounts, IBC channels
+- Connect community discussions to on-chain activity
+- Use specific numbers and data points throughout
+- Write in flowing prose paragraphs, not bullet points
+- Include transitions between sections
+- Avoid technical jargon while maintaining accuracy
+- Focus on impact and meaning over technical details
 
 Also provide:
-- A 2-3 sentence executive summary
-- Key themes (3-5 main themes)
+- A 2-3 sentence executive summary that mentions key metrics
+- Key themes (3-5 main themes with specific data points)
 - Community pulse metrics
 
 Format as structured JSON with these exact keys:
-- executive_summary (2-3 sentences capturing the week's essence)
+- executive_summary (2-3 sentences with key metrics)
 - brief_content (the full 800-1200 word narrative brief in markdown)
 - themes (object with theme names as keys, related topics as values)
 - community_pulse (object with overall_activity, key_focus_areas array, emerging_trends array)
@@ -405,11 +415,11 @@ Format as structured JSON with these exact keys:
             response = await self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert curator for the Regen Network ecosystem, skilled at identifying key developments and trends in regenerative finance, blockchain governance, and ecological economics."},
+                    {"role": "system", "content": "You are an expert curator for the Regen Network ecosystem, skilled at identifying key developments and trends in regenerative finance, blockchain governance, and ecological economics. You excel at weaving together on-chain metrics with community discussions to create comprehensive narratives."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=3000,  # Increased to accommodate longer briefs
+                max_tokens=4000,  # Increased to accommodate 1000+ word briefs
                 response_format={"type": "json_object"}
             )
 
