@@ -1197,6 +1197,9 @@ async function generateAudio(draftId) {
 async function generateNewDraft(type) {
     if (!confirm(`Generate new ${type} draft?`)) return;
 
+    // Add loading placeholder immediately
+    addDraftLoadingPlaceholder(type);
+
     try {
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
         showNotification(`🚀 Generating new ${type} draft...`, 'info');
@@ -1224,14 +1227,75 @@ async function generateNewDraft(type) {
             }, 5000);
         } else {
             showNotification(`Failed to generate ${type} draft: ${data.error || 'Unknown error'}`, 'error');
+            // Remove placeholder on error
+            removeDraftLoadingPlaceholder(type);
         }
     } catch (error) {
         console.error('Error generating draft:', error);
         showNotification(`Error: ${error.message}`, 'error');
+        // Remove placeholder on error
+        removeDraftLoadingPlaceholder(type);
+    }
+}
+
+function addDraftLoadingPlaceholder(type) {
+    const containerId = type === 'weekly' ? 'weekly-drafts-container' : 'drafts-container';
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    // Create loading placeholder card
+    const placeholderId = `${type}-loading-placeholder`;
+    const now = new Date();
+    const timestamp = now.toLocaleDateString() + ', ' + now.toLocaleTimeString();
+
+    const placeholderHtml = `
+        <div id="${placeholderId}" class="row mb-3">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <h6 class="card-subtitle mb-2 text-muted">
+                                    <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+                                    Generating ${type === 'weekly' ? 'Weekly Digest' : 'Daily Thread'} draft
+                                </h6>
+                                <small class="text-muted">${timestamp}</small>
+                                <p class="card-text mt-2 text-muted">
+                                    <em>Creating your ${type} draft... This may take a moment.</em>
+                                </p>
+                            </div>
+                            <div>
+                                <span class="badge bg-warning text-dark">
+                                    <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                                    Generating
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Remove any existing placeholder
+    removeDraftLoadingPlaceholder(type);
+
+    // Add at the top of the container
+    container.insertAdjacentHTML('afterbegin', placeholderHtml);
+}
+
+function removeDraftLoadingPlaceholder(type) {
+    const placeholderId = `${type}-loading-placeholder`;
+    const placeholder = document.getElementById(placeholderId);
+    if (placeholder) {
+        placeholder.remove();
     }
 }
 
 function refreshDrafts() {
+    // Remove any loading placeholders when refreshing
+    removeDraftLoadingPlaceholder('daily');
+    removeDraftLoadingPlaceholder('weekly');
     loadDrafts();
 }
 
