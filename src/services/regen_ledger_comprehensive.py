@@ -686,8 +686,11 @@ class RegenLedgerComprehensive:
         # Bonded tokens
         bonded = staking_stats.get("total_bonded", "0")
         if bonded and bonded != "0":
-            bonded_millions = int(bonded) / 10**6 / 1000000 if isinstance(bonded, str) else bonded / 10**6
-            lines.append(f"• 💰 {bonded_millions:.1f}M REGEN bonded")
+            try:
+                bonded_millions = int(bonded) / 10**6 / 1000000 if isinstance(bonded, str) else bonded / 10**6
+                lines.append(f"• 💰 {bonded_millions:.1f}M REGEN bonded")
+            except (ValueError, TypeError):
+                pass  # Skip if can't convert bonded amount
 
         # IBC
         lines.append(f"• 🌉 {net_stats.get('ibc_channels', 0)} IBC channels")
@@ -770,12 +773,17 @@ class RegenLedgerComprehensive:
             digest_data["sections"].append(market_section)
 
         # Network statistics section
+        avg_tx = stats.get('network', {}).get('avg_tx_per_block')
+        avg_tx_str = f"{avg_tx:.2f}" if avg_tx is not None else "N/A"
+        total_tx = stats.get("network", {}).get("total_transactions")
+        total_tx_str = str(total_tx) if total_tx is not None else "N/A"
+
         network_section = {
             "title": "⛓️ Network Statistics",
             "stats": stats.get("network", {}),
             "items": [
-                {"metric": "Total Transactions", "value": stats.get("network", {}).get("total_transactions", 0)},
-                {"metric": "Avg TX/Block", "value": f"{stats.get('network', {}).get('avg_tx_per_block', 0):.2f}"},
+                {"metric": "Total Transactions", "value": total_tx_str},
+                {"metric": "Avg TX/Block", "value": avg_tx_str},
                 {"metric": "Active Validators", "value": stats.get("staking", {}).get("total_validators", 0)},
                 {"metric": "IBC Channels", "value": stats.get("network", {}).get("ibc_channels", 0)}
             ]

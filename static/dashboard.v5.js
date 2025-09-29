@@ -637,9 +637,13 @@ function triggerManualRun(type) {
         .then(data => {
             if (data.success) {
                 showNotification(`${type.charAt(0).toUpperCase() + type.slice(1)} generation started successfully!`, 'success');
-                // Refresh dashboard after a delay
+                // Only refresh drafts section, don't reload entire dashboard
                 setTimeout(() => {
-                    refreshDashboard();
+                    // Check if drafts tab is active
+                    const draftsTab = document.getElementById('drafts-tab');
+                    if (draftsTab && draftsTab.classList.contains('active')) {
+                        refreshDrafts();
+                    }
                     // If it's weekly, also refresh the weekly section
                     if (type === 'weekly') {
                         fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
