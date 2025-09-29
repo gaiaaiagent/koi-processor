@@ -306,17 +306,17 @@ class DailyCuratorLLM:
         """
         async with asyncpg.create_pool(self.db_url) as pool:
             async with pool.acquire() as conn:
+                # Simple approach: get most recent forum posts/topics
                 query = """
-                    SELECT DISTINCT ON (thread_id)
+                    SELECT
                         rid,
                         source_sensor,
                         content,
                         metadata,
                         published_at,
-                        -- Extract thread ID from discourse RID pattern
                         CASE
-                            WHEN rid LIKE 'regen.forum-%' THEN
-                                SUBSTRING(rid FROM 'forum\\.regen\\.network_([0-9]+)')
+                            WHEN rid LIKE '%topic_%' THEN
+                                SUBSTRING(rid FROM 'topic_([0-9]+)')
                             ELSE
                                 SUBSTRING(rid FROM 'forum\\.regen\\.network_([0-9]+)')
                         END as thread_id
@@ -326,7 +326,7 @@ class DailyCuratorLLM:
                       AND superseded_at IS NULL
                       AND event_type != 'FORGET'
                       AND published_at IS NOT NULL
-                    ORDER BY thread_id, published_at DESC
+                    ORDER BY published_at DESC
                     LIMIT $1
                 """
 
