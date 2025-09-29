@@ -408,12 +408,65 @@ Format as structured JSON with these exact keys:
 
         except Exception as e:
             logger.error(f"LLM analysis failed: {e}")
-            # Return a basic structure if LLM fails
+            # Create a basic fallback summary without LLM
+            # Extract basic statistics from the data
+            total_discussions = len(thread_groups)
+            total_posts = sum(len(items) for items in thread_groups.values())
+
+            # Extract key topics from thread titles
+            discussion_topics = []
+            for url, items in list(thread_groups.items())[:5]:  # Top 5 discussions
+                if items and items[0].get('metadata'):
+                    metadata = items[0]['metadata']
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except:
+                            continue
+                    if isinstance(metadata, dict) and metadata.get('title'):
+                        discussion_topics.append(metadata['title'])
+
+            # Build a basic summary
+            executive_summary = f"This week saw {total_discussions} active discussions with {total_posts} total contributions across the Regen Network ecosystem."
+
+            # Create basic content summary
+            brief_content = f"""## Weekly Activity Summary
+
+The Regen Network community maintained steady engagement this week with {total_discussions} discussion threads and {total_posts} total posts.
+
+### Community Discussions
+
+"""
+            if discussion_topics:
+                brief_content += "Key topics included:\n"
+                for topic in discussion_topics[:5]:
+                    brief_content += f"- {topic}\n"
+                brief_content += "\n"
+            else:
+                brief_content += "Various topics were discussed across the community forums.\n\n"
+
+            # Add ledger summary if available
+            if ledger_data and ledger_data.get('summary'):
+                brief_content += f"""### On-Chain Activity
+
+{ledger_data.get('summary', 'No ledger data available.')}
+
+"""
+
+            brief_content += """*Note: Detailed content analysis is temporarily unavailable. Above is a basic summary of weekly activity.*"""
+
             return {
-                "executive_summary": "Weekly content summary unavailable due to processing error.",
-                "top_stories": [],
-                "themes": {},
-                "community_pulse": "Unable to assess."
+                "executive_summary": executive_summary,
+                "brief_content": brief_content,
+                "themes": {
+                    "Community Activity": [f"{total_discussions} discussions", f"{total_posts} posts"]
+                },
+                "community_pulse": {
+                    "overall_activity": "Active" if total_posts > 20 else "Moderate" if total_posts > 5 else "Light",
+                    "key_focus_areas": discussion_topics[:3] if discussion_topics else ["Community discussions"],
+                    "emerging_trends": ["Content analysis unavailable"]
+                },
+                "key_discussions": []
             }
 
     async def generate_weekly_digest(self) -> Dict[str, Any]:
