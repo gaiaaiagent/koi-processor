@@ -313,16 +313,21 @@ class DailyCuratorLLM:
                         content,
                         metadata,
                         published_at,
-                        -- Extract thread ID from RID
-                        SUBSTRING(rid FROM 'forum\\.regen\\.network_([0-9]+)') as thread_id
+                        -- Extract thread ID from discourse RID pattern
+                        CASE
+                            WHEN rid LIKE 'regen.forum-%' THEN
+                                SUBSTRING(rid FROM 'forum\\.regen\\.network_([0-9]+)')
+                            ELSE
+                                SUBSTRING(rid FROM 'forum\\.regen\\.network_([0-9]+)')
+                        END as thread_id
                     FROM koi_memories
-                    WHERE source_sensor LIKE '%forum%'
-                      AND rid LIKE 'forum.regen.network_%_post_%'
+                    WHERE source_sensor LIKE '%discourse%'
+                      AND (rid LIKE 'regen.forum-post:%' OR rid LIKE 'regen.forum-topic:%')
                       AND superseded_at IS NULL
                       AND event_type != 'FORGET'
                       AND published_at IS NOT NULL
                     ORDER BY thread_id, published_at DESC
-                    LIMIT %s
+                    LIMIT $1
                 """
 
                 rows = await conn.fetch(query, limit * 2)  # Get more to filter later
@@ -332,12 +337,19 @@ class DailyCuratorLLM:
                     content = row['content']
                     metadata = row['metadata'] or {}
 
-                    # Parse content if JSON
+                    # Parse content if JSON string
                     if isinstance(content, str):
                         try:
                             content = json.loads(content)
                         except:
                             pass
+
+                    # Parse metadata if JSON string
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except:
+                            metadata = {}
 
                     if isinstance(content, dict):
                         title = content.get('title', '')
@@ -347,7 +359,7 @@ class DailyCuratorLLM:
                         text = str(content)[:200]
 
                     # Get thread URL from metadata
-                    url = metadata.get('url', '')
+                    url = metadata.get('url', '') if isinstance(metadata, dict) else ''
                     if not url and row['thread_id']:
                         # Construct URL from thread ID
                         url = f"https://forum.regen.network/t/{row['thread_id']}"
@@ -395,10 +407,10 @@ class DailyCuratorLLM:
                       -- EXCLUDE GITHUB FILE CHUNKS - only want actual activity for daily posts
                       -- But allow forum/website chunks which are actual content
                       AND NOT (source_sensor LIKE '%github%' AND rid LIKE '%#chunk%')
-                      -- DAILY THREADS: Only forum, GitHub, and ledger sources
+                      -- DAILY THREADS: Only discourse (forum), GitHub, and ledger sources
                       -- Exclude Notion, website scrapes, and other sources
                       AND (
-                          source_sensor LIKE '%forum%'
+                          source_sensor LIKE '%discourse%'
                           OR source_sensor LIKE '%github%'
                           OR source_sensor LIKE '%ledger%'
                       )
@@ -968,11 +980,17 @@ Provide a JSON response with:
 
         if need_fallback:
             # Get recent forum threads as fallback
-            recent_threads = await self.get_recent_forum_threads(limit=5)
-            if recent_threads:
-                # Randomly select one thread
-                fallback_thread = random.choice(recent_threads)
-                logger.info(f"Using fallback forum thread: {fallback_thread.get('title', 'Unknown')}")
+            try:
+                recent_threads = await self.get_recent_forum_threads(limit=5)
+                if recent_threads:
+                    # Randomly select one thread
+                    fallback_thread = random.choice(recent_threads)
+                    logger.info(f"Using fallback forum thread: {fallback_thread.get('title', 'Unknown')}")
+                else:
+                    logger.info("No forum threads available for fallback")
+            except Exception as e:
+                logger.warning(f"Could not fetch forum threads for fallback: {e}")
+                fallback_thread = None
 
         # Generate posts based on activity level
 
