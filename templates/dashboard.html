@@ -507,16 +507,11 @@
             }
         };
 
-        window.generateNewDraft = function(type) {
-            triggerManualRun(type);
-        };
+        // Don't override generateNewDraft - it has its own implementation
+        // that properly handles staying on the drafts tab
 
-        window.refreshDrafts = function() {
-            // Refresh the drafts list
-            console.log('Refreshing drafts...');
-            // This would typically fetch the latest drafts via API
-            location.reload();
-        };
+        // Don't override refreshDrafts - it has its own implementation
+        // that properly refreshes without a page reload
     </script>
 </body>
 </html>

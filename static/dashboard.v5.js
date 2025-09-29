@@ -1199,6 +1199,8 @@ async function generateNewDraft(type) {
 
     try {
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        showNotification(`🚀 Generating new ${type} draft...`, 'info');
+
         const response = await fetch(`${basePath}/api/dashboard/trigger_manual_run`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1211,10 +1213,21 @@ async function generateNewDraft(type) {
 
         const data = await response.json();
         if (data.success) {
-            setTimeout(() => loadDrafts(), 2000);
+            showNotification(`✨ Successfully triggered ${type} draft generation!`, 'success');
+            // Refresh drafts after a short delay to allow generation to complete
+            setTimeout(() => {
+                refreshDrafts();
+                // Also update the weekly section if it's a weekly draft
+                if (type === 'weekly') {
+                    fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
+                }
+            }, 5000);
+        } else {
+            showNotification(`Failed to generate ${type} draft: ${data.error || 'Unknown error'}`, 'error');
         }
     } catch (error) {
         console.error('Error generating draft:', error);
+        showNotification(`Error: ${error.message}`, 'error');
     }
 }
 
