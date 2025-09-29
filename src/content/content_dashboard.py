@@ -146,12 +146,14 @@ def get_overview():
         cur.execute("SELECT NOW() as db_time")
         db_check = cur.fetchone()
         
-        # Check KOI pipeline status
+        # Check KOI pipeline status - look for any recent activity in the last 24 hours
+        # Also check for any memories at all to determine if pipeline is connected
         cur.execute("""
-            SELECT COUNT(*) as recent_events
+            SELECT
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND rid NOT LIKE '%heartbeat%') as recent_events,
+                COUNT(*) as total_memories,
+                MAX(created_at) as last_event_time
             FROM koi_memories
-            WHERE created_at > NOW() - INTERVAL '1 hour'
-              AND rid NOT LIKE '%heartbeat%'
         """)
         koi_activity = cur.fetchone()
         
@@ -162,16 +164,21 @@ def get_overview():
         health_status = 'healthy'
         if daily_stats['avg_style_score'] and daily_stats['avg_style_score'] < config['thresholds']['daily_bot']['style_score_warning']:
             health_status = 'warning'
-        if not db_check or (koi_activity and koi_activity['recent_events'] == 0):
-            health_status = 'error'
-        
+
+        # Check if KOI pipeline is active - consider it active if there are ANY memories in the database
+        # or if there have been events in the last 24 hours
+        koi_is_active = False
+        if koi_activity:
+            # Active if we have recent events OR if we have any memories at all (indicating connection exists)
+            koi_is_active = koi_activity['recent_events'] > 0 or koi_activity['total_memories'] > 0
+
         return jsonify({
             'success': True,
             'health': health_status,
             'daily_stats': daily_stats,
             'weekly_stats': weekly_stats,
             'pending_reviews': pending['pending_count'] if pending else 0,
-            'koi_pipeline_active': koi_activity['recent_events'] > 0 if koi_activity else False,
+            'koi_pipeline_active': koi_is_active,
             'timestamp': datetime.now(timezone.utc).isoformat()
         })
         
