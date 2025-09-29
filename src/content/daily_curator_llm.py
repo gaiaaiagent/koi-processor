@@ -399,8 +399,9 @@ class DailyCuratorLLM:
                       AND published_at IS NOT NULL
                       AND published_at >= NOW() - INTERVAL '24 hours'
                       AND published_at <= NOW()
-                      -- Require reasonable confidence in the published date
-                      AND published_confidence >= 0.6
+                      -- Require HIGH confidence in the published date for daily threads
+                      -- This filters out incorrectly dated Notion content
+                      AND published_confidence >= 0.9
                     ORDER BY published_at DESC
                 """
 
@@ -605,7 +606,21 @@ Keep the summary under 300 words."""
 
                     sources.append(source_info)
 
-            context = "Recent updates:\n" + "\n".join(content_texts)
+            # Handle empty content gracefully
+            if content_texts:
+                context = "Recent updates:\n" + "\n".join(content_texts)
+            else:
+                # No content from last 24h - use ledger-based context
+                if stats:
+                    context = f"No new GitHub/forum activity in past 24h. Focus on ledger metrics and community building.\nLedger stats: {stats.get('ledger_summary', 'Active network with ongoing transactions')}"
+                    # Add ledger as source when no other content
+                    if not sources:
+                        sources.append({
+                            'type': 'ledger',
+                            'description': 'Regen Network Blockchain Explorer'
+                        })
+                else:
+                    context = "Quiet day with minimal new activity. Focus on community engagement and ongoing initiatives."
 
         # Create type-specific prompts
         prompts = {
@@ -882,8 +897,29 @@ Provide a JSON response with:
         logger.info(f"Identified themes: {themes.get('main_themes', [])}")
 
         # Determine activity level and post count
+        # Count unique posts, not chunks (chunks share same base RID)
         primary_content = [item for item in all_content if not item.get('is_thread_context', False)]
-        activity_level = len(primary_content)
+
+        # Count unique base RIDs (excluding chunks)
+        unique_posts = set()
+        for item in primary_content:
+            rid = item.get('rid', '')
+            # Remove chunk suffix to get base RID
+            base_rid = rid.split('#chunk')[0] if rid else ''
+            if base_rid:
+                unique_posts.add(base_rid)
+
+        # Also filter by source - ledger-only doesn't count as activity
+        non_ledger_sources = set()
+        for item in primary_content:
+            source = item.get('source_sensor', '')
+            if source and 'ledger' not in source.lower():
+                non_ledger_sources.add(source)
+
+        # Activity level is based on unique posts from non-ledger sources
+        activity_level = len(unique_posts) if non_ledger_sources else 0
+
+        logger.info(f"Found {len(primary_content)} items, {len(unique_posts)} unique posts, {len(non_ledger_sources)} non-ledger sources")
 
         # Determine post count based on activity
         # Low activity (0-5 items): 3 posts
