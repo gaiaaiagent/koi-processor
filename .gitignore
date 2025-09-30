@@ -64,3 +64,8 @@ backups/
 # Node modules (for TypeScript components)
 node_modules/
 bge-mcp-ts/node_modules/
+# Database backups and exports
+*.sql
+*.csv
+!migrations/*.sql
+
