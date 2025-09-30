@@ -346,15 +346,15 @@ async def get_document_provenance(rid: str):
                 WITH RECURSIVE chain AS (
                     -- Find all transformations involving this RID
                     SELECT DISTINCT * FROM (
-                        SELECT * FROM koi_transformation_receipts
+                        SELECT * FROM transformation_receipts
                         WHERE input_rid = $1 OR output_rid = $1
 
                         UNION
 
                         -- Find upstream transformations
-                        SELECT t.* FROM koi_transformation_receipts t
+                        SELECT t.* FROM transformation_receipts t
                         WHERE t.output_rid IN (
-                            SELECT input_rid FROM koi_transformation_receipts
+                            SELECT input_rid FROM transformation_receipts
                             WHERE output_rid = $1
                         )
                     ) AS all_receipts
@@ -412,10 +412,10 @@ async def get_document_provenance(rid: str):
                 if 'memory' in receipt['transformation_type']:
                     storage.add('postgresql')
 
-            # Also check if document exists in koi_content
+            # Also check if document exists in koi_memories
             doc = await conn.fetchrow("""
-                SELECT rid as id, title, metadata->>'source' as source_sensor, created_at, content_hash
-                FROM koi_content
+                SELECT rid as id, content->>'title' as title, metadata->>'source' as source_sensor, created_at, content_hash
+                FROM koi_memories
                 WHERE rid = $1
             """, rid)
 
@@ -475,15 +475,15 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
             doc_rids = await conn.fetch("""
                 SELECT DISTINCT
                     rid,
-                    title,
+                    content->>'title' as title,
                     metadata->>'source' as source_sensor,
                     created_at
-                FROM koi_content
+                FROM koi_memories
                 WHERE rid IS NOT NULL
                     AND rid NOT LIKE '%test_%'
                     AND rid NOT LIKE '%heartbeat%'
                     AND rid NOT LIKE '%:demo:%'
-                    AND (title != 'Test Page' OR title IS NULL)
+                    AND (content->>'title' != 'Test Page' OR content->>'title' IS NULL)
                 ORDER BY created_at DESC
                 LIMIT $1
             """, limit // 2)
@@ -492,7 +492,7 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
             receipt_rids = await conn.fetch("""
                 SELECT DISTINCT rid, created_at FROM (
                     SELECT DISTINCT input_rid as rid, MIN(created_at) as created_at
-                    FROM koi_transformation_receipts
+                    FROM transformation_receipts
                     WHERE input_rid IS NOT NULL
                         AND input_rid NOT LIKE '%test_%'
                         AND input_rid NOT LIKE '%heartbeat%'
@@ -501,7 +501,7 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
                     UNION
 
                     SELECT DISTINCT output_rid as rid, MIN(created_at) as created_at
-                    FROM koi_transformation_receipts
+                    FROM transformation_receipts
                     WHERE output_rid IS NOT NULL
                         AND output_rid NOT LIKE '%test_%'
                         AND output_rid NOT LIKE '%heartbeat%'
@@ -542,11 +542,11 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
                 "count": len(rids),
                 "total_available": await conn.fetchval("""
                     SELECT COUNT(DISTINCT rid) FROM (
-                        SELECT rid FROM koi_content WHERE rid IS NOT NULL
+                        SELECT rid FROM koi_memories WHERE rid IS NOT NULL
                         UNION
-                        SELECT input_rid as rid FROM koi_transformation_receipts WHERE input_rid IS NOT NULL
+                        SELECT input_rid as rid FROM transformation_receipts WHERE input_rid IS NOT NULL
                         UNION
-                        SELECT output_rid as rid FROM koi_transformation_receipts WHERE output_rid IS NOT NULL
+                        SELECT output_rid as rid FROM transformation_receipts WHERE output_rid IS NOT NULL
                     ) AS all_rids
                 """)
             }
