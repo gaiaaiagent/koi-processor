@@ -380,30 +380,35 @@ CRITICAL REQUIREMENT: The brief_content MUST be 800-1200 words. This is non-nego
 Write a comprehensive weekly digest with these MANDATORY sections (each section MUST meet the minimum word count):
 
 1. **Opening Overview** (MINIMUM 150 words):
-   Open with: "This week in the Regen Network ecosystem saw [specific metrics]..."
-   Include: The 2 governance proposals (#57 and #56), 110.1M REGEN bonded, 21 validators, 100 IBC channels, 25 marketplace sell orders
+   Open with: "This week in the Regen Network ecosystem saw [specific metrics from the provided data]..."
+   Include key metrics from the ledger data provided above (governance proposals, bonded REGEN, validators, IBC channels, marketplace activity)
+   Use ONLY the actual numbers from the data - do not use placeholder or example numbers
 
 2. **Governance Deep Dive** (MINIMUM 200 words):
-   Detail Proposal #57 (Tokenomics working group funding) - explain what it funds, why it matters
-   Detail Proposal #56 (REGEN<>AXELAR client revival) - explain the technical importance, what it enables
-   Connect to the 110.1M REGEN bonded and validator participation
+   Analyze the governance proposals present in the ledger data
+   For each proposal, explain what it addresses and why it matters to the ecosystem
+   Connect governance activity to validator participation and bonding metrics from the data
+   If specific proposal numbers are referenced in discussions, include that context
 
 3. **Community Forum Analysis** (MINIMUM 200 words):
-   Expand on the CryptoTaxCalculator integration discussion - why enterprises need this
-   Discuss the Biocultural Units tokenization proposal - what are BCUs, why tokenize them
-   Analyze the Attention Commons concept - what it means for the ecosystem
-   Link these to the broader regenerative finance movement
+   Analyze the key discussions that appeared in the provided forum/discourse content
+   For each major discussion topic, explain its significance and implications
+   Connect community conversations to ecosystem goals and technical developments
+   Link discussions to broader trends in regenerative finance when relevant
+   ONLY discuss topics that are actually present in the provided discussion data
 
 4. **Marketplace and Network Metrics** (MINIMUM 200 words):
-   Analyze the 25 sell orders / 0 buy orders - what this imbalance indicates
-   Discuss credit issuance patterns and what they reveal about project activity
-   Examine the 100 IBC channels - which ecosystems are connected, why it matters
-   Connect marketplace activity to the governance proposals
+   Analyze marketplace metrics from the ledger data (sell/buy orders, credit batches)
+   Discuss what these metrics reveal about ecosystem health and activity
+   Examine IBC connectivity and cross-chain activity based on provided statistics
+   Connect marketplace dynamics to governance and community developments
+   Base all analysis on the actual numbers in the ledger data section above
 
 5. **Technical Developments** (MINIMUM 150 words):
-   Detail the Regen Liquid Staking deployment on Neutron
-   Explain how this connects to the AXELAR client revival
-   Discuss infrastructure improvements and their impact
+   Based ONLY on the actual data provided, discuss any technical developments from the week
+   If Proposal #56 (AXELAR client revival) passed, explain what this technical change enables
+   Focus on infrastructure improvements mentioned in the discussions
+   DO NOT invent or assume technical developments that are not in the provided data
 
 6. **Synthesis and Outlook** (MINIMUM 150 words):
    Connect all the threads - governance, community, marketplace, technical
@@ -433,7 +438,7 @@ Format as structured JSON with these exact keys:
             response = await self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert curator for the Regen Network ecosystem, skilled at identifying key developments and trends in regenerative finance, blockchain governance, and ecological economics. You excel at weaving together on-chain metrics with community discussions to create comprehensive narratives."},
+                    {"role": "system", "content": "You are an expert curator for the Regen Network ecosystem, skilled at identifying key developments and trends in regenerative finance, blockchain governance, and ecological economics. You excel at weaving together on-chain metrics with community discussions to create comprehensive narratives.\n\nCRITICAL: You must ONLY write about events, discussions, and developments that are explicitly present in the provided data. DO NOT invent, assume, or extrapolate information that is not directly supported by the content and metrics given to you. If a section requests coverage of a topic not present in the data, acknowledge its absence or focus on what IS present. Accuracy is paramount."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,

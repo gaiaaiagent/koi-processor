@@ -419,7 +419,7 @@ Requirements:
             response = await self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a community engagement expert for Regen Network."},
+                    {"role": "system", "content": "You are a community engagement expert for Regen Network. Only write about information explicitly provided in the context. Do not fabricate details or assume developments."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -553,7 +553,7 @@ Keep the summary under 300 words."""
             response = await self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert at summarizing blockchain and environmental finance updates."},
+                    {"role": "system", "content": "You are an expert at summarizing blockchain and environmental finance updates. Only summarize information that is explicitly present in the provided content. Do not invent or assume developments that are not mentioned."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
@@ -786,7 +786,9 @@ Requirements:
                     1. Always write tweets that are exactly 260-280 characters
                     2. NEVER invent fake usernames, handles, or specific names that don't appear in the provided context
                     3. Only reference actual data, statistics, and information from the context provided
-                    4. If you don't have specific data, use general language instead of making up specifics"""},
+                    4. If you don't have specific data, use general language instead of making up specifics
+                    5. DO NOT fabricate events, deployments, launches, or technical developments that are not explicitly mentioned in the provided data
+                    6. Accuracy is paramount - when in doubt, be general rather than specific"""},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -879,7 +881,7 @@ Provide a JSON response with:
             response = await self.openai_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert analyst for blockchain and environmental finance. Always respond with valid JSON."},
+                    {"role": "system", "content": "You are an expert analyst for blockchain and environmental finance. Always respond with valid JSON. Only extract themes and information that are explicitly present in the provided content. Do not fabricate or assume developments."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
