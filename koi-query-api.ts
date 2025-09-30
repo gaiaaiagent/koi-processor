@@ -19,7 +19,7 @@ import {
 } from "./bge-mcp-ts/adaptive-features.js";
 
 const app = express();
-const PORT = 8300;
+const PORT = 8301;
 
 // Database configuration
 const POSTGRES_URL = process.env.POSTGRES_URL || "postgresql://postgres:postgres@localhost:5433/eliza";
