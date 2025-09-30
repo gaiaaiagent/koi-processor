@@ -14,6 +14,15 @@ import { Pool } from "pg";
 import axios from "axios";
 import fetch from "node-fetch";
 
+// Import adaptive features
+import {
+  reciprocalRankFusion,
+  calculateConfidence,
+  logQuery,
+  shouldTriggerExtraction,
+  selectDocumentsForExtraction
+} from "./adaptive-features.js";
+
 // Server configuration
 const BGE_API_URL = process.env.BGE_API_URL || "http://localhost:8090/encode";
 const POSTGRES_URL = process.env.POSTGRES_URL || "postgresql://postgres:postgres@localhost:5433/eliza";
@@ -245,67 +254,95 @@ async function exploreGraph(
   }
 }
 
-// Hybrid search combining vector similarity and SPARQL
+// Hybrid search with Reciprocal Rank Fusion (RRF)
 async function hybridSearch(
   query: string,
   sparqlFilter?: string,
-  topK: number = 10
+  topK: number = 10,
+  userId?: string,
+  agentId?: string
 ) {
+  const startTime = Date.now();
+  
   try {
     // Get semantic search results
     const semanticResults = await searchEmbeddings(query, topK * 2);
+    
+    // Convert to RRF format
+    const vectorResults = semanticResults.results.map(result => ({
+      id: result.metadata.rid || result.id,
+      content: result.content,
+      similarity: result.metadata.similarity,
+      score: result.metadata.similarity,
+      source: 'vector' as const,
+      metadata: result.metadata,
+      rid: result.metadata.rid
+    }));
 
-    // If SPARQL filter provided, get graph matches
-    let graphMatches = new Set<string>();
+    // Get SPARQL results if filter provided
+    let sparqlResults: any[] = [];
     if (sparqlFilter) {
       const sparqlQuery = `
         PREFIX regen: <https://regen.network/ontology#>
         PREFIX koi: <https://regen.network/koi#>
 
-        SELECT DISTINCT ?rid WHERE {
+        SELECT DISTINCT ?rid ?content WHERE {
           ${sparqlFilter}
           ?entity koi:hasRID ?rid .
+          OPTIONAL { ?entity koi:content ?content }
         } LIMIT ${topK * 2}
       `;
 
       try {
         const graphResult = await executeSparqlQuery(sparqlQuery);
         if (graphResult.results?.bindings) {
-          graphResult.results.bindings.forEach((binding: any) => {
-            if (binding.rid?.value) {
-              graphMatches.add(binding.rid.value);
-            }
-          });
+          sparqlResults = graphResult.results.bindings.map((binding: any, index: number) => ({
+            id: binding.rid?.value,
+            content: binding.content?.value || '',
+            similarity: 1.0 - (index * 0.1), // Decreasing score by rank
+            score: 1.0 - (index * 0.1),
+            source: 'sparql' as const,
+            metadata: { rid: binding.rid?.value },
+            rid: binding.rid?.value
+          }));
         }
       } catch (e) {
         console.error("[BGE-MCP] SPARQL filter failed, using semantic only:", e);
       }
     }
 
-    // Combine and rank results
-    const combinedResults = semanticResults.results.map(result => {
-      const inGraph = graphMatches.has(result.metadata.rid);
-      return {
-        ...result,
-        metadata: {
-          ...result.metadata,
-          in_graph: inGraph,
-          // Boost score if in graph
-          combined_score: result.metadata.similarity * (inGraph ? 1.5 : 1.0)
-        }
-      };
+    // Apply Reciprocal Rank Fusion
+    const fusedResults = reciprocalRankFusion(vectorResults, sparqlResults);
+    
+    // Calculate confidence score
+    const confidence = calculateConfidence(fusedResults);
+    
+    // Prepare final results
+    const finalResults = fusedResults.slice(0, topK);
+    
+    // Log query for learning
+    const responseTime = Date.now() - startTime;
+    
+    await logQuery(pool, {
+      query_text: query,
+      user_id: userId,
+      agent_id: agentId,
+      confidence_score: confidence,
+      triggered_extraction: shouldTriggerExtraction(confidence),
+      response_time_ms: responseTime,
+      results: finalResults
     });
 
-    // Sort by combined score and limit
-    combinedResults.sort((a, b) =>
-      b.metadata.combined_score - a.metadata.combined_score
-    );
+    console.error(`[BGE-MCP] Hybrid search: confidence=${confidence.toFixed(3)}, results=${finalResults.length}, time=${responseTime}ms`);
 
     return {
       query,
+      confidence,
       sparql_filter: sparqlFilter || "none",
-      count: Math.min(topK, combinedResults.length),
-      results: combinedResults.slice(0, topK)
+      count: finalResults.length,
+      fusion_method: "RRF",
+      extraction_recommended: shouldTriggerExtraction(confidence),
+      results: finalResults
     };
   } catch (error) {
     console.error("[BGE-MCP] Hybrid search failed:", error);
@@ -520,7 +557,7 @@ async function main() {
       },
       {
         name: "hybrid_search",
-        description: "Hybrid search combining semantic vectors and knowledge graph",
+        description: "Hybrid search with RRF fusion, confidence monitoring, and query logging",
         inputSchema: {
           type: "object",
           properties: {
@@ -536,6 +573,14 @@ async function main() {
               type: "number",
               description: "Number of results",
               default: 10
+            },
+            user_id: {
+              type: "string",
+              description: "Optional user ID for query tracking"
+            },
+            agent_id: {
+              type: "string", 
+              description: "Optional agent ID for query tracking"
             }
           },
           required: ["query"]
@@ -631,7 +676,9 @@ async function main() {
           result = await hybridSearch(
             args.query as string,
             args.sparql_filter as string,
-            args.top_k as number || 10
+            args.top_k as number || 10,
+            args.user_id as string,
+            args.agent_id as string
           );
           break;
 

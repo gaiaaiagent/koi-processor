@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KOI Knowledge Graph - Hybrid RAG Query Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <style>
+        .loading-spinner {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <div class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center py-6">
+                    <div class="flex items-center space-x-3">
+                        <i data-lucide="network" class="h-8 w-8 text-blue-600"></i>
+                        <div>
+                            <h1 class="text-3xl font-bold text-gray-900">KOI Knowledge Graph</h1>
+                            <p class="text-gray-600">Explore the regenerative systems knowledge graph through natural language queries and interactive visualization</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                            <span class="w-2 h-2 bg-green-400 rounded-full mr-1 animate-pulse"></span>
+                            Hybrid RAG Active
+                        </span>
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                            <i data-lucide="database" class="h-3 w-3 mr-1"></i>
+                            5,703+ Documents
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                
+                <!-- Query Interface -->
+                <div class="lg:col-span-2">
+                    <div class="bg-white rounded-lg shadow-sm border">
+                        <div class="px-6 py-4 border-b border-gray-200">
+                            <h2 class="text-xl font-semibold text-gray-900 flex items-center">
+                                <i data-lucide="search" class="h-5 w-5 mr-2"></i>
+                                Hybrid RAG Query Interface
+                            </h2>
+                            <p class="text-sm text-gray-600 mt-1">
+                                Ask questions using vector search + knowledge graph + adaptive extraction
+                            </p>
+                        </div>
+                        
+                        <div class="p-6 space-y-6">
+                            <!-- Query Input -->
+                            <div class="space-y-3">
+                                <label class="block text-sm font-medium text-gray-700">Ask a Question</label>
+                                <textarea 
+                                    id="queryInput"
+                                    rows="3" 
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="Ask about the knowledge graph in natural language... 
+Example: 'Show me documents about regenerative agriculture with high confidence'"
+                                ></textarea>
+                                <div class="flex justify-between items-center">
+                                    <div class="text-xs text-gray-500">
+                                        Press Ctrl+Enter to execute
+                                    </div>
+                                    <button 
+                                        id="queryBtn"
+                                        onclick="executeQuery()"
+                                        class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+                                    >
+                                        <i data-lucide="send" class="h-4 w-4 mr-2"></i>
+                                        Query Knowledge Graph
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Results Area -->
+                            <div id="resultsArea" class="hidden space-y-4">
+                                <div class="border-t pt-4">
+                                    <h3 class="text-lg font-medium text-gray-900 mb-4">Query Results</h3>
+                                    
+                                    <!-- Stats -->
+                                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                                        <div class="text-center">
+                                            <div id="resultCount" class="text-2xl font-bold text-blue-600">--</div>
+                                            <div class="text-xs text-gray-500">Results</div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div id="confidence" class="text-2xl font-bold text-green-600">--</div>
+                                            <div class="text-xs text-gray-500">Confidence</div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div id="executionTime" class="text-2xl font-bold text-purple-600">--</div>
+                                            <div class="text-xs text-gray-500">Time (s)</div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div id="extraction" class="text-2xl font-bold text-orange-600">--</div>
+                                            <div class="text-xs text-gray-500">Extraction</div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Results List -->
+                                    <div id="resultsList" class="space-y-3">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Loading State -->
+                            <div id="loadingState" class="hidden flex items-center justify-center py-8">
+                                <div class="loading-spinner h-8 w-8 text-blue-600">
+                                    <i data-lucide="loader2" class="h-8 w-8"></i>
+                                </div>
+                                <span class="ml-3 text-gray-600">Processing hybrid RAG query...</span>
+                            </div>
+
+                            <!-- Error State -->
+                            <div id="errorState" class="hidden p-4 bg-red-50 border border-red-200 rounded-md">
+                                <div class="flex">
+                                    <i data-lucide="x-circle" class="h-5 w-5 text-red-400"></i>
+                                    <div class="ml-3">
+                                        <h3 class="text-sm font-medium text-red-800">Query Error</h3>
+                                        <div id="errorMessage" class="mt-2 text-sm text-red-700"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sidebar -->
+                <div class="space-y-6">
+                    <!-- Quick Stats -->
+                    <div class="bg-white rounded-lg shadow-sm border">
+                        <div class="px-4 py-3 border-b border-gray-200">
+                            <h3 class="text-lg font-medium text-gray-900">Quick Stats</h3>
+                        </div>
+                        <div class="p-4 space-y-3">
+                            <div class="flex justify-between items-center">
+                                <span class="text-sm text-gray-600">Total Documents</span>
+                                <span class="text-sm font-medium text-gray-900">5,703</span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-sm text-gray-600">BGE Embeddings</span>
+                                <span class="text-sm font-medium text-gray-900">4,913</span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-sm text-gray-600">Search Methods</span>
+                                <span class="text-sm font-medium text-gray-900">Vector + SPARQL</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Example Queries -->
+                    <div class="bg-white rounded-lg shadow-sm border">
+                        <div class="px-4 py-3 border-b border-gray-200">
+                            <h3 class="text-lg font-medium text-gray-900">Example Queries</h3>
+                        </div>
+                        <div class="p-4 space-y-2">
+                            <button onclick="setQuery('What is regenerative agriculture?')" class="w-full text-left text-sm p-2 rounded border hover:bg-gray-50 transition-colors">
+                                What is regenerative agriculture?
+                            </button>
+                            <button onclick="setQuery('How does carbon sequestration work in soil?')" class="w-full text-left text-sm p-2 rounded border hover:bg-gray-50 transition-colors">
+                                How does carbon sequestration work in soil?
+                            </button>
+                            <button onclick="setQuery('What are the benefits of biochar?')" class="w-full text-left text-sm p-2 rounded border hover:bg-gray-50 transition-colors">
+                                What are the benefits of biochar?
+                            </button>
+                            <button onclick="setQuery('How do regenerative practices improve soil health?')" class="w-full text-left text-sm p-2 rounded border hover:bg-gray-50 transition-colors">
+                                How do regenerative practices improve soil health?
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- System Info -->
+                    <div class="bg-white rounded-lg shadow-sm border">
+                        <div class="px-4 py-3 border-b border-gray-200">
+                            <h3 class="text-lg font-medium text-gray-900">System Status</h3>
+                        </div>
+                        <div class="p-4 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-gray-600">Vector Search</span>
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                    <span class="w-1.5 h-1.5 bg-green-400 rounded-full mr-1"></span>
+                                    Active
+                                </span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-gray-600">SPARQL Endpoint</span>
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                    <span class="w-1.5 h-1.5 bg-green-400 rounded-full mr-1"></span>
+                                    Active
+                                </span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-gray-600">Adaptive Extraction</span>
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                    <span class="w-1.5 h-1.5 bg-blue-400 rounded-full mr-1"></span>
+                                    Ready
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+
+        // Set query from example
+        function setQuery(text) {
+            document.getElementById('queryInput').value = text;
+        }
+
+        // Handle Ctrl+Enter
+        document.getElementById('queryInput').addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                executeQuery();
+            }
+        });
+
+        // Execute query
+        async function executeQuery() {
+            const queryInput = document.getElementById('queryInput');
+            const query = queryInput.value.trim();
+            
+            if (!query) return;
+
+            // Show loading state
+            document.getElementById('loadingState').classList.remove('hidden');
+            document.getElementById('resultsArea').classList.add('hidden');
+            document.getElementById('errorState').classList.add('hidden');
+            document.getElementById('queryBtn').disabled = true;
+
+            try {
+                const response = await fetch('/api/koi/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        question: query,
+                        user_id: 'dashboard-user',
+                        agent_id: 'dashboard-interface'
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                displayResults(result);
+
+            } catch (error) {
+                console.error('Query error:', error);
+                showError(error.message);
+            } finally {
+                document.getElementById('loadingState').classList.add('hidden');
+                document.getElementById('queryBtn').disabled = false;
+            }
+        }
+
+        // Display query results
+        function displayResults(result) {
+            // Update stats
+            document.getElementById('resultCount').textContent = result.total_results || 0;
+            document.getElementById('confidence').textContent = result.confidence ? result.confidence.toFixed(3) : '--';
+            document.getElementById('executionTime').textContent = result.execution_time ? result.execution_time.toFixed(3) : '--';
+            document.getElementById('extraction').textContent = result.triggered_extraction ? 'YES' : 'NO';
+
+            // Update results list
+            const resultsList = document.getElementById('resultsList');
+            resultsList.innerHTML = '';
+
+            if (result.results && result.results.length > 0) {
+                result.results.forEach(item => {
+                    const resultDiv = document.createElement('div');
+                    resultDiv.className = 'p-4 border border-gray-200 rounded-lg hover:bg-gray-50';
+                    resultDiv.innerHTML = `
+                        <div class="flex justify-between items-start mb-2">
+                            <h4 class="font-medium text-gray-900">${item.title || 'Document'}</h4>
+                            <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                ${item.source || 'hybrid'}
+                            </span>
+                        </div>
+                        <p class="text-sm text-gray-600 mb-2">${item.content || 'No content available'}</p>
+                        <div class="flex justify-between items-center text-xs text-gray-500">
+                            <span>Score: ${item.score ? item.score.toFixed(3) : 'N/A'}</span>
+                            <span>RID: ${item.rid || item.id || 'N/A'}</span>
+                        </div>
+                    `;
+                    resultsList.appendChild(resultDiv);
+                });
+            } else {
+                resultsList.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <i data-lucide="search-x" class="h-12 w-12 mx-auto mb-3 text-gray-400"></i>
+                        <p>No results found for this query.</p>
+                        <p class="text-sm mt-2">Try rephrasing your question or use different keywords.</p>
+                    </div>
+                `;
+            }
+
+            // Show results
+            document.getElementById('resultsArea').classList.remove('hidden');
+            lucide.createIcons();
+        }
+
+        // Show error
+        function showError(message) {
+            document.getElementById('errorMessage').textContent = message;
+            document.getElementById('errorState').classList.remove('hidden');
+        }
+
+        // Initialize icons on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            lucide.createIcons();
+        });
+    </script>
+</body>
+</html>

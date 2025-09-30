@@ -66,6 +66,170 @@ class ComponentStatus(BaseModel):
     last_updated: str
     metrics: Optional[Dict[str, Any]] = {}
 
+# URL Reconstruction Functions
+
+def reconstruct_url_from_metadata(rid: str, metadata: dict) -> Optional[str]:
+    """
+    Reconstruct source URL from RID and metadata
+    Handles different source types: discourse, github, notion, web, etc.
+    """
+
+    # Direct URL in metadata (best case)
+    if metadata.get('url'):
+        return metadata['url']
+
+    if metadata.get('post_url'):
+        return metadata['post_url']
+
+    # Check for discourse topic_url
+    if metadata.get('topic_url'):
+        # If we have post_number, append it to topic URL
+        post_num = metadata.get('post_number')
+        topic_url = metadata['topic_url']
+        if post_num and post_num > 1:
+            return f"{topic_url}/{post_num}"
+        return topic_url
+
+    source = metadata.get('source', '')
+    source_type = metadata.get('source_type', '')
+    original_id = metadata.get('original_id', '')
+
+    # Discourse forum posts
+    if 'discourse' in source or source_type == 'forum-post':
+        # Parse original_id like "forum.regen.network_136_post_3"
+        if '_post_' in original_id:
+            parts = original_id.split('_post_')
+            if len(parts) == 2:
+                topic_parts = parts[0].split('_')
+                topic_id = topic_parts[-1]
+                post_number = parts[1]
+                forum_domain = source.replace('discourse:', '')
+                if topic_id and forum_domain:
+                    return f"https://{forum_domain}/t/{topic_id}/{post_number}"
+
+        # Try parsing from RID
+        # Format: regen.forum-topic:forum.regen.network_topic_136#chunk0
+        if 'forum-topic:' in rid or 'forum-post:' in rid:
+            # Extract domain and topic ID from RID
+            if '_topic_' in rid or '_post_' in rid:
+                parts = rid.split(':')
+                if len(parts) >= 2:
+                    id_part = parts[1].split('#')[0]  # Remove chunk suffix
+
+                    # Parse "forum.regen.network_topic_136" or similar
+                    if '_topic_' in id_part:
+                        domain_and_topic = id_part.split('_topic_')
+                        if len(domain_and_topic) == 2:
+                            forum_domain = domain_and_topic[0]
+                            topic_id = domain_and_topic[1]
+                            return f"https://{forum_domain}/t/{topic_id}"
+
+                    elif '_post_' in id_part:
+                        # Parse "forum.regen.network_136_post_3"
+                        post_match = id_part.split('_post_')
+                        if len(post_match) == 2:
+                            topic_parts = post_match[0].split('_')
+                            topic_id = topic_parts[-1]
+                            post_number = post_match[1]
+                            # Get domain from first part
+                            forum_domain = '_'.join(topic_parts[:-1])
+                            return f"https://{forum_domain}/t/{topic_id}/{post_number}"
+
+    # GitHub repositories
+    elif 'github' in source or source_type == 'github':
+        repo = metadata.get('repository', '')
+        if repo:
+            return f"https://github.com/{repo}"
+
+        # Try parsing from RID
+        if 'github:' in rid:
+            parts = rid.split('github:')
+            if len(parts) == 2:
+                repo_path = parts[1].split('#')[0]
+                return f"https://github.com/{repo_path}"
+
+    # Notion pages
+    elif 'notion' in source or source_type == 'notion':
+        page_id = metadata.get('page_id', '')
+        if page_id:
+            return f"https://www.notion.so/{page_id}"
+
+    # Web pages
+    elif source_type in ['web', 'webpage', 'website']:
+        domain = metadata.get('domain', '')
+        path = metadata.get('path', '')
+        if domain:
+            return f"https://{domain}{path}" if path else f"https://{domain}"
+
+    return None
+
+async def fetch_source_url(conn, rid: str) -> Optional[str]:
+    """
+    Fetch source URL for a given RID from database
+    Tries multiple strategies:
+    1. koi_content.url (new pipeline)
+    2. koi_memory_chunks -> koi_content.url (via link)
+    3. koi_memories.metadata->>'url' (old pipeline with URL)
+    4. Reconstruct from koi_memories.metadata (old pipeline)
+    """
+
+    # Strategy 1: Check koi_content directly
+    result = await conn.fetchrow("""
+        SELECT metadata->>'url' as url, metadata
+        FROM koi_content
+        WHERE rid = $1
+    """, rid)
+
+    if result:
+        if result['url']:
+            return result['url']
+        # Try reconstruction from koi_content metadata
+        if result['metadata']:
+            # metadata is returned as JSON, convert to dict if needed
+            metadata = result['metadata'] if isinstance(result['metadata'], dict) else json.loads(result['metadata'])
+            reconstructed = reconstruct_url_from_metadata(rid, metadata)
+            if reconstructed:
+                return reconstructed
+
+    # Strategy 2: Check via koi_memory_chunks
+    result = await conn.fetchrow("""
+        SELECT c.metadata->>'url' as url, c.metadata
+        FROM koi_memory_chunks mc
+        JOIN koi_content c ON mc.source_content_rid = c.rid
+        WHERE mc.chunk_rid = $1
+    """, rid)
+
+    if result:
+        if result['url']:
+            return result['url']
+        # Try reconstruction from linked koi_content metadata
+        if result['metadata']:
+            metadata = result['metadata'] if isinstance(result['metadata'], dict) else json.loads(result['metadata'])
+            reconstructed = reconstruct_url_from_metadata(rid, metadata)
+            if reconstructed:
+                return reconstructed
+
+    # Strategy 3 & 4: Check koi_memories (old pipeline)
+    result = await conn.fetchrow("""
+        SELECT metadata->>'url' as url, metadata
+        FROM koi_memories
+        WHERE id::text = $1 OR content->>'id' = $1
+    """, rid)
+
+    if result:
+        if result['url']:
+            return result['url']
+
+        # Try reconstruction from metadata
+        if result['metadata']:
+            metadata = result['metadata'] if isinstance(result['metadata'], dict) else json.loads(result['metadata'])
+            reconstructed = reconstruct_url_from_metadata(rid, metadata)
+            if reconstructed:
+                return reconstructed
+
+    # Last attempt: Try reconstruction from RID alone with empty metadata
+    return reconstruct_url_from_metadata(rid, {})
+
 # Load and parse RDF data
 def load_pipeline_metadata() -> Graph:
     """Load pipeline metadata from TTL files"""
@@ -341,20 +505,27 @@ async def get_document_provenance(rid: str):
         )
 
         try:
+            # Fetch source URL using our reconstruction logic
+            source_url = await fetch_source_url(conn, rid)
+
+            # Strip content: prefix if present for transformation receipt queries
+            # koi_content uses content:orn:... but transformation_receipts use orn:...
+            receipt_rid = rid.replace("content:", "") if rid.startswith("content:") else rid
+
             # Query transformation receipts for this RID
             receipts = await conn.fetch("""
                 WITH RECURSIVE chain AS (
                     -- Find all transformations involving this RID
                     SELECT DISTINCT * FROM (
-                        SELECT * FROM transformation_receipts
+                        SELECT * FROM koi_transformation_receipts
                         WHERE input_rid = $1 OR output_rid = $1
 
                         UNION
 
                         -- Find upstream transformations
-                        SELECT t.* FROM transformation_receipts t
+                        SELECT t.* FROM koi_transformation_receipts t
                         WHERE t.output_rid IN (
-                            SELECT input_rid FROM transformation_receipts
+                            SELECT input_rid FROM koi_transformation_receipts
                             WHERE output_rid = $1
                         )
                     ) AS all_receipts
@@ -374,7 +545,7 @@ async def get_document_provenance(rid: str):
                     metadata
                 FROM chain
                 ORDER BY created_at ASC
-            """, rid)
+            """, receipt_rid)
 
             # Build provenance timeline
             timeline = []
@@ -412,10 +583,10 @@ async def get_document_provenance(rid: str):
                 if 'memory' in receipt['transformation_type']:
                     storage.add('postgresql')
 
-            # Also check if document exists in koi_memories
+            # Also check if document exists in koi_content
             doc = await conn.fetchrow("""
-                SELECT rid as id, content->>'title' as title, metadata->>'source' as source_sensor, created_at, content_hash
-                FROM koi_memories
+                SELECT rid as id, title, metadata->>'source' as source_sensor, created_at, content_hash
+                FROM koi_content
                 WHERE rid = $1
             """, rid)
 
@@ -429,9 +600,10 @@ async def get_document_provenance(rid: str):
                 "document": {
                     "title": doc['title'] if doc else None,
                     "source_sensor": doc['source_sensor'] if doc else None,
+                    "source_url": source_url,  # Add reconstructed URL
                     "created_at": doc['created_at'].isoformat() if doc and doc['created_at'] else None,
                     "content_hash": doc['content_hash'] if doc else None
-                } if doc else None,
+                } if doc else {"source_url": source_url},  # Include URL even if no doc found
                 "provenance": {
                     "sensed_by": list(sensors),
                     "processed_by": list(processors),
@@ -475,15 +647,15 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
             doc_rids = await conn.fetch("""
                 SELECT DISTINCT
                     rid,
-                    content->>'title' as title,
+                    title,
                     metadata->>'source' as source_sensor,
                     created_at
-                FROM koi_memories
+                FROM koi_content
                 WHERE rid IS NOT NULL
                     AND rid NOT LIKE '%test_%'
                     AND rid NOT LIKE '%heartbeat%'
                     AND rid NOT LIKE '%:demo:%'
-                    AND (content->>'title' != 'Test Page' OR content->>'title' IS NULL)
+                    AND (title != 'Test Page' OR title IS NULL)
                 ORDER BY created_at DESC
                 LIMIT $1
             """, limit // 2)
@@ -492,7 +664,7 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
             receipt_rids = await conn.fetch("""
                 SELECT DISTINCT rid, created_at FROM (
                     SELECT DISTINCT input_rid as rid, MIN(created_at) as created_at
-                    FROM transformation_receipts
+                    FROM koi_transformation_receipts
                     WHERE input_rid IS NOT NULL
                         AND input_rid NOT LIKE '%test_%'
                         AND input_rid NOT LIKE '%heartbeat%'
@@ -501,7 +673,7 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
                     UNION
 
                     SELECT DISTINCT output_rid as rid, MIN(created_at) as created_at
-                    FROM transformation_receipts
+                    FROM koi_transformation_receipts
                     WHERE output_rid IS NOT NULL
                         AND output_rid NOT LIKE '%test_%'
                         AND output_rid NOT LIKE '%heartbeat%'
@@ -542,11 +714,11 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
                 "count": len(rids),
                 "total_available": await conn.fetchval("""
                     SELECT COUNT(DISTINCT rid) FROM (
-                        SELECT rid FROM koi_memories WHERE rid IS NOT NULL
+                        SELECT rid FROM koi_content WHERE rid IS NOT NULL
                         UNION
-                        SELECT input_rid as rid FROM transformation_receipts WHERE input_rid IS NOT NULL
+                        SELECT input_rid as rid FROM koi_transformation_receipts WHERE input_rid IS NOT NULL
                         UNION
-                        SELECT output_rid as rid FROM transformation_receipts WHERE output_rid IS NOT NULL
+                        SELECT output_rid as rid FROM koi_transformation_receipts WHERE output_rid IS NOT NULL
                     ) AS all_rids
                 """)
             }
