@@ -90,8 +90,11 @@ metadata_resolver = MetadataResolver()
 smart_chunker = SmartChunker()
 
 kg_integrator = KnowledgeGraphIntegrator(
-    store_type="memory",  # Use memory for now, can switch to postgresql
-    store_config={}
+    store_type="sparql",  # Use SPARQL endpoint (Apache Jena Fuseki)
+    store_config={
+        "query_endpoint": "http://localhost:3030/koi/sparql",
+        "update_endpoint": "http://localhost:3030/koi/update"
+    }
 )
 
 cat_chain = CATReceiptChain(
