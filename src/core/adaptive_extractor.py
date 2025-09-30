@@ -15,7 +15,7 @@ import asyncpg
 import aiohttp
 from loguru import logger
 
-from src.core.create_cat_receipt import CATReceipt
+from src.core.create_cat_receipt import create_cat_receipt
 
 
 @dataclass
@@ -162,17 +162,19 @@ class AdaptiveExtractor:
             return None
             
         # Create CAT receipt for extraction
-        receipt = CATReceipt(
-            transformation_type="adaptive_extraction",
-            parent_rid=context.query_id,
-            metadata={
-                "trigger": "low_confidence",
-                "confidence_score": context.confidence,
-                "documents_processed": len(selected_docs),
-                "query": context.query_text,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        )
+        receipt_metadata = {
+            "trigger": "low_confidence",
+            "confidence_score": context.confidence,
+            "documents_processed": len(selected_docs),
+            "query": context.query_text,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Generate receipt ID as proper UUID
+        import uuid
+        receipt_content = f"adaptive_extraction:{context.query_id}:{datetime.utcnow().isoformat()}"
+        receipt_hash = hashlib.sha256(receipt_content.encode()).digest()[:16]
+        receipt_rid = str(uuid.UUID(bytes=receipt_hash))
         
         # Extract from each document
         all_facts = []
@@ -192,7 +194,7 @@ class AdaptiveExtractor:
                 
         # Store extracted knowledge
         await self._store_extracted_knowledge(
-            receipt.rid,
+            receipt_rid,
             all_facts,
             all_entities,
             all_relationships
@@ -205,14 +207,14 @@ class AdaptiveExtractor:
         # Log extraction
         await self._log_extraction(
             context.query_id,
-            receipt.rid,
+            receipt_rid,
             len(selected_docs),
             total_cost,
             confidence_improvement
         )
         
         return ExtractionResult(
-            receipt_rid=receipt.rid,
+            receipt_rid=receipt_rid,
             extracted_facts=all_facts,
             extracted_entities=all_entities,
             extracted_relationships=all_relationships,
@@ -425,9 +427,12 @@ class AdaptiveExtractor:
         return min(0.85, self.CONFIDENCE_THRESHOLD + 0.15)
         
     def _generate_query_id(self, query: str, user_id: Optional[str]) -> str:
-        """Generate unique query ID"""
+        """Generate unique query ID as full UUID format"""
+        import uuid
         content = f"{query}{user_id}{datetime.utcnow().isoformat()}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        # Generate deterministic UUID from hash
+        hash_bytes = hashlib.sha256(content.encode()).digest()[:16]
+        return str(uuid.UUID(bytes=hash_bytes))
 
 
 # Export for use in other modules
