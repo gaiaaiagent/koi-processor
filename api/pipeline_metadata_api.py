@@ -227,6 +227,20 @@ async def fetch_source_url(conn, rid: str) -> Optional[str]:
             if reconstructed:
                 return reconstructed
 
+    # Strategy 5: Check transformation receipts (sensor_collection has source URL)
+    result = await conn.fetchrow("""
+        SELECT metadata->>'source_url' as source_url, metadata->>'url' as url
+        FROM koi_transformation_receipts
+        WHERE output_rid = $1
+          AND transformation_type = 'sensor_collection'
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, rid)
+
+    if result:
+        # Try source_url first, then url
+        return result['source_url'] or result['url']
+
     # Last attempt: Try reconstruction from RID alone with empty metadata
     return reconstruct_url_from_metadata(rid, {})
 
@@ -515,20 +529,15 @@ async def get_document_provenance(rid: str):
             # Query transformation receipts for this RID
             receipts = await conn.fetch("""
                 WITH RECURSIVE chain AS (
-                    -- Find all transformations involving this RID
-                    SELECT DISTINCT * FROM (
-                        SELECT * FROM koi_transformation_receipts
-                        WHERE input_rid = $1 OR output_rid = $1
+                    -- Base case: Find all transformations directly involving this RID
+                    SELECT * FROM koi_transformation_receipts
+                    WHERE input_rid = $1 OR output_rid = $1
 
-                        UNION
+                    UNION
 
-                        -- Find upstream transformations
-                        SELECT t.* FROM koi_transformation_receipts t
-                        WHERE t.output_rid IN (
-                            SELECT input_rid FROM koi_transformation_receipts
-                            WHERE output_rid = $1
-                        )
-                    ) AS all_receipts
+                    -- Recursive case: Trace backwards through input_rid
+                    SELECT t.* FROM koi_transformation_receipts t
+                    INNER JOIN chain c ON t.output_rid = c.input_rid
                 )
                 SELECT
                     receipt_id,
@@ -547,15 +556,15 @@ async def get_document_provenance(rid: str):
                 ORDER BY created_at ASC
             """, receipt_rid)
 
-            # Build provenance timeline
+            # Build provenance timeline with logical ordering
             timeline = []
             sensors = set()
             processors = set()
             storage = set()
+            first_sensor = None
 
             for receipt in receipts:
-                # Add to timeline
-                timeline.append({
+                receipt_data = {
                     "timestamp": receipt['created_at'].isoformat() if receipt['created_at'] else None,
                     "type": receipt['transformation_type'],
                     "receipt_id": receipt['receipt_id'],
@@ -567,21 +576,78 @@ async def get_document_provenance(rid: str):
                         "embeddings_created": receipt['embeddings_created'],
                         "entities_extracted": receipt['entities_extracted']
                     }
-                })
+                }
 
-                # Track components
-                if receipt['source_sensor']:
+                # For sensor collection, use the source URL as input if available
+                if ('collection' in receipt['transformation_type'].lower() or
+                    'sensor' in receipt['transformation_type'].lower()) and not receipt['input_rid']:
+                    # We'll add the source_url after we fetch it
+                    receipt_data['_needs_source_url'] = True
+
+                timeline.append(receipt_data)
+
+                # Track components (only first sensor)
+                if receipt['source_sensor'] and not first_sensor:
+                    first_sensor = receipt['source_sensor']
                     sensors.add(receipt['source_sensor'])
                 if receipt['processor_name']:
                     processors.add(receipt['processor_name'])
 
-                # Infer storage from transformation types
+                # Infer storage
                 if 'embedding' in receipt['transformation_type']:
                     storage.add('postgresql-pgvector')
                 if 'graph' in receipt['transformation_type']:
                     storage.add('apache-jena')
                 if 'memory' in receipt['transformation_type']:
                     storage.add('postgresql')
+
+            # Sort timeline by logical provenance flow:
+            # 1. Sensor collection first (no input or collection type)
+            # 2. Then by RID length (base RID before chunks/derivatives)
+            # 3. Then by timestamp
+            # 4. Then by transformation type (for stable sort when timestamps match)
+            def sort_key(receipt):
+                # Priority 1: Collection events first
+                is_collection = (
+                    not receipt['input_rid'] or
+                    'collection' in receipt['type'].lower() or
+                    'sensor' in receipt['type'].lower()
+                )
+                collection_priority = 0 if is_collection else 1
+
+                # Priority 2: Shorter RIDs first (base before derived)
+                rid_length = len(receipt['output_rid']) if receipt['output_rid'] else 999
+
+                # Priority 3: Earlier timestamps first
+                timestamp = receipt['timestamp'] or '9999'
+
+                # Priority 4: Transformation type order for same timestamps
+                # Order: collection → forwarding → processing → memory → embedding
+                type_order = {
+                    'sensor_collection': 0,
+                    'coordinator_forwarding': 1,
+                    'koi_event_processing': 2,
+                    'koi_to_memory': 3,
+                    'memory_to_bge_embedding': 4
+                }
+                type_priority = type_order.get(receipt['type'], 99)
+
+                return (collection_priority, rid_length, timestamp, type_priority)
+
+            timeline.sort(key=sort_key)
+
+            # If we don't have a source URL yet, try to get it from sensor_collection receipt metadata
+            if not source_url:
+                sensor_receipt = next((r for r in receipts if r['transformation_type'] == 'sensor_collection'), None)
+                if sensor_receipt and sensor_receipt['metadata']:
+                    metadata = sensor_receipt['metadata'] if isinstance(sensor_receipt['metadata'], dict) else json.loads(sensor_receipt['metadata'])
+                    source_url = metadata.get('source_url') or metadata.get('url')
+
+            # Add source URL to sensor collection receipts that need it
+            for receipt in timeline:
+                if receipt.get('_needs_source_url') and source_url:
+                    receipt['input_rid'] = source_url
+                    del receipt['_needs_source_url']  # Clean up the marker
 
             # Also check if document exists in koi_content
             doc = await conn.fetchrow("""
@@ -590,9 +656,9 @@ async def get_document_provenance(rid: str):
                 WHERE rid = $1
             """, rid)
 
-            if doc:
-                if doc['source_sensor']:
-                    sensors.add(doc['source_sensor'])
+            # Only add doc sensor if we don't have one from receipts (first_sensor takes priority)
+            if doc and doc['source_sensor'] and not first_sensor:
+                sensors.add(doc['source_sensor'])
 
             return {
                 "rid": rid,

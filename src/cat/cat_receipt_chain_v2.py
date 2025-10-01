@@ -237,7 +237,7 @@ class CATReceiptChainV2:
                     JOIN chain c ON r.output_rid = c.input_rid
                 )
                 SELECT * FROM chain
-                ORDER BY created_at DESC
+                ORDER BY created_at ASC
             """, rid)
 
             return [dict(r) for r in records]

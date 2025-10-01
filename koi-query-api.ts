@@ -202,20 +202,40 @@ async function performKeywordSearch(query: string, topK: number = 10) {
 
     const results = await pool.query(searchQuery, [tsquery, topK]);
 
-    return results.rows.map(row => ({
-      id: row.rid,
-      content: row.content.substring(0, 200) + "...",
-      similarity: parseFloat(row.rank),
-      score: parseFloat(row.rank),
-      source: 'keyword' as const,
-      metadata: {
-        rid: row.rid,
-        source: row.source,
-        url: row.url,
-        fts_rank: parseFloat(row.rank)
-      },
-      rid: row.rid
-    }));
+    // Find max rank for normalization
+    const maxRank = results.rows.length > 0
+      ? Math.max(...results.rows.map(r => parseFloat(r.rank)))
+      : 1;
+
+    return results.rows.map(row => {
+      const rawRank = parseFloat(row.rank);
+
+      // Logarithmic scaling for better score discrimination
+      const normalizedScore = Math.log(1 + rawRank) / Math.log(1 + maxRank);
+
+      // Boost for exact phrase matches (case-insensitive)
+      const queryLower = query.toLowerCase();
+      const contentLower = row.content.toLowerCase();
+      const hasExactMatch = contentLower.includes(queryLower);
+      const finalScore = hasExactMatch ? normalizedScore * 1.2 : normalizedScore;
+
+      return {
+        id: row.rid,
+        content: row.content.substring(0, 200) + "...",
+        similarity: finalScore,
+        score: finalScore,
+        source: 'keyword' as const,
+        metadata: {
+          rid: row.rid,
+          source: row.source,
+          url: row.url,
+          fts_rank: rawRank,
+          normalized_score: normalizedScore,
+          exact_match_boost: hasExactMatch
+        },
+        rid: row.rid
+      };
+    });
   } catch (error) {
     console.error('[Keyword Search] Error:', error);
     // Fallback to ILIKE if FTS fails
@@ -266,13 +286,14 @@ app.post('/api/koi/query', async (req, res) => {
     const startTime = Date.now();
 
     // Perform hybrid search with RRF
-    const [vectorResults, sparqlResults] = await Promise.all([
+    const [vectorResults, keywordResults] = await Promise.all([
       performSemanticSearch(question, 8),
       performKeywordSearch(question, 5)
     ]);
 
     // Apply Reciprocal Rank Fusion
-    const fusedResults = reciprocalRankFusion(vectorResults, sparqlResults);
+    // Pass empty array for SPARQL results (not implemented yet)
+    const fusedResults = reciprocalRankFusion(vectorResults, [], keywordResults);
     
     // Calculate confidence
     const confidence = calculateConfidence(fusedResults);

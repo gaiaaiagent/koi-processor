@@ -52,6 +52,17 @@ async def create_cat_receipt(
         receipt_id: The generated receipt ID
     """
     try:
+        # Check if this exact transformation already exists (deduplication)
+        existing = await conn.fetchrow("""
+            SELECT receipt_id FROM koi_transformation_receipts
+            WHERE input_rid = $1 AND output_rid = $2 AND transformation_type = $3
+            LIMIT 1
+        """, input_rid, output_rid, transformation_type)
+
+        if existing:
+            logger.info(f"✓ DUPLICATE RECEIPT: {transformation_type} {input_rid} → {output_rid} - SKIPPING (existing: {existing['receipt_id'][:8]}...)")
+            return existing['receipt_id']
+
         # Generate receipt ID using SHA-256 of key fields
         receipt_content = f"{transformation_type}:{input_rid}:{output_rid}:{datetime.now(timezone.utc).isoformat()}"
         receipt_id = hashlib.sha256(receipt_content.encode()).hexdigest()
@@ -62,6 +73,8 @@ async def create_cat_receipt(
 
         # Add timestamp to metadata
         metadata['timestamp'] = datetime.now(timezone.utc).isoformat()
+
+        logger.info(f"✓ NEW RECEIPT: {transformation_type} {input_rid[:50]} → {output_rid[:50]} (ID: {receipt_id[:8]}...)")
 
         # Insert into koi_transformation_receipts table
         await conn.execute("""

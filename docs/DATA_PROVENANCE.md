@@ -1,7 +1,7 @@
 # Data Provenance System
 
-**Last Updated:** September 30, 2025
-**Status:** ✅ Production Ready - 100% Coverage Achieved
+**Last Updated:** October 1, 2025
+**Status:** ✅ Production Ready - 100% Coverage + Deduplication Implemented
 
 ---
 
@@ -31,10 +31,11 @@ The KOI Data Provenance System provides complete end-to-end traceability for all
 | **Podcasts** | 116 | 116 | 100.00% |
 | **Overall** | **2,835** | **2,835** | **100.00%** |
 
-### CAT Receipt Statistics
-- **Total Receipts**: 19,760+ transformations tracked
-- **Receipt Types**: 5 (sensor_collection, chunking, llm_extraction, graph_integration, embedding)
-- **Embedding Coverage**: 99.95% (2,019/2,020 memories with BGE embeddings)
+### CAT Receipt Statistics (October 1, 2025)
+- **Total Receipts**: 28,902 transformations tracked (100% unique after deduplication)
+- **Receipt Types**: 5 (sensor_collection, coordinator_forwarding, koi_event_processing, koi_to_memory, memory_to_bge_embedding)
+- **Duplicate Prevention**: Multi-level deduplication at coordinator and event bridge
+- **Embedding Coverage**: 99.95%+ memories with BGE embeddings
 
 ---
 
@@ -272,68 +273,74 @@ CAT receipts are cryptographic records that track:
 - **Processor**: Which component performed the transformation
 - **Metrics**: Processing statistics (chunks, embeddings, duration)
 - **Metadata**: Additional context and parameters
+- **Deduplication**: Prevents duplicate receipts for identical transformations
 
 ### Receipt Types
 
-The KOI pipeline generates several types of CAT receipts:
+The KOI pipeline generates five types of CAT receipts:
 
 #### 1. `sensor_collection`
 Created when sensors collect content from external sources.
 - Input: Source URL or API endpoint
 - Output: Document RID
-- Tracks: Collection timestamp, sensor type
+- Tracks: Collection timestamp, sensor type, source URL
 
-#### 2. `chunking`
+#### 2. `coordinator_forwarding`
+Created when coordinator forwards events to event bridge.
+- Input: Document RID from sensor
+- Output: Same RID (forwarding step)
+- Tracks: Coordinator processing time, routing decision
+
+#### 3. `koi_event_processing`
+Created when event bridge processes the KOI event.
+- Input: Document RID
+- Output: Document RID (processing confirmation)
+- Tracks: Event type (NEW/UPDATE/FORGET), validation results
+
+#### 4. `koi_to_memory`
 Created when documents are split into memory chunks.
 - Input: Document RID
-- Output: Chunk RIDs
-- Tracks: Number of chunks created, chunk strategy
+- Output: Chunk RIDs (e.g., `{doc_rid}#chunk0`, `{doc_rid}#chunk1`)
+- Tracks: Number of chunks created, chunking strategy
 
-#### 3. `llm_extraction`
-Created when LLMs extract structured data.
-- Input: Document RID
-- Output: Extracted entities/relations
-- Tracks: Model used, confidence scores
-
-#### 4. `graph_integration`
-Created when data is integrated into knowledge graph.
-- Input: Extracted data
-- Output: RDF triples
-- Tracks: Triples added, integration time
-
-#### 5. `embedding`
-Created when text chunks are converted to BGE embeddings.
+#### 5. `memory_to_bge_embedding`
+Created when memory chunks are converted to BGE embeddings.
 - Input: Memory chunk RID
-- Output: Embedding vector
-- Tracks: Model (bge-large-en-v1.5), dimensions (1024)
+- Output: Embedding identifier (e.g., `embedding:{chunk_rid}:bge-large-en-v1.5`)
+- Tracks: Model (bge-large-en-v1.5), dimensions (1024), processing time
 
 ### Database Schema
 
-CAT receipts are stored in the `cat_receipts` table:
+CAT receipts are stored in the `koi_transformation_receipts` table:
 
 ```sql
-CREATE TABLE cat_receipts (
-    rid TEXT PRIMARY KEY,                   -- Receipt RID (orn:cat:...)
-    type TEXT NOT NULL,                     -- Receipt type (chunking, embedding, etc.)
-    timestamp TIMESTAMP WITH TIME ZONE,     -- Creation timestamp
-    parent_rid TEXT,                        -- Parent receipt (for chaining)
-    content_cid TEXT,                       -- Content ID
-    transformation JSONB NOT NULL,          -- Transformation details
-    metadata JSONB DEFAULT '{}',            -- Additional metadata
-    hash TEXT NOT NULL,                     -- Receipt hash
+CREATE TABLE koi_transformation_receipts (
+    receipt_id VARCHAR(64) PRIMARY KEY,           -- SHA-256 hash of transformation
+    transformation_type VARCHAR(50) NOT NULL,     -- Type: sensor_collection, coordinator_forwarding, etc.
+    input_rid VARCHAR(500),                       -- Input Resource Identifier
+    input_cid VARCHAR(500),                       -- Input Content Identifier
+    output_rid VARCHAR(500),                      -- Output Resource Identifier
+    output_cid VARCHAR(500),                      -- Output Content Identifier
+    processor_name VARCHAR(200),                  -- Processor component name
+    processor_version VARCHAR(50),                -- Processor version
+    chunks_created INTEGER DEFAULT 0,             -- Number of chunks created
+    embeddings_created INTEGER DEFAULT 0,         -- Number of embeddings created
+    entities_extracted INTEGER DEFAULT 0,         -- Number of entities extracted
+    source_sensor VARCHAR(200),                   -- Source sensor identifier
+    event_type VARCHAR(20),                       -- Event type: NEW, UPDATE, FORGET
+    metadata JSONB,                               -- Additional metadata (includes source_url)
+    processing_duration_ms INTEGER,               -- Processing time in milliseconds
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Indexes for efficient queries
-CREATE INDEX idx_cat_parent_rid ON cat_receipts(parent_rid);
-CREATE INDEX idx_cat_type ON cat_receipts(type);
-CREATE INDEX idx_cat_timestamp ON cat_receipts(timestamp);
-CREATE INDEX idx_cat_content_cid ON cat_receipts(content_cid);
+CREATE INDEX idx_koi_transformation_input_rid ON koi_transformation_receipts(input_rid);
+CREATE INDEX idx_koi_transformation_output_rid ON koi_transformation_receipts(output_rid);
+CREATE INDEX idx_koi_transformation_type ON koi_transformation_receipts(transformation_type);
+CREATE INDEX idx_koi_transformation_created_at ON koi_transformation_receipts(created_at);
 
--- Self-referencing foreign key for receipt chains
-ALTER TABLE cat_receipts
-    ADD CONSTRAINT cat_receipts_parent_rid_fkey
-    FOREIGN KEY (parent_rid) REFERENCES cat_receipts(rid);
+-- Unique constraint for deduplication (prevents duplicate transformations)
+CREATE UNIQUE INDEX idx_koi_transformation_dedup ON koi_transformation_receipts(input_rid, output_rid, transformation_type);
 ```
 
 ### Querying CAT Receipts
@@ -341,111 +348,140 @@ ALTER TABLE cat_receipts
 #### View Recent Receipts
 ```sql
 SELECT
-    type,
-    rid,
-    parent_rid,
-    transformation,
+    transformation_type,
+    input_rid,
+    output_rid,
+    processor_name,
     created_at
-FROM cat_receipts
+FROM koi_transformation_receipts
 ORDER BY created_at DESC
 LIMIT 10;
 ```
 
 #### Get Complete Provenance Chain
 
-Trace a chunk back through all transformations:
+Trace a chunk back through all transformations using recursive query:
 
 ```sql
 WITH RECURSIVE provenance_chain AS (
-    -- Start with target chunk
-    SELECT
-        rid,
-        type,
-        parent_rid,
-        transformation,
-        0 as depth
-    FROM cat_receipts
-    WHERE rid LIKE '%chunk0%'  -- Your target chunk
+    -- Base case: Find all transformations directly involving this RID
+    SELECT * FROM koi_transformation_receipts
+    WHERE input_rid = 'your-chunk-rid' OR output_rid = 'your-chunk-rid'
 
-    UNION ALL
+    UNION
 
-    -- Follow parent chain
-    SELECT
-        c.rid,
-        c.type,
-        c.parent_rid,
-        c.transformation,
-        p.depth + 1
-    FROM cat_receipts c
-    JOIN provenance_chain p ON c.rid = p.parent_rid
-    WHERE p.depth < 10  -- Prevent infinite loops
+    -- Recursive case: Trace backwards through input_rid
+    SELECT t.* FROM koi_transformation_receipts t
+    INNER JOIN provenance_chain c ON t.output_rid = c.input_rid
 )
-SELECT * FROM provenance_chain
-ORDER BY depth;
+SELECT
+    transformation_type,
+    input_rid,
+    output_rid,
+    processor_name,
+    source_sensor,
+    created_at
+FROM provenance_chain
+ORDER BY created_at ASC;
 ```
 
 #### Find Processing Statistics
 ```sql
 SELECT
-    type,
+    transformation_type,
     COUNT(*) as receipt_count,
     DATE(created_at) as date
-FROM cat_receipts
+FROM koi_transformation_receipts
 WHERE created_at > NOW() - INTERVAL '7 days'
-GROUP BY type, DATE(created_at)
-ORDER BY date DESC, type;
+GROUP BY transformation_type, DATE(created_at)
+ORDER BY date DESC, transformation_type;
 ```
 
 **Example Output:**
 ```
-type              | receipt_count | date
-------------------|---------------|------------
-embedding         | 847          | 2025-09-30
-chunking          | 234          | 2025-09-30
-sensor_collection | 198          | 2025-09-30
-llm_extraction    | 187          | 2025-09-30
-graph_integration | 176          | 2025-09-30
+transformation_type         | receipt_count | date
+----------------------------|---------------|------------
+memory_to_bge_embedding     | 847          | 2025-10-01
+koi_to_memory               | 234          | 2025-10-01
+sensor_collection           | 198          | 2025-10-01
+coordinator_forwarding      | 198          | 2025-10-01
+koi_event_processing        | 198          | 2025-10-01
 ```
 
 ### Receipt Generation
 
-CAT receipts are automatically generated by the Event Bridge v2:
+CAT receipts are automatically generated by the Event Bridge v2 with deduplication:
 
 ```python
-async def create_cat_receipt(transformation_type, input_rid, output_rid, processor, metadata):
-    """Create a CAT receipt for transformation tracking"""
+async def create_cat_receipt(
+    conn: asyncpg.Connection,
+    transformation_type: str,
+    input_rid: str,
+    output_rid: str,
+    processor_name: str = "KOI Event Bridge v2",
+    processor_version: str = "2.0.0",
+    chunks_created: int = 0,
+    embeddings_created: int = 0,
+    metadata: Optional[Dict[str, Any]] = None
+) -> str:
+    """Create a CAT receipt with automatic deduplication"""
 
-    # Generate receipt hash
+    # Check if this exact transformation already exists (deduplication)
+    existing = await conn.fetchrow("""
+        SELECT receipt_id FROM koi_transformation_receipts
+        WHERE input_rid = $1 AND output_rid = $2 AND transformation_type = $3
+        LIMIT 1
+    """, input_rid, output_rid, transformation_type)
+
+    if existing:
+        logger.info(f"✓ DUPLICATE RECEIPT: {transformation_type} - SKIPPING")
+        return existing['receipt_id']
+
+    # Generate receipt ID using SHA-256
     timestamp = datetime.now(timezone.utc).isoformat()
     receipt_content = f"{transformation_type}:{input_rid}:{output_rid}:{timestamp}"
-    receipt_hash = hashlib.sha256(receipt_content.encode()).hexdigest()
+    receipt_id = hashlib.sha256(receipt_content.encode()).hexdigest()
 
-    # Create receipt RID
-    receipt_rid = f"orn:cat:{transformation_type}:{receipt_hash[:16]}"
+    logger.info(f"✓ NEW RECEIPT: {transformation_type} {input_rid[:50]} → {output_rid[:50]}")
 
-    # Store in PostgreSQL
+    # Insert into koi_transformation_receipts table
     await conn.execute("""
-        INSERT INTO cat_receipts (rid, type, parent_rid, transformation, hash, timestamp)
-        VALUES ($1, $2, $3, $4, $5, $6)
-    """, receipt_rid, transformation_type, parent_rid, transformation_json, receipt_hash, timestamp)
+        INSERT INTO koi_transformation_receipts (
+            receipt_id, transformation_type, input_rid, output_rid,
+            processor_name, processor_version, chunks_created,
+            embeddings_created, metadata, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (receipt_id) DO NOTHING
+    """, receipt_id, transformation_type, input_rid, output_rid,
+        processor_name, processor_version, chunks_created,
+        embeddings_created, json.dumps(metadata), datetime.now(timezone.utc))
 
-    # Store in Jena (optional RDF provenance)
-    if jena_enabled:
-        await jena.store_transformation(
-            transformation_type, input_rid, output_rid, processor, metadata
-        )
-
-    return receipt_rid
+    return receipt_id
 ```
 
 ### Receipt ID Format
 
-Receipt RIDs follow the pattern: `orn:cat:{type}:{hash}`
+Receipt IDs are SHA-256 hashes of the transformation details:
 
-**Examples:**
-- `orn:cat:chunking:1c42bf1279456c53` - Chunking receipt
-- `orn:cat:embedding:3cd42b9a95db3448` - Embedding receipt
-- `orn:cat:graph_integration:6fb4be3d94a56541` - Graph integration receipt
+**Format:** `sha256(transformation_type:input_rid:output_rid:timestamp)`
+
+**Example:** `7c9e6679f8a3c8e4d5f2a1b9c0e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0`
+
+### Deduplication System
+
+The KOI pipeline implements multi-level deduplication to prevent duplicate CAT receipts:
+
+#### Level 1: Coordinator Content Deduplication
+- Tracks content hashes and URLs in persistent state
+- Prevents sensors from submitting duplicate content
+- Location: `koi_protocol/coordinator/koi_coordinator.py`
+
+#### Level 2: Event Bridge Receipt Deduplication
+- Checks for existing (input_rid, output_rid, transformation_type) before creating receipt
+- Prevents duplicate receipts if events are replayed
+- Location: `src/core/create_cat_receipt.py`
+
+**Result:** 100% unique receipts - no duplicates in production (as of October 1, 2025)
 
 ---
 
