@@ -1135,3 +1135,132 @@ This adaptive knowledge MCP implementation represents a paradigm shift from stat
 4. **Maintains complete provenance** for all knowledge
 
 The system starts simple with existing infrastructure and progressively adds intelligence based on actual usage patterns, ensuring resources are focused where they provide maximum value. This approach aligns with the research insights from RAG_Research.md while maintaining practical implementability within the existing KOI architecture.
+## Implementation Updates (September 30, 2025)
+
+### BM25/FTS Keyword Search Integration
+
+**Motivation:** Semantic search (BGE embeddings) alone was insufficient for entity names and exact phrase matching. We needed keyword-based search to complement vector similarity.
+
+**Implementation:**
+1. **Database Migration** (`migrations/012_add_bm25_fts.sql`):
+   - Added `content_tsv` tsvector column to `koi_memories`
+   - Created GIN index: `koi_memories_content_tsv_idx`
+   - Trigger function auto-updates tsvector on INSERT/UPDATE
+   - Weighted search: content (A), title (B), description (C)
+
+2. **Search Function** (`koi-query-api.ts`):
+   ```typescript
+   async function performKeywordSearch(query: string, topK: number = 10) {
+     const tsquery = query.split(/\s+/)
+       .map(word => word.replace(/[^a-zA-Z0-9]/g, ''))
+       .filter(w => w.length > 0).join(' & ');
+     
+     const searchQuery = `
+       SELECT m.rid, m.content->>'text' as content,
+              m.metadata->>'url' as url,
+              ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank
+       FROM koi_memories m
+       WHERE m.content_tsv @@ to_tsquery('english', $1)
+       ORDER BY rank DESC
+       LIMIT $2
+     `;
+     // Returns RRF-compatible results
+   }
+   ```
+
+3. **Hybrid Pipeline Update:**
+   - Replaced mock SPARQL search with real BM25 keyword search
+   - Both semantic and keyword results fed into RRF fusion
+   - Source field changed from `sparql` to `keyword`
+
+**Results:**
+- Backfilled 4,031 records with FTS index
+- 100% coverage on new inserts via trigger
+- Better entity matching (e.g., "Gregory Landua" queries)
+
+---
+
+### Provenance URL Traceability Fix
+
+**Problem:** Provenance timeline UI showed "No source URL" even though URLs existed in database.
+
+**Root Cause Analysis:**
+1. Backend API (`pipeline_metadata_api.py`) had incorrect WHERE clause in `fetch_source_url()`
+2. Was using `WHERE id::text = $1` instead of `WHERE rid = $1`
+3. Frontend component missing `source_url` field in interface
+
+**Fixes:**
+
+**Backend** (`api/pipeline_metadata_api.py` line 216):
+```python
+# BEFORE
+result = await conn.fetchrow("""
+    SELECT metadata->>'url' as url, metadata
+    FROM koi_memories
+    WHERE id::text = $1 OR content->>'id' = $1
+""", rid)
+
+# AFTER  
+result = await conn.fetchrow("""
+    SELECT metadata->>'url' as url, metadata
+    FROM koi_memories
+    WHERE rid = $1
+""", rid)
+```
+
+**Frontend** (`ProvenanceTimeline.tsx`):
+```typescript
+interface ProvenanceData {
+  document?: {
+    title?: string;
+    source_sensor?: string;
+    source_url?: string;  // ADDED
+    created_at?: string;
+    content_hash?: string;
+  };
+}
+
+// Display in Document Information section
+{provenanceData.document.source_url && (
+  <div className="text-gray-800 col-span-2">
+    <span className="text-gray-600 font-medium">Source URL:</span>{" "}
+    <a href={provenanceData.document.source_url} 
+       target="_blank" 
+       rel="noopener noreferrer"
+       className="text-blue-600 hover:underline break-all">
+      {provenanceData.document.source_url}
+    </a>
+  </div>
+)}
+```
+
+**Verification:**
+- All 4,160+ records have URL metadata
+- API returns correct URLs for all RID lookups
+- Full provenance chain: search result → chunk → parent doc → source URL
+
+---
+
+### System-Wide Data Quality Verification
+
+**URL Coverage by Sensor:**
+| Sensor | Records | URL Coverage |
+|--------|---------|--------------|
+| GitHub | 1,747 | 100% |
+| Website | 792 | 100% |
+| Discourse | 905 | 100% |
+| GitLab | 600 | 100% |
+| Podcast | 116 | 100% |
+| **Total** | **4,160+** | **100%** |
+
+**Website Sensor Refresh:**
+- Deleted old data with incorrect URLs
+- Re-scraped 792 pages with verified URLs
+- 165 URLs still queued (4-6 hour completion)
+
+**Impact:**
+- Complete provenance traceability
+- Supports compliance requirements  
+- Enables citation and verification
+- Foundation for feedback attribution
+

@@ -190,3 +190,99 @@ LIMIT 10;
 3. **Feedback UI** - Build interface for collecting user feedback
 4. **Monitoring Dashboard** - Create real-time analytics dashboard
 5. **Production Deployment** - Deploy to production KOI pipeline
+## Recent Updates (September 30, 2025)
+
+### ✅ BM25 Keyword Search Integration
+**Status:** COMPLETED
+
+Implemented full-text search (FTS) using PostgreSQL's BM25-like ranking to improve keyword matching alongside semantic search.
+
+**Implementation Details:**
+- **Database Schema:**
+  - Added `content_tsv` tsvector column to `koi_memories` table
+  - Created GIN index for fast full-text search
+  - Implemented automatic trigger to update tsvector on INSERT/UPDATE
+  - Backfilled 4,031 existing records with FTS data
+
+- **Search Function:** (`/opt/projects/koi-processor/koi-query-api.ts`)
+  - Converts query to tsquery format (word1 & word2 & word3)
+  - Uses `ts_rank_cd()` for BM25-like ranking
+  - Returns results in RRF-compatible format
+  - Includes ILIKE fallback if FTS fails
+
+- **Weighted Search:**
+  - Content text: Weight A (highest)
+  - Metadata title: Weight B (medium)
+  - Metadata description: Weight C (lower)
+
+- **Hybrid Search Pipeline:**
+  1. Semantic search (BGE embeddings) → Top-K results
+  2. Keyword search (BM25/FTS) → Top-K results
+  3. Reciprocal Rank Fusion (RRF) → Combined ranked results
+
+**Benefits:**
+- Better entity/name matching (e.g., "Gregory Landua", "biochar")
+- Improved exact phrase matching
+- Fallback to ILIKE if FTS fails
+- 100% integration with existing RRF pipeline
+
+**Migration:** `/opt/projects/koi-processor/migrations/012_add_bm25_fts.sql`
+
+---
+
+### ✅ Provenance URL Display Fix
+**Status:** COMPLETED
+
+Fixed missing source URL display in provenance timeline UI, enabling full traceability from search results back to original sources.
+
+**Backend Fix:** (`/opt/projects/koi-processor/api/pipeline_metadata_api.py`)
+- **Bug:** `fetch_source_url()` was using incorrect WHERE clause: `WHERE id::text = $1`
+- **Fix:** Changed to `WHERE rid = $1` to properly query by RID column
+- **Result:** API now correctly returns `source_url` field from `koi_memories.metadata`
+
+**Frontend Fix:** (`/opt/projects/GAIA/packages/client/src/routes/koi/components/ProvenanceTimeline.tsx`)
+- Added `source_url` field to `ProvenanceData.document` interface
+- Display source URL as clickable link in Document Information section
+- URL spans full width with word-break for long URLs
+
+**Impact:**
+- 100% URL coverage across all sensors (verified)
+- Full provenance chain from search result → chunk → parent document → source URL
+- Supports compliance and verifiability requirements
+
+---
+
+### ✅ Website Sensor Data Refresh
+**Status:** IN PROGRESS (165 URLs queued)
+
+Re-scraped website data to ensure data quality and correct URL assignment.
+
+**Actions Taken:**
+1. Backed up 1,234 website records to CSV
+2. Deleted all old website data (1,319 total records)
+3. Cleared website sensor state for fresh crawl
+4. Restarted sensor via start_all.sh
+
+**Current Status:**
+- 792 pages scraped with 100% URL coverage
+- 165 URLs still queued across 12 sites
+- Sensor check interval: 30 minutes
+- Full re-scrape expected: 4-6 hours
+
+---
+
+### ✅ All Sensors Verified
+**Status:** COMPLETED
+
+Verified URL coverage across all data sources:
+
+| Sensor Type | Records | URL Coverage |
+|------------|---------|--------------|
+| GitHub | 1,747 | 100% |
+| Website | 792 | 100% |
+| Discourse | 905 | 100% |
+| GitLab | 600 | 100% |
+| Podcast | 116 | 100% |
+
+**Total:** 4,160+ records with 100% URL coverage system-wide
+

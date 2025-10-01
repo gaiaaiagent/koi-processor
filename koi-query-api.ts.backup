@@ -172,89 +172,38 @@ async function triggerAdaptiveExtraction(
   }
 }
 
+// Mock SPARQL search
+async function performSparqlSearch(query: string, topK: number = 5) {
+  const sparqlQuery = `
+    SELECT 
+      m.rid,
+      m.content->>'text' as content,
+      m.metadata->>'source' as source
+    FROM koi_memories m
+    WHERE 
+      m.content->>'text' ILIKE $1
+      AND LENGTH(m.content->>'text') > 50
+    ORDER BY RANDOM()
+    LIMIT $2
+  `;
+
+  const results = await pool.query(sparqlQuery, [`%${query}%`, topK]);
+  
+  return results.rows.map((row, index) => ({
+    id: row.rid,
+    content: row.content.substring(0, 200) + "...",
+    similarity: 1.0 - (index * 0.1),
+    score: 1.0 - (index * 0.1),
+    source: 'sparql' as const,
+    metadata: {
+      rid: row.rid,
+      source: row.source
+    },
+    rid: row.rid
+  }));
+}
 
 // Hybrid RAG Query Endpoint
-// Full-text search using PostgreSQL's ts_rank (BM25-like ranking)
-async function performKeywordSearch(query: string, topK: number = 10) {
-  try {
-    // Convert query to tsquery format
-    const tsquery = query.trim().split(/\s+/).map(word => word.replace(/[^a-zA-Z0-9]/g, '')).filter(w => w.length > 0).join(' & ');
-
-    if (!tsquery) {
-      return [];
-    }
-
-    const searchQuery = `
-      SELECT
-        m.rid,
-        m.content->>'text' as content,
-        m.metadata->>'source' as source,
-        m.metadata->>'url' as url,
-        ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank
-      FROM koi_memories m
-      WHERE
-        m.content_tsv @@ to_tsquery('english', $1)
-        AND m.content->>'text' IS NOT NULL
-        AND LENGTH(m.content->>'text') > 50
-      ORDER BY rank DESC
-      LIMIT $2
-    `;
-
-    const results = await pool.query(searchQuery, [tsquery, topK]);
-
-    return results.rows.map(row => ({
-      id: row.rid,
-      content: row.content.substring(0, 200) + "...",
-      similarity: parseFloat(row.rank),
-      score: parseFloat(row.rank),
-      source: 'keyword' as const,
-      metadata: {
-        rid: row.rid,
-        source: row.source,
-        url: row.url,
-        fts_rank: parseFloat(row.rank)
-      },
-      rid: row.rid
-    }));
-  } catch (error) {
-    console.error('[Keyword Search] Error:', error);
-    // Fallback to ILIKE if FTS fails
-    const fallbackQuery = `
-      SELECT
-        m.rid,
-        m.content->>'text' as content,
-        m.metadata->>'source' as source,
-        m.metadata->>'url' as url,
-        0.5 as rank
-      FROM koi_memories m
-      WHERE
-        m.content->>'text' ILIKE $1
-        AND LENGTH(m.content->>'text') > 50
-      ORDER BY CASE
-        WHEN m.content->>'text' ILIKE $2 THEN 3  -- Exact phrase match
-        WHEN m.content->>'text' ILIKE $1 THEN 2  -- Contains all words
-        ELSE 1
-      END DESC
-      LIMIT $3
-    `;
-
-    const results = await pool.query(fallbackQuery, [`%${query}%`, `%${query}%`, topK]);
-
-    return results.rows.map(row => ({
-      id: row.rid,
-      content: row.content.substring(0, 200) + "...",
-      similarity: parseFloat(row.rank),
-      score: parseFloat(row.rank),
-      source: 'keyword' as const,
-      metadata: {
-        rid: row.rid,
-        source: row.source,
-        url: row.url
-      },
-      rid: row.rid
-    }));
-  }
-}
 app.post('/api/koi/query', async (req, res) => {
   try {
     const { question, user_id = 'web-user', agent_id = 'koi-interface' } = req.body;
@@ -268,7 +217,7 @@ app.post('/api/koi/query', async (req, res) => {
     // Perform hybrid search with RRF
     const [vectorResults, sparqlResults] = await Promise.all([
       performSemanticSearch(question, 8),
-      performKeywordSearch(question, 5)
+      performSparqlSearch(question, 5)
     ]);
 
     // Apply Reciprocal Rank Fusion

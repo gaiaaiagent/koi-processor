@@ -213,7 +213,7 @@ async def fetch_source_url(conn, rid: str) -> Optional[str]:
     result = await conn.fetchrow("""
         SELECT metadata->>'url' as url, metadata
         FROM koi_memories
-        WHERE rid = $1
+        WHERE id::text = $1 OR content->>'id' = $1
     """, rid)
 
     if result:
