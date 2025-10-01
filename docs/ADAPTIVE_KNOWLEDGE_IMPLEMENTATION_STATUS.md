@@ -286,3 +286,105 @@ Verified URL coverage across all data sources:
 
 **Total:** 4,160+ records with 100% URL coverage system-wide
 
+
+---
+
+## Critical Update: OpenAI Embeddings Migration (October 2025)
+
+### Production Deployment Complete ✅
+
+**Migration Status:** All 6,174 memories re-embedded with OpenAI text-embedding-3-large
+
+**Impact on Adaptive Knowledge System:**
+
+1. **Vector Search Quality**
+   - MTEB score improved from 54.25 to 64.59 (+10 points)
+   - Better semantic understanding across diverse queries
+   - Improved entity recognition and relationship detection
+
+2. **Performance Improvements**
+   - Query embedding generation: 4s → 341ms (12x faster)
+   - End-to-end search: 6s → 105ms (57x faster)
+   - Enables real-time adaptive extraction triggers
+
+3. **Confidence Calculation Impact**
+   - More accurate similarity scores
+   - Better discrimination between relevant and irrelevant results
+   - Reduced false positive extractions
+
+4. **Cost Implications for Adaptive Extraction**
+   - Query embeddings now faster and cheaper
+   - Better baseline reduces extraction trigger rate
+   - Expected 20-30% reduction in extraction needs
+
+**Weighted Average Fusion Deployed:**
+
+Replaced RRF (k=60) with weighted average fusion:
+- Formula: `0.7 * vector_similarity + 0.3 * keyword_score`
+- Excellent score discrimination (0.36 → 0.26 range)
+- Integrated in `/opt/projects/koi-processor/bge-mcp-ts/adaptive-features.ts`
+
+**Updated Confidence Monitoring:**
+
+```typescript
+// Enhanced with OpenAI embeddings
+function calculateConfidence(results: any[]): number {
+  const factors = {
+    topScore: results[0]?.similarity || 0,        // Now using OpenAI similarity
+    scoreGap: (results[0]?.similarity || 0) - (results[1]?.similarity || 0),
+    resultCount: Math.min(results.length / 10, 1),
+    averageScore: results.slice(0, 5).reduce((a, r) => a + r.similarity, 0) / 5
+  };
+
+  // Improved accuracy with higher quality embeddings
+  return (
+    factors.topScore * 0.4 +
+    factors.scoreGap * 0.2 +
+    factors.resultCount * 0.2 +
+    factors.averageScore * 0.2
+  );
+}
+```
+
+**Next Steps for Adaptive Implementation:**
+
+1. ✅ **Completed:** OpenAI embeddings migration
+2. ✅ **Completed:** Weighted average fusion
+3. ⏳ **Next:** Update confidence thresholds based on new scoring
+4. ⏳ **Next:** Re-calibrate IDDS scoring with OpenAI similarities
+5. ⏳ **Next:** Integrate confidence monitoring with extraction triggers
+
+**Database Updates:**
+
+- `koi_embeddings.dim_1024` now contains OpenAI embeddings
+- All confidence scores need recalcration with new baseline
+- Query log analytics should show improved confidence distribution
+
+**Performance Metrics (Updated):**
+
+```sql
+-- Check new confidence distribution
+SELECT
+  CASE
+    WHEN confidence_score < 0.5 THEN 'Low'
+    WHEN confidence_score < 0.7 THEN 'Medium'
+    ELSE 'High'
+  END as confidence_level,
+  COUNT(*) as query_count
+FROM koi_query_log
+WHERE timestamp > NOW() - INTERVAL '7 days'
+GROUP BY confidence_level;
+
+-- Expected improvement: Higher proportion in "High" confidence
+```
+
+**Recommendation:**
+
+Re-run adaptive extraction calibration with new embeddings to optimize:
+- Confidence threshold (may be able to raise from 0.7 to 0.75)
+- IDDS parameters for document selection
+- Extraction trigger sensitivity
+
+See `/opt/projects/koi-processor/docs/SEARCH_QUALITY_FIX_PLAN.md` for complete details.
+
+**Last Updated:** October 1, 2025

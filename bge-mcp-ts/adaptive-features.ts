@@ -29,50 +29,89 @@ interface QueryLogEntry {
 }
 
 /**
- * Reciprocal Rank Fusion (RRF) Implementation
- * Combines multiple ranked lists into a single ranking
- * Based on research showing 20-30% improvement in retrieval
+ * Weighted Average Fusion Implementation
+ * Combines vector and keyword search using weighted averaging
+ * Provides better score discrimination than RRF for hybrid search
+ *
+ * Weights: 0.7 vector (semantic similarity) + 0.3 keyword (BM25)
+ * This balances semantic understanding with exact keyword matching
+ */
+export function weightedAverageFusion(
+  vectorResults: SearchResult[],
+  sparqlResults: SearchResult[],
+  keywordResults?: SearchResult[]
+): SearchResult[] {
+  const VECTOR_WEIGHT = 0.7;
+  const KEYWORD_WEIGHT = 0.3;
+
+  // Merge results by document ID
+  const merged = new Map<string, {
+    vectorScore: number;
+    keywordScore: number;
+    result: SearchResult;
+  }>();
+
+  // Process vector results
+  vectorResults.forEach(result => {
+    const id = result.rid || result.id;
+    merged.set(id, {
+      vectorScore: result.similarity || result.score || 0,
+      keywordScore: 0,
+      result
+    });
+  });
+
+  // Process keyword results
+  keywordResults?.forEach(result => {
+    const id = result.rid || result.id;
+    const existing = merged.get(id);
+    const keywordScore = result.similarity || result.score || 0;
+
+    if (existing) {
+      existing.keywordScore = keywordScore;
+    } else {
+      // Document only in keyword results, not in vector results
+      merged.set(id, {
+        vectorScore: 0,
+        keywordScore,
+        result
+      });
+    }
+  });
+
+  // Calculate weighted average scores
+  const fusedResults = Array.from(merged.entries())
+    .map(([id, data]) => {
+      const score = data.vectorScore * VECTOR_WEIGHT + data.keywordScore * KEYWORD_WEIGHT;
+      return {
+        ...data.result,
+        id,
+        score,
+        source: 'hybrid' as const,
+        metadata: {
+          ...data.result.metadata,
+          vector_score: data.vectorScore,
+          keyword_score: data.keywordScore,
+          weighted_score: score
+        }
+      };
+    })
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  return fusedResults;
+}
+
+/**
+ * Legacy RRF function - kept for backwards compatibility
+ * Use weightedAverageFusion for better score discrimination
  */
 export function reciprocalRankFusion(
   vectorResults: SearchResult[],
   sparqlResults: SearchResult[],
   keywordResults?: SearchResult[]
 ): SearchResult[] {
-  const k = 60; // Standard constant from RRF research
-  const fusedScores = new Map<string, number>();
-  const resultMetadata = new Map<string, SearchResult>();
-
-  // Process each result set
-  const resultSets = [
-    { results: vectorResults, source: 'vector' },
-    { results: sparqlResults, source: 'sparql' },
-    ...(keywordResults ? [{ results: keywordResults, source: 'keyword' }] : [])
-  ];
-
-  resultSets.forEach(({ results, source }) => {
-    results.forEach((result, rank) => {
-      const id = result.rid || result.id;
-      const currentScore = fusedScores.get(id) || 0;
-      const rrfScore = 1 / (k + rank + 1);
-      
-      fusedScores.set(id, currentScore + rrfScore);
-
-      // Preserve metadata from highest scoring source
-      if (!resultMetadata.has(id) || rrfScore > currentScore) {
-        resultMetadata.set(id, { ...result, source: source as any });
-      }
-    });
-  });
-
-  // Sort by fused score
-  return Array.from(fusedScores.entries())
-    .map(([id, score]) => ({
-      ...resultMetadata.get(id)!,
-      id,
-      score,
-      source: 'hybrid' as const
-    }))
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
+  // Redirect to weighted average fusion
+  return weightedAverageFusion(vectorResults, sparqlResults, keywordResults);
 }
 
 /**
@@ -335,6 +374,7 @@ CREATE INDEX IF NOT EXISTS idx_query_feedback ON koi_query_log(feedback_provided
 
 // Export all functions
 export default {
+  weightedAverageFusion,
   reciprocalRankFusion,
   calculateConfidence,
   logQuery,

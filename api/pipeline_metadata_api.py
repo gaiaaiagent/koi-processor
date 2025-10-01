@@ -526,12 +526,21 @@ async def get_document_provenance(rid: str):
             # koi_content uses content:orn:... but transformation_receipts use orn:...
             receipt_rid = rid.replace("content:", "") if rid.startswith("content:") else rid
 
+            # Extract base RID (without #chunkN suffix) for chunks
+            base_rid = receipt_rid.split('#')[0] if '#' in receipt_rid else receipt_rid
+
             # Query transformation receipts for this RID
+            # For chunks, also include transformations on the base RID
             receipts = await conn.fetch("""
                 WITH RECURSIVE chain AS (
                     -- Base case: Find all transformations directly involving this RID
                     SELECT * FROM koi_transformation_receipts
                     WHERE input_rid = $1 OR output_rid = $1
+
+                    -- For chunks, also include transformations on the base document
+                    UNION
+                    SELECT * FROM koi_transformation_receipts
+                    WHERE ($1 != $2) AND (input_rid = $2 OR output_rid = $2)
 
                     UNION
 
@@ -554,7 +563,7 @@ async def get_document_provenance(rid: str):
                     metadata
                 FROM chain
                 ORDER BY created_at ASC
-            """, receipt_rid)
+            """, receipt_rid, base_rid)
 
             # Build provenance timeline with logical ordering
             timeline = []
@@ -635,6 +644,41 @@ async def get_document_provenance(rid: str):
                 return (collection_priority, rid_length, timestamp, type_priority)
 
             timeline.sort(key=sort_key)
+
+            # If querying a chunk and there's no koi_to_memory receipt for it,
+            # add a synthetic entry to show it was created during initial chunking
+            if '#chunk' in receipt_rid:
+                has_chunk_creation = any(
+                    r['output_rid'] == receipt_rid and 'memory' in r['type'].lower()
+                    for r in timeline
+                )
+
+                if not has_chunk_creation:
+                    # Find the earliest embedding timestamp for this chunk to estimate creation time
+                    chunk_embedding = next(
+                        (r for r in timeline if r['input_rid'] == receipt_rid and 'embedding' in r['type'].lower()),
+                        None
+                    )
+
+                    if chunk_embedding:
+                        synthetic_chunk = {
+                            "timestamp": chunk_embedding['timestamp'],
+                            "type": "koi_to_memory",
+                            "receipt_id": "synthetic-chunk-creation",
+                            "input_rid": base_rid,
+                            "output_rid": receipt_rid,
+                            "details": {
+                                "processor": "KOI Event Bridge v2",
+                                "chunks_created": 1,
+                                "embeddings_created": 0,
+                                "entities_extracted": 0,
+                                "note": "Created during initial chunking (receipt not recorded)"
+                            }
+                        }
+                        # Insert before the embedding step
+                        embedding_idx = timeline.index(chunk_embedding)
+                        timeline.insert(embedding_idx, synthetic_chunk)
+                        processors.add("KOI Event Bridge v2")
 
             # If we don't have a source URL yet, try to get it from sensor_collection receipt metadata
             if not source_url:
