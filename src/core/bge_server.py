@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
 """
-Simple BGE Embedding Server
-Provides BGE embeddings via HTTP API for KOI Event Bridge
+Embedding Server - OpenAI API Edition
+Provides embeddings via HTTP API for KOI Event Bridge
+Uses OpenAI text-embedding-3-large for high-quality, fast embeddings
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-import numpy as np
 import uvicorn
 import logging
-from sentence_transformers import SentenceTransformer
-import torch
 import hashlib
-from functools import lru_cache
+import os
+import httpx
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="BGE Embedding Server", version="1.0.0")
+app = FastAPI(title="Embedding Server", version="2.0.0")
 
-# Global model instance
-model = None
+# OpenAI API configuration
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = "text-embedding-3-large"
+EMBEDDING_DIM = 1024  # Configurable dimension (OpenAI supports 256-3072)
 
 # In-memory cache for embeddings
 embedding_cache: Dict[str, List[float]] = {}
@@ -45,20 +50,36 @@ class EmbeddingResponse(BaseModel):
     embedding: List[float]
     dim: int = 1024
 
-def load_model():
-    """Load the BGE model (lazy loading)"""
-    global model
-    if model is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        logger.info(f"Loading BGE model BAAI/bge-large-en-v1.5 on {device}...")
-        model = SentenceTransformer('BAAI/bge-large-en-v1.5')
-        model.to(device)
-        logger.info(f"✅ BGE model loaded successfully on {device}")
-    return model
+async def get_openai_embedding(text: str) -> List[float]:
+    """Get embedding from OpenAI API"""
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "input": text,
+                    "model": OPENAI_MODEL,
+                    "dimensions": EMBEDDING_DIM
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["data"][0]["embedding"]
+        except httpx.HTTPError as e:
+            logger.error(f"OpenAI API error: {e}")
+            raise HTTPException(status_code=502, detail=f"OpenAI API error: {str(e)}")
 
 @app.post("/encode", response_model=EmbeddingResponse)
 async def generate_embedding(request: EmbeddingRequest):
-    """Generate BGE embedding for text (with caching)"""
+    """Generate embedding for text (with caching)"""
     # Get text from either field
     text = request.text or request.input
 
@@ -69,41 +90,38 @@ async def generate_embedding(request: EmbeddingRequest):
     cache_key = hashlib.sha256(text.encode('utf-8')).hexdigest()
 
     if cache_key in embedding_cache:
-        logger.debug(f"Cache hit for text of length {len(text)}")
+        logger.debug(f"✓ Cache hit for text of length {len(text)}")
         return EmbeddingResponse(
             embedding=embedding_cache[cache_key],
-            dim=1024
+            dim=EMBEDDING_DIM
         )
 
-    # Use real BGE model
-    bge_model = load_model()
-    embedding = bge_model.encode(text, normalize_embeddings=True)
-    embedding_list = embedding.tolist()
+    # Get embedding from OpenAI API
+    logger.info(f"→ Calling OpenAI API for text of length {len(text)}")
+    embedding_list = await get_openai_embedding(text)
 
     # Cache the result (limit cache size to 10000 entries)
     if len(embedding_cache) < 10000:
         embedding_cache[cache_key] = embedding_list
-        logger.debug(f"Cached embedding (cache size: {len(embedding_cache)})")
+        logger.debug(f"✓ Cached embedding (cache size: {len(embedding_cache)})")
 
-    logger.info(f"Generated embedding for text of length {len(text)} (cache size: {len(embedding_cache)})")
+    logger.info(f"✓ Generated embedding via OpenAI (cache size: {len(embedding_cache)})")
 
     return EmbeddingResponse(
         embedding=embedding_list,
-        dim=len(embedding)
+        dim=EMBEDDING_DIM
     )
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model_loaded = model is not None
+    api_configured = OPENAI_API_KEY is not None
     return {
         "status": "healthy",
-        "service": "BGE Embedding Server",
-        "model": "BAAI/bge-large-en-v1.5",
-        "embedding_dim": 1024,
-        "device": device,
-        "model_loaded": model_loaded,
+        "service": "Embedding Server (OpenAI)",
+        "model": OPENAI_MODEL,
+        "embedding_dim": EMBEDDING_DIM,
+        "api_configured": api_configured,
         "cache_size": len(embedding_cache),
         "cache_hit_ratio": "tracked in logs"
     }
@@ -129,7 +147,11 @@ async def clear_cache():
     }
 
 if __name__ == "__main__":
-    print("[BGE Server] Starting on http://localhost:8090")
-    print("[BGE Server] Real BGE embeddings (BAAI/bge-large-en-v1.5)")
-    print(f"[BGE Server] Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    if not OPENAI_API_KEY:
+        print("⚠️  WARNING: OPENAI_API_KEY not found in environment")
+        print("Set it with: export OPENAI_API_KEY='your-key-here'")
+    print(f"[Embedding Server] Starting on http://localhost:8090")
+    print(f"[Embedding Server] Model: {OPENAI_MODEL}")
+    print(f"[Embedding Server] Dimensions: {EMBEDDING_DIM}")
+    print(f"[Embedding Server] API Key: {'✓ Configured' if OPENAI_API_KEY else '✗ Missing'}")
     uvicorn.run(app, host="0.0.0.0", port=8090, log_level="info")
