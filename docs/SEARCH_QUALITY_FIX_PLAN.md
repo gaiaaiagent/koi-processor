@@ -42,19 +42,21 @@
 - RRF + BM25 improvements active
 - Status: **RUNNING on port 8301**
 
-### 🔄 IN PROGRESS - Re-embedding
+### ✅ COMPLETED - Re-embedding
 
 ```
-Documents: 96/5521 (1.7% complete)
-Rate: 0.4 docs/sec
-ETA: ~221 minutes (~3.7 hours)
-Status: RUNNING (background process)
-Log: regenerate_embeddings.log
+Documents: 5521/5521 (100% complete)
+Status: COMPLETE
+All embeddings using real BGE model (BAAI/bge-large-en-v1.5)
+Semantic search quality restored
 ```
 
-**Monitor progress:**
+**Verification:**
 ```bash
-tail -f regenerate_embeddings.log
+# Test semantic search quality
+curl -X POST http://localhost:8301/api/koi/query \
+  -d '{"question": "biocultural jaguar credits"}' | jq '.results[0].similarity'
+# Should return >0.7 for relevant matches
 ```
 
 ### ⏳ PENDING - Phase 2-4
