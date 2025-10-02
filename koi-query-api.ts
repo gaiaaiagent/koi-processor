@@ -39,6 +39,9 @@ function parsePostgresUrl(url: string) {
 const dbConfig = parsePostgresUrl(POSTGRES_URL);
 const pool = new Pool(dbConfig);
 
+// HNSW index provides excellent recall without tuning parameters
+// No need to set probes or other runtime parameters
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -177,37 +180,72 @@ async function triggerAdaptiveExtraction(
 // Full-text search using PostgreSQL's ts_rank (BM25-like ranking)
 async function performKeywordSearch(query: string, topK: number = 10) {
   try {
-    // Convert query to tsquery format
-    const tsquery = query.trim().split(/\s+/).map(word => word.replace(/[^a-zA-Z0-9]/g, '')).filter(w => w.length > 0).join(' & ');
+    // Split query into words and clean them
+    const words = query.trim().split(/\s+/)
+      .map(word => word.replace(/[^a-zA-Z0-9]/g, ''))
+      .filter(w => w.length > 0);
 
-    if (!tsquery) {
+    if (words.length === 0) {
       return [];
     }
 
+    // Create both AND and OR queries for better name matching
+    // For names like "greg landua", we want to match "Gregory Landua" too
+    const andQuery = words.join(' & ');
+    const orQuery = words.join(' | ');
+
+    // Use prefix matching with :* for partial name matches
+    const prefixQuery = words.map(w => `${w}:*`).join(' | ');
+
+    // Try AND first, then fall back to OR with prefix matching
     const searchQuery = `
       SELECT
         m.rid,
         m.content->>'text' as content,
         m.metadata->>'source' as source,
         m.metadata->>'url' as url,
-        ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank
+        ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank,
+        'strict' as match_type
       FROM koi_memories m
       WHERE
         m.content_tsv @@ to_tsquery('english', $1)
         AND m.content->>'text' IS NOT NULL
         AND LENGTH(m.content->>'text') > 50
+
+      UNION ALL
+
+      SELECT
+        m.rid,
+        m.content->>'text' as content,
+        m.metadata->>'source' as source,
+        m.metadata->>'url' as url,
+        ts_rank_cd(m.content_tsv, to_tsquery('english', $2)) as rank,
+        'relaxed' as match_type
+      FROM koi_memories m
+      WHERE
+        m.content_tsv @@ to_tsquery('english', $2)
+        AND m.content->>'text' IS NOT NULL
+        AND LENGTH(m.content->>'text') > 50
+        AND NOT EXISTS (
+          SELECT 1 FROM koi_memories m2
+          WHERE m2.rid = m.rid
+          AND m2.content_tsv @@ to_tsquery('english', $1)
+        )
+
       ORDER BY rank DESC
-      LIMIT $2
+      LIMIT $3
     `;
 
-    const results = await pool.query(searchQuery, [tsquery, topK]);
+    // Increased multiplier to ensure OR results are well represented
+    // With AND getting ~10 results and OR getting ~10, we need more total results
+    const results = await pool.query(searchQuery, [andQuery, orQuery, Math.max(topK * 3, 50)]);
 
     // Find max rank for normalization
     const maxRank = results.rows.length > 0
       ? Math.max(...results.rows.map(r => parseFloat(r.rank)))
       : 1;
 
-    return results.rows.map(row => {
+    return results.rows.slice(0, topK).map(row => {
       const rawRank = parseFloat(row.rank);
 
       // Logarithmic scaling for better score discrimination
@@ -217,7 +255,10 @@ async function performKeywordSearch(query: string, topK: number = 10) {
       const queryLower = query.toLowerCase();
       const contentLower = row.content.toLowerCase();
       const hasExactMatch = contentLower.includes(queryLower);
-      const finalScore = hasExactMatch ? normalizedScore * 1.2 : normalizedScore;
+
+      // Boost strict matches (AND query) over relaxed matches (OR query)
+      const matchTypeBoost = row.match_type === 'strict' ? 1.0 : 0.9;
+      const finalScore = (hasExactMatch ? normalizedScore * 1.2 : normalizedScore) * matchTypeBoost;
 
       return {
         id: row.rid,
@@ -231,7 +272,8 @@ async function performKeywordSearch(query: string, topK: number = 10) {
           url: row.url,
           fts_rank: rawRank,
           normalized_score: normalizedScore,
-          exact_match_boost: hasExactMatch
+          exact_match_boost: hasExactMatch,
+          match_type: row.match_type
         },
         rid: row.rid
       };
@@ -277,8 +319,8 @@ async function performKeywordSearch(query: string, topK: number = 10) {
 }
 app.post('/api/koi/query', async (req, res) => {
   try {
-    const { question, user_id = 'web-user', agent_id = 'koi-interface' } = req.body;
-    
+    const { question, user_id = 'web-user', agent_id = 'koi-interface', limit = 10 } = req.body;
+
     if (!question) {
       return res.status(400).json({ error: 'Question is required' });
     }
@@ -286,9 +328,12 @@ app.post('/api/koi/query', async (req, res) => {
     const startTime = Date.now();
 
     // Perform hybrid search with RRF
+    // Increased limits to capture more diverse results before fusion
+    // Higher keyword limit to ensure important biographical pages (rank ~#11) are included
+    // Increased to 20 to capture team/profile pages that rank just outside top-15
     const [vectorResults, keywordResults] = await Promise.all([
-      performSemanticSearch(question, 8),
-      performKeywordSearch(question, 5)
+      performSemanticSearch(question, 20),
+      performKeywordSearch(question, 20)
     ]);
 
     // Apply Reciprocal Rank Fusion
@@ -338,7 +383,7 @@ app.post('/api/koi/query', async (req, res) => {
       confidence: confidence,
       execution_time: responseTime / 1000,
       triggered_extraction: triggeredExtraction,
-      results: fusedResults.slice(0, 10).map(r => ({
+      results: fusedResults.slice(0, limit).map(r => ({
         title: `Document ${r.rid}`,
         content: r.content,
         score: r.score,

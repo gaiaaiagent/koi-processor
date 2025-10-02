@@ -18,7 +18,7 @@ from typing import Dict, Any, List
 
 # Configure logging to stderr (stdout is for JSON-RPC only)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='[%(asctime)s] %(levelname)s: %(message)s',
     handlers=[logging.StreamHandler(sys.stderr)]
 )
@@ -131,6 +131,13 @@ class MCPServer:
 
             logger.info(f"Retrieved {len(results)} results with avg confidence {confidence:.3f}")
 
+            # Debug: Log first result details
+            if results:
+                first_result = results[0]
+                logger.info(f"DEBUG: First result RID: {first_result.get('rid', 'N/A')}")
+                logger.info(f"DEBUG: First result score: {first_result.get('score', 0.0):.3f}")
+                logger.info(f"DEBUG: First result content preview: {first_result.get('content', '')[:100]}...")
+
             return results
 
         except Exception as e:
@@ -195,12 +202,17 @@ class MCPServer:
 
             formatted += f"## Result {i} (confidence: {score:.3f})\n"
             formatted += f"**RID**: {rid}\n"
-            formatted += f"**Content**: {content[:500]}{'...' if len(content) > 500 else ''}\n"
+            # Increased from 500 to 2000 chars to provide more context for LLM
+            formatted += f"**Content**: {content[:2000]}{'...' if len(content) > 2000 else ''}\n"
 
             if metadata:
                 formatted += f"**Metadata**: {json.dumps(metadata, indent=2)}\n"
 
             formatted += "\n---\n\n"
+
+        # Debug: Log formatted output size
+        logger.info(f"DEBUG: Formatted {len(results)} results into {len(formatted)} characters")
+        logger.info(f"DEBUG: Formatted output preview (first 300 chars): {formatted[:300]}...")
 
         return formatted
 
@@ -216,8 +228,30 @@ class MCPServer:
                 query = arguments.get("query", "")
                 limit = arguments.get("limit", 5)
 
+                logger.info(f"DEBUG: search_knowledge called with limit={limit}")
+
                 results = await self.search_knowledge(query, limit)
                 formatted_results = self.format_search_results(results, query)
+
+                logger.info(f"DEBUG: Returning MCP response with {len(formatted_results)} chars to agent")
+
+                # Write formatted results to debug file
+                import os
+                import time
+                debug_dir = "/tmp/mcp_debug"
+                os.makedirs(debug_dir, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                with open(f"{debug_dir}/last_search.txt", "w") as f:
+                    f.write(f"Query: {query}\nLimit: {limit}\n\n{formatted_results}")
+                with open(f"{debug_dir}/search_{timestamp}.txt", "w") as f:
+                    f.write(f"=== MCP SEARCH DEBUG {timestamp} ===\n")
+                    f.write(f"Query: {query}\n")
+                    f.write(f"Limit: {limit}\n")
+                    f.write(f"Results count: {len(results)}\n")
+                    f.write(f"Formatted length: {len(formatted_results)} chars\n")
+                    f.write(f"\n=== FORMATTED OUTPUT (this goes to agent) ===\n")
+                    f.write(formatted_results)
+                    f.write(f"\n\n=== END DEBUG ===\n")
 
                 return {
                     "jsonrpc": "2.0",

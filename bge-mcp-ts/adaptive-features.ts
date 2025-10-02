@@ -33,16 +33,17 @@ interface QueryLogEntry {
  * Combines vector and keyword search using weighted averaging
  * Provides better score discrimination than RRF for hybrid search
  *
- * Weights: 0.7 vector (semantic similarity) + 0.3 keyword (BM25)
- * This balances semantic understanding with exact keyword matching
+ * Weights: 0.8 vector (semantic similarity) + 0.2 keyword (BM25)
+ * This prioritizes semantic understanding while still benefiting from keyword matching
+ * Increased vector weight helps biographical/profile pages rank higher
  */
 export function weightedAverageFusion(
   vectorResults: SearchResult[],
   sparqlResults: SearchResult[],
   keywordResults?: SearchResult[]
 ): SearchResult[] {
-  const VECTOR_WEIGHT = 0.7;
-  const KEYWORD_WEIGHT = 0.3;
+  const VECTOR_WEIGHT = 0.8;
+  const KEYWORD_WEIGHT = 0.2;
 
   // Merge results by document ID
   const merged = new Map<string, {
