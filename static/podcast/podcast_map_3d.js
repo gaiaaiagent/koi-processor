@@ -352,12 +352,25 @@ function playAudio(node) {
     const titleEl = document.getElementById('player-episode-title');
     const textEl = document.getElementById('player-text');
 
+    // Stop any currently playing audio first
+    if (!audio.paused) {
+        audio.pause();
+    }
+    audio.currentTime = 0;
+
+    // Show player and update content
     player.classList.add('active');
     titleEl.textContent = node.episode_title;
     textEl.textContent = node.text;
 
+    // Set new audio source and play
     const audioUrl = node.audio_url || node.episode_url;
-    audio.src = audioUrl;
+
+    // If changing to a different source, update src
+    if (audio.src !== audioUrl) {
+        audio.src = audioUrl;
+    }
+
     audio.currentTime = node.timestamp;
     audio.play().catch(err => {
         console.log('Audio playback failed:', err);
