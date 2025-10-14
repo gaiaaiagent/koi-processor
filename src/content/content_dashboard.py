@@ -7,6 +7,7 @@ Web-based monitoring interface for Daily Bot and Weekly Digest operations
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from flask_compress import Compress
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
@@ -28,15 +29,25 @@ import tempfile
 from urllib.parse import urljoin, urlparse
 from openai import OpenAI
 
+# Handle imports whether run as module or script
+try:
+    from src.content.podcast_job_queue import get_job_queue
+except ImportError:
+    from podcast_job_queue import get_job_queue
+
 # Load environment variables from .env file
 load_dotenv()
 
 # Initialize Flask app
-app = Flask(__name__, 
+app = Flask(__name__,
             template_folder='../../templates',
             static_folder='../../static')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
+app.config['COMPRESS_MIMETYPES'] = ['application/json', 'text/html', 'text/css', 'application/javascript']
+app.config['COMPRESS_LEVEL'] = 6
+app.config['COMPRESS_MIN_SIZE'] = 500
 CORS(app)
+Compress(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Configuration
@@ -1102,11 +1113,10 @@ def edit_draft(draft_id):
         logger.error(f"Error editing draft: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/dashboard/drafts/<draft_id>/generate_podcast', methods=['POST'])
+@app.route('/api/dashboard/drafts/<draft_id>/export_notebooklm', methods=['POST'])
 @require_auth
-def generate_podcast_for_draft(draft_id):
-    """Generate podcast (text + audio) for a weekly digest draft"""
-    import subprocess
+def export_notebooklm_for_draft(draft_id):
+    """Generate NotebookLM export markdown for a draft with full context"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -1119,111 +1129,227 @@ def generate_podcast_for_draft(draft_id):
         """, (draft_id,))
 
         result = cur.fetchone()
+        cur.close()
+        conn.close()
 
         if not result:
-            cur.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Weekly digest draft not found'}), 404
 
         content = result['content_data'] if isinstance(result['content_data'], dict) else json.loads(result['content_data'])
 
-        # Generate podcast text version (20-minute script)
-        podcast_text = generate_podcast_script(content)
-
-        # Save both versions
-        temp_file = f'/tmp/weekly_digest_for_audio_{draft_id}.json'
-        with open(temp_file, 'w') as f:
-            content['podcast_script'] = podcast_text
-            json.dump(content, f)
-
-        # Run audio generation using simple podcast generator
-        env = os.environ.copy()
-
-        # Log the command being run
-        cmd = [
-            'python3',
-            '/opt/projects/koi-processor/src/audio/simple_podcast_generator.py',
-            temp_file,
-            '--output-dir', '/opt/projects/koi-processor/podcast_audio'
-        ]
-        logger.info(f"Running podcast generation command: {' '.join(cmd)}")
-
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=180)
-
-        logger.info(f"Podcast generation result - Return code: {result.returncode}")
-        logger.info(f"Podcast generation stdout: {result.stdout}")
-        if result.stderr:
-            logger.error(f"Podcast generation stderr: {result.stderr}")
-
-        if result.returncode == 0:
-            # Parse output to find the generated file
-            audio_file = None
-            if '✅ Podcast generated:' in result.stdout:
-                for line in result.stdout.split('\n'):
-                    if '✅ Podcast generated:' in line:
-                        audio_file = line.split('✅ Podcast generated:')[1].strip()
-                        break
-
-            # Update draft metadata with podcast status and audio file info
-            update_data = {
-                'podcast_script': podcast_text,
-                'audio_file': audio_file
-            }
-
-            cur.execute("""
-                UPDATE quality_reviews
-                SET
-                    quality_issues = jsonb_set(
-                        COALESCE(quality_issues, '{}'::jsonb),
-                        '{podcast_generated}',
-                        'true'
-                    ),
-                    content_data = content_data || %s::jsonb
-                WHERE review_id = %s
-            """, (json.dumps(update_data), draft_id))
-
-            conn.commit()
-            cur.close()
-            conn.close()
-
-            # Extract file size if mentioned
-            file_size = None
-            if '📊 File size:' in result.stdout:
-                for line in result.stdout.split('\n'):
-                    if '📊 File size:' in line:
-                        file_size = line.split('📊 File size:')[1].strip()
-                        break
-
-            # Also save markdown version for NotebookLM
+        # Use the async enhanced export method - handle both direct and module imports
+        try:
+            # Try if run as module (python -m src.content.content_dashboard)
+            from src.content.weekly_curator_llm import WeeklyCuratorLLM
+        except ImportError:
             try:
-                markdown = generate_weekly_markdown(content)
-                markdown_file = f'/opt/projects/koi-processor/podcast_audio/weekly_digest_{draft_id[:8]}.md'
-                with open(markdown_file, 'w') as f:
-                    f.write(markdown)
-                logger.info(f"Saved markdown version to {markdown_file}")
-            except Exception as e:
-                logger.error(f"Error saving markdown: {e}")
+                # Try direct import (when run from project root)
+                import sys
+                project_root = Path(__file__).parent.parent.parent
+                if str(project_root) not in sys.path:
+                    sys.path.insert(0, str(project_root))
+                from src.content.weekly_curator_llm import WeeklyCuratorLLM
+            except ImportError:
+                # Try same directory import (when run from src/content/)
+                from weekly_curator_llm import WeeklyCuratorLLM
 
-            return jsonify({
-                'success': True,
-                'message': f'Podcast generated successfully! Audio file: {os.path.basename(audio_file) if audio_file else "Check podcast_audio/"}',
-                'audio_file': audio_file,
-                'file_size': file_size,
-                'script_length': len(podcast_text),
-                'markdown_file': f'weekly_digest_{draft_id[:8]}.md'
-            })
-        else:
-            cur.close()
-            conn.close()
-            return jsonify({
-                'success': False,
-                'message': 'Podcast generation failed',
-                'error': result.stderr
-            }), 500
+        curator = WeeklyCuratorLLM()
+
+        # Run async export in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(curator.export_notebooklm_enhanced(content))
+        finally:
+            loop.close()
+
+        # File should now exist
+        output_dir = Path(__file__).parent.parent.parent / "output" / "weekly"
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        filename = f"weekly_digest_{date_str}_notebooklm.md"
+        file_path = output_dir / filename
+
+        if not file_path.exists():
+            raise Exception("NotebookLM export file was not created")
+
+        logger.info(f"Generated NotebookLM export: {file_path}")
+
+        return jsonify({
+            'success': True,
+            'message': 'NotebookLM export generated with full context (forum threads, transcripts, etc.)',
+            'file_path': str(file_path),
+            'filename': filename
+        })
 
     except Exception as e:
-        logger.error(f"Error generating podcast: {e}")
+        logger.error(f"Error generating NotebookLM export: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/drafts/<draft_id>/download_notebooklm')
+@require_auth
+def download_notebooklm_export(draft_id):
+    """Download NotebookLM export file"""
+    try:
+        from flask import send_file
+
+        output_dir = Path(__file__).parent.parent.parent / "output" / "weekly"
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        filename = f"weekly_digest_{date_str}_notebooklm.md"
+        file_path = output_dir / filename
+
+        if not file_path.exists():
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='text/markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Error downloading NotebookLM export: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/drafts/<draft_id>/generate_podcast', methods=['POST'])
+@require_auth
+def generate_podcast_for_draft(draft_id):
+    """Submit podcast generation job (async) - returns immediately with job_id"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get draft content
+        cur.execute("""
+            SELECT content_type, content_data
+            FROM quality_reviews
+            WHERE review_id = %s AND content_type = 'weekly_digest'
+        """, (draft_id,))
+
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not result:
+            return jsonify({'success': False, 'message': 'Weekly digest draft not found'}), 404
+
+        content = result['content_data'] if isinstance(result['content_data'], dict) else json.loads(result['content_data'])
+
+        # Submit job to queue
+        job_queue = get_job_queue(DB_CONFIG)
+        job_id = job_queue.submit_job(draft_id, content)
+
+        return jsonify({
+            'success': True,
+            'message': 'Podcast generation started',
+            'job_id': job_id
+        })
+
+    except Exception as e:
+        logger.error(f"Error submitting podcast job: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/podcast/status/<job_id>')
+@require_auth
+def get_podcast_job_status(job_id):
+    """Get podcast generation job status (for polling)"""
+    try:
+        job_queue = get_job_queue(DB_CONFIG)
+        status = job_queue.get_job_status(job_id)
+
+        if not status:
+            return jsonify({'success': False, 'error': 'Job not found'}), 404
+
+        return jsonify({
+            'success': True,
+            'job': status
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting job status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+def generate_notebooklm_export(content: Dict) -> str:
+    """Generate NotebookLM-optimized markdown export from digest content"""
+    brief = content.get('brief_content', '') or content.get('brief', '')
+    themes = content.get('themes', {})
+    executive_summary = content.get('executive_summary', '')
+    key_discussions = content.get('key_discussions', [])
+    ledger_activity = content.get('ledger_activity', {})
+    community_pulse = content.get('community_pulse', {})
+
+    # Build comprehensive markdown
+    md = f"""# Regen Network Weekly Digest - NotebookLM Export
+*Complete weekly digest optimized for NotebookLM analysis*
+
+---
+
+## Executive Summary
+
+{executive_summary}
+
+---
+
+## Full Weekly Brief
+
+{brief}
+
+---
+
+## Key Themes
+
+"""
+
+    if themes:
+        for theme, topics in themes.items():
+            md += f"### {theme}\n\n"
+            if isinstance(topics, list):
+                for topic in topics:
+                    md += f"- {topic}\n"
+            else:
+                md += f"{topics}\n"
+            md += "\n"
+
+    md += "\n## Community Pulse\n\n"
+    if community_pulse:
+        md += f"**Activity Level**: {community_pulse.get('overall_activity', 'N/A')}\n\n"
+
+        if community_pulse.get('key_focus_areas'):
+            md += "**Key Focus Areas**:\n"
+            for area in community_pulse['key_focus_areas']:
+                md += f"- {area}\n"
+            md += "\n"
+
+        if community_pulse.get('emerging_trends'):
+            md += "**Emerging Trends**:\n"
+            for trend in community_pulse['emerging_trends']:
+                md += f"- {trend}\n"
+            md += "\n"
+
+    md += "\n## Key Discussions & Sources\n\n"
+    if key_discussions:
+        for disc in key_discussions:
+            title = disc.get('title', 'Untitled')
+            url = disc.get('url', '')
+            md += f"- [{title}]({url})\n"
+
+    if ledger_activity and ledger_activity.get('summary'):
+        md += "\n## On-Chain Activity\n\n"
+        md += ledger_activity['summary']
+        md += "\n\n"
+
+    md += """
+---
+
+*Generated by Regen Network KOI System - Optimized for NotebookLM Analysis*
+*Upload this markdown file to NotebookLM to generate AI podcast discussions*
+"""
+
+    return md
+
 
 def generate_podcast_script(content):
     """Generate a 20-minute podcast script from weekly digest content"""
@@ -2239,6 +2365,23 @@ def koi_hybrid_query():
     except Exception as e:
         logger.error(f"KOI query error: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/podcast')
+def podcast_map():
+    """Serve the 3D podcast visualization map"""
+    from flask import send_from_directory
+    return send_from_directory('../../static/podcast', 'podcast_map_3d.html')
+
+@app.route('/podcast_audio/<filename>')
+def podcast_audio(filename):
+    """Serve podcast audio files"""
+    from flask import send_from_directory
+    import os
+    audio_dir = '/opt/projects/koi-sensors/sensors/podcast/temp_audio'
+    if os.path.exists(os.path.join(audio_dir, filename)):
+        return send_from_directory(audio_dir, filename, mimetype='audio/mpeg')
+    else:
+        return "Audio file not found", 404
 
 if __name__ == '__main__':
     port = config['dashboard'].get('port', 8400)

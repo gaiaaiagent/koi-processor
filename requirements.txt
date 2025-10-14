@@ -12,6 +12,7 @@ pydantic>=2.0.0
 flask==3.0.0
 flask-cors==4.0.0
 flask-socketio==5.3.5
+flask-compress>=1.18
 python-socketio==5.10.0
 
 # Database
@@ -29,6 +30,7 @@ numpy>=1.24.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
 scikit-learn>=1.3.0
+umap-learn>=0.5.5
 
 # Utilities
 python-dotenv>=1.0.0
