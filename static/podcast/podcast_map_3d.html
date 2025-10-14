@@ -196,6 +196,97 @@
             display: block;
             margin-bottom: 4px;
         }
+
+        /* Mobile Menu Toggle */
+        #mobile-menu-toggle {
+            display: none;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #ffffff;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 20px;
+            cursor: pointer;
+            margin-left: auto;
+        }
+
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            #header {
+                height: auto;
+                flex-direction: column;
+                padding: 12px 16px;
+                gap: 10px;
+            }
+
+            #header h1 {
+                font-size: 16px;
+                margin-right: 0;
+                order: 1;
+            }
+
+            #mobile-menu-toggle {
+                display: block;
+                position: absolute;
+                top: 12px;
+                right: 16px;
+            }
+
+            #header select {
+                width: 100%;
+                min-width: 0;
+                order: 3;
+                font-size: 13px;
+            }
+
+            #graph-container {
+                top: auto;
+            }
+
+            #audio-player {
+                left: 0;
+                right: 0;
+                bottom: 0;
+                top: auto;
+                width: 100%;
+                max-height: 50vh;
+                border-radius: 12px 12px 0 0;
+                padding: 16px;
+            }
+
+            #player-episode-title {
+                font-size: 13px;
+            }
+
+            #player-text {
+                font-size: 12px;
+                max-height: 60px;
+            }
+
+            #controls-hint {
+                display: none;
+            }
+        }
+
+        /* Tablet responsiveness */
+        @media (max-width: 1024px) and (min-width: 769px) {
+            #header {
+                flex-wrap: wrap;
+            }
+
+            #header h1 {
+                font-size: 17px;
+            }
+
+            select {
+                min-width: 120px;
+                font-size: 13px;
+            }
+
+            #audio-player {
+                width: 350px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -266,6 +357,6 @@
     <script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://unpkg.com/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"></script>
-    <script src="/static/podcast/podcast_map_3d.js?v=39"></script>
+    <script src="/static/podcast/podcast_map_3d.js?v=40"></script>
 </body>
 </html>
