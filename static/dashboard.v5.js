@@ -1080,12 +1080,22 @@ function renderDraftActions(draft) {
             </button>
         `;
 
-        if (draft.type === 'weekly_digest' && !draft.metadata?.audio_generated) {
+        if (draft.type === 'weekly_digest') {
+            // NotebookLM Export button (always available)
             html += `
-                <button class="btn btn-sm btn-info" onclick="generatePodcast('${draft.id}')" title="Generate Podcast">
-                    <i class="bi bi-mic"></i> Podcast
+                <button class="btn btn-sm btn-primary" onclick="exportNotebookLM('${draft.id}')" title="Export for NotebookLM">
+                    <i class="bi bi-journal-text"></i> NotebookLM
                 </button>
             `;
+
+            // Audio Podcast button (only if not generated yet)
+            if (!draft.metadata?.audio_generated) {
+                html += `
+                    <button class="btn btn-sm btn-info ms-1" onclick="generatePodcast('${draft.id}')" title="Generate Audio Podcast">
+                        <i class="bi bi-mic"></i> Audio
+                    </button>
+                `;
+            }
         }
     }
 
@@ -1136,19 +1146,79 @@ async function rejectDraft(draftId) {
     }
 }
 
+async function exportNotebookLM(draftId) {
+    // Find the button that was clicked and show loading state
+    const button = event?.target?.closest('button');
+    const originalContent = button?.innerHTML;
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Generating...';
+        }
+
+        showNotification('📝 Generating NotebookLM export...', 'info');
+
+        const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/export_notebooklm`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || `Server error: ${response.status}`);
+        }
+
+        if (data.success && data.file_path) {
+            // Create download link
+            const downloadUrl = `${basePath}/api/dashboard/drafts/${draftId}/download_notebooklm`;
+
+            // Trigger download
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = data.filename || 'weekly_digest_notebooklm.md';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            showNotification('✅ NotebookLM export downloaded!', 'success');
+        } else {
+            throw new Error(data.message || 'Failed to generate NotebookLM export');
+        }
+
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalContent;
+        }
+
+    } catch (error) {
+        console.error('Error exporting NotebookLM:', error);
+        showNotification(`❌ Error: ${error.message}`, 'error');
+
+        // Reset button
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalContent;
+        }
+    }
+}
+
 async function generatePodcast(draftId) {
-    if (!confirm('Generate podcast (text + audio)? This may take a few minutes.')) return;
+    if (!confirm('Generate audio podcast? This may take a few minutes.')) return;
 
     // Find the button that was clicked and show loading state
     const button = event.target.closest('button');
     const originalContent = button.innerHTML;
     button.disabled = true;
-    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Generating...';
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Starting...';
 
     try {
         const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
-        showNotification('🎙️ Generating podcast brief and audio...', 'info');
+        showNotification('🎙️ Starting podcast generation...', 'info');
 
+        // Step 1: Submit the job (returns immediately)
         const response = await fetch(`${basePath}/api/dashboard/drafts/${draftId}/generate_podcast`, {
             method: 'POST'
         });
@@ -1159,34 +1229,100 @@ async function generatePodcast(draftId) {
             throw new Error(data.error || `Server error: ${response.status}`);
         }
 
-        if (data.success) {
-            // Show detailed success message with file info
-            let successMsg = '✅ ' + data.message;
-            if (data.file_size) {
-                successMsg += ` (${data.file_size})`;
-            }
-            showNotification(successMsg, 'success');
-
-            // Show audio file location if available
-            if (data.audio_file) {
-                console.log('Podcast audio file:', data.audio_file);
-            }
-
-            // Reload drafts to show updated status
-            setTimeout(() => loadDrafts(), 1000);
+        if (data.success && data.job_id) {
+            // Step 2: Poll for job status
+            showNotification('🎙️ Generating podcast... This will take a few minutes.', 'info');
+            await pollPodcastJobStatus(data.job_id, draftId, button, originalContent);
         } else {
-            showNotification(`❌ ${data.error || data.message || 'Failed to generate podcast'}`, 'error');
-        }
-    } catch (error) {
-        console.error('Error generating podcast:', error);
-        showNotification(`❌ Error: ${error.message || 'Failed to generate podcast'}`, 'error');
-    } finally {
-        // Restore button state
-        if (button) {
+            showNotification(`❌ ${data.error || data.message || 'Failed to start podcast generation'}`, 'error');
             button.disabled = false;
             button.innerHTML = originalContent;
         }
+    } catch (error) {
+        console.error('Error generating podcast:', error);
+
+        let errorMsg = '';
+        if (error.message.includes('network') || error.message.includes('fetch')) {
+            errorMsg = '🌐 Network error. Please check your connection and try again.';
+        } else {
+            errorMsg = `❌ Error: ${error.message || 'Failed to generate podcast'}`;
+        }
+
+        showNotification(errorMsg, 'error');
+        button.disabled = false;
+        button.innerHTML = originalContent;
     }
+}
+
+async function pollPodcastJobStatus(jobId, draftId, button, originalContent) {
+    const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+    const pollInterval = 2000; // Poll every 2 seconds
+    const maxAttempts = 300; // 10 minutes max (300 * 2s)
+    let attempts = 0;
+
+    const poll = async () => {
+        try {
+            attempts++;
+
+            const response = await fetch(`${basePath}/api/dashboard/podcast/status/${jobId}`);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to get job status');
+            }
+
+            const job = data.job;
+
+            // Update button with progress
+            if (job.progress) {
+                button.innerHTML = `<span class="spinner-border spinner-border-sm me-2"></span>${job.progress}% - ${job.message || 'Processing...'}`;
+            }
+
+            if (job.status === 'completed') {
+                // Success!
+                const result = job.result || {};
+                let successMsg = '✅ Podcast generated successfully!';
+                if (result.file_size) {
+                    successMsg += ` (${result.file_size})`;
+                }
+                showNotification(successMsg, 'success');
+
+                if (result.audio_file) {
+                    console.log('Podcast audio file:', result.audio_file);
+                }
+
+                // Restore button and reload drafts
+                button.disabled = false;
+                button.innerHTML = originalContent;
+                setTimeout(() => loadDrafts(), 1000);
+
+            } else if (job.status === 'failed') {
+                // Failed
+                showNotification(`❌ Podcast generation failed: ${job.error || 'Unknown error'}`, 'error');
+                button.disabled = false;
+                button.innerHTML = originalContent;
+
+            } else if (attempts >= maxAttempts) {
+                // Timeout
+                showNotification('⏱️ Podcast generation is taking longer than expected. Check back later or view server logs.', 'warning');
+                button.disabled = false;
+                button.innerHTML = originalContent;
+
+            } else {
+                // Still processing - poll again
+                setTimeout(poll, pollInterval);
+            }
+
+        } catch (error) {
+            console.error('Error polling job status:', error);
+            showNotification(`❌ Error checking status: ${error.message}`, 'error');
+            button.disabled = false;
+            button.innerHTML = originalContent;
+        }
+    };
+
+    // Start polling
+    poll();
 }
 
 // Keep old function for compatibility
