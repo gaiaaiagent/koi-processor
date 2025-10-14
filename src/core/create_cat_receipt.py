@@ -168,3 +168,90 @@ async def create_embedding_receipt(
         metadata=metadata,
         processing_duration_ms=processing_time_ms
     )
+
+
+async def create_kg_extraction_receipt(
+    conn: asyncpg.Connection,
+    memory_rid: str,
+    extraction_rid: str,
+    extraction_type: str,
+    entities_extracted: int = 0,
+    statements_extracted: int = 0,
+    confidence_avg: float = 0.0,
+    ontology_version: str = "op-v1.1",
+    extractor_version: str = "1.0.0",
+    tokens_consumed: int = 0,
+    cost_usd: float = 0.0,
+    source_url: Optional[str] = None,
+    source_sensor: Optional[str] = None,
+    processing_time_ms: Optional[int] = None,
+    additional_metadata: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Create a CAT receipt specifically for Knowledge Graph extraction
+
+    Args:
+        conn: Database connection
+        memory_rid: RID of the source memory/content
+        extraction_rid: RID of the extraction output
+        extraction_type: Type of KG extraction (passA, passB, entity_resolution, nanopub_creation, contradiction_detection)
+        entities_extracted: Number of entities extracted
+        statements_extracted: Number of statements/claims extracted
+        confidence_avg: Average confidence score (0.0-1.0)
+        ontology_version: Ontology version used (default: op-v1.1)
+        extractor_version: Version of the KG extractor
+        tokens_consumed: Number of LLM tokens used
+        cost_usd: Cost in USD for processing
+        source_url: Source URL of the content (for provenance)
+        source_sensor: Source sensor name
+        processing_time_ms: Time taken for extraction
+        additional_metadata: Any additional metadata to include
+
+    Returns:
+        receipt_id: The generated receipt ID
+    """
+
+    # Build KG-specific metadata
+    metadata = {
+        "entities_extracted": entities_extracted,
+        "statements_extracted": statements_extracted,
+        "confidence_avg": confidence_avg,
+        "ontology_version": ontology_version,
+        "tokens_consumed": tokens_consumed,
+        "cost_usd": cost_usd
+    }
+
+    # Add source URL if provided (for provenance tracking)
+    if source_url:
+        metadata["source_url"] = source_url
+
+    # Merge in any additional metadata
+    if additional_metadata:
+        metadata.update(additional_metadata)
+
+    # Determine transformation type based on extraction type
+    transformation_type_map = {
+        "passA": "kg_extraction_passA",
+        "passB": "kg_extraction_passB",
+        "entity_resolution": "kg_entity_resolution",
+        "nanopub_creation": "kg_nanopub_creation",
+        "contradiction_detection": "kg_contradiction_detection"
+    }
+
+    transformation_type = transformation_type_map.get(
+        extraction_type,
+        f"kg_extraction_{extraction_type}"
+    )
+
+    return await create_cat_receipt(
+        conn=conn,
+        transformation_type=transformation_type,
+        input_rid=memory_rid,
+        output_rid=extraction_rid,
+        processor_name=f"KG Extractor ({extraction_type})",
+        processor_version=extractor_version,
+        entities_extracted=entities_extracted,
+        source_sensor=source_sensor,
+        metadata=metadata,
+        processing_duration_ms=processing_time_ms
+    )

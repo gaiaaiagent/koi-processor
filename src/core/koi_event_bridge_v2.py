@@ -48,6 +48,7 @@ app.add_middleware(
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:5433/eliza')
 BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
 USE_ISOLATED_TABLES = os.getenv('USE_ISOLATED_TABLES', 'true').lower() == 'true'
+KG_EXTRACTION_ENABLED = os.getenv('KG_EXTRACTION_ENABLED', 'false').lower() == 'true'
 
 # Pydantic models - KOI Protocol compliant
 class KOIManifest(BaseModel):
@@ -256,7 +257,6 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
             date_str = event.bundle.manifest.metadata['published_at']
             if isinstance(date_str, str):
                 try:
-                    from datetime import datetime
                     # Parse ISO format datetime string
                     published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                     logger.info(f"Converted published_at string to datetime: {date_str} -> {published_at}")
@@ -271,7 +271,6 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
             date_str = event.bundle.manifest.metadata['created_at']
             if isinstance(date_str, str):
                 try:
-                    from datetime import datetime
                     published_at = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 except Exception as e:
                     logger.warning(f"Failed to parse created_at date '{date_str}': {e}")
@@ -302,6 +301,12 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 event_type, source_sensor, content, metadata,
                 published_at, published_confidence, content_hash
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (rid) DO UPDATE SET
+                content = EXCLUDED.content,
+                metadata = EXCLUDED.metadata,
+                published_at = EXCLUDED.published_at,
+                content_hash = EXCLUDED.content_hash,
+                updated_at = CURRENT_TIMESTAMP
         """,
             memory_id,
             event.bundle.rid,
@@ -397,6 +402,43 @@ async def store_embedding(conn: asyncpg.Connection, memory_id: str,
     except Exception as e:
         logger.error(f"Error storing embedding: {e}")
         return False
+
+async def trigger_kg_extraction(memory_rid: str, content: str, metadata: dict) -> Optional[str]:
+    """Trigger KG extraction for a memory using Pass A extractor
+
+    Args:
+        memory_rid: RID of the memory to extract from
+        content: Text content to extract entities/statements from
+        metadata: Metadata dict containing source_url and other info
+
+    Returns:
+        extraction_rid if successful, None if failed
+    """
+    if not KG_EXTRACTION_ENABLED:
+        return None
+
+    try:
+        # Import Pass A extractor from koi-sensors
+        import sys
+        sys.path.insert(0, '/opt/projects/koi-sensors')
+        from knowledge_graph.extractors.pass_a_extractor import PassAExtractor
+
+        # Create extractor instance
+        extractor = PassAExtractor(db_url=DB_URL)
+
+        # Run extraction with full provenance tracking
+        extraction_rid, receipt_id = await extractor.extract_and_track(
+            memory_rid=memory_rid,
+            content=content,
+            metadata=metadata
+        )
+
+        logger.info(f"KG extraction complete for {memory_rid}: {extraction_rid} (receipt: {receipt_id})")
+        return extraction_rid
+
+    except Exception as e:
+        logger.error(f"Error during KG extraction for {memory_rid}: {e}", exc_info=True)
+        return None
 
 async def process_koi_event(event: KOIEvent) -> ProcessingResult:
     """Process a KOI event with deduplication and versioning"""
@@ -636,7 +678,25 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
 
                     # Brief delay to avoid overwhelming the embedding server
                     await asyncio.sleep(0.05)
-                
+
+                # Trigger KG extraction on the full document (not chunks)
+                # Only extract from NEW or UPDATE events with sufficient content
+                if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100:
+                    # Build metadata for KG extraction
+                    kg_metadata = {
+                        'source_url': source_url or event.bundle.manifest.metadata.get('url'),
+                        'source_sensor': event.source_node,
+                        'event_type': event.event_type,
+                        **event.bundle.manifest.metadata
+                    }
+
+                    # Extract from the original document RID, not chunk RIDs
+                    await trigger_kg_extraction(
+                        memory_rid=event.bundle.rid,
+                        content=text_content,
+                        metadata=kg_metadata
+                    )
+
                 # Get version info for response
                 version = None
                 previous_version_id = None

@@ -235,6 +235,173 @@ async def fallback_text_search(query_text: str, limit: int) -> List[Dict[str, An
 
         return memories
 
+async def enrich_with_kg_data(memory_rid: str, conn: asyncpg.Connection) -> Dict[str, Any]:
+    """
+    Enrich a memory with Knowledge Graph extraction data
+
+    Returns KG data including:
+    - Extracted entities
+    - Extracted statements
+    - Extraction confidence
+    - Provenance chain (transformation receipts)
+    """
+    # Get KG extractions for this memory
+    kg_rows = await conn.fetch("""
+        SELECT
+            extraction_rid,
+            entities,
+            statements,
+            relations,
+            confidence_score,
+            ontology_version,
+            extractor_version,
+            created_at
+        FROM koi_kg_extractions
+        WHERE memory_rid = $1
+        ORDER BY created_at DESC
+    """, memory_rid)
+
+    if not kg_rows:
+        return None
+
+    # Get the most recent extraction
+    kg_data = dict(kg_rows[0])
+
+    # Parse JSON fields if they're strings
+    import json
+    if isinstance(kg_data.get('entities'), str):
+        kg_data['entities'] = json.loads(kg_data['entities']) if kg_data['entities'] else []
+    if isinstance(kg_data.get('statements'), str):
+        kg_data['statements'] = json.loads(kg_data['statements']) if kg_data['statements'] else []
+    if isinstance(kg_data.get('relations'), str):
+        kg_data['relations'] = json.loads(kg_data['relations']) if kg_data['relations'] else []
+
+    # Resolve entities to canonical RIDs
+    resolved_entities = []
+    if kg_data.get('entities'):
+        for entity in kg_data['entities']:
+            entity_rid = entity.get('rid')
+            if entity_rid:
+                # Check if this entity was resolved to a canonical RID
+                canonical_rid = await conn.fetchval("""
+                    SELECT output_rid FROM koi_transformation_receipts
+                    WHERE input_rid = $1 AND transformation_type = 'kg_entity_resolution'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, entity_rid)
+
+                if canonical_rid:
+                    entity['canonical_rid'] = canonical_rid
+                    entity['was_resolved'] = True
+                else:
+                    entity['canonical_rid'] = entity_rid
+                    entity['was_resolved'] = False
+
+            resolved_entities.append(entity)
+
+    # Get provenance chain for this extraction
+    provenance = await conn.fetch("""
+        SELECT
+            receipt_id,
+            transformation_type,
+            input_rid,
+            output_rid,
+            processor_name,
+            metadata,
+            created_at
+        FROM koi_transformation_receipts
+        WHERE output_rid = $1
+        ORDER BY created_at ASC
+    """, kg_data['extraction_rid'])
+
+    return {
+        'extraction_rid': kg_data['extraction_rid'],
+        'entities': resolved_entities,
+        'statements': kg_data.get('statements', []),
+        'relations': kg_data.get('relations', []),
+        'confidence': kg_data.get('confidence_score', 0.0),
+        'ontology_version': kg_data.get('ontology_version'),
+        'extractor_version': kg_data.get('extractor_version'),
+        'provenance_chain': [
+            {
+                'receipt_id': p['receipt_id'],
+                'type': p['transformation_type'],
+                'processor': p['processor_name'],
+                'timestamp': p['created_at'].isoformat() if p['created_at'] else None
+            }
+            for p in provenance
+        ]
+    }
+
+async def search_with_kg_enrichment(query_text: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Search memories and enrich results with Knowledge Graph data
+
+    This provides:
+    1. Regular memory search results
+    2. Extracted entities and statements for each result
+    3. Resolved canonical entity RIDs
+    4. Complete provenance chains
+    """
+    logger.info(f"🔍 KG-enriched search for: {query_text[:50]}...")
+
+    async with db_pool.acquire() as conn:
+        # First, do text search on memories
+        memories = await fallback_text_search(query_text, limit)
+
+        # Enrich each memory with KG data
+        enriched_memories = []
+        for memory in memories:
+            kg_data = await enrich_with_kg_data(memory['rid'], conn)
+
+            if kg_data:
+                memory['kg'] = kg_data
+                logger.info(f"  ✓ Enriched {memory['rid'][:30]}... with {len(kg_data['entities'])} entities")
+            else:
+                memory['kg'] = None
+
+            enriched_memories.append(memory)
+
+        # Also search directly in KG entities and statements
+        entity_matches = await conn.fetch("""
+            SELECT DISTINCT
+                kg.memory_rid,
+                kg.extraction_rid,
+                e->>'name' as entity_name,
+                e->>'type' as entity_type,
+                e->>'confidence' as confidence
+            FROM koi_kg_extractions kg,
+                 jsonb_array_elements(kg.entities) AS e
+            WHERE e->>'name' ILIKE $1
+            ORDER BY CAST(e->>'confidence' AS FLOAT) DESC
+            LIMIT $2
+        """, f'%{query_text}%', limit)
+
+        statement_matches = await conn.fetch("""
+            SELECT DISTINCT
+                kg.memory_rid,
+                kg.extraction_rid,
+                s->>'subject' as subject,
+                s->>'predicate' as predicate,
+                s->>'object' as object,
+                s->>'confidence' as confidence
+            FROM koi_kg_extractions kg,
+                 jsonb_array_elements(kg.statements) AS s
+            WHERE s->>'subject' ILIKE $1
+               OR s->>'predicate' ILIKE $1
+               OR s->>'object' ILIKE $1
+            ORDER BY CAST(s->>'confidence' AS FLOAT) DESC
+            LIMIT $2
+        """, f'%{query_text}%', limit)
+
+        # Add KG match metadata
+        kg_matches = {
+            'entity_matches': [dict(e) for e in entity_matches],
+            'statement_matches': [dict(s) for s in statement_matches]
+        }
+
+        return enriched_memories, kg_matches
+
 @app.post("/search", response_model=KnowledgeResponse)
 async def search_knowledge(query: KnowledgeQuery):
     """
@@ -425,6 +592,25 @@ MCP_TOOLS = [
         }
     },
     {
+        "name": "search_with_kg",
+        "description": "Search memories with Knowledge Graph enrichment. Returns documents with extracted entities, statements, canonical entity RIDs, and complete provenance chains. Use this to find structured knowledge about entities, relationships, and facts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query text (searches memory content, entities, and statements)"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum number of results (default: 10)",
+                    "default": 10
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
         "name": "get_memory",
         "description": "Retrieve a specific memory by its RID (Resource Identifier)",
         "inputSchema": {
@@ -530,6 +716,32 @@ async def handle_mcp_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
                 }],
                 "isError": False
             }
+
+    elif tool_name == "search_with_kg":
+        # KG-enriched search
+        query_text = arguments.get("query", "")
+        limit = arguments.get("limit", 10)
+
+        enriched_memories, kg_matches = await search_with_kg_enrichment(query_text, limit)
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "success": True,
+                    "query": query_text,
+                    "total_results": len(enriched_memories),
+                    "search_method": "kg_enriched",
+                    "kg_matches": {
+                        "entity_matches": len(kg_matches['entity_matches']),
+                        "statement_matches": len(kg_matches['statement_matches'])
+                    },
+                    "results": enriched_memories,
+                    "direct_kg_matches": kg_matches
+                }, indent=2, default=str)
+            }],
+            "isError": False
+        }
 
     elif tool_name == "get_memory":
         rid = arguments.get("rid")

@@ -508,6 +508,17 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                     )
 
                 # Layer 3: Store chunks in koi_memory_chunks
+                # First, clean up old chunks if this is an UPDATE (prevents orphaned chunks)
+                if event.event_type == "UPDATE" and USE_ISOLATED_TABLES:
+                    # Delete old chunks that won't be replaced
+                    # (e.g., if old content had 10 chunks but new has only 5)
+                    await conn.execute("""
+                        DELETE FROM koi_memory_chunks
+                        WHERE document_rid = $1
+                          AND chunk_index >= $2
+                    """, document_rid, len(chunks))
+                    logger.info(f"Cleaned up old chunks for {document_rid} (keeping {len(chunks)} chunks)")
+
                 for i, chunk in enumerate(chunks):
                     chunk_rid = f"{event.bundle.rid}:chunk_{i}"
 
