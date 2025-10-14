@@ -68,45 +68,103 @@ class WeeklyCuratorLLM:
         """
         async with asyncpg.create_pool(self.db_url) as pool:
             async with pool.acquire() as conn:
+                # Query that aggregates chunks back into complete documents
                 query = """
-                    SELECT
+                    WITH base_content AS (
+                      -- Get all relevant content from the past week
+                      SELECT
                         id, rid, source_sensor, event_type,
                         content, metadata,
                         published_at, published_confidence,
                         created_at
-                    FROM koi_memories
-                    WHERE superseded_at IS NULL
-                      AND event_type != 'FORGET'
-                      -- Exclude all heartbeat content
-                      AND content::text NOT LIKE '%sensor_heartbeat%'
-                      AND content::text NOT LIKE '%heartbeat%'
-                      AND rid NOT LIKE '%heartbeat%'
-                      -- Exclude system/operational messages
-                      AND content::text NOT LIKE '%Sensor initialized%'
-                      AND content::text NOT LIKE '%Monitoring active%'
-                      AND content::text NOT LIKE '%Starting sensor%'
-                      AND content::text NOT LIKE '%KOI system%'
-                      -- EXCLUDE GITHUB FILE CHUNKS - only want actual activity
-                      -- But allow forum/website chunks which are actual content
-                      AND NOT (source_sensor LIKE '%%github%%' AND rid LIKE '%%#chunk%%')
-                      -- Focus on specific sources for weekly digest
-                      AND (
-                          -- Forum content
-                          source_sensor LIKE '%%discourse%%'
-                          OR rid LIKE '%%forum.regen.network%%'
-                          -- Governance notes from regentokenomics.org
-                          OR rid LIKE '%%regentokenomics%%'
-                          -- GitHub activity (commits, PRs, issues - not file chunks)
-                          OR (source_sensor LIKE '%%github-activity%%')
-                      )
-                      -- ONLY content actually PUBLISHED in the specified window
-                      AND published_at IS NOT NULL
-                      AND published_at >= NOW() - ($1 * INTERVAL '1 day')
-                      AND published_at <= NOW()
-                      -- Require higher confidence for better accuracy
-                      AND published_confidence >= 0.8
+                      FROM koi_memories
+                      WHERE superseded_at IS NULL
+                        AND event_type != 'FORGET'
+                        -- Exclude all heartbeat content
+                        AND content::text NOT LIKE '%sensor_heartbeat%'
+                        AND content::text NOT LIKE '%heartbeat%'
+                        AND rid NOT LIKE '%heartbeat%'
+                        -- Exclude system/operational messages
+                        AND content::text NOT LIKE '%Sensor initialized%'
+                        AND content::text NOT LIKE '%Monitoring active%'
+                        AND content::text NOT LIKE '%Starting sensor%'
+                        AND content::text NOT LIKE '%KOI system%'
+                        -- EXCLUDE GITHUB FILE CHUNKS - only want actual activity
+                        AND NOT (source_sensor LIKE '%%github%%' AND rid LIKE '%%#chunk%%')
+                        -- Focus on specific sources for weekly digest
+                        AND (
+                            -- Forum content
+                            source_sensor LIKE '%%discourse%%'
+                            OR rid LIKE '%%forum.regen.network%%'
+                            -- Website content from regentokenomics.org
+                            -- EXCLUDE directory/index pages only
+                            OR (rid LIKE '%%regentokenomics%%'
+                                -- Must NOT be the index page (exact match or with trailing slash)
+                                AND NOT (metadata->>'url' ~ '.*regentokenomics\\.org/weekly-meetups/?$'))
+                            -- GitHub activity (commits, PRs, issues - not file chunks)
+                            OR (source_sensor LIKE '%%github-activity%%')
+                        )
+                        -- ONLY content actually PUBLISHED in the specified window
+                        AND published_at IS NOT NULL
+                        AND published_at >= NOW() - ($1 * INTERVAL '1 day')
+                        AND published_at <= NOW()
+                        -- Require higher confidence for better accuracy
+                        AND published_confidence >= 0.8
+                    ),
+                    parent_rids AS (
+                      -- Extract parent RID for each entry
+                      SELECT
+                        id, source_sensor, event_type,
+                        content, metadata,
+                        published_at, published_confidence,
+                        created_at,
+                        CASE
+                          WHEN rid LIKE '%%#chunk%%' THEN SUBSTRING(rid FROM '^(.+)#chunk[0-9]+$')
+                          ELSE rid
+                        END AS parent_rid,
+                        rid LIKE '%%#chunk%%' AS is_chunk
+                      FROM base_content
+                    ),
+                    aggregated_content AS (
+                      -- Aggregate chunks by parent RID
+                      SELECT
+                        parent_rid,
+                        -- Take first ID for the parent document
+                        (ARRAY_AGG(id ORDER BY created_at))[1] AS id,
+                        -- For chunks, aggregate text in order; for non-chunks, use content as-is
+                        CASE
+                          WHEN BOOL_OR(is_chunk) THEN
+                            jsonb_build_object('text', STRING_AGG(content->>'text', ' ' ORDER BY (metadata->>'chunk_index')::int))
+                          ELSE
+                            (ARRAY_AGG(content ORDER BY created_at))[1]
+                        END AS content,
+                        -- Take metadata from first chunk or from the document itself
+                        (ARRAY_AGG(metadata ORDER BY created_at))[1] AS metadata,
+                        -- Use earliest published_at for the document
+                        MIN(published_at) AS published_at,
+                        -- Use highest confidence
+                        MAX(published_confidence) AS published_confidence,
+                        -- Use first source_sensor
+                        (ARRAY_AGG(source_sensor ORDER BY created_at))[1] AS source_sensor,
+                        -- Use first event_type
+                        (ARRAY_AGG(event_type ORDER BY created_at))[1] AS event_type,
+                        -- Use earliest created_at
+                        MIN(created_at) AS created_at
+                      FROM parent_rids
+                      GROUP BY parent_rid
+                    )
+                    SELECT
+                      id,
+                      parent_rid AS rid,
+                      source_sensor,
+                      event_type,
+                      content,
+                      metadata,
+                      published_at,
+                      published_confidence,
+                      created_at
+                    FROM aggregated_content
                     ORDER BY published_at DESC
-                    -- NO LIMIT - we want ALL content from the week
                 """
 
                 rows = await conn.fetch(query, days_back)
@@ -157,10 +215,75 @@ class WeeklyCuratorLLM:
                             except:
                                 pass
 
+                    # Special handling for website content (e.g., regentokenomics.org)
+                    if 'website' in row_dict.get('source_sensor', '').lower():
+                        # Check if this is a placeholder page without actual content
+                        if not self.has_substantial_content(row_dict):
+                            logger.debug(f"Skipping placeholder page without transcript/recording: {row_dict.get('metadata', {}).get('url', 'unknown')}")
+                            continue
+
                     filtered_rows.append(row_dict)
 
                 logger.info(f"Retrieved {len(filtered_rows)} items from past {days_back} days (filtered from {len(rows)})")
                 return filtered_rows
+
+    def has_substantial_content(self, row_dict: Dict) -> bool:
+        """
+        Check if a website page has substantial content (transcript or recording).
+        Returns True if the page should be included, False if it's a placeholder.
+
+        For regentokenomics.org meeting pages:
+        - Include if there's a transcript or recording present
+        - Exclude if it's just a placeholder with future date and no content
+        """
+        content = row_dict.get('content', {})
+        metadata = row_dict.get('metadata', {})
+
+        # Parse content if it's a string
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except:
+                content = {'text': content}
+
+        # Parse metadata if it's a string
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except:
+                metadata = {}
+
+        # Get the text content
+        content_text = ''
+        if isinstance(content, dict):
+            content_text = content.get('text', '') or content.get('content', '') or str(content)
+        else:
+            content_text = str(content)
+
+        content_text_lower = content_text.lower()
+
+        # Check for indicators of actual content:
+        # 1. Presence of "transcript" or "recording" keywords
+        has_transcript = 'transcript' in content_text_lower
+        has_recording = 'recording' in content_text_lower or 'video' in content_text_lower
+
+        # 2. Substantial text content (more than just placeholder text)
+        # Count actual content words (excluding common placeholder phrases)
+        words = content_text.split()
+        substantial_length = len(words) > 200  # More than 200 words suggests real content
+
+        # If there's a transcript, recording, or substantial content, include it
+        if has_transcript or has_recording or substantial_length:
+            return True
+
+        # Check if this looks like a placeholder page
+        # Common indicators: "Date of Session" with minimal other content
+        if 'date of session' in content_text_lower and len(words) < 100:
+            logger.debug(f"Detected placeholder page with 'Date of Session' and <100 words")
+            return False
+
+        # Default to including if we're not sure
+        return True
 
     def extract_clean_source(self, source_sensor: str) -> str:
         """Extract clean source name from sensor ID"""
@@ -266,17 +389,16 @@ class WeeklyCuratorLLM:
 
         return dict(thread_groups)
 
-    def count_unique_posts(self, items: List[Dict]) -> int:
-        """Count unique posts, excluding chunks and duplicates"""
-        unique_posts = set()
+    def count_unique_items(self, items: List[Dict]) -> int:
+        """Count unique items (posts, pages, activities), excluding chunks and duplicates"""
+        unique_items = set()
         for item in items:
             rid = item.get('rid', '')
-            # Remove chunk identifiers to get base post ID
+            # Remove chunk identifiers to get base ID
             base_rid = rid.split('#chunk')[0] if rid else ''
-            # Only count posts, not topics or other types
-            if base_rid and '_post_' in base_rid:
-                unique_posts.add(base_rid)
-        return len(unique_posts)
+            if base_rid:
+                unique_items.add(base_rid)
+        return len(unique_items)
 
     def extract_content_text(self, item: Dict) -> str:
         """Extract readable text from content field"""
@@ -294,16 +416,96 @@ class WeeklyCuratorLLM:
             text = content.get('content', '') or content.get('text', '') or content.get('body', '')
             if not text:
                 # Fallback to stringifying the dict
-                text = json.dumps(content, default=str)[:500]
+                text = json.dumps(content, default=str)[:2000]  # Increased for full context
         else:
-            text = str(content)[:500]
+            text = str(content)[:2000]  # Increased from 500 to 2000 for full context
 
         return text.strip()
+
+    def smart_truncate(self, text: str, max_length: int) -> str:
+        """
+        Intelligently truncate text at sentence boundaries
+
+        Preserves readability by cutting at the last complete sentence
+        within the character limit
+        """
+        if len(text) <= max_length:
+            return text
+
+        # Find last sentence boundary within limit
+        truncated = text[:max_length]
+
+        # Look for sentence endings (., !, ?)
+        sentence_endings = ['.', '!', '?', '\n']
+        last_boundary = -1
+
+        for ending in sentence_endings:
+            pos = truncated.rfind(ending)
+            if pos > last_boundary:
+                last_boundary = pos
+
+        # If we found a sentence boundary, use it
+        if last_boundary > max_length * 0.5:  # At least 50% of max length
+            return text[:last_boundary + 1].strip()
+
+        # Otherwise, cut at word boundary
+        last_space = truncated.rfind(' ')
+        if last_space > 0:
+            return truncated[:last_space].strip() + '...'
+
+        # Fallback: hard truncate
+        return truncated.strip() + '...'
+
+    def calculate_content_budget(self, num_threads: int, total_context_budget: int = 12000) -> Dict[str, int]:
+        """
+        Dynamically calculate how much content to include per thread based on total count
+
+        Strategy:
+        - Reserve budget for system prompt, ledger data, instructions (~4000 tokens)
+        - Distribute remaining budget across threads
+        - Give more weight to threads with higher post counts
+        - Ensure minimum viable content even with many threads
+        """
+        # Reserve space for prompt overhead
+        overhead_budget = 4000
+        available_budget = total_context_budget - overhead_budget
+
+        if num_threads == 0:
+            return {'per_thread': 0, 'max_per_post': 0}
+
+        # Base allocation per thread
+        base_per_thread = available_budget // num_threads
+
+        # Determine max content per post based on thread count
+        if num_threads <= 3:
+            # Few threads - allow full content
+            max_per_post = 3000
+        elif num_threads <= 10:
+            # Moderate threads - allow substantial content
+            max_per_post = 1500
+        elif num_threads <= 20:
+            # Many threads - moderate truncation
+            max_per_post = 800
+        else:
+            # Lots of threads - aggressive but balanced truncation
+            max_per_post = 400
+
+        return {
+            'per_thread': min(base_per_thread, max_per_post * 3),  # Max 3 posts per thread
+            'max_per_post': max_per_post,
+            'total_budget': available_budget
+        }
 
     async def analyze_with_llm(self, thread_groups: Dict[str, List[Dict]], ledger_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Use LLM to intelligently analyze and summarize the week's content
         """
+        # Calculate dynamic content budget based on number of threads
+        num_threads = len(thread_groups)
+        budget = self.calculate_content_budget(num_threads)
+
+        logger.info(f"Content budget: {num_threads} threads, {budget['max_per_post']} chars/post, {budget['per_thread']} chars/thread")
+
         # Prepare content for LLM analysis
         threads_summary = []
 
@@ -311,7 +513,7 @@ class WeeklyCuratorLLM:
             thread_data = {
                 'url': thread_url,
                 'full_url': thread_url,  # Preserve full URL for LLM to use
-                'post_count': self.count_unique_posts(items),
+                'post_count': self.count_unique_items(items),
                 'latest_date': items[0]['published_at'].isoformat() if items else '',
                 'posts': []
             }
@@ -328,9 +530,14 @@ class WeeklyCuratorLLM:
 
                 title = metadata.get('title', 'Untitled') if isinstance(metadata, dict) else 'Untitled'
 
+                # Extract content with dynamic budget
+                full_content = self.extract_content_text(item)
+                # Truncate to budget, but intelligently at sentence boundaries
+                content = self.smart_truncate(full_content, budget['max_per_post'])
+
                 thread_data['posts'].append({
                     'title': title,
-                    'content': self.extract_content_text(item),
+                    'content': content,
                     'source': self.extract_clean_source(item['source_sensor']),
                     'date': item['published_at'].isoformat()
                 })
@@ -341,7 +548,7 @@ class WeeklyCuratorLLM:
         threads_summary.sort(key=lambda x: x['post_count'], reverse=True)
 
         # Prepare prompt for LLM with ALL content
-        total_posts = sum(self.count_unique_posts(items) for items in thread_groups.values())
+        total_posts = sum(self.count_unique_items(items) for items in thread_groups.values())
 
         # Include ALL threads but summarize if too many
         thread_context = threads_summary if len(threads_summary) <= 50 else threads_summary[:50]
@@ -442,7 +649,7 @@ Format as structured JSON with these exact keys:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=4000,  # Increased to accommodate 1000+ word briefs
+                max_completion_tokens=4000,  # Updated parameter name for newer models
                 response_format={"type": "json_object"}
             )
 
@@ -678,7 +885,7 @@ Format as structured JSON with these exact keys:
                         sources_by_type[source_type].append({
                             'title': title or thread_url[:100],
                             'url': actual_url,
-                            'count': self.count_unique_posts(thread_items),
+                            'count': self.count_unique_items(thread_items),
                             'date_range': date_range
                         })
 
@@ -696,14 +903,27 @@ Format as structured JSON with these exact keys:
 
                     brief += f"### {display_name}\n"
 
-                    # Sort by post count and show top items
+                    # Sort by item count and show top items
                     source_items.sort(key=lambda x: x['count'], reverse=True)
 
-                    total_posts = sum(item['count'] for item in source_items)
-                    brief += f"- **Total activity**: {total_posts} posts across {len(source_items)} discussions\n"
+                    # Determine appropriate label based on source type
+                    item_label = "items"
+                    collection_label = "threads"
+                    if 'discourse' in source_type.lower():
+                        item_label = "posts"
+                        collection_label = "discussions"
+                    elif 'github' in source_type.lower():
+                        item_label = "activities"
+                        collection_label = "items"
+                    elif 'website' in source_type.lower():
+                        item_label = "pages"
+                        collection_label = "pages"
+
+                    total_items = sum(item['count'] for item in source_items)
+                    brief += f"- **Total activity**: {total_items} {item_label} across {len(source_items)} {collection_label}\n"
 
                     # Show individual items with details
-                    for item in source_items[:5]:  # Show top 5 discussions
+                    for item in source_items[:5]:  # Show top 5 items
                         if item['url']:
                             # Truncate long titles
                             display_title = item['title'][:60] + '...' if len(item['title']) > 60 else item['title']
@@ -712,14 +932,17 @@ Format as structured JSON with these exact keys:
                             display_title = item['title'][:80] + '...' if len(item['title']) > 80 else item['title']
                             brief += f"- {display_title} "
 
-                        # Add post count and date
-                        brief += f"({item['count']} posts"
+                        # Add item count and date (skip count of 1 for single pages)
+                        if item['count'] > 1:
+                            brief += f"({item['count']} {item_label}"
+                        else:
+                            brief += f"("
                         if item['date_range']:
-                            brief += f", {item['date_range']}"
+                            brief += f", {item['date_range']}" if item['count'] > 1 else f"{item['date_range']}"
                         brief += ")\n"
 
                     if len(source_items) > 5:
-                        brief += f"- ...and {len(source_items) - 5} more discussions\n"
+                        brief += f"- ...and {len(source_items) - 5} more {collection_label}\n"
 
                     brief += "\n"
 
@@ -865,7 +1088,52 @@ Format as structured JSON with these exact keys:
             return None
 
     async def fetch_website_content(self, url: str) -> Optional[Dict[str, str]]:
-        """Fetch full content from regentokenomics.org or other website pages"""
+        """Fetch full content from regentokenomics.org or other website pages
+
+        PRIMARY: Use database content (already aggregated from chunks)
+        FALLBACK: HTTP fetch only if not in database
+        """
+        result = {'text': '', 'video_urls': [], 'audio_urls': []}
+
+        try:
+            # PRIMARY: Get content from database (with chunk aggregation for full content)
+            async with asyncpg.create_pool(self.db_url) as pool:
+                async with pool.acquire() as conn:
+                    # First try to get parent record (non-chunked) which has full content
+                    parent_query = """
+                        SELECT content->>'text' AS text, metadata
+                        FROM koi_memories
+                        WHERE superseded_at IS NULL
+                          AND metadata->>'url' = $1
+                          AND rid NOT LIKE '%#chunk%'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """
+
+                    row = await conn.fetchrow(parent_query, url)
+                    if row and row['text']:
+                        logger.info(f"✅ Retrieved website content from database: {len(row['text'])} chars for {url}")
+                        result['text'] = row['text']
+
+                        # Get metadata for title and extract video/audio URLs
+                        metadata = row['metadata']
+                        if metadata and isinstance(metadata, dict):
+                            title = metadata.get('title', '')
+                            if title:
+                                result['text'] = f"**Page Title**: {title}\n\n{result['text']}"
+
+                            # TODO: Extract video/audio URLs from metadata if available
+                            # For now, videos will be handled by sensor-level transcription
+
+                        logger.info(f"✅ NotebookLM: Using database content (no HTTP fetch needed)")
+                        return result
+                    else:
+                        logger.info(f"⚠️  Website content not in database, falling back to HTTP fetch for {url}")
+
+        except Exception as e:
+            logger.warning(f"❌ Error fetching from database: {e}, falling back to HTTP fetch")
+
+        # FALLBACK: Fetch via HTTP if not in database
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(url, timeout=30.0, follow_redirects=True)
@@ -874,7 +1142,6 @@ Format as structured JSON with these exact keys:
                     return None
 
                 html_content = response.text
-                result = {'text': '', 'video_urls': [], 'audio_urls': []}
 
                 # Extract text content (simple approach - could be enhanced with BeautifulSoup)
                 import re
@@ -911,7 +1178,7 @@ Format as structured JSON with these exact keys:
                             text = re.sub(r'<i>(.*?)</i>', r'*\1*', text)
                             text = re.sub(r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>', r'[\2](\1)', text)
                             text = re.sub(r'<.*?>', '', text)  # Remove remaining tags
-                            result['text'] += text[:5000]  # Limit to avoid huge texts
+                            result['text'] += text[:10000]  # Increased limit from 5000 to 10000
                             break
 
                 # Look for video files (mp4, webm, etc.)
@@ -1135,7 +1402,9 @@ Format as structured JSON with these exact keys:
                     if 'forum.regen.network' in thread_url:
                         forum_urls.add(thread_url)
                     elif 'regentokenomics.org' in thread_url or 'website' in digest['thread_groups'][thread_url]:
-                        website_urls.add(thread_url)
+                        # EXCLUDE directory/index pages
+                        if not re.match(r'.*regentokenomics\.org/weekly-meetups/?$', thread_url):
+                            website_urls.add(thread_url)
 
             # From top stories
             for story in digest.get('top_stories', []):
@@ -1143,7 +1412,19 @@ Format as structured JSON with these exact keys:
                 if 'forum.regen.network' in url:
                     forum_urls.add(url)
                 elif 'regentokenomics.org' in url:
-                    website_urls.add(url)
+                    # EXCLUDE directory/index pages
+                    if not re.match(r'.*regentokenomics\.org/weekly-meetups/?$', url):
+                        website_urls.add(url)
+
+            # From key discussions
+            for discussion in digest.get('key_discussions', []):
+                url = discussion.get('url', '')
+                if 'forum.regen.network' in url:
+                    forum_urls.add(url)
+                elif 'regentokenomics.org' in url:
+                    # EXCLUDE directory/index pages
+                    if not re.match(r'.*regentokenomics\.org/weekly-meetups/?$', url):
+                        website_urls.add(url)
 
             # Extract from brief text using regex (but skip truncated URLs with ...)
             brief_text = digest.get('brief', '')
@@ -1163,13 +1444,19 @@ Format as structured JSON with these exact keys:
 
             # Website URLs (regentokenomics.org)
             website_patterns = [
-                r'https?://regentokenomics\.org[^\s\)]+',
-                r'https?://[^\s\)]*weekly-meetup[^\s\)]+'
+                r'https?://regentokenomics\.org[^\s\)\]]+',
+                r'https?://[^\s\)\]]*weekly-meetup[^\s\)\]]+'
             ]
             for pattern in website_patterns:
                 found_urls = re.findall(pattern, brief_text)
                 for url in found_urls:
-                    website_urls.add(url.rstrip('/'))
+                    # Clean up URL - remove trailing punctuation and markdown artifacts
+                    url = url.rstrip('.,;:)/]')
+                    # Remove any remaining markdown formatting like ']('
+                    url = url.split('](')[0] if '](' in url else url
+                    # EXCLUDE directory/index pages (like /weekly-meetups without specific date)
+                    if url.startswith('http') and not re.match(r'.*regentokenomics\.org/weekly-meetups/?$', url):
+                        website_urls.add(url)
 
             # Extract governance proposal IDs
             proposal_ids = set()
@@ -1204,27 +1491,10 @@ Format as structured JSON with these exact keys:
                     if content:
                         f.write(f"## Website: {url}\n\n")
 
-                        # Write text content
+                        # Write full page content (includes transcripts already embedded from toggle expansion)
                         if content['text']:
-                            f.write("### Page Content\n\n")
                             f.write(content['text'])
                             f.write("\n\n")
-
-                        # Process videos
-                        if content['video_urls']:
-                            f.write("### Video Content\n\n")
-                            for video_url in content['video_urls']:
-                                f.write(f"**Video found**: {video_url}\n\n")
-
-                                # Attempt to transcribe
-                                logger.info(f"Attempting to transcribe video: {video_url}")
-                                transcript = await self.transcribe_video(video_url)
-                                if transcript:
-                                    f.write("**Full Video Transcription**:\n\n")
-                                    f.write(transcript)
-                                    f.write("\n\n")
-                                else:
-                                    f.write("*[Unable to transcribe video - may require manual review]*\n\n")
 
                         f.write("---\n\n")
                     else:

@@ -530,7 +530,7 @@ async def get_document_provenance(rid: str):
             base_rid = receipt_rid.split('#')[0] if '#' in receipt_rid else receipt_rid
 
             # Query transformation receipts for this RID
-            # For chunks, also include transformations on the base RID
+            # For chunks, include base document transformations but exclude other chunks
             receipts = await conn.fetch("""
                 WITH RECURSIVE chain AS (
                     -- Base case: Find all transformations directly involving this RID
@@ -538,9 +538,16 @@ async def get_document_provenance(rid: str):
                     WHERE input_rid = $1 OR output_rid = $1
 
                     -- For chunks, also include transformations on the base document
+                    -- BUT exclude koi_to_memory transformations that create other chunks
                     UNION
                     SELECT * FROM koi_transformation_receipts
                     WHERE ($1 != $2) AND (input_rid = $2 OR output_rid = $2)
+                    AND NOT (
+                        -- Exclude other chunks' creation receipts
+                        transformation_type = 'koi_to_memory'
+                        AND output_rid LIKE $2 || '#chunk%'
+                        AND output_rid != $1
+                    )
 
                     UNION
 
