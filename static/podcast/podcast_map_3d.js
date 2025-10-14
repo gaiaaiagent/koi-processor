@@ -12,6 +12,9 @@ let clickProtectionTimeout = null;
 let clusterColors = {};
 let cameraFollowEnabled = true;
 let userInteractionTimeout = null;
+let touchStartTime = 0;
+let touchStartPos = { x: 0, y: 0 };
+let isTouchGesture = false;
 
 // Helper functions
 function hexToRgba(hex, alpha) {
@@ -174,7 +177,33 @@ function initializeGraph() {
 
     container.addEventListener('mousedown', disableAutoFeatures);
     container.addEventListener('wheel', disableAutoFeatures);
-    container.addEventListener('touchstart', disableAutoFeatures);
+
+    // Touch event handlers for mobile gesture detection
+    container.addEventListener('touchstart', (e) => {
+        touchStartTime = Date.now();
+        touchStartPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        isTouchGesture = e.touches.length > 1; // Multi-touch = gesture
+        disableAutoFeatures();
+    });
+
+    container.addEventListener('touchmove', (e) => {
+        if (e.touches.length > 1) {
+            isTouchGesture = true; // Pinch zoom
+        } else if (e.touches.length === 1) {
+            const dx = Math.abs(e.touches[0].clientX - touchStartPos.x);
+            const dy = Math.abs(e.touches[0].clientY - touchStartPos.y);
+            if (dx > 10 || dy > 10) {
+                isTouchGesture = true; // Drag/pan
+            }
+        }
+    });
+
+    container.addEventListener('touchend', () => {
+        // Reset gesture flag after a short delay
+        setTimeout(() => {
+            isTouchGesture = false;
+        }, 100);
+    });
 }
 
 // Links are now handled by 3D-Force-Graph's built-in rendering with dynamic opacity/width functions
@@ -276,6 +305,12 @@ function getFilteredData() {
 }
 
 function handleNodeClick(node) {
+    // Ignore clicks during touch gestures (pinch/zoom/pan)
+    if (isTouchGesture) {
+        console.log('Ignoring click during touch gesture');
+        return;
+    }
+
     if (clickProtectionTimeout) {
         clearTimeout(clickProtectionTimeout);
     }
