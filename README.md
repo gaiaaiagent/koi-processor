@@ -80,7 +80,7 @@ koi-processor/
 DATA INGESTION PIPELINE:
 ┌─────────────┐     ┌──────────────┐     ┌──────────────┐
 │ KOI Sensors │────▶│ Coordinator  │────▶│ Event Bridge │
-│  (Various)  │     │  (Port 8200) │     │  (Port 8100) │
+│  (Various)  │     │  (Port 8005) │     │  (Port 8100) │
 └─────────────┘     └──────────────┘     └──────────────┘
                                                    │
                                     ┌──────────────┴──────────────┐
@@ -100,6 +100,23 @@ DATA INGESTION PIPELINE:
                             └──────────────┘            │ • RDF Triples    │
                                                         │ • Ontologies     │
                                                         └──────────────────┘
+
+QUERY/ACCESS LAYER:
+                            ┌──────────────────────────────────────┐
+                            │      Hybrid RAG API (Port 8301)      │
+                            │  • Reciprocal Rank Fusion (RRF)      │
+                            │  • BGE Semantic Search               │
+                            │  • Adaptive Extraction Triggers      │
+                            └──────────────────────────────────────┘
+                                              │
+                            ┌─────────────────┴──────────────────┐
+                            │                                     │
+                            ▼                                     ▼
+                   ┌──────────────────┐             ┌──────────────────┐
+                   │  MCP Knowledge   │             │   GAIA React     │
+                   │  Server          │             │   Frontend       │
+                   │  (Port 8200)     │             │ (Port 3000 web)  │
+                   └──────────────────┘             └──────────────────┘
 
 QUERY/ACCESS LAYER:
                             ┌───────────────────────────────────┐
@@ -246,8 +263,23 @@ bash scripts/run_migrations_with_backup.sh
 
 4. **Start services**:
 ```bash
+# Start core KOI services
 bash scripts/start_all_services.sh
+
+# Start Hybrid RAG API (required for semantic search)
+cd /opt/projects/koi-processor && bun koi-query-api.ts &
+
+# Start MCP Knowledge Server (for agent access)
+source venv/bin/activate && python3 src/core/koi_knowledge_mcp_server.py &
 ```
+
+**Service Ports:**
+- Port 8005: KOI Coordinator
+- Port 8090: BGE Embedding Server
+- Port 8100: Event Bridge
+- Port 8200: MCP Knowledge Server
+- Port 8301: Hybrid RAG API (semantic search)
+- Port 8400: Content Dashboard
 
 5. **Access dashboard**:
 Open http://localhost:8400 in your browser
