@@ -208,6 +208,13 @@ QUERY/ACCESS LAYER:
 - **Migration support**: Gradual transition from legacy systems
 - **Full documentation**: See [STORAGE_ARCHITECTURE.md](docs/STORAGE_ARCHITECTURE.md) for details
 
+### 🗓️ RDF Date Enrichment (publishedAt)
+- Export publication dates from DB to JSON mapping:
+  - `node scripts/export_published_map.js` (uses `POSTGRES_URL`, writes to `src/core/published_map.json` by default)
+- Refine RDF graph with `regx:publishedAt` and load into Jena:
+  - `bash scripts/refine_with_published.sh` (uses `CONSOLIDATION_PATH`, `PUBLISHED_MAP_PATH`, `JENA_DATA_ENDPOINT`)
+- Enables SPARQL date gating in MCP when present.
+
 ## Quick Start
 
 ### Prerequisites

@@ -47,7 +47,7 @@ app.use(cors());
 app.use(express.json());
 
 // Semantic search using BGE embeddings 
-async function performSemanticSearch(query: string, topK: number = 10) {
+async function performSemanticSearch(query: string, topK: number = 10, filters?: any) {
   try {
     // Generate embedding for the query using BGE API
     const bgeResponse = await fetch('http://localhost:8090/encode', {
@@ -61,12 +61,27 @@ async function performSemanticSearch(query: string, topK: number = 10) {
     if (!bgeResponse.ok) {
       console.log('BGE API not available, falling back to ILIKE search');
       // Fallback to simple text search when BGE API is not available
+      const dateClauses: string[] = [];
+      const params: any[] = [`%${query}%`, `%${query.replace(/\s+/g, '%')}%`];
+      if (filters?.date_range?.start) {
+        dateClauses.push(`m.published_at >= $${params.length + 1}::timestamptz`);
+        params.push(filters.date_range.start);
+      }
+      if (filters?.date_range?.end) {
+        dateClauses.push(`m.published_at <= $${params.length + 1}::timestamptz`);
+        params.push(filters.date_range.end);
+      }
+      const whereDate = dateClauses.length
+        ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
+        : '';
       const fallbackQuery = `
         SELECT 
           m.rid,
           m.content->>'text' as content,
           m.metadata->>'source' as source,
-          0.5 as similarity
+          m.metadata->>'url' as url,
+          0.5 as similarity,
+          m.published_at
         FROM koi_memories m
         WHERE 
           m.content->>'text' IS NOT NULL
@@ -75,11 +90,12 @@ async function performSemanticSearch(query: string, topK: number = 10) {
             m.content->>'text' ILIKE $1
             OR m.content->>'text' ILIKE $2
           )
+          ${whereDate}
         ORDER BY RANDOM()
-        LIMIT $3
+        LIMIT $${params.length + 1}
       `;
-      
-      const results = await pool.query(fallbackQuery, [`%${query}%`, `%${query.replace(/\s+/g, '%')}%`, topK]);
+      params.push(topK);
+      const results = await pool.query(fallbackQuery, params);
       
       return results.rows.map(row => ({
         id: row.rid,
@@ -90,7 +106,9 @@ async function performSemanticSearch(query: string, topK: number = 10) {
         metadata: {
           rid: row.rid,
           source: row.source,
-          similarity: parseFloat(row.similarity)
+          url: row.url,
+          similarity: parseFloat(row.similarity),
+          published_at: row.published_at || null
         },
         rid: row.rid
       }));
@@ -102,25 +120,44 @@ async function performSemanticSearch(query: string, topK: number = 10) {
     // Convert array to PostgreSQL vector format
     const vectorString = `[${queryEmbedding.join(',')}]`;
 
+    // Optional date filters
+    const dateClauses: string[] = [];
+    const params: any[] = [vectorString];
+    if (filters?.date_range?.start) {
+      dateClauses.push(`m.published_at >= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.start);
+    }
+    if (filters?.date_range?.end) {
+      dateClauses.push(`m.published_at <= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.end);
+    }
+    const andDate = dateClauses.length
+      ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
+      : '';
+
     const searchQuery = `
       SELECT 
         m.rid,
         m.content->>'text' as content,
         m.metadata->>'source' as source,
+        m.metadata->>'url' as url,
         e.dim_1024 <=> $1::vector as distance,
-        1 - (e.dim_1024 <=> $1::vector) as similarity
+        1 - (e.dim_1024 <=> $1::vector) as similarity,
+        m.published_at
       FROM koi_memories m
       JOIN koi_embeddings e ON e.memory_id = m.id
       WHERE 
         e.dim_1024 IS NOT NULL
         AND m.content->>'text' IS NOT NULL
         AND LENGTH(m.content->>'text') > 50
+        ${andDate}
       ORDER BY e.dim_1024 <=> $1::vector
-      LIMIT $2
+      LIMIT $${params.length + 1}
     `;
 
-    const results = await pool.query(searchQuery, [vectorString, topK]);
-    
+    params.push(topK);
+    const results = await pool.query(searchQuery, params);
+
     return results.rows.map(row => ({
       id: row.rid,
       content: row.content.substring(0, 200) + "...",
@@ -130,7 +167,9 @@ async function performSemanticSearch(query: string, topK: number = 10) {
       metadata: {
         rid: row.rid,
         source: row.source,
-        similarity: parseFloat(row.similarity)
+        url: row.url,
+        similarity: parseFloat(row.similarity),
+        published_at: row.published_at || null
       },
       rid: row.rid
     }));
@@ -178,7 +217,7 @@ async function triggerAdaptiveExtraction(
 
 // Hybrid RAG Query Endpoint
 // Full-text search using PostgreSQL's ts_rank (BM25-like ranking)
-async function performKeywordSearch(query: string, topK: number = 10) {
+async function performKeywordSearch(query: string, topK: number = 10, filters?: any) {
   try {
     // Split query into words and clean them
     const words = query.trim().split(/\s+/)
@@ -198,47 +237,67 @@ async function performKeywordSearch(query: string, topK: number = 10) {
     const prefixQuery = words.map(w => `${w}:*`).join(' | ');
 
     // Try AND first, then fall back to OR with prefix matching
+    const dateClauses: string[] = [];
+    const params: any[] = [andQuery, orQuery];
+    if (filters?.date_range?.start) {
+      dateClauses.push(`published_at >= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.start);
+    }
+    if (filters?.date_range?.end) {
+      dateClauses.push(`published_at <= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.end);
+    }
+    const whereCombined = dateClauses.length
+      ? `WHERE (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR published_at IS NULL' : ''})`
+      : '';
+
     const searchQuery = `
-      SELECT
-        m.rid,
-        m.content->>'text' as content,
-        m.metadata->>'source' as source,
-        m.metadata->>'url' as url,
-        ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank,
-        'strict' as match_type
-      FROM koi_memories m
-      WHERE
-        m.content_tsv @@ to_tsquery('english', $1)
-        AND m.content->>'text' IS NOT NULL
-        AND LENGTH(m.content->>'text') > 50
+      WITH combined AS (
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank,
+          'strict' as match_type,
+          m.published_at
+        FROM koi_memories m
+        WHERE
+          m.content_tsv @@ to_tsquery('english', $1)
+          AND m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
 
-      UNION ALL
+        UNION ALL
 
-      SELECT
-        m.rid,
-        m.content->>'text' as content,
-        m.metadata->>'source' as source,
-        m.metadata->>'url' as url,
-        ts_rank_cd(m.content_tsv, to_tsquery('english', $2)) as rank,
-        'relaxed' as match_type
-      FROM koi_memories m
-      WHERE
-        m.content_tsv @@ to_tsquery('english', $2)
-        AND m.content->>'text' IS NOT NULL
-        AND LENGTH(m.content->>'text') > 50
-        AND NOT EXISTS (
-          SELECT 1 FROM koi_memories m2
-          WHERE m2.rid = m.rid
-          AND m2.content_tsv @@ to_tsquery('english', $1)
-        )
-
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          ts_rank_cd(m.content_tsv, to_tsquery('english', $2)) as rank,
+          'relaxed' as match_type,
+          m.published_at
+        FROM koi_memories m
+        WHERE
+          m.content_tsv @@ to_tsquery('english', $2)
+          AND m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND NOT EXISTS (
+            SELECT 1 FROM koi_memories m2
+            WHERE m2.rid = m.rid
+            AND m2.content_tsv @@ to_tsquery('english', $1)
+          )
+      )
+      SELECT * FROM combined
+      ${whereCombined}
       ORDER BY rank DESC
-      LIMIT $3
+      LIMIT $${params.length + 1}
     `;
 
     // Increased multiplier to ensure OR results are well represented
     // With AND getting ~10 results and OR getting ~10, we need more total results
-    const results = await pool.query(searchQuery, [andQuery, orQuery, Math.max(topK * 3, 50)]);
+    params.push(Math.max(topK * 3, 50));
+    const results = await pool.query(searchQuery, params);
 
     // Find max rank for normalization
     const maxRank = results.rows.length > 0
@@ -270,6 +329,7 @@ async function performKeywordSearch(query: string, topK: number = 10) {
           rid: row.rid,
           source: row.source,
           url: row.url,
+          published_at: row.published_at || null,
           fts_rank: rawRank,
           normalized_score: normalizedScore,
           exact_match_boost: hasExactMatch,
@@ -281,26 +341,43 @@ async function performKeywordSearch(query: string, topK: number = 10) {
   } catch (error) {
     console.error('[Keyword Search] Error:', error);
     // Fallback to ILIKE if FTS fails
+    const dateClauses: string[] = [];
+    const params: any[] = [`%${query}%`, `%${query}%`];
+    if (filters?.date_range?.start) {
+      dateClauses.push(`m.published_at >= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.start);
+    }
+    if (filters?.date_range?.end) {
+      dateClauses.push(`m.published_at <= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.end);
+    }
+    const andDate = dateClauses.length
+      ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
+      : '';
+
     const fallbackQuery = `
       SELECT
         m.rid,
         m.content->>'text' as content,
         m.metadata->>'source' as source,
         m.metadata->>'url' as url,
-        0.5 as rank
+        0.5 as rank,
+        m.published_at
       FROM koi_memories m
       WHERE
         m.content->>'text' ILIKE $1
         AND LENGTH(m.content->>'text') > 50
+        ${andDate}
       ORDER BY CASE
         WHEN m.content->>'text' ILIKE $2 THEN 3  -- Exact phrase match
         WHEN m.content->>'text' ILIKE $1 THEN 2  -- Contains all words
         ELSE 1
       END DESC
-      LIMIT $3
+      LIMIT $${params.length + 1}
     `;
 
-    const results = await pool.query(fallbackQuery, [`%${query}%`, `%${query}%`, topK]);
+    params.push(topK);
+    const results = await pool.query(fallbackQuery, params);
 
     return results.rows.map(row => ({
       id: row.rid,
@@ -311,7 +388,8 @@ async function performKeywordSearch(query: string, topK: number = 10) {
       metadata: {
         rid: row.rid,
         source: row.source,
-        url: row.url
+        url: row.url,
+        published_at: row.published_at || null
       },
       rid: row.rid
     }));
@@ -319,7 +397,7 @@ async function performKeywordSearch(query: string, topK: number = 10) {
 }
 app.post('/api/koi/query', async (req, res) => {
   try {
-    const { question, user_id = 'web-user', agent_id = 'koi-interface', limit = 10 } = req.body;
+    const { question, user_id = 'web-user', agent_id = 'koi-interface', limit = 10, filters = {} } = req.body;
 
     if (!question) {
       return res.status(400).json({ error: 'Question is required' });
@@ -332,8 +410,8 @@ app.post('/api/koi/query', async (req, res) => {
     // Higher keyword limit to ensure important biographical pages (rank ~#11) are included
     // Increased to 20 to capture team/profile pages that rank just outside top-15
     const [vectorResults, keywordResults] = await Promise.all([
-      performSemanticSearch(question, 20),
-      performKeywordSearch(question, 20)
+      performSemanticSearch(question, 20, filters),
+      performKeywordSearch(question, 20, filters)
     ]);
 
     // Apply Reciprocal Rank Fusion
@@ -366,15 +444,19 @@ app.post('/api/koi/query', async (req, res) => {
     const responseTime = Date.now() - startTime;
 
     // Log the query
-    await logQuery(pool, {
-      query_text: question,
-      user_id,
-      agent_id,
-      confidence_score: confidence,
-      triggered_extraction: triggeredExtraction,
-      response_time_ms: responseTime,
-      results: fusedResults.slice(0, 5)
-    });
+    try {
+      await logQuery(pool, {
+        query_text: question,
+        user_id,
+        agent_id,
+        confidence_score: confidence,
+        triggered_extraction: triggeredExtraction,
+        response_time_ms: responseTime,
+        results: fusedResults.slice(0, 5)
+      });
+    } catch (error) {
+      console.error('Query logging failed:', error);
+    }
 
     // Format response
     const response = {
@@ -388,7 +470,8 @@ app.post('/api/koi/query', async (req, res) => {
         content: r.content,
         score: r.score,
         source: r.source,
-        rid: r.rid
+        rid: r.rid,
+        metadata: r.metadata || {}
       }))
     };
 
@@ -397,6 +480,181 @@ app.post('/api/koi/query', async (req, res) => {
   } catch (error) {
     console.error('Query error:', error);
     res.status(500).json({ 
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Podcast chatbot endpoint with LLM synthesis
+app.post('/api/podcast/chat', async (req, res) => {
+  try {
+    const { question, limit = 5 } = req.body;
+
+    if (!question) {
+      return res.status(400).json({ error: 'Question is required' });
+    }
+
+    // Call the existing hybrid RAG API with larger limit to get podcast results after filtering
+    const ragResponse = await fetch('http://localhost:8301/api/koi/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question,
+        limit: 50  // Request more results so we can filter to podcasts and still have enough
+      })
+    });
+
+    if (!ragResponse.ok) {
+      return res.status(500).json({ error: 'Search failed', synthesized: false });
+    }
+
+    const ragData = await ragResponse.json();
+    const allResults = ragData.results || [];
+
+    // Filter to only podcast results, then limit to requested amount
+    const filteredResults = allResults.filter((r: any) => {
+      const rid = r.rid || '';
+      return rid.includes('podcast');
+    });
+    const results = filteredResults.slice(0, limit || 5);
+
+    console.log(`[Podcast Chat] Filtered ${filteredResults.length} podcast results from ${allResults.length} total, using top ${results.length}`);
+    if (results.length > 0) {
+      console.log(`[Podcast Chat] Sample RID: ${results[0].rid}`);
+    }
+
+    if (results.length === 0) {
+      return res.json({
+        question,
+        answer: 'No relevant information found about that in the podcast.',
+        synthesized: false
+      });
+    }
+
+    // Load podcast metadata
+    let podcastData: any = null;
+    try {
+      const fs = await import('fs');
+      const podcastJson = fs.readFileSync('/opt/projects/koi-processor/static/podcast/podcast_map_3d.json', 'utf8');
+      podcastData = JSON.parse(podcastJson);
+      console.log(`[Podcast Chat] Loaded ${podcastData.episodes?.length || 0} episodes from metadata`);
+    } catch (error) {
+      console.error('[Podcast Chat] Error loading podcast metadata:', error);
+    }
+
+    // Extract episodes and build context for LLM
+    const episodesInfo: Record<string, {url: string, episode_int_id: number}> = {};
+    const contextParts: string[] = [];
+
+    results.forEach((r: any, idx: number) => {
+      const content = r.content || '';
+      contextParts.push(`[${idx + 1}] ${content}`);
+
+      // Try to extract episode metadata from RID
+      // Format: regen.podcast:podcast_716040283#chunk34
+      const rid = r.rid || '';
+      const match = rid.match(/:podcast_(\d+)/);
+      if (match) {
+        const episodeIdStr = `podcast_${match[1]}`;
+        console.log(`[Episode Extract] RID: ${rid} -> episode_id: ${episodeIdStr}`);
+
+        if (podcastData && podcastData.episodes) {
+          // Find episode in podcast data by episode_id field
+          const episode = podcastData.episodes.find((ep: any) => ep.episode_id === episodeIdStr);
+          console.log(`[Episode Extract] Found episode:`, episode ? episode.title : 'NOT FOUND');
+
+          if (episode) {
+            const episodeTitle = episode.title || episodeIdStr;
+            const episodeUrl = episode.url || `https://regen.gaiaai.xyz/podcast`;
+            if (!(episodeTitle in episodesInfo)) {
+              episodesInfo[episodeTitle] = {
+                url: episodeUrl,
+                episode_int_id: episode.episode_int_id
+              };
+              console.log(`[Episode Extract] Added: ${episodeTitle}`);
+            }
+          }
+        }
+      } else {
+        console.log(`[Episode Extract] No match for RID: ${rid}`);
+      }
+    });
+
+    console.log(`[Episode Extract] Total episodes found: ${Object.keys(episodesInfo).length}`);
+
+    const context = contextParts.join('\n\n');
+
+    // LLM synthesis with OpenAI
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      return res.json({
+        question,
+        results: results.slice(0, 5),
+        synthesized: false,
+        error: 'OpenAI not configured'
+      });
+    }
+
+    try {
+      const systemPrompt = `You are a helpful AI assistant for the Planetary Regeneration Podcast.
+
+Answer questions based ONLY on the provided context from podcast transcripts. Be concise and direct in your response.
+
+Do NOT include any citations, source numbers, or episode lists in your answer. Just provide a clear, informative response to the question.`;
+
+      const userPrompt = `Question: ${question}
+
+Context from podcast:
+${context}
+
+Answer the question using the context above.`;
+
+      const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 600
+        })
+      });
+
+      if (!openaiResponse.ok) {
+        throw new Error(`OpenAI API error: ${openaiResponse.status}`);
+      }
+
+      const openaiData = await openaiResponse.json();
+      const answer = openaiData.choices[0].message.content;
+
+      return res.json({
+        question,
+        answer,
+        episodes: episodesInfo,
+        synthesized: true,
+        total_results: results.length
+      });
+
+    } catch (error) {
+      console.error('LLM synthesis error:', error);
+      return res.json({
+        question,
+        results: results.slice(0, 5),
+        synthesized: false,
+        error: error instanceof Error ? error.message : 'LLM error'
+      });
+    }
+
+  } catch (error) {
+    console.error('Podcast chat error:', error);
+    res.status(500).json({
       error: 'Internal server error',
       message: error instanceof Error ? error.message : 'Unknown error'
     });
