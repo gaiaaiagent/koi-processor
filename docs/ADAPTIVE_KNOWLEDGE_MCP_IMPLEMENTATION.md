@@ -1,5 +1,25 @@
 # Adaptive Knowledge MCP Implementation Plan
 
+## Recent Implementation Status (Oct 2025)
+
+- Adaptive dual‑branch executor operational in `regen-koi-mcp`:
+  - Focused branch: top‑K predicates via embeddings + usage + community expansion
+  - Broad branch: entity/topic regex over all predicates
+  - Canonical‑aware filtering on both branches; smart fallback disables canonical when zero results
+  - RRF fusion merges branches (precision + recall)
+- Consolidation: t=0.25 (all) mapping loaded via `CONSOLIDATION_PATH`
+- Predicate communities: computed and used for community‑aware expansion
+- Canonical categories: present in graph (`regx:canonicalPredicate`) and leveraged for filtering
+- Evaluation harness: 100% query success, 0% noise; ~1.5 s average latency
+
+Environment variables (MCP):
+- `JENA_ENDPOINT` (default `http://localhost:3030/koi/sparql`)
+- `CONSOLIDATION_PATH` (t=0.25 mapping)
+- `PATTERNS_PATH` (predicate_patterns.json)
+- `COMMUNITY_PATH` (predicate_communities.json)
+- `EMBEDDING_SERVICE_URL` (predicate similarity API)
+- `OPENAI_API_KEY` (optional; template path used when absent)
+
 ## Executive Summary
 
 This document outlines the implementation of an adaptive, query-driven knowledge extraction system for the KOI pipeline, replacing traditional bulk extraction with an intelligent system that learns from usage patterns and user feedback.

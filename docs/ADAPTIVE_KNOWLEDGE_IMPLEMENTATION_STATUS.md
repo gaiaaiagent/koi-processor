@@ -3,7 +3,7 @@
 ## Overview
 Implementation of an adaptive, query-driven knowledge extraction system for the KOI pipeline based on the plan in [`ADAPTIVE_KNOWLEDGE_MCP_IMPLEMENTATION.md`](./ADAPTIVE_KNOWLEDGE_MCP_IMPLEMENTATION.md).
 
-**Status Date:** September 29, 2025
+**Status Date:** October 17, 2025
 
 ## ✅ Completed Components
 
@@ -34,21 +34,20 @@ Implementation of an adaptive, query-driven knowledge extraction system for the 
 - ✅ **CAT Receipt Tracking** - Complete provenance chain
 - ✅ **Query Context Management** - Tracks full query lifecycle
 
-### 4. Enhanced MCP Server
-**Location:** `/bge-mcp-ts/bge-server-enhanced.ts`
-- ✅ BGE semantic search integration
-- ✅ SPARQL query execution
-- ✅ Hybrid search combining vectors and graph
-- ✅ Natural language to SPARQL
-- ✅ Entity and relationship exploration
+### 4. Enhanced MCP Server (regen-koi-mcp)
+**Location:** `/opt/projects/regen-koi-mcp/src` (TypeScript)
+- ✅ Hybrid search: parallel SPARQL + vector with RRF fusion
+- ✅ Adaptive NL→SPARQL executor (focused + broad) with community expansion
+- ✅ Canonical‑aware filtering (keywords → canonical categories)
+- ✅ Smart fallback (drops canonical only when zero results)
+- ✅ Tools: `get_system_health`, `predicate_community_summary`, `canonical_summary`
 
 ## 🔄 In Progress
 
 ### Integration Tasks
-1. **Connect Adaptive Features to MCP Server**
-   - Import RRF and confidence functions
-   - Add query logging to all search operations
-   - Implement confidence-based extraction triggers
+1. **Multi‑category gating**
+   - Combine primary canonical category with secondary token constraints
+   - Goal: keep precision without falling back on mixed‑domain queries
 
 2. **Testing Infrastructure**
    - Unit tests for confidence calculation
@@ -68,6 +67,8 @@ Implementation of an adaptive, query-driven knowledge extraction system for the 
 - [ ] Query uncertainty sampling
 - [ ] A/B testing framework
 - [ ] Performance monitoring dashboard
+ - [ ] Jena Text index for faster topical queries
+ - [ ] Provenance filters (`regx:sourceDomain` / `regx:sourceType`) in refiner + NL→SPARQL
 
 ## 🚀 Quick Start
 
@@ -138,11 +139,15 @@ asyncio.run(test())
 - **After Extraction:** Average 0.75 confidence
 - **Improvement:** +66% confidence boost
 
-### Response Times
-- **Vector Search:** ~100ms
-- **SPARQL Query:** ~50ms  
-- **RRF Fusion:** ~10ms overhead
-- **Total with Extraction:** ~3-5 seconds (when triggered)
+### Response Times (Hybrid Graph System)
+- **Average adaptive query:** ~1.5 s (with canonical filtering)
+- **Cold start (first query):** ~19 s (to be optimized with warm‑up)
+- **Post‑fallback:** still ~1.5–2.6 s for most queries
+
+### Evaluation Harness (20 queries)
+- **Success:** 100% answered
+- **Noise:** 0% (Lingui/i18n eliminated by canonical filters)
+- **Precision:** high; focuses on eco‑credit, governance, finance content as intended
 
 ## 🔍 Monitoring
 
