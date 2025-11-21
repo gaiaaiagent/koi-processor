@@ -267,15 +267,20 @@
                     <div class="col-12">
                         <div class="d-flex justify-content-between align-items-center mb-3">
                             <h5>Draft Management</h5>
-                            <div class="btn-group" role="group">
+                            <div class="d-flex gap-2 align-items-center">
+                                <div class="input-group input-group-sm" style="width: auto;">
+                                    <span class="input-group-text">From</span>
+                                    <input type="date" class="form-control" id="digest-start-date" style="width: 140px;">
+                                </div>
+                                <div class="input-group input-group-sm" style="width: auto;">
+                                    <span class="input-group-text">To</span>
+                                    <input type="date" class="form-control" id="digest-end-date" style="width: 140px;">
+                                </div>
                                 <button class="btn btn-sm btn-outline-primary" onclick="refreshDrafts()">
                                     <i class="bi bi-arrow-clockwise"></i> Refresh
                                 </button>
-                                <button class="btn btn-sm btn-primary" onclick="generateNewDraft('daily')">
-                                    <i class="bi bi-plus-circle"></i> New Daily
-                                </button>
-                                <button class="btn btn-sm btn-primary" onclick="generateNewDraft('weekly')">
-                                    <i class="bi bi-plus-circle"></i> New Weekly
+                                <button class="btn btn-sm btn-primary" onclick="generateNewDigest()">
+                                    <i class="bi bi-plus-circle"></i> New
                                 </button>
                             </div>
                         </div>
@@ -512,6 +517,21 @@
 
         // Don't override refreshDrafts - it has its own implementation
         // that properly refreshes without a page reload
+
+        // Initialize date range inputs with default 7 days
+        document.addEventListener('DOMContentLoaded', function() {
+            const today = new Date();
+            const sevenDaysAgo = new Date(today);
+            sevenDaysAgo.setDate(today.getDate() - 7);
+
+            const startInput = document.getElementById('digest-start-date');
+            const endInput = document.getElementById('digest-end-date');
+
+            if (startInput && endInput) {
+                startInput.value = sevenDaysAgo.toISOString().split('T')[0];
+                endInput.value = today.toISOString().split('T')[0];
+            }
+        });
     </script>
 </body>
 </html>

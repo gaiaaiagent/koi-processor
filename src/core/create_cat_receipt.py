@@ -53,15 +53,23 @@ async def create_cat_receipt(
     """
     try:
         # Check if this exact transformation already exists (deduplication)
+        # BUT only skip if the output memory is still active (not superseded)
         existing = await conn.fetchrow("""
-            SELECT receipt_id FROM koi_transformation_receipts
-            WHERE input_rid = $1 AND output_rid = $2 AND transformation_type = $3
+            SELECT r.receipt_id, m.superseded_at
+            FROM koi_transformation_receipts r
+            LEFT JOIN koi_memories m ON m.rid = r.output_rid
+            WHERE r.input_rid = $1 AND r.output_rid = $2 AND r.transformation_type = $3
+            ORDER BY r.created_at DESC
             LIMIT 1
         """, input_rid, output_rid, transformation_type)
 
         if existing:
-            logger.info(f"✓ DUPLICATE RECEIPT: {transformation_type} {input_rid} → {output_rid} - SKIPPING (existing: {existing['receipt_id'][:8]}...)")
-            return existing['receipt_id']
+            # Only skip if the output memory is NOT superseded
+            if existing['superseded_at'] is None:
+                logger.info(f"✓ DUPLICATE RECEIPT: {transformation_type} {input_rid} → {output_rid} - SKIPPING (existing: {existing['receipt_id'][:8]}...)")
+                return existing['receipt_id']
+            else:
+                logger.info(f"✓ SUPERSEDED RECEIPT: {transformation_type} {input_rid} → {output_rid} - Creating new receipt (old was superseded at {existing['superseded_at']})")
 
         # Generate receipt ID using SHA-256 of key fields
         receipt_content = f"{transformation_type}:{input_rid}:{output_rid}:{datetime.now(timezone.utc).isoformat()}"

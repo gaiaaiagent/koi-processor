@@ -371,14 +371,65 @@ function clearSelection() {
     currentEpisode = null;
     activeNode = null;
 
-    // Reset node colors and sizes to default
+    // Reset node colors and sizes to default using dynamic functions
     const clusterKey = `cluster_${currentClusterLevel}`;
-    graph.nodeColor(node => clusterColors[node[clusterKey]] || '#666');
-    graph.nodeVal(2);
+    graph.nodeColor(node => {
+        if (activeNode && node.id === activeNode.id) {
+            return '#00ff00';
+        }
+        const nodeColor = clusterColors[node[clusterKey]] || '#666';
+        if (currentEpisode) {
+            return node.episode_id === currentEpisode ? nodeColor : hexToRgba(nodeColor, 0.2);
+        }
+        if (currentCluster !== null) {
+            return node[clusterKey] === currentCluster ? nodeColor : hexToRgba(nodeColor, 0.2);
+        }
+        return nodeColor;
+    });
 
-    // Reset link appearance to default
-    graph.linkOpacity(0.3);
-    graph.linkWidth(0.8);
+    graph.nodeVal(node => {
+        if (activeNode && node.id === activeNode.id) return 20;
+        if (currentEpisode) {
+            return node.episode_id === currentEpisode ? 12 : 1;
+        }
+        if (currentCluster !== null) {
+            return node[clusterKey] === currentCluster ? 8 : 1;
+        }
+        return 2;
+    });
+
+    // Reset link appearance to default using dynamic functions
+    graph.linkOpacity(link => {
+        if (currentEpisode) {
+            return link.episode_id === currentEpisode ? 0.8 : 0.05;
+        }
+        if (currentCluster !== null) {
+            const key = `cluster_${currentClusterLevel}`;
+            const sourceNode = graphData.points.find(n => n.id === link.source);
+            const targetNode = graphData.points.find(n => n.id === link.target);
+            if (sourceNode && targetNode) {
+                const bothInCluster = sourceNode[key] === currentCluster && targetNode[key] === currentCluster;
+                return bothInCluster ? 0.6 : 0.05;
+            }
+        }
+        return link.opacity || 0.3;
+    });
+
+    graph.linkWidth(link => {
+        if (currentEpisode) {
+            return link.episode_id === currentEpisode ? 3.0 : 0.3;
+        }
+        if (currentCluster !== null) {
+            const key = `cluster_${currentClusterLevel}`;
+            const sourceNode = graphData.points.find(n => n.id === link.source);
+            const targetNode = graphData.points.find(n => n.id === link.target);
+            if (sourceNode && targetNode) {
+                const bothInCluster = sourceNode[key] === currentCluster && targetNode[key] === currentCluster;
+                return bothInCluster ? 2.0 : 0.3;
+            }
+        }
+        return 0.8;
+    });
 }
 
 function playAudio(node) {
@@ -502,9 +553,14 @@ function setupControls() {
             audio.pause();
             activeNode = null;
             currentEpisode = null;
+            currentCluster = null;
+
+            // Reset cluster selector to "All Topics"
+            document.getElementById('cluster-selector').value = '';
 
             // Reset to default view
             clearSelection();
+            graph.graphData(getFilteredData());
         }
     });
 

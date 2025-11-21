@@ -804,6 +804,10 @@ def trigger_manual_run():
             date_str = datetime.now().strftime("%Y-%m-%d")
             output_file = f'/opt/projects/koi-processor/output/weekly/weekly_digest_{date_str}.json'
 
+            # Get optional date range parameters
+            start_date = data.get('start_date')
+            end_date = data.get('end_date')
+
             # Set environment variables
             env = os.environ.copy()
 
@@ -822,6 +826,12 @@ def trigger_manual_run():
             env['INCLUDE_PROVENANCE'] = 'true'
             env['SKIP_AUDIO_GENERATION'] = 'true' if skip_audio else 'false'
 
+            # Add date range to environment if provided
+            if start_date:
+                env['DIGEST_START_DATE'] = start_date
+            if end_date:
+                env['DIGEST_END_DATE'] = end_date
+
             # Also ensure we have the Notion API key if needed
             notion_key = os.getenv('NOTION_API_KEY', '')
             if notion_key:
@@ -833,10 +843,12 @@ def trigger_manual_run():
             if not os.path.exists(python_path):
                 python_path = 'python3'
 
-            result = subprocess.run([
-                python_path,
-                '/opt/projects/koi-processor/scripts/run_weekly_curator_llm.py'
-            ], capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=300)
+            # Build command with optional date range arguments
+            cmd = [python_path, '/opt/projects/koi-processor/scripts/run_weekly_curator_llm.py']
+            if start_date and end_date:
+                cmd.extend(['--start-date', start_date, '--end-date', end_date])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd='/opt/projects/koi-processor', env=env, timeout=300)
 
             if result.returncode == 0:
                 # No need to submit to review - weekly_curator_llm.py already saves to database
@@ -2314,57 +2326,139 @@ def generate_weekly():
     return jsonify({'success': True, 'message': 'Weekly generation started'})
 
 # KOI API endpoints for hybrid RAG queries
+
+"""
+Fixed /api/koi/query endpoint for podcast chatbot
+Calls the MCP server's /search endpoint with source filtering
+"""
+
+"""
+Final fix: Query database directly, no circular MCP dependency
+Uses existing BGE embeddings in the database
+"""
+
 @app.route('/api/koi/query', methods=['POST'])
-@require_auth  
+@require_auth
 def koi_hybrid_query():
-    """Hybrid RAG query endpoint using enhanced MCP server"""
-    import requests
-    
+    """Podcast Q&A endpoint - calls hybrid RAG API and adds LLM synthesis"""
     try:
         data = request.get_json()
         query_text = data.get('question', '')
-        user_id = data.get('user_id')
-        agent_id = data.get('agent_id')
-        
+        source_filter = data.get('source_filter', 'podcast')
+        limit = data.get('limit', 5)
+
         if not query_text:
             return jsonify({'error': 'Query text required'}), 400
-            
-        # Call our enhanced MCP server (running via stdio, so we'll use a simplified approach)
-        # For now, directly use the adaptive features
-        from pathlib import Path
-        import sys
-        
-        # Add the bge-mcp-ts directory to Python path temporarily
-        bge_path = Path(__file__).parent.parent.parent / 'bge-mcp-ts'
-        if str(bge_path) not in sys.path:
-            sys.path.insert(0, str(bge_path))
-            
-        # Import our adaptive functions
+
+        # Call the existing hybrid RAG API on port 8301
         try:
-            import subprocess
-            import json
-            
-            # For now, return a mock response that shows the structure
-            # In production, this would call the MCP server
-            result = {
+            import requests
+            rag_response = requests.post('http://localhost:8301/api/koi/query', json={
                 'question': query_text,
-                'results': [],
-                'confidence': 0.85,
-                'execution_time': 0.150,
-                'triggered_extraction': False,
-                'sources': ['vector', 'sparql'],
-                'total_results': 0
-            }
-            
-            return jsonify(result)
-            
+                'limit': limit,
+                'source_filter': source_filter
+            }, timeout=15)
+
+            if rag_response.status_code != 200:
+                logger.error(f"RAG API failed: {rag_response.status_code}")
+                return jsonify({'error': 'Search failed', 'synthesized': False}), 500
+
+            rag_data = rag_response.json()
+            results = rag_data.get('results', [])
+
         except Exception as e:
-            logger.error(f"Error calling enhanced MCP server: {e}")
-            return jsonify({'error': 'MCP server unavailable'}), 503
-            
+            logger.error(f"Error calling RAG API: {e}")
+            return jsonify({'error': f'RAG API error: {str(e)}', 'synthesized': False}), 500
+
+        if not results:
+            return jsonify({
+                'question': query_text,
+                'answer': 'No relevant information found about that in the podcast.',
+                'synthesized': False
+            })
+
+        # Extract episodes and build context
+        episodes_info = {}
+        context_parts = []
+
+        for idx, r in enumerate(results, 1):
+            content = r.get('content', '')
+            context_parts.append(f"[{idx}] {content}")
+
+            metadata = r.get('metadata', {})
+            if isinstance(metadata, str):
+                try:
+                    import json
+                    metadata = json.loads(metadata)
+                except:
+                    pass
+
+            episode_title = metadata.get('episode_title', metadata.get('title', ''))
+            episode_url = metadata.get('url', '')
+            if episode_title and episode_title not in episodes_info:
+                episodes_info[episode_title] = episode_url
+
+        context = "\n\n".join(context_parts)
+
+        # LLM synthesis
+        openai_key = os.getenv('OPENAI_API_KEY')
+        if not openai_key:
+            return jsonify({
+                'question': query_text,
+                'results': [{'content': r['content'], 'score': r['score']} for r in results],
+                'synthesized': False
+            })
+
+        try:
+            system_prompt = """You are a helpful AI assistant for the Planetary Regeneration Podcast.
+
+Answer questions based ONLY on the provided context. Cite sources using [1], [2] format.
+
+At the end, list relevant episodes:
+
+**Relevant Episodes:**
+- Episode Title"""
+
+            user_prompt = f"""Question: {query_text}
+
+Context:
+{context}
+
+Answer using the context above."""
+
+            client = OpenAI(api_key=openai_key)
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=600
+            )
+
+            answer = completion.choices[0].message.content
+
+            return jsonify({
+                'question': query_text,
+                'answer': answer,
+                'episodes': episodes_info,
+                'synthesized': True,
+                'total_results': len(results)
+            })
+
+        except Exception as e:
+            logger.error(f"LLM error: {e}")
+            return jsonify({
+                'question': query_text,
+                'results': [{'content': r['content'], 'score': r['score']} for r in results],
+                'synthesized': False
+            })
+
     except Exception as e:
         logger.error(f"KOI query error: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/podcast')
 def podcast_map():

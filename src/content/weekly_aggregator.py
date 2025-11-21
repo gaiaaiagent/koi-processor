@@ -203,17 +203,17 @@ class WeeklyAggregator:
             publication_date, confidence, tags
         FROM source_groups
         WHERE
-            -- Get up to 100 items per source category to ensure diversity
-            (source_category = 'forum' AND category_rank <= 100)
-            OR (source_category = 'github' AND category_rank <= 50)  -- Limit GitHub to avoid flooding
-            OR (source_category = 'twitter' AND category_rank <= 50)
-            OR (source_category = 'telegram' AND category_rank <= 50)
-            OR (source_category = 'gitlab' AND category_rank <= 50)
-            OR (source_category = 'notion' AND category_rank <= 50)
-            OR (source_category = 'website' AND category_rank <= 50)
-            OR (source_category = 'medium' AND category_rank <= 50)
-            OR (source_category = 'podcast' AND category_rank <= 50)
-            OR (source_category = 'other' AND category_rank <= 50)
+            -- Get up to 200 items per source category to ensure diversity
+            (source_category = 'forum' AND category_rank <= 200)
+            OR (source_category = 'github' AND category_rank <= 150)
+            OR (source_category = 'twitter' AND category_rank <= 100)
+            OR (source_category = 'telegram' AND category_rank <= 100)
+            OR (source_category = 'gitlab' AND category_rank <= 150)
+            OR (source_category = 'notion' AND category_rank <= 200)
+            OR (source_category = 'website' AND category_rank <= 100)
+            OR (source_category = 'medium' AND category_rank <= 100)
+            OR (source_category = 'podcast' AND category_rank <= 100)
+            OR (source_category = 'other' AND category_rank <= 100)
         ORDER BY publication_date DESC, confidence DESC
         LIMIT %s
         """
@@ -237,16 +237,29 @@ class WeeklyAggregator:
                 else:
                     content_text = str(row['content'])
 
-                # Extract title
-                title = row['title'] or "Untitled"
-                if not title or title == "Untitled":
-                    # Try to extract title from content
+                # Extract title with fallback strategies
+                title = row['title']
+                if not title or title == "Untitled" or title == "":
+                    # Strategy 1: Try markdown header
                     if '# ' in content_text:
                         lines = content_text.split('\n')
                         for line in lines:
                             if line.startswith('# '):
                                 title = line[2:].strip()
                                 break
+
+                    # Strategy 2: Use first sentence/line from content
+                    if not title or title == "Untitled":
+                        first_line = content_text.split('\n')[0].strip()
+                        # Take first 100 chars as title
+                        if first_line:
+                            title = first_line[:100]
+                            if len(first_line) > 100:
+                                title += "..."
+
+                # Ensure we have some title
+                if not title or title == "":
+                    title = "Untitled"
 
                 items.append(ContentItem(
                     id=row['id'],
@@ -513,18 +526,43 @@ class WeeklyAggregator:
         
         # Prepare cluster data
         cluster_data = []
+        used_themes = set()
+        cluster_index = 1
+
         for cluster in clusters:
             if cluster:
                 # Determine theme from most common tags
                 all_tags = []
                 for item in cluster:
                     all_tags.extend(item.tags)
-                
-                theme = "General Updates"
+
+                theme = None
                 if all_tags:
                     tag_counts = Counter(all_tags)
                     theme = tag_counts.most_common(1)[0][0].title()
-                
+
+                # If no tags, try to infer from source types
+                if not theme:
+                    sources = [item.source for item in cluster]
+                    if any('github' in s.lower() for s in sources):
+                        theme = "Development Activity"
+                    elif any('discourse' in s.lower() or 'forum' in s.lower() for s in sources):
+                        theme = "Community Discussions"
+                    elif any('notion' in s.lower() for s in sources):
+                        theme = "Documentation & Planning"
+                    elif any('gitlab' in s.lower() for s in sources):
+                        theme = "Project Updates"
+                    else:
+                        theme = "General Updates"
+
+                # Ensure unique theme names
+                original_theme = theme
+                counter = 1
+                while theme in used_themes:
+                    theme = f"{original_theme} {counter}"
+                    counter += 1
+                used_themes.add(theme)
+
                 cluster_data.append({
                     "theme": theme,
                     "size": len(cluster),

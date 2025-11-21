@@ -1374,6 +1374,58 @@ async function generateNewDraft(type) {
     }
 }
 
+async function generateNewDigest() {
+    // Get date range from inputs
+    const startDate = document.getElementById('digest-start-date').value;
+    const endDate = document.getElementById('digest-end-date').value;
+
+    if (!startDate || !endDate) {
+        showNotification('Please select both start and end dates', 'error');
+        return;
+    }
+
+    if (!confirm(`Generate digest from ${startDate} to ${endDate}?`)) return;
+
+    // Add loading placeholder immediately
+    addDraftLoadingPlaceholder('custom');
+
+    try {
+        const basePath = window.location.pathname.includes('/digests') ? '/digests' : '';
+        showNotification(`🚀 Generating digest for ${startDate} to ${endDate}...`, 'info');
+
+        const response = await fetch(`${basePath}/api/dashboard/trigger_manual_run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'weekly',  // Use weekly type for custom date range
+                draft_mode: true,
+                skip_audio: true,
+                start_date: startDate,
+                end_date: endDate
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showNotification(`✨ Successfully triggered digest generation!`, 'success');
+            // Refresh drafts after a short delay to allow generation to complete
+            setTimeout(() => {
+                refreshDrafts();
+                fetchAPI('/api/dashboard/weekly/stats').then(updateWeeklySection);
+            }, 5000);
+        } else {
+            showNotification(`Failed to generate digest: ${data.error || 'Unknown error'}`, 'error');
+            // Remove placeholder on error
+            removeDraftLoadingPlaceholder('custom');
+        }
+    } catch (error) {
+        console.error('Error generating digest:', error);
+        showNotification(`Error: ${error.message}`, 'error');
+        // Remove placeholder on error
+        removeDraftLoadingPlaceholder('custom');
+    }
+}
+
 function addDraftLoadingPlaceholder(type) {
     // The actual container is "pending-drafts-list" not "drafts-container"
     const containerId = 'pending-drafts-list';

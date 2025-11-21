@@ -306,6 +306,7 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 metadata = EXCLUDED.metadata,
                 published_at = EXCLUDED.published_at,
                 content_hash = EXCLUDED.content_hash,
+                superseded_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
         """,
             memory_id,
@@ -324,6 +325,15 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
             published_confidence,
             content_hash
         )
+
+        # Fetch the actual memory_id from database (in case ON CONFLICT kept the old UUID)
+        actual_memory_id = await conn.fetchval("""
+            SELECT id FROM koi_memories WHERE rid = $1
+        """, event.bundle.rid)
+
+        # Update memory_id to use the actual one from database
+        if actual_memory_id:
+            memory_id = str(actual_memory_id)
     else:
         # Legacy table structure - just insert without version control
         # TODO: Update legacy structure to support versioning

@@ -61,10 +61,15 @@ class WeeklyCuratorLLM:
             logger.error(f"Error getting ledger data: {e}")
             return {}
 
-    async def get_weekly_content(self, days_back: int = 7) -> List[Dict[str, Any]]:
+    async def get_weekly_content(self, days_back: int = 7, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
-        Get ALL content PUBLISHED in the past week
+        Get ALL content PUBLISHED in the past week or within a specific date range
         NO LIMITS - we want complete context for the LLM
+
+        Args:
+            days_back: Number of days to look back (ignored if start_date/end_date provided)
+            start_date: Optional start date for filtering
+            end_date: Optional end date for filtering
         """
         async with asyncpg.create_pool(self.db_url) as pool:
             async with pool.acquire() as conn:
@@ -171,8 +176,19 @@ class WeeklyCuratorLLM:
 
                 # Filter out old or irrelevant content
                 filtered_rows = []
-                now = datetime.now(timezone.utc)
-                week_ago = now - timedelta(days=days_back)
+
+                # Determine date range for filtering
+                if start_date and end_date:
+                    # Use provided date range
+                    filter_start = start_date.replace(tzinfo=timezone.utc) if start_date.tzinfo is None else start_date
+                    filter_end = end_date.replace(tzinfo=timezone.utc) if end_date.tzinfo is None else end_date
+                else:
+                    # Use days_back relative to now
+                    now = datetime.now(timezone.utc)
+                    filter_start = now - timedelta(days=days_back)
+                    filter_end = now
+
+                logger.info(f"Filtering content from {filter_start.date()} to {filter_end.date()}")
 
                 for row in rows:
                     row_dict = dict(row)
@@ -184,8 +200,8 @@ class WeeklyCuratorLLM:
                         continue
 
                     # Double-check the date is actually within our window
-                    if published_at < week_ago or published_at > now:
-                        logger.debug(f"Skipping content outside date window: {published_at}")
+                    if published_at < filter_start or published_at > filter_end:
+                        logger.debug(f"Skipping content outside date window: {published_at} (window: {filter_start.date()} to {filter_end.date()})")
                         continue
 
                     # Special handling for GitHub content
@@ -696,9 +712,29 @@ Format as structured JSON with these exact keys:
         """
         logger.info("Starting weekly digest generation with LLM")
 
-        # Get all content from past week
-        items = await self.get_weekly_content(days_back=7)
-        logger.info(f"Retrieved {len(items)} items from past week")
+        # Check for custom date range from environment variables
+        start_date_str = os.getenv('DIGEST_START_DATE')
+        end_date_str = os.getenv('DIGEST_END_DATE')
+
+        start_date = None
+        end_date = None
+        days_back = 7
+
+        if start_date_str and end_date_str:
+            # Parse dates
+            from datetime import datetime
+            start_date = datetime.fromisoformat(start_date_str)
+            end_date = datetime.fromisoformat(end_date_str)
+            # Extend end_date to end of day
+            end_date = end_date.replace(hour=23, minute=59, second=59)
+            days_back = (end_date - start_date).days + 1  # +1 to include both dates
+            logger.info(f"Using custom date range: {start_date_str} to {end_date_str} ({days_back} days)")
+        else:
+            logger.info("Using default 7-day range")
+
+        # Get all content from the specified period
+        items = await self.get_weekly_content(days_back=days_back, start_date=start_date, end_date=end_date)
+        logger.info(f"Retrieved {len(items)} items from past {days_back} days")
 
         # Get ledger data for the week
         ledger_data = await self.get_ledger_data_for_week()
@@ -723,7 +759,14 @@ Format as structured JSON with these exact keys:
 
         # Build the digest structure
         now = datetime.now(timezone.utc)
-        week_start = now - timedelta(days=7)
+
+        # Use custom date range if provided, otherwise default to past 7 days
+        if start_date and end_date:
+            actual_week_start = start_date
+            actual_week_end = end_date
+        else:
+            actual_week_start = now - timedelta(days=7)
+            actual_week_end = now
 
         # Extract clean sources and statistics
         all_sources = [self.extract_clean_source(item['source_sensor']) for item in items]
@@ -731,8 +774,8 @@ Format as structured JSON with these exact keys:
 
         digest = {
             'id': hashlib.sha256(f"weekly-{now.isoformat()}".encode()).hexdigest()[:12],
-            'week_start': week_start.isoformat(),
-            'week_end': now.isoformat(),
+            'week_start': actual_week_start.isoformat(),
+            'week_end': actual_week_end.isoformat(),
             'total_items': len(items),
             'total_discussions': len(thread_groups),
             'executive_summary': llm_analysis.get('executive_summary', ''),
@@ -750,7 +793,7 @@ Format as structured JSON with these exact keys:
                 'source_breakdown': dict(source_counts),
                 'ledger_summary': ledger_data.get('summary', '') if ledger_data else ''
             },
-            'brief': self.format_brief(llm_analysis, week_start, now, len(thread_groups), len(items), ledger_data, items, thread_groups),
+            'brief': self.format_brief(llm_analysis, actual_week_start, actual_week_end, len(thread_groups), len(items), ledger_data, items, thread_groups),
             'generated_at': now.isoformat(),
             'generator': 'weekly_curator_llm_v1'
         }
@@ -1127,8 +1170,147 @@ Format as structured JSON with these exact keys:
 
                         logger.info(f"✅ NotebookLM: Using database content (no HTTP fetch needed)")
                         return result
-                    else:
-                        logger.info(f"⚠️  Website content not in database, falling back to HTTP fetch for {url}")
+
+                    # If no parent record, try aggregating chunks
+                    chunks_query = """
+                        SELECT content->>'text' AS text, metadata, rid
+                        FROM koi_memories
+                        WHERE superseded_at IS NULL
+                          AND metadata->>'url' = $1
+                          AND rid LIKE '%#chunk%'
+                        ORDER BY rid
+                    """
+
+                    chunk_rows = await conn.fetch(chunks_query, url)
+                    if chunk_rows:
+                        logger.info(f"✅ Found {len(chunk_rows)} chunks for {url}, aggregating...")
+
+                        # Aggregate chunk text with filtering and deduplication
+                        texts = []
+                        metadata = None
+                        seen_sentences = set()  # For deduplication
+
+                        for chunk_row in chunk_rows:
+                            chunk_text = chunk_row['text']
+                            if not chunk_text:
+                                continue
+
+                            # Filter out JSON metadata junk
+                            # These chunks contain React/Next.js state data
+                            json_markers = [
+                                'propertyValues', 'blockId', 'parentId',
+                                'self.__next_f.push', '"hasContent":true',
+                                'createdTime', 'lastEditedTime', '"children":[',
+                                '"className":', '"uri":', 'weekly-meetups-nov-11',
+                                'mantic-string', '"id":"'
+                            ]
+
+                            # Skip if it contains multiple JSON markers or high JSON density
+                            marker_count = sum(1 for marker in json_markers if marker in chunk_text)
+                            json_chars = sum(1 for c in chunk_text if c in '{}[]":,')
+                            json_density = json_chars / len(chunk_text) if len(chunk_text) > 0 else 0
+
+                            if marker_count >= 2 or json_density > 0.25:
+                                logger.debug(f"Filtering out JSON junk chunk (markers={marker_count}, density={json_density:.2f}): {chunk_row['rid']}")
+                                continue
+
+                            # Deduplicate overlapping content
+                            # Split into sentences and track what we've seen
+                            sentences = chunk_text.split('. ')
+                            unique_sentences = []
+
+                            for sentence in sentences:
+                                sentence = sentence.strip()
+                                if len(sentence) < 20:  # Skip very short fragments
+                                    unique_sentences.append(sentence)
+                                    continue
+
+                                # Use first 50 chars as dedup key
+                                sentence_key = sentence[:50] if len(sentence) > 50 else sentence
+                                if sentence_key not in seen_sentences:
+                                    seen_sentences.add(sentence_key)
+                                    unique_sentences.append(sentence)
+
+                            if unique_sentences:
+                                deduplicated_text = '. '.join(unique_sentences)
+                                texts.append(deduplicated_text)
+
+                            if not metadata and chunk_row['metadata']:
+                                metadata = chunk_row['metadata']
+
+                        if texts:
+                            result['text'] = '\n\n'.join(texts)
+                            logger.info(f"✅ Aggregated {len(texts)} chunks (filtered & deduplicated) into {len(result['text'])} chars")
+
+                            # Post-process: Remove any remaining JSON fragments
+                            import re
+                            original_len = len(result['text'])
+
+                            # Split into paragraphs for processing
+                            paragraphs = result['text'].split('\n\n')
+                            cleaned_paragraphs = []
+
+                            for para in paragraphs:
+                                # Skip paragraphs that are heavily JSON
+                                json_density = sum(1 for c in para if c in '{}[]":,\\') / len(para) if len(para) > 0 else 0
+
+                                # Skip if >20% JSON density or contains multiple JSON markers
+                                json_marker_count = sum([
+                                    para.count('"id":"'),
+                                    para.count('"children":['),
+                                    para.count('"parentId":"'),
+                                    para.count('"className":"'),
+                                    para.count('"type":"'),
+                                    para.count('"hasContent":'),
+                                    para.count(',"width":'),
+                                    para.count(',"height":')
+                                ])
+
+                                if json_density > 0.2 or json_marker_count >= 3:
+                                    continue
+
+                                # Clean individual lines within paragraph
+                                lines = para.split('\n')
+                                cleaned_lines = []
+                                for line in lines:
+                                    if not line.strip():
+                                        continue
+
+                                    # Skip lines with high JSON density
+                                    line_json_density = sum(1 for c in line if c in '{}[]":,\\') / len(line) if len(line) > 0 else 0
+                                    if line_json_density > 0.3:
+                                        continue
+
+                                    # Remove inline JSON fragments
+                                    cleaned_line = re.sub(r'\{[^}]{50,}\}', '', line)  # Remove long JSON objects
+                                    cleaned_line = re.sub(r',"[a-zA-Z_]+":(?:"[^"]*"|\[[^\]]*\]|\{[^}]*\})', '', cleaned_line)
+
+                                    if cleaned_line.strip():
+                                        cleaned_lines.append(cleaned_line)
+
+                                if cleaned_lines:
+                                    cleaned_paragraphs.append('\n'.join(cleaned_lines))
+
+                            result['text'] = '\n\n'.join(cleaned_paragraphs)
+
+                            # Clean up excessive whitespace
+                            result['text'] = re.sub(r'\n{3,}', '\n\n', result['text'])
+                            result['text'] = result['text'].strip()
+
+                            final_len = len(result['text'])
+                            if final_len < original_len:
+                                logger.info(f"🧹 Cleaned {original_len - final_len} chars of JSON fragments from aggregated text")
+
+                            # Get metadata for title
+                            if metadata and isinstance(metadata, dict):
+                                title = metadata.get('title', '')
+                                if title:
+                                    result['text'] = f"**Page Title**: {title}\n\n{result['text']}"
+
+                            logger.info(f"✅ NotebookLM: Using aggregated database chunks (no HTTP fetch needed)")
+                            return result
+
+                    logger.info(f"⚠️  Website content not in database, falling back to HTTP fetch for {url}")
 
         except Exception as e:
             logger.warning(f"❌ Error fetching from database: {e}, falling back to HTTP fetch")

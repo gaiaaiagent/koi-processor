@@ -39,6 +39,12 @@ class KnowledgeQuery(BaseModel):
     agent_id: Optional[str] = None
     limit: int = 10
     similarity_threshold: float = 0.7
+    source_filter: Optional[str] = None  # Filter by source_sensor (e.g., 'podcast')
+    include_metadata: Optional[bool] = True  # MCP client compatibility
+    filters: Optional[Dict[str, Any]] = None  # Date range and other filters for hybrid search
+
+    class Config:
+        extra = "ignore"  # Ignore any additional fields from clients
 
 class KnowledgeResponse(BaseModel):
     success: bool
@@ -167,7 +173,7 @@ async def root():
         }
     }
 
-async def call_hybrid_rag_api(query_text: str, agent_id: str, limit: int) -> Optional[Dict[str, Any]]:
+async def call_hybrid_rag_api(query_text: str, agent_id: str, limit: int, source_filter: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Call the Hybrid RAG API (RRF + BGE + Adaptive Extraction)
     Returns API response or None if unavailable
@@ -175,13 +181,18 @@ async def call_hybrid_rag_api(query_text: str, agent_id: str, limit: int) -> Opt
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             logger.info(f"🔍 Calling Hybrid RAG API for: {query_text[:50]}...")
+            payload = {
+                "question": query_text,
+                "agent_id": agent_id or "mcp-agent",
+                "user_id": "mcp-user"
+            }
+            if source_filter:
+                payload["source_filter"] = source_filter
+                logger.info(f"🎯 Filtering by source: {source_filter}")
+
             response = await client.post(
                 HYBRID_RAG_API_URL,
-                json={
-                    "question": query_text,
-                    "agent_id": agent_id or "mcp-agent",
-                    "user_id": "mcp-user"
-                }
+                json=payload
             )
 
             if response.status_code == 200:
@@ -196,28 +207,48 @@ async def call_hybrid_rag_api(query_text: str, agent_id: str, limit: int) -> Opt
             logger.warning(f"⚠️ Hybrid RAG API unavailable: {e}")
             return None
 
-async def fallback_text_search(query_text: str, limit: int) -> List[Dict[str, Any]]:
+async def fallback_text_search(query_text: str, limit: int, source_filter: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Fallback to simple text search when Hybrid RAG API is unavailable
     """
     logger.info("📝 Using fallback text search")
     async with db_pool.acquire() as conn:
-        results = await conn.fetch("""
-            SELECT
-                rid,
-                cid,
-                content,
-                metadata,
-                created_at,
-                source_sensor,
-                version
-            FROM koi_memories
-            WHERE content::text ILIKE $1
-               OR metadata::text ILIKE $1
-               OR source_sensor ILIKE $1
-            ORDER BY created_at DESC
-            LIMIT $2
-        """, f'%{query_text}%', limit)
+        if source_filter:
+            logger.info(f"🎯 Filtering by source: {source_filter}")
+            results = await conn.fetch("""
+                SELECT
+                    rid,
+                    cid,
+                    content,
+                    metadata,
+                    created_at,
+                    source_sensor,
+                    version
+                FROM koi_memories
+                WHERE (content::text ILIKE $1
+                   OR metadata::text ILIKE $1
+                   OR source_sensor ILIKE $1)
+                  AND source_sensor ILIKE $3
+                ORDER BY created_at DESC
+                LIMIT $2
+            """, f'%{query_text}%', limit, f'%{source_filter}%')
+        else:
+            results = await conn.fetch("""
+                SELECT
+                    rid,
+                    cid,
+                    content,
+                    metadata,
+                    created_at,
+                    source_sensor,
+                    version
+                FROM koi_memories
+                WHERE content::text ILIKE $1
+                   OR metadata::text ILIKE $1
+                   OR source_sensor ILIKE $1
+                ORDER BY created_at DESC
+                LIMIT $2
+            """, f'%{query_text}%', limit)
 
         memories = []
         for row in results:
@@ -415,7 +446,8 @@ async def search_knowledge(query: KnowledgeQuery):
         hybrid_result = await call_hybrid_rag_api(
             query.query,
             query.agent_id,
-            query.limit
+            query.limit,
+            query.source_filter
         )
 
         if hybrid_result:
@@ -447,7 +479,7 @@ async def search_knowledge(query: KnowledgeQuery):
 
         # Fallback to simple text search
         logger.info("⚠️ Hybrid RAG unavailable, using fallback")
-        memories = await fallback_text_search(query.query, query.limit)
+        memories = await fallback_text_search(query.query, query.limit, query.source_filter)
 
         return KnowledgeResponse(
             success=True,
@@ -586,6 +618,10 @@ MCP_TOOLS = [
                     "type": "number",
                     "description": "Maximum number of results (default: 10)",
                     "default": 10
+                },
+                "source_filter": {
+                    "type": "string",
+                    "description": "Filter by source sensor (e.g., 'podcast' to only search podcast content)"
                 }
             },
             "required": ["query"]
@@ -672,8 +708,9 @@ async def handle_mcp_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
         query_text = arguments.get("query", "")
         agent_id = arguments.get("agent_id")
         limit = arguments.get("limit", 10)
+        source_filter = arguments.get("source_filter")
 
-        hybrid_result = await call_hybrid_rag_api(query_text, agent_id, limit)
+        hybrid_result = await call_hybrid_rag_api(query_text, agent_id, limit, source_filter)
 
         if hybrid_result:
             # Format results for MCP response
@@ -702,7 +739,7 @@ async def handle_mcp_call_tool(params: Dict[str, Any]) -> Dict[str, Any]:
             }
         else:
             # Fallback search
-            memories = await fallback_text_search(query_text, limit)
+            memories = await fallback_text_search(query_text, limit, source_filter)
             return {
                 "content": [{
                     "type": "text",

@@ -29,8 +29,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def preview_digest(digest):
-    """Print a preview of the digest to console"""
+def preview_digest(digest, output_markdown=False):
+    """Print a preview of the digest to console
+
+    Args:
+        digest: The WeeklyDigest object
+        output_markdown: If True, output the full markdown content after preview
+    """
     print("\n" + "="*80)
     print("WEEKLY DIGEST PREVIEW")
     print("="*80)
@@ -67,8 +72,18 @@ def preview_digest(digest):
             for key, value in digest.stats.items():
                 if key != 'source_distribution':
                     print(f"{key}: {value}")
-    
+
     print("\n" + "="*80 + "\n")
+
+    # Output full markdown content if requested
+    if output_markdown and hasattr(digest, 'brief'):
+        print("\n" + "="*80)
+        print("MARKDOWN_CONTENT_START")
+        print("="*80)
+        print(digest.brief)
+        print("="*80)
+        print("MARKDOWN_CONTENT_END")
+        print("="*80)
 
 def test_digest():
     """Generate a test digest with sample data"""
@@ -87,7 +102,7 @@ def test_digest():
         "koi_coordinator_url": "http://localhost:8000",
         "content": {
             "min_confidence": 0.5,
-            "max_items": 50,
+            "max_items": 1000,
             "clustering_eps": 0.3,
             "min_cluster_size": 2,
             "brief_word_count": 1000
@@ -224,8 +239,8 @@ Examples:
     if digest:
         # Preview
         if args.preview:
-            preview_digest(digest)
-            print("\n📋 Preview mode - no files saved")
+            preview_digest(digest, output_markdown=True)
+            print("\n📋 Preview mode - no files saved", file=sys.stderr)
         else:
             # Generate filename with date
             date_str = digest.week_end.strftime('%Y-%m-%d')

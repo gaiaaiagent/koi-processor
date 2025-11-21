@@ -8,6 +8,8 @@ import sys
 import os
 import asyncio
 import logging
+import argparse
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -23,14 +25,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def main():
-    """Main execution function"""
+async def main(start_date=None, end_date=None):
+    """Main execution function
+
+    Args:
+        start_date: Start date for digest (YYYY-MM-DD) or None for 7 days ago
+        end_date: End date for digest (YYYY-MM-DD) or None for today
+    """
     try:
         # Import the new curator's main function directly
         # This avoids duplication since the main() already saves to DB
         from src.content.weekly_curator_llm import main as curator_main
 
-        logger.info("Generating weekly digest with LLM (includes ALL content)...")
+        # Set environment variables for date range if provided
+        if start_date:
+            os.environ['DIGEST_START_DATE'] = start_date
+        if end_date:
+            os.environ['DIGEST_END_DATE'] = end_date
+
+        logger.info(f"Generating weekly digest with LLM (includes ALL content)... Date range: {start_date or '7 days ago'} to {end_date or 'today'}")
 
         # Run the curator's main function which handles everything
         digest = await curator_main()
@@ -48,6 +61,12 @@ async def main():
         return 1
 
 if __name__ == "__main__":
-    # Run the async main function
-    exit_code = asyncio.run(main())
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Generate weekly digest with optional date range')
+    parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD), defaults to 7 days ago')
+    parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD), defaults to today')
+    args = parser.parse_args()
+
+    # Run async main
+    exit_code = asyncio.run(main(args.start_date, args.end_date))
     sys.exit(exit_code)
