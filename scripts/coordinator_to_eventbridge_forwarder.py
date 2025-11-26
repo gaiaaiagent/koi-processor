@@ -17,8 +17,9 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("koi.forwarder")
 
-COORDINATOR_URL = "http://localhost:8200"
+COORDINATOR_URL = "http://localhost:8005"
 EVENT_BRIDGE_URL = "http://localhost:8100"  # Event Bridge v2 port
+CODE_GRAPH_URL = "http://localhost:8350"  # Code Graph Service port
 POLL_INTERVAL = 2  # seconds - faster for testing
 NODE_ID = "event-bridge-forwarder"
 MAX_CONCURRENT = 10  # Limit concurrent processing to avoid DB connection exhaustion
@@ -53,15 +54,26 @@ async def forward_events():
                         # Forward events in PARALLEL using asyncio.gather (MAJOR SPEEDUP!)
                         async def forward_single_event(event, event_id):
                             try:
-                                eb_response = await client.post(
-                                    f"{EVENT_BRIDGE_URL}/process-koi-event",
-                                    json=event
-                                )
-                                if eb_response.status_code == 200:
+                                # Send to both Event Bridge AND Code Graph Service in parallel
+                                eb_task = client.post(f"{EVENT_BRIDGE_URL}/process-koi-event", json=event)
+                                cg_task = client.post(f"{CODE_GRAPH_URL}/process-koi-event", json=event)
+                                
+                                eb_response, cg_response = await asyncio.gather(eb_task, cg_task, return_exceptions=True)
+                                
+                                # Check Event Bridge response
+                                eb_success = not isinstance(eb_response, Exception) and eb_response.status_code == 200
+                                
+                                # Check Code Graph response (allow it to fail silently if not a code file)
+                                if isinstance(cg_response, Exception):
+                                    logger.debug(f"Code Graph Service connection error: {cg_response}")
+                                elif cg_response.status_code != 200:
+                                    logger.debug(f"Code Graph Service error {cg_response.status_code}: {cg_response.text[:100]}")
+                                
+                                if eb_success:
                                     logger.info(f"Successfully forwarded event: {event.get('rid', 'unknown')}")
                                     return event_id
                                 else:
-                                    logger.error(f"Event Bridge error {eb_response.status_code}: {eb_response.text}")
+                                    logger.error(f"Event Bridge error {eb_response.status_code if not isinstance(eb_response, Exception) else eb_response}: {eb_response.text if not isinstance(eb_response, Exception) else ''}")
                                     return None
                             except Exception as e:
                                 logger.error(f"Error forwarding event: {e}")

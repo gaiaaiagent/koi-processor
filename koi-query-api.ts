@@ -661,6 +661,151 @@ Answer the question using the context above.`;
   }
 });
 
+// Graph Query Endpoint - Direct Apache AGE access
+app.post('/api/koi/graph', async (req, res) => {
+  try {
+    const { query_type, ...params } = req.body;
+
+    if (!query_type) {
+      return res.status(400).json({ error: 'query_type is required' });
+    }
+
+    // Create a client for this request to manage AGE setup
+    const client = await pool.connect();
+
+    try {
+      // Load AGE extension and set search path
+      await client.query("LOAD 'age'");
+      await client.query("SET search_path = ag_catalog, '$user', public");
+
+      let cypherQuery = '';
+      let queryParams: any[] = [];
+
+      // Build cypher query based on query_type
+      switch (query_type) {
+        case 'list_repos':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$ MATCH (r:Repository) RETURN r.name as name, r.url as url ORDER BY r.name $$) as (name agtype, url agtype)`;
+          break;
+
+        case 'find_by_type':
+          const entityType = params.entity_type || 'Function';
+          const limit = params.limit || 10;
+          const repoFilter = params.repo_name ? `WHERE r.name = '${params.repo_name}'` : '';
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n:${entityType})
+            ${repoFilter ? `MATCH (n)-[:DEFINED_IN]->(f:File)-[:IN_REPO]->(r:Repository) ${repoFilter}` : ''}
+            RETURN n.name as name, n.signature as signature, n.description as description
+            LIMIT ${limit}
+          $$) as (name agtype, signature agtype, description agtype)`;
+          break;
+
+        case 'search_entities':
+          const searchTerm = params.entity_name || '';
+          const searchLimit = params.limit || 10;
+          const searchRepoFilter = params.repo_name ? `MATCH (n)-[:DEFINED_IN]->(f:File)-[:IN_REPO]->(r:Repository) WHERE r.name = '${params.repo_name}' AND` : 'WHERE';
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            ${searchRepoFilter} n.name =~ '(?i).*${searchTerm}.*'
+            RETURN labels(n)[0] as type, n.name as name, n.signature as signature, n.description as description
+            LIMIT ${searchLimit}
+          $$) as (type agtype, name agtype, signature agtype, description agtype)`;
+          break;
+
+        case 'list_modules':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (m:Module)
+            RETURN m.name as name, m.path as path
+            ORDER BY m.name
+          $$) as (name agtype, path agtype)`;
+          break;
+
+        case 'get_module':
+          const moduleName = params.module_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (m:Module {name: '${moduleName}'})
+            OPTIONAL MATCH (m)<-[:IN_MODULE]-(e)
+            RETURN m.name as module_name, m.path as module_path, labels(e)[0] as entity_type, e.name as entity_name
+          $$) as (module_name agtype, module_path agtype, entity_type agtype, entity_name agtype)`;
+          break;
+
+        case 'keeper_for_msg':
+          const msgName = params.entity_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (msg {name: '${msgName}'})-[:HANDLED_BY]->(k:Keeper)
+            RETURN k.name as keeper_name, k.signature as signature
+          $$) as (keeper_name agtype, signature agtype)`;
+          break;
+
+        case 'msgs_for_keeper':
+          const keeperName = params.entity_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (k:Keeper {name: '${keeperName}'})<-[:HANDLED_BY]-(msg)
+            RETURN msg.name as msg_name, msg.signature as signature
+          $$) as (msg_name agtype, signature agtype)`;
+          break;
+
+        case 'related_entities':
+          const entityName = params.entity_name || '';
+          const relatedLimit = params.limit || 10;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n {name: '${entityName}'})-[r]-(related)
+            RETURN labels(related)[0] as type, related.name as name, type(r) as relationship
+            LIMIT ${relatedLimit}
+          $$) as (type agtype, name agtype, relationship agtype)`;
+          break;
+
+        default:
+          return res.status(400).json({ error: `Unknown query_type: ${query_type}` });
+      }
+
+      // Execute the cypher query
+      const result = await client.query(cypherQuery, queryParams);
+
+      // Convert agtype results to plain JSON
+      const rows = result.rows.map(row => {
+        const converted: any = {};
+        for (const key in row) {
+          const value = row[key];
+          // AGE returns values as JSON strings, parse them
+          if (value === null || value === undefined) {
+            converted[key] = null;
+          } else if (typeof value === 'string') {
+            try {
+              // Try to parse as JSON (AGE agtype format)
+              const parsed = JSON.parse(value);
+              converted[key] = parsed;
+            } catch {
+              // If not JSON, keep as string
+              converted[key] = value;
+            }
+          } else {
+            converted[key] = value;
+          }
+        }
+        return converted;
+      });
+
+      res.json({
+        query_type,
+        total_results: rows.length,
+        results: rows
+      });
+
+    } finally {
+      client.release();
+    }
+
+  } catch (error) {
+    console.error('Graph query error:', error);
+    res.status(500).json({
+      error: 'Graph query failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 // Proxy middleware for KOI services
 const proxyToService = (serviceUrl: string) => {
   return async (req: express.Request, res: express.Response) => {
@@ -677,17 +822,17 @@ const proxyToService = (serviceUrl: string) => {
 
       const data = await response.text();
       res.status(response.status);
-      
+
       // Set content type based on response
       const contentType = response.headers.get('content-type');
       if (contentType) {
         res.set('Content-Type', contentType);
       }
-      
+
       res.send(data);
     } catch (error) {
       console.error(`Proxy error for ${req.originalUrl}:`, error);
-      res.status(503).json({ 
+      res.status(503).json({
         error: 'Service unavailable',
         service: serviceUrl,
         message: error instanceof Error ? error.message : 'Unknown error'
@@ -697,7 +842,7 @@ const proxyToService = (serviceUrl: string) => {
 };
 
 // KOI Service Proxies (Development API Gateway)
-app.use('/api/koi/graph/', proxyToService('http://localhost:8002'));
+// Note: /api/koi/graph is handled directly above, not proxied
 app.use('/api/koi/coordinator/', proxyToService('http://localhost:8005'));
 app.use('/api/koi/event-bridge/', proxyToService('http://localhost:8100'));
 app.use('/api/koi/bge/', proxyToService('http://localhost:8090'));

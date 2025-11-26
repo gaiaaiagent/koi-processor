@@ -39,6 +39,7 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Daily Content Curator**: LLM-enhanced daily X posts with comprehensive ledger integration
 - ✅ **Weekly Aggregator**: AI-powered weekly digest with on-chain activity tracking
 
+- ✅ **Code Graph Service**: Automatic code entity extraction into Apache AGE graph
 ## Project Structure
 
 ```
