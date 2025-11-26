@@ -50,6 +50,9 @@ BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
 USE_ISOLATED_TABLES = os.getenv('USE_ISOLATED_TABLES', 'true').lower() == 'true'
 KG_EXTRACTION_ENABLED = os.getenv('KG_EXTRACTION_ENABLED', 'false').lower() == 'true'
 
+# Global connection pool (shared across all requests)
+db_pool: Optional[asyncpg.Pool] = None
+
 # Pydantic models - KOI Protocol compliant
 class KOIManifest(BaseModel):
     rid: str
@@ -454,332 +457,332 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
     """Process a KOI event with deduplication and versioning"""
     start_time = time.time()
     try:
-        async with asyncpg.create_pool(DB_URL) as pool:
-            async with pool.acquire() as conn:
-                # Extract URL if this is a web page
-                source_url = None
-                if event.bundle and event.bundle.manifest.metadata:
-                    # Check for URL in metadata
-                    source_url = event.bundle.manifest.metadata.get('url') or event.bundle.manifest.metadata.get('source_url')
+        # Use global connection pool instead of creating new one
+        async with db_pool.acquire() as conn:
+            # Extract URL if this is a web page
+            source_url = None
+            if event.bundle and event.bundle.manifest.metadata:
+                # Check for URL in metadata
+                source_url = event.bundle.manifest.metadata.get('url') or event.bundle.manifest.metadata.get('source_url')
 
-                # For web pages, check by URL to handle re-crawls properly
-                if source_url and source_url.startswith('http'):
-                    existing = await check_existing_memory(conn, event.bundle.rid, url=source_url)
-                else:
-                    # Check for existing memory with this RID
-                    existing = await check_existing_memory(conn, event.bundle.rid)
-                
-                # Handle based on event type
-                if event.event_type == "FORGET":
-                    if existing and USE_ISOLATED_TABLES:
-                        # Mark as superseded without creating new version
-                        await conn.execute("""
-                            UPDATE koi_memories 
-                            SET superseded_at = $1 
-                            WHERE rid = $2 AND superseded_at IS NULL
-                        """, datetime.now(tz=timezone.utc), event.bundle.rid)
-                        
-                        return ProcessingResult(
-                            success=True,
-                            rid=event.bundle.rid,
-                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
-                            chunks_created=0,
-                            embeddings_created=0
-                        )
-                    else:
-                        # TODO: Implement deletion for legacy tables
-                        return ProcessingResult(
-                            success=True,
-                            rid=event.bundle.rid,
-                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
-                            chunks_created=0,
-                            embeddings_created=0
-                        )
-                
-                elif event.event_type == "NEW" and existing:
-                    # For web pages with URLs, we'll handle this later with content hash checking
-                    if not source_url:
-                        # Only skip if not a web page (no URL)
-                        logger.info(f"RID {event.bundle.rid} already exists (non-web content), skipping NEW event")
-                        return ProcessingResult(
-                            success=True,
-                            rid=event.bundle.rid,
-                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
-                            chunks_created=0,
-                            embeddings_created=0,
-                            error="Already exists"
-                        )
-                    # For web pages, continue to content hash checking below
-                
-                elif event.event_type == "UPDATE" and not existing:
-                    # No previous version to update, treat as NEW
-                    logger.info(f"No existing version for RID {event.bundle.rid}, treating UPDATE as NEW")
-                    event.event_type = "NEW"
-                
-                # Extract text content
-                text_content = await extract_text_from_bundle(event.bundle)
-
-                # Debug logging
-                logger.info(f"Extracted text content length: {len(text_content) if text_content else 0}")
-                if text_content:
-                    logger.info(f"Content preview: {text_content[:200]}")
-
-                if not text_content or len(text_content.strip()) < 50:
+            # For web pages, check by URL to handle re-crawls properly
+            if source_url and source_url.startswith('http'):
+                existing = await check_existing_memory(conn, event.bundle.rid, url=source_url)
+            else:
+                # Check for existing memory with this RID
+                existing = await check_existing_memory(conn, event.bundle.rid)
+            
+            # Handle based on event type
+            if event.event_type == "FORGET":
+                if existing and USE_ISOLATED_TABLES:
+                    # Mark as superseded without creating new version
+                    await conn.execute("""
+                        UPDATE koi_memories 
+                        SET superseded_at = $1 
+                        WHERE rid = $2 AND superseded_at IS NULL
+                    """, datetime.now(tz=timezone.utc), event.bundle.rid)
+                    
                     return ProcessingResult(
-                        success=False,
+                        success=True,
+                        rid=event.bundle.rid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
+                        chunks_created=0,
+                        embeddings_created=0
+                    )
+                else:
+                    # TODO: Implement deletion for legacy tables
+                    return ProcessingResult(
+                        success=True,
+                        rid=event.bundle.rid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
+                        chunks_created=0,
+                        embeddings_created=0
+                    )
+            
+            elif event.event_type == "NEW" and existing:
+                # For web pages with URLs, we'll handle this later with content hash checking
+                if not source_url:
+                    # Only skip if not a web page (no URL)
+                    logger.info(f"RID {event.bundle.rid} already exists (non-web content), skipping NEW event")
+                    return ProcessingResult(
+                        success=True,
                         rid=event.bundle.rid,
                         cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
                         chunks_created=0,
                         embeddings_created=0,
-                        error="Content too short or empty"
+                        error="Already exists"
                     )
+                # For web pages, continue to content hash checking below
+            
+            elif event.event_type == "UPDATE" and not existing:
+                # No previous version to update, treat as NEW
+                logger.info(f"No existing version for RID {event.bundle.rid}, treating UPDATE as NEW")
+                event.event_type = "NEW"
+            
+            # Extract text content
+            text_content = await extract_text_from_bundle(event.bundle)
 
-                # Calculate content hash for deduplication
-                content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
+            # Debug logging
+            logger.info(f"Extracted text content length: {len(text_content) if text_content else 0}")
+            if text_content:
+                logger.info(f"Content preview: {text_content[:200]}")
 
-                # Check if we have this exact content already (deduplication)
-                if USE_ISOLATED_TABLES:
-                    # For web pages, re-check by URL with the content hash
-                    if source_url:
-                        existing_by_url = await check_existing_memory(conn, event.bundle.rid, url=source_url)
-                        if existing_by_url:
-                            # Check if content changed
-                            if existing_by_url.get('content_hash') == content_hash:
-                                # Content hasn't changed, skip processing
-                                logger.info(f"URL {source_url} has unchanged content (hash: {content_hash[:8]}...), skipping")
-                                return ProcessingResult(
-                                    success=True,
-                                    rid=event.bundle.rid,
-                                    cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
-                                    chunks_created=0,
-                                    embeddings_created=0,
-                                    version=existing_by_url.get('version'),
-                                    error="Content unchanged, skipped processing"
-                                )
-                            else:
-                                # Content changed, treat as UPDATE
-                                logger.info(f"URL {source_url} has new content, converting NEW to UPDATE")
-                                event.event_type = "UPDATE"
-                                existing = existing_by_url  # Use the URL-matched entry as existing
-                    else:
-                        # Non-web content, check by RID and hash
-                        existing_with_same_hash = await check_existing_memory(conn, event.bundle.rid, content_hash)
+            if not text_content or len(text_content.strip()) < 50:
+                return ProcessingResult(
+                    success=False,
+                    rid=event.bundle.rid,
+                    cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
+                    chunks_created=0,
+                    embeddings_created=0,
+                    error="Content too short or empty"
+                )
 
-                        if existing_with_same_hash:
+            # Calculate content hash for deduplication
+            content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
+
+            # Check if we have this exact content already (deduplication)
+            if USE_ISOLATED_TABLES:
+                # For web pages, re-check by URL with the content hash
+                if source_url:
+                    existing_by_url = await check_existing_memory(conn, event.bundle.rid, url=source_url)
+                    if existing_by_url:
+                        # Check if content changed
+                        if existing_by_url.get('content_hash') == content_hash:
                             # Content hasn't changed, skip processing
-                            logger.info(f"RID {event.bundle.rid} has unchanged content (hash: {content_hash[:8]}...), skipping")
+                            logger.info(f"URL {source_url} has unchanged content (hash: {content_hash[:8]}...), skipping")
                             return ProcessingResult(
                                 success=True,
                                 rid=event.bundle.rid,
                                 cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
                                 chunks_created=0,
                                 embeddings_created=0,
-                                version=existing_with_same_hash.get('version'),
+                                version=existing_by_url.get('version'),
                                 error="Content unchanged, skipped processing"
                             )
-
-                        # If we have a different version, this should be an UPDATE
-                        if existing and event.event_type == "NEW":
-                            logger.info(f"RID {event.bundle.rid} exists with different content, converting NEW to UPDATE")
+                        else:
+                            # Content changed, treat as UPDATE
+                            logger.info(f"URL {source_url} has new content, converting NEW to UPDATE")
                             event.event_type = "UPDATE"
-                
-                # Chunk the text
-                chunks = chunk_text(text_content)
-                
-                if not chunks:
-                    return ProcessingResult(
-                        success=False,
-                        rid=event.bundle.rid,
-                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
-                        chunks_created=0,
-                        embeddings_created=0,
-                        error="No chunks created"
-                    )
-                
-                # Process each chunk
-                embeddings_created = 0
-                memory_ids = []
+                            existing = existing_by_url  # Use the URL-matched entry as existing
+                else:
+                    # Non-web content, check by RID and hash
+                    existing_with_same_hash = await check_existing_memory(conn, event.bundle.rid, content_hash)
 
-                # Extract document metadata if it exists
-                doc_metadata = {}
-                if isinstance(event.bundle.contents, dict):
-                    if 'document' in event.bundle.contents and isinstance(event.bundle.contents['document'], dict):
-                        doc = event.bundle.contents['document']
-                        if 'metadata' in doc and isinstance(doc['metadata'], dict):
-                            doc_metadata = doc['metadata']
-
-                for i, chunk in enumerate(chunks):
-                    # Create memory for chunk
-                    chunk_rid = f"{event.bundle.rid}#chunk{i}"
-                    # Calculate chunk content hash for CID
-                    chunk_hash = hashlib.sha256(chunk.encode()).hexdigest()
-                    chunk_event = KOIEvent(
-                        event_type=event.event_type,
-                        rid=chunk_rid,
-                        source_node=event.source_node,
-                        timestamp=event.timestamp,
-                        bundle=KOIBundle(
-                            rid=chunk_rid,
-                            manifest=KOIManifest(
-                                rid=chunk_rid,
-                                timestamp=event.timestamp,
-                                content_hash=chunk_hash,
-                                size_bytes=len(chunk.encode()),
-                                content_type="text/plain",
-                                version="1.0",
-                                metadata={
-                                    **event.bundle.manifest.metadata,
-                                    **doc_metadata,  # Include document metadata (post details, etc.)
-                                    "chunk_index": i,
-                                    "chunk_total": len(chunks),
-                                    "parent_rid": event.bundle.rid
-                                }
-                            ),
-                            contents={"text": chunk}
-                        )
-                    )
-                    
-                    # Check if chunk already exists
-                    chunk_existing = await check_existing_memory(conn, chunk_rid)
-                    
-                    # Create new version if needed
-                    if event.event_type == "NEW" and not chunk_existing:
-                        memory_id = await create_new_version(conn, chunk_event, None, chunk)
-                    elif event.event_type == "UPDATE":
-                        memory_id = await create_new_version(conn, chunk_event, chunk_existing, chunk)
-                    else:
-                        continue  # Skip if already exists
-                    
-                    memory_ids.append(memory_id)
-
-                    # Create CAT receipt for memory creation (only if transformation occurred)
-                    # Skip if this is just a forwarding operation where input equals output
-                    if event.bundle.rid != chunk_rid:  # Only create receipt if we actually transformed
-                        await create_cat_receipt(
-                            conn=conn,
-                            transformation_type="koi_to_memory",
-                            input_rid=event.bundle.rid,
-                            output_rid=chunk_rid,
-                            input_cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else None,
-                            output_cid=f"cid:sha256:{chunk_hash}",
-                            chunks_created=1,
-                            source_sensor=event.source_node,
-                            event_type=event.event_type,
-                            metadata={"chunk_index": i, "chunk_total": len(chunks)}
-                        )
-
-                    # Generate and store embedding
-                    embedding_start = time.time()
-                    embedding = await generate_embedding_bge(chunk)
-                    if embedding and await store_embedding(conn, memory_id, embedding):
-                        embeddings_created += 1
-                        embedding_time_ms = int((time.time() - embedding_start) * 1000)
-
-                        # Create CAT receipt for embedding generation
-                        await create_embedding_receipt(
-                            conn=conn,
-                            memory_id=memory_id,
-                            rid=chunk_rid,
-                            embedding_model="bge-large-en-v1.5",
-                            embedding_dim=len(embedding),
-                            source_sensor=event.source_node,
-                            processing_time_ms=embedding_time_ms
-                        )
-
-                    # Brief delay to avoid overwhelming the embedding server
-                    await asyncio.sleep(0.05)
-
-                # Trigger KG extraction on the full document (not chunks)
-                # Only extract from NEW or UPDATE events with sufficient content
-                if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100:
-                    # Build metadata for KG extraction
-                    kg_metadata = {
-                        'source_url': source_url or event.bundle.manifest.metadata.get('url'),
-                        'source_sensor': event.source_node,
-                        'event_type': event.event_type,
-                        **event.bundle.manifest.metadata
-                    }
-
-                    # Extract from the original document RID, not chunk RIDs
-                    await trigger_kg_extraction(
-                        memory_rid=event.bundle.rid,
-                        content=text_content,
-                        metadata=kg_metadata
-                    )
-
-                # Get version info for response
-                version = None
-                previous_version_id = None
-                if USE_ISOLATED_TABLES and memory_ids:
-                    result = await conn.fetchrow("""
-                        SELECT version, previous_version_id 
-                        FROM koi_memories 
-                        WHERE id = $1
-                    """, memory_ids[0])
-                    if result:
-                        version = result['version']
-                        previous_version_id = str(result['previous_version_id']) if result['previous_version_id'] else None
-                
-                # Calculate total processing time
-                processing_time_ms = int((time.time() - start_time) * 1000)
-
-                # Create overall transformation receipt (only if we created chunks)
-                cat_receipt_id = None
-                if memory_ids and USE_ISOLATED_TABLES and len(chunks) > 1:
-                    # Only create overall receipt if we actually chunked the content
-                    cat_receipt_id = await create_cat_receipt(
-                        conn=conn,
-                        transformation_type="koi_event_processing",
-                        input_rid=event.bundle.rid,
-                        output_rid=event.bundle.rid,
-                        chunks_created=len(memory_ids),
-                        embeddings_created=embeddings_created,
-                        source_sensor=event.source_node,
-                        event_type=event.event_type,
-                        processing_duration_ms=processing_time_ms,
-                        metadata={
-                            "version": version,
-                            "chunks_processed": len(memory_ids),
-                            "content_hash": content_hash[:8] + "..."  # Store abbreviated hash for tracking
-                        }
-                    )
-
-                # Write provenance to RDF knowledge graph
-                try:
-                    prdf = ProvenanceToRDF()
-                    if await prdf.check_fuseki_connection():
-                        # Extract sensor ID from source_node
-                        sensor_id = event.source_node.split(":")[-1] if ":" in event.source_node else event.source_node
-
-                        # Write document provenance
-                        await prdf.write_document_provenance(
+                    if existing_with_same_hash:
+                        # Content hasn't changed, skip processing
+                        logger.info(f"RID {event.bundle.rid} has unchanged content (hash: {content_hash[:8]}...), skipping")
+                        return ProcessingResult(
+                            success=True,
                             rid=event.bundle.rid,
-                            sensor_id=sensor_id,
-                            event_type=event.event_type,
-                            timestamp=event.timestamp,
-                            title=event.bundle.contents.get("title", event.bundle.rid),
-                            content_hash=event.bundle.manifest.content_hash,
-                            processors=["event-bridge", "bge-embeddings"],
-                            storage_locations=["postgresql"],
-                            cat_receipt_id=cat_receipt_id
+                            cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
+                            chunks_created=0,
+                            embeddings_created=0,
+                            version=existing_with_same_hash.get('version'),
+                            error="Content unchanged, skipped processing"
                         )
-                        logger.info(f"Wrote provenance to RDF for {event.bundle.rid}")
-                    else:
-                        logger.warning("Apache Jena Fuseki not available for provenance writing")
-                except Exception as e:
-                    logger.error(f"Failed to write provenance to RDF: {e}")
-                    # Don't fail the whole process if RDF writing fails
 
+                    # If we have a different version, this should be an UPDATE
+                    if existing and event.event_type == "NEW":
+                        logger.info(f"RID {event.bundle.rid} exists with different content, converting NEW to UPDATE")
+                        event.event_type = "UPDATE"
+            
+            # Chunk the text
+            chunks = chunk_text(text_content)
+            
+            if not chunks:
                 return ProcessingResult(
-                    success=True,
+                    success=False,
                     rid=event.bundle.rid,
                     cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
-                    chunks_created=len(memory_ids),
-                    embeddings_created=embeddings_created,
-                    version=version,
-                    previous_version_id=previous_version_id
+                    chunks_created=0,
+                    embeddings_created=0,
+                    error="No chunks created"
+                )
+            
+            # Process each chunk
+            embeddings_created = 0
+            memory_ids = []
+
+            # Extract document metadata if it exists
+            doc_metadata = {}
+            if isinstance(event.bundle.contents, dict):
+                if 'document' in event.bundle.contents and isinstance(event.bundle.contents['document'], dict):
+                    doc = event.bundle.contents['document']
+                    if 'metadata' in doc and isinstance(doc['metadata'], dict):
+                        doc_metadata = doc['metadata']
+
+            for i, chunk in enumerate(chunks):
+                # Create memory for chunk
+                chunk_rid = f"{event.bundle.rid}#chunk{i}"
+                # Calculate chunk content hash for CID
+                chunk_hash = hashlib.sha256(chunk.encode()).hexdigest()
+                chunk_event = KOIEvent(
+                    event_type=event.event_type,
+                    rid=chunk_rid,
+                    source_node=event.source_node,
+                    timestamp=event.timestamp,
+                    bundle=KOIBundle(
+                        rid=chunk_rid,
+                        manifest=KOIManifest(
+                            rid=chunk_rid,
+                            timestamp=event.timestamp,
+                            content_hash=chunk_hash,
+                            size_bytes=len(chunk.encode()),
+                            content_type="text/plain",
+                            version="1.0",
+                            metadata={
+                                **event.bundle.manifest.metadata,
+                                **doc_metadata,  # Include document metadata (post details, etc.)
+                                "chunk_index": i,
+                                "chunk_total": len(chunks),
+                                "parent_rid": event.bundle.rid
+                            }
+                        ),
+                        contents={"text": chunk}
+                    )
                 )
                 
+                # Check if chunk already exists
+                chunk_existing = await check_existing_memory(conn, chunk_rid)
+                
+                # Create new version if needed
+                if event.event_type == "NEW" and not chunk_existing:
+                    memory_id = await create_new_version(conn, chunk_event, None, chunk)
+                elif event.event_type == "UPDATE":
+                    memory_id = await create_new_version(conn, chunk_event, chunk_existing, chunk)
+                else:
+                    continue  # Skip if already exists
+                
+                memory_ids.append(memory_id)
+
+                # Create CAT receipt for memory creation (only if transformation occurred)
+                # Skip if this is just a forwarding operation where input equals output
+                if event.bundle.rid != chunk_rid:  # Only create receipt if we actually transformed
+                    await create_cat_receipt(
+                        conn=conn,
+                        transformation_type="koi_to_memory",
+                        input_rid=event.bundle.rid,
+                        output_rid=chunk_rid,
+                        input_cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else None,
+                        output_cid=f"cid:sha256:{chunk_hash}",
+                        chunks_created=1,
+                        source_sensor=event.source_node,
+                        event_type=event.event_type,
+                        metadata={"chunk_index": i, "chunk_total": len(chunks)}
+                    )
+
+                # Generate and store embedding
+                embedding_start = time.time()
+                embedding = await generate_embedding_bge(chunk)
+                if embedding and await store_embedding(conn, memory_id, embedding):
+                    embeddings_created += 1
+                    embedding_time_ms = int((time.time() - embedding_start) * 1000)
+
+                    # Create CAT receipt for embedding generation
+                    await create_embedding_receipt(
+                        conn=conn,
+                        memory_id=memory_id,
+                        rid=chunk_rid,
+                        embedding_model="bge-large-en-v1.5",
+                        embedding_dim=len(embedding),
+                        source_sensor=event.source_node,
+                        processing_time_ms=embedding_time_ms
+                    )
+
+                # Delay removed for maximum throughput - OpenAI can handle the load
+                # await asyncio.sleep(0.05)
+
+            # Trigger KG extraction on the full document (not chunks)
+            # Only extract from NEW or UPDATE events with sufficient content
+            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100:
+                # Build metadata for KG extraction
+                kg_metadata = {
+                    'source_url': source_url or event.bundle.manifest.metadata.get('url'),
+                    'source_sensor': event.source_node,
+                    'event_type': event.event_type,
+                    **event.bundle.manifest.metadata
+                }
+
+                # Extract from the original document RID, not chunk RIDs
+                await trigger_kg_extraction(
+                    memory_rid=event.bundle.rid,
+                    content=text_content,
+                    metadata=kg_metadata
+                )
+
+            # Get version info for response
+            version = None
+            previous_version_id = None
+            if USE_ISOLATED_TABLES and memory_ids:
+                result = await conn.fetchrow("""
+                    SELECT version, previous_version_id 
+                    FROM koi_memories 
+                    WHERE id = $1
+                """, memory_ids[0])
+                if result:
+                    version = result['version']
+                    previous_version_id = str(result['previous_version_id']) if result['previous_version_id'] else None
+            
+            # Calculate total processing time
+            processing_time_ms = int((time.time() - start_time) * 1000)
+
+            # Create overall transformation receipt (only if we created chunks)
+            cat_receipt_id = None
+            if memory_ids and USE_ISOLATED_TABLES and len(chunks) > 1:
+                # Only create overall receipt if we actually chunked the content
+                cat_receipt_id = await create_cat_receipt(
+                    conn=conn,
+                    transformation_type="koi_event_processing",
+                    input_rid=event.bundle.rid,
+                    output_rid=event.bundle.rid,
+                    chunks_created=len(memory_ids),
+                    embeddings_created=embeddings_created,
+                    source_sensor=event.source_node,
+                    event_type=event.event_type,
+                    processing_duration_ms=processing_time_ms,
+                    metadata={
+                        "version": version,
+                        "chunks_processed": len(memory_ids),
+                        "content_hash": content_hash[:8] + "..."  # Store abbreviated hash for tracking
+                    }
+                )
+
+            # Write provenance to RDF knowledge graph
+            try:
+                prdf = ProvenanceToRDF()
+                if await prdf.check_fuseki_connection():
+                    # Extract sensor ID from source_node
+                    sensor_id = event.source_node.split(":")[-1] if ":" in event.source_node else event.source_node
+
+                    # Write document provenance
+                    await prdf.write_document_provenance(
+                        rid=event.bundle.rid,
+                        sensor_id=sensor_id,
+                        event_type=event.event_type,
+                        timestamp=event.timestamp,
+                        title=event.bundle.contents.get("title", event.bundle.rid),
+                        content_hash=event.bundle.manifest.content_hash,
+                        processors=["event-bridge", "bge-embeddings"],
+                        storage_locations=["postgresql"],
+                        cat_receipt_id=cat_receipt_id
+                    )
+                    logger.info(f"Wrote provenance to RDF for {event.bundle.rid}")
+                else:
+                    logger.warning("Apache Jena Fuseki not available for provenance writing")
+            except Exception as e:
+                logger.error(f"Failed to write provenance to RDF: {e}")
+                # Don't fail the whole process if RDF writing fails
+
+            return ProcessingResult(
+                success=True,
+                rid=event.bundle.rid,
+                cid=f"cid:sha256:{event.bundle.manifest.content_hash}" if event.bundle else "",
+                chunks_created=len(memory_ids),
+                embeddings_created=embeddings_created,
+                version=version,
+                previous_version_id=previous_version_id
+            )
+            
     except Exception as e:
         logger.error(f"Error processing event: {e}", exc_info=True)
         return ProcessingResult(
@@ -842,59 +845,86 @@ async def process_event_endpoint(event: KOIEvent):
 async def get_stats():
     """Get pipeline statistics"""
     try:
-        async with asyncpg.create_pool(DB_URL) as pool:
-            async with pool.acquire() as conn:
-                if USE_ISOLATED_TABLES:
-                    result = await conn.fetchrow("""
-                        SELECT 
-                            COUNT(DISTINCT rid) as unique_documents,
-                            COUNT(*) as total_versions,
-                            COUNT(CASE WHEN event_type = 'NEW' THEN 1 END) as new_events,
-                            COUNT(CASE WHEN event_type = 'UPDATE' THEN 1 END) as update_events,
-                            COUNT(DISTINCT source_sensor) as active_sensors,
-                            MAX(created_at) as latest_event
-                        FROM koi_memories
-                    """)
-                    
-                    embeddings = await conn.fetchrow("""
-                        SELECT 
-                            COUNT(dim_768) as gemma_embeddings,
-                            COUNT(dim_1024) as bge_embeddings
-                        FROM koi_embeddings
-                    """)
-                    
-                    return {
-                        "unique_documents": result['unique_documents'],
-                        "total_versions": result['total_versions'],
-                        "new_events": result['new_events'],
-                        "update_events": result['update_events'],
-                        "active_sensors": result['active_sensors'],
-                        "latest_event": result['latest_event'].isoformat() if result['latest_event'] else None,
-                        "embeddings": {
-                            "bge": embeddings['bge_embeddings'],
-                            "gemma": embeddings['gemma_embeddings']
-                        }
+        # Use global connection pool instead of creating new one
+        async with db_pool.acquire() as conn:
+            if USE_ISOLATED_TABLES:
+                result = await conn.fetchrow("""
+                    SELECT 
+                        COUNT(DISTINCT rid) as unique_documents,
+                        COUNT(*) as total_versions,
+                        COUNT(CASE WHEN event_type = 'NEW' THEN 1 END) as new_events,
+                        COUNT(CASE WHEN event_type = 'UPDATE' THEN 1 END) as update_events,
+                        COUNT(DISTINCT source_sensor) as active_sensors,
+                        MAX(created_at) as latest_event
+                    FROM koi_memories
+                """)
+                
+                embeddings = await conn.fetchrow("""
+                    SELECT 
+                        COUNT(dim_768) as gemma_embeddings,
+                        COUNT(dim_1024) as bge_embeddings
+                    FROM koi_embeddings
+                """)
+                
+                return {
+                    "unique_documents": result['unique_documents'],
+                    "total_versions": result['total_versions'],
+                    "new_events": result['new_events'],
+                    "update_events": result['update_events'],
+                    "active_sensors": result['active_sensors'],
+                    "latest_event": result['latest_event'].isoformat() if result['latest_event'] else None,
+                    "embeddings": {
+                        "bge": embeddings['bge_embeddings'],
+                        "gemma": embeddings['gemma_embeddings']
                     }
-                else:
-                    # Legacy stats
-                    result = await conn.fetchrow("""
-                        SELECT 
-                            COUNT(*) as total_memories,
-                            COUNT(DISTINCT content->>'rid') as unique_rids,
-                            COUNT(CASE WHEN type = 'koi_document' THEN 1 END) as koi_documents
-                        FROM memories
-                    """)
-                    
-                    return {
-                        "total_memories": result['total_memories'],
-                        "unique_rids": result['unique_rids'],
-                        "koi_documents": result['koi_documents'],
-                        "isolated_tables": False
-                    }
-                    
+                }
+            else:
+                # Legacy stats
+                result = await conn.fetchrow("""
+                    SELECT 
+                        COUNT(*) as total_memories,
+                        COUNT(DISTINCT content->>'rid') as unique_rids,
+                        COUNT(CASE WHEN type = 'koi_document' THEN 1 END) as koi_documents
+                    FROM memories
+                """)
+                
+                return {
+                    "total_memories": result['total_memories'],
+                    "unique_rids": result['unique_rids'],
+                    "koi_documents": result['koi_documents'],
+                    "isolated_tables": False
+                }
+                
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Application lifecycle - manage connection pool
+@app.on_event("startup")
+async def startup():
+    """Create database connection pool on startup"""
+    global db_pool
+    logger.info("Creating database connection pool...")
+    try:
+        db_pool = await asyncpg.create_pool(
+            DB_URL,
+            min_size=10,   # Keep 10 connections ready
+            max_size=20,   # Never exceed 20 connections (prevents exhaustion)
+            command_timeout=60
+        )
+        logger.info(f"✓ Database pool created (10-20 connections)")
+    except Exception as e:
+        logger.error(f"✗ Failed to create database pool: {e}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Close database connection pool on shutdown"""
+    global db_pool
+    if db_pool:
+        logger.info("Closing database connection pool...")
+        await db_pool.close()
+        logger.info("✓ Database pool closed")
 
 if __name__ == "__main__":
     import uvicorn

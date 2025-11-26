@@ -32,7 +32,6 @@ class KOIEventFilter:
     # RID patterns that indicate non-content
     NON_CONTENT_PATTERNS = [
         'heartbeat',
-        'test',
         'ping',
         'health_check',
         'status_update',

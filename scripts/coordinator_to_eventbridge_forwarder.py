@@ -17,10 +17,11 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("koi.forwarder")
 
-COORDINATOR_URL = "http://localhost:8005"
+COORDINATOR_URL = "http://localhost:8200"
 EVENT_BRIDGE_URL = "http://localhost:8100"  # Event Bridge v2 port
 POLL_INTERVAL = 2  # seconds - faster for testing
 NODE_ID = "event-bridge-forwarder"
+MAX_CONCURRENT = 10  # Limit concurrent processing to avoid DB connection exhaustion
 
 async def forward_events():
     """Poll coordinator for events and forward to Event Bridge"""
@@ -30,10 +31,10 @@ async def forward_events():
 
         while True:
             try:
-                # Poll coordinator for events
+                # Poll coordinator for events (request fewer to limit concurrency)
                 response = await client.get(
                     f"{COORDINATOR_URL}/events/poll",
-                    params={"node_id": NODE_ID}
+                    params={"node_id": NODE_ID, "max_events": MAX_CONCURRENT}
                 )
 
                 if response.status_code == 200:
@@ -49,25 +50,31 @@ async def forward_events():
                         # Track successfully processed events for confirmation
                         successfully_processed = []
 
-                        # Forward each event to Event Bridge
-                        for i, event in enumerate(events):
+                        # Forward events in PARALLEL using asyncio.gather (MAJOR SPEEDUP!)
+                        async def forward_single_event(event, event_id):
                             try:
-                                # Post to Event Bridge
                                 eb_response = await client.post(
                                     f"{EVENT_BRIDGE_URL}/process-koi-event",
                                     json=event
                                 )
-
                                 if eb_response.status_code == 200:
                                     logger.info(f"Successfully forwarded event: {event.get('rid', 'unknown')}")
-                                    # Track this event as successfully processed
-                                    if i < len(event_ids):
-                                        successfully_processed.append(event_ids[i])
+                                    return event_id
                                 else:
                                     logger.error(f"Event Bridge error {eb_response.status_code}: {eb_response.text}")
-
+                                    return None
                             except Exception as e:
                                 logger.error(f"Error forwarding event: {e}")
+                                return None
+
+                        # Send all events in parallel
+                        results = await asyncio.gather(*[
+                            forward_single_event(event, event_ids[i] if i < len(event_ids) else None)
+                            for i, event in enumerate(events)
+                        ])
+
+                        # Collect successfully processed event IDs
+                        successfully_processed = [r for r in results if r is not None]
 
                         # Confirm delivery for successfully processed events
                         if successfully_processed:
