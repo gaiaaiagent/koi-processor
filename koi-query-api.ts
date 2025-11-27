@@ -684,7 +684,13 @@ app.post('/api/koi/graph', async (req, res) => {
       // Build cypher query based on query_type
       switch (query_type) {
         case 'list_repos':
-          cypherQuery = `SELECT * FROM cypher('regen_graph', $$ MATCH (r:Repository) RETURN r.name as name, r.url as url ORDER BY r.name $$) as (name agtype, url agtype)`;
+          // Get all unique repository names from entities
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n) WHERE n.repo IS NOT NULL
+            WITH DISTINCT n.repo as repo_name, count(*) as entity_count
+            RETURN {name: repo_name} as repo, entity_count
+            ORDER BY repo_name
+          $$) as (repo agtype, entity_count agtype)`;
           break;
 
         case 'find_by_type':
@@ -695,9 +701,9 @@ app.post('/api/koi/graph', async (req, res) => {
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (n:${entityType})
             ${repoFilter ? `MATCH (n)-[:DEFINED_IN]->(f:File)-[:IN_REPO]->(r:Repository) ${repoFilter}` : ''}
-            RETURN n.name as name, n.signature as signature, n.description as description
+            RETURN properties(n) as entity
             LIMIT ${limit}
-          $$) as (name agtype, signature agtype, description agtype)`;
+          $$) as (entity agtype)`;
           break;
 
         case 'search_entities':
@@ -708,17 +714,17 @@ app.post('/api/koi/graph', async (req, res) => {
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (n)
             ${searchRepoFilter} n.name =~ '(?i).*${searchTerm}.*'
-            RETURN labels(n)[0] as type, n.name as name, n.signature as signature, n.description as description
+            RETURN labels(n)[0] as type, properties(n) as entity
             LIMIT ${searchLimit}
-          $$) as (type agtype, name agtype, signature agtype, description agtype)`;
+          $$) as (type agtype, entity agtype)`;
           break;
 
         case 'list_modules':
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (m:Module)
-            RETURN m.name as name, m.path as path
+            RETURN properties(m) as module
             ORDER BY m.name
-          $$) as (name agtype, path agtype)`;
+          $$) as (module agtype)`;
           break;
 
         case 'get_module':
@@ -726,24 +732,24 @@ app.post('/api/koi/graph', async (req, res) => {
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (m:Module {name: '${moduleName}'})
             OPTIONAL MATCH (m)<-[:IN_MODULE]-(e)
-            RETURN m.name as module_name, m.path as module_path, labels(e)[0] as entity_type, e.name as entity_name
-          $$) as (module_name agtype, module_path agtype, entity_type agtype, entity_name agtype)`;
+            RETURN properties(m) as module, labels(e)[0] as entity_type, properties(e) as entity
+          $$) as (module agtype, entity_type agtype, entity agtype)`;
           break;
 
         case 'keeper_for_msg':
           const msgName = params.entity_name || '';
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (msg {name: '${msgName}'})-[:HANDLED_BY]->(k:Keeper)
-            RETURN k.name as keeper_name, k.signature as signature
-          $$) as (keeper_name agtype, signature agtype)`;
+            RETURN properties(k) as keeper
+          $$) as (keeper agtype)`;
           break;
 
         case 'msgs_for_keeper':
           const keeperName = params.entity_name || '';
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (k:Keeper {name: '${keeperName}'})<-[:HANDLED_BY]-(msg)
-            RETURN msg.name as msg_name, msg.signature as signature
-          $$) as (msg_name agtype, signature agtype)`;
+            RETURN properties(msg) as message
+          $$) as (message agtype)`;
           break;
 
         case 'related_entities':
@@ -751,9 +757,32 @@ app.post('/api/koi/graph', async (req, res) => {
           const relatedLimit = params.limit || 10;
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (n {name: '${entityName}'})-[r]-(related)
-            RETURN labels(related)[0] as type, related.name as name, type(r) as relationship
+            RETURN labels(related)[0] as type, properties(related) as entity, type(r) as relationship
             LIMIT ${relatedLimit}
-          $$) as (type agtype, name agtype, relationship agtype)`;
+          $$) as (type agtype, entity agtype, relationship agtype)`;
+          break;
+
+        case 'list_entity_types':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WITH labels(n)[0] as entity_type, count(*) as count
+            WHERE entity_type IS NOT NULL
+            RETURN entity_type, count
+            ORDER BY count DESC
+          $$) as (entity_type agtype, count agtype)`;
+          break;
+
+        case 'get_entity_stats':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WITH labels(n)[0] as entity_type,
+                 count(*) as count,
+                 collect(DISTINCT n.language)[0..5] as languages,
+                 collect(DISTINCT n.repo)[0..5] as repos
+            WHERE entity_type IS NOT NULL
+            RETURN entity_type, count, languages, repos
+            ORDER BY count DESC
+          $$) as (entity_type agtype, count agtype, languages agtype, repos agtype)`;
           break;
 
         default:
