@@ -224,6 +224,7 @@ class CodeGraphProcessor:
 
                     # Add provenance to entity for Apache AGE storage
                     entity['source_rid'] = rid
+                    entity['repo'] = repo
                     entity['entity_rid'] = entity_rid
                     entity['cat_receipt_id'] = receipt_id
                     entity['commit_sha'] = commit_sha
