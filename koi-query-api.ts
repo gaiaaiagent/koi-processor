@@ -40,6 +40,45 @@ const dbConfig = parsePostgresUrl(POSTGRES_URL);
 const pool = new Pool(dbConfig);
 
 // HNSW index provides excellent recall without tuning parameters
+
+// Helper function to fix duplicated paths in entity data
+function fixEntityPaths(entity: any): any {
+  if (!entity || typeof entity !== "object") return entity;
+  
+  // Fix file_path - handle multiple prefix patterns
+  if (entity.file_path && entity.repo) {
+    let path = entity.file_path;
+    
+    // Pattern 1: /opt/projects/regen-repos/<repo>/...
+    const absPrefix = `/opt/projects/regen-repos/${entity.repo}/`;
+    if (path.startsWith(absPrefix)) {
+      path = path.substring(absPrefix.length);
+    }
+    
+    // Pattern 2: regen-network/<repo>/...
+    const regenPrefix = `regen-network/${entity.repo}/`;
+    if (path.startsWith(regenPrefix)) {
+      path = path.substring(regenPrefix.length);
+    }
+    
+    // Pattern 3: <repo>/... (e.g., regen-ledger/x/...)
+    const repoPrefix = `${entity.repo}/`;
+    if (path.startsWith(repoPrefix)) {
+      path = path.substring(repoPrefix.length);
+    }
+    
+    entity.file_path = path;
+  }
+  
+  // Reconstruct github_url with correct path
+  if (entity.file_path && entity.repo) {
+    const branch = entity.commit_sha && entity.commit_sha !== "None" ? entity.commit_sha : (entity.branch || "main");
+    entity.github_url = `https://github.com/regen-network/${entity.repo}/blob/${branch}/${entity.file_path}${entity.line_number ? "#L" + entity.line_number : ""}`;
+  }
+  
+  return entity;
+}
+
 // No need to set probes or other runtime parameters
 
 // Middleware
@@ -698,17 +737,8 @@ app.post('/api/koi/graph', async (req, res) => {
           const limit = params.limit || 10;
           const repoFilter = params.repo_name ? `WHERE r.name = '${params.repo_name}'` : '';
 
-          // Backwards compatibility: map domain-specific types to generic types with domain filters
-          let typeMatch = '';
-          if (entityType === 'Keeper') {
-            typeMatch = `MATCH (n:Struct) WHERE n.domain_type = 'keeper'`;
-          } else if (entityType === 'Message') {
-            typeMatch = `MATCH (n:Struct) WHERE n.domain_type = 'message'`;
-          } else if (entityType === 'Handler') {
-            typeMatch = `MATCH (n:Function) WHERE n.domain_type = 'handler'`;
-          } else {
-            typeMatch = `MATCH (n:${entityType})`;
-          }
+          // Match entity type directly by graph label
+          const typeMatch = `MATCH (n:${entityType})`;
 
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             ${typeMatch}
@@ -721,7 +751,7 @@ app.post('/api/koi/graph', async (req, res) => {
         case 'search_entities':
           const searchTerm = params.entity_name || '';
           const searchLimit = params.limit || 10;
-          const searchRepoFilter = params.repo_name ? `MATCH (n)-[:DEFINED_IN]->(f:File)-[:IN_REPO]->(r:Repository) WHERE r.name = '${params.repo_name}' AND` : 'WHERE';
+          const searchRepoFilter = params.repo_name ? `WHERE n.repo = '${params.repo_name}' AND` : 'WHERE';
 
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
             MATCH (n)
@@ -801,6 +831,107 @@ app.post('/api/koi/graph', async (req, res) => {
           $$) as (entity_type agtype, count agtype, languages agtype, repos agtype)`;
           break;
 
+        case 'list_concepts':
+          // List all concepts with their descriptions
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Concept)
+            RETURN properties(c) as concept
+            ORDER BY c.name
+          $$) as (concept agtype)`;
+          break;
+
+        case 'explain_concept':
+          // Get a concept and its related entities via EXPLAINS edges
+          const conceptName = params.concept_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Concept {name: '${conceptName}'})
+            OPTIONAL MATCH (c)-[:EXPLAINS]->(e)
+            RETURN properties(c) as concept, 
+                   labels(e)[0] as entity_type,
+                   properties(e) as entity
+          $$) as (concept agtype, entity_type agtype, entity agtype)`;
+          break;
+
+        case 'find_concept_for_query':
+          // Find concepts matching a natural language query via keywords
+          const userQuery = params.query || '';
+          const queryLower = userQuery.toLowerCase();
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Concept)
+            WHERE c.keywords CONTAINS '${queryLower}'
+               OR toLower(c.name) CONTAINS '${queryLower}'
+               OR toLower(c.description) CONTAINS '${queryLower}'
+            RETURN properties(c) as concept
+            LIMIT 5
+          $$) as (concept agtype)`;
+          break;
+        case 'find_callers':
+          // Find all functions/methods that call a given entity
+          const targetName = params.entity_name || '';
+          const callersLimit = params.limit || 50;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (caller)-[:CALLS]->(callee)
+            WHERE callee.name = '${targetName}'
+            RETURN properties(caller) as caller,
+                   properties(callee) as callee
+            LIMIT ${callersLimit}
+          $$) as (caller agtype, callee agtype)`;
+          break;
+
+        case 'find_callees':
+          // Find all functions/methods called by a given entity
+          const callerName = params.entity_name || '';
+          const calleesLimit = params.limit || 50;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (caller {name: '${callerName}'})-[:CALLS]->(callee)
+            RETURN properties(caller) as caller,
+                   properties(callee) as callee
+            LIMIT ${calleesLimit}
+          $$) as (caller agtype, callee agtype)`;
+          break;
+
+        case 'find_call_graph':
+          // Return the local call graph (1-2 hops) around an entity
+          const centerEntity = params.entity_name || '';
+          const hops = params.hops || 1;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (center {name: '${centerEntity}'})
+            OPTIONAL MATCH (caller)-[:CALLS*1..${hops}]->(center)
+            OPTIONAL MATCH (center)-[:CALLS*1..${hops}]->(callee)
+            RETURN properties(center) as center,
+                   collect(DISTINCT properties(caller)) as callers,
+                   collect(DISTINCT properties(callee)) as callees
+          $$) as (center agtype, callers agtype, callees agtype)`;
+          break;
+
+        case 'find_orphaned_code':
+          // Find entities with no incoming or outgoing CALLS edges
+          const orphanType = params.entity_type || 'Function';
+          const orphanLimit = params.limit || 100;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WHERE (n.entity_type = '${orphanType}' OR labels(n)[0] = '${orphanType}')
+            OPTIONAL MATCH (n)-[r_out:CALLS]->()
+            OPTIONAL MATCH (n)<-[r_in:CALLS]-()
+            WHERE r_out IS NULL AND r_in IS NULL
+            RETURN properties(n) as orphan
+            LIMIT ${orphanLimit}
+          $$) as (orphan agtype)`;
+          break;
+
+        case 'trace_call_chain':
+          // Find the full call path from entity A to entity B
+          const fromName = params.from || '';
+          const toName = params.to || '';
+          const maxDepth = params.max_depth || 5;
+          const chainLimit = params.limit || 10;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH path = (source {name: '${fromName}'})-[:CALLS*1..${maxDepth}]->(target {name: '${toName}'})
+            RETURN nodes(path) as chain
+            LIMIT ${chainLimit}
+          $$) as (chain agtype)`;
+          break;
+
         default:
           return res.status(400).json({ error: `Unknown query_type: ${query_type}` });
       }
@@ -832,10 +963,26 @@ app.post('/api/koi/graph', async (req, res) => {
         return converted;
       });
 
+
+      // Fix duplicated paths in entity data
+      const fixedRows = rows.map(row => {
+        const fixed: any = { ...row };
+        // Fix entity objects
+        if (fixed.entity) fixed.entity = fixEntityPaths(fixed.entity);
+        if (fixed.caller) fixed.caller = fixEntityPaths(fixed.caller);
+        if (fixed.callee) fixed.callee = fixEntityPaths(fixed.callee);
+        if (fixed.orphan) fixed.orphan = fixEntityPaths(fixed.orphan);
+        // For chain results (array of entities)
+        if (Array.isArray(fixed.chain)) {
+          fixed.chain = fixed.chain.map((e: any) => fixEntityPaths(e));
+        }
+        return fixed;
+      });
+
       res.json({
         query_type,
-        total_results: rows.length,
-        results: rows
+        total_results: fixedRows.length,
+        results: fixedRows
       });
 
     } finally {
@@ -916,6 +1063,205 @@ app.get('/api/koi/health', async (req, res) => {
 });
 
 // Start server
+
+// Statistics endpoint
+app.get('/api/koi/stats', async (req, res) => {
+  try {
+    // Total documents
+    const totalResult = await pool.query('SELECT COUNT(*) as total FROM koi_memories');
+    const total = parseInt(totalResult.rows[0].total);
+
+    // By source
+    const bySourceResult = await pool.query(`
+      SELECT
+        metadata->>'source' as source,
+        COUNT(*) as count
+      FROM koi_memories
+      WHERE metadata->>'source' IS NOT NULL
+      GROUP BY source
+      ORDER BY count DESC
+    `);
+
+    // Recent activity (last 7 days)
+    const recentResult = await pool.query(`
+      SELECT COUNT(*) as recent
+      FROM koi_memories
+      WHERE created_at > NOW() - INTERVAL '7 days'
+    `);
+    const recent = parseInt(recentResult.rows[0].recent);
+
+    // Format by_source as object
+    const by_source = {};
+    bySourceResult.rows.forEach(row => {
+      by_source[row.source] = parseInt(row.count);
+    });
+
+    res.json({
+      total_documents: total,
+      recent_7_days: recent,
+      by_source: by_source
+    });
+  } catch (error) {
+    console.error('Stats error:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+// Weekly digest endpoint - simplified version using search
+app.get('/api/koi/weekly-digest', async (req, res) => {
+  try {
+    const { start_date, end_date, format = 'markdown' } = req.query;
+
+    // Calculate dates
+    const now = new Date();
+    const endDateStr = end_date || now.toISOString().split('T')[0];
+    
+    let startDateStr = start_date;
+    if (!startDateStr) {
+      const weekAgo = new Date(now);
+      weekAgo.setDate(now.getDate() - 7);
+      startDateStr = weekAgo.toISOString().split('T')[0];
+    }
+
+    console.log(`Generating weekly digest from ${startDateStr} to ${endDateStr}`);
+
+    // Query for recent Regen Network activity
+    const searchQuery = 'Regen Network activity updates discussions governance proposals';
+    const topK = 50;
+
+    // Perform semantic search with date filters
+    const bgeResponse = await fetch('http://localhost:8090/encode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: searchQuery })
+    });
+
+    let results = [];
+    
+    if (bgeResponse.ok) {
+      const { embedding } = await bgeResponse.json();
+      
+      // Vector search with date range - use parameterized query
+      const vectorQuery = `
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          1 - (e.dim_1024 <=> $1::vector) as similarity,
+          m.published_at
+        FROM koi_memories m
+        JOIN koi_embeddings e ON m.id = e.memory_id
+        WHERE
+          m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND e.dim_1024 IS NOT NULL
+          AND m.published_at >= $2::timestamptz
+          AND m.published_at <= $3::timestamptz
+        ORDER BY e.dim_1024 <=> $1::vector
+        LIMIT $4
+      `;
+      
+      const queryResults = await pool.query(vectorQuery, [
+        JSON.stringify(embedding),
+        startDateStr,
+        endDateStr,
+        topK
+      ]);
+      
+      results = queryResults.rows;
+    } else {
+      // Fallback to keyword search
+      const fallbackQuery = `
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          0.5 as similarity,
+          m.published_at
+        FROM koi_memories m
+        WHERE
+          m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND m.published_at >= $1::timestamptz
+          AND m.published_at <= $2::timestamptz
+        ORDER BY m.published_at DESC
+        LIMIT $3
+      `;
+      
+      const queryResults = await pool.query(fallbackQuery, [startDateStr, endDateStr, topK]);
+      results = queryResults.rows;
+    }
+
+    // Generate markdown digest
+    let markdownContent = `# Regen Network Weekly Digest\\n\\n`;
+    markdownContent += `**Period:** ${startDateStr} to ${endDateStr}\\n\\n`;
+    markdownContent += `## Summary\\n\\n`;
+    markdownContent += `This digest contains ${results.length} recent documents and discussions from the Regen Network community.\\n\\n`;
+    markdownContent += `## Recent Activity\\n\\n`;
+
+    // Group by date
+    const byDate = {};
+    results.forEach(r => {
+      const date = r.published_at ? r.published_at.toISOString().split('T')[0] : 'undated';
+      if (!byDate[date]) byDate[date] = [];
+      byDate[date].push(r);
+    });
+
+    // Output results by date
+    Object.keys(byDate).sort().reverse().forEach(date => {
+      if (date !== 'undated') {
+        markdownContent += `### ${date}\\n\\n`;
+      }
+      byDate[date].forEach(item => {
+        const preview = item.content.substring(0, 200);
+        markdownContent += `**Source:** ${item.source}\\n`;
+        if (item.url) {
+          markdownContent += `**URL:** ${item.url}\\n`;
+        }
+        markdownContent += `${preview}...\\n\\n---\\n\\n`;
+      });
+    });
+
+    const wordCount = markdownContent.split(/\\s+/).length;
+
+    if (format === 'json') {
+      res.json({
+        success: true,
+        week_start: startDateStr,
+        week_end: endDateStr,
+        total_items: results.length,
+        content: markdownContent,
+        metadata: {
+          word_count: wordCount,
+          source_count: results.length
+        }
+      });
+    } else {
+      res.json({
+        success: true,
+        format: 'markdown',
+        content: markdownContent,
+        metadata: {
+          week_start: startDateStr,
+          week_end: endDateStr,
+          total_items: results.length,
+          word_count: wordCount
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Weekly digest error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate weekly digest'
+    });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`🚀 KOI Query API running on http://localhost:${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/api/koi/health`);
