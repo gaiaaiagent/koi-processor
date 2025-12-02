@@ -242,7 +242,34 @@ QUERY/ACCESS LAYER:
 
 ### Installation
 
-### Quick Start
+## Setup
+
+### Quick Start (No Google Drive)
+```bash
+./scripts/setup.sh
+```
+
+### With Google Drive Integration
+1. Run setup:
+   ```bash
+   ./scripts/setup.sh
+   ```
+
+2. Configure OAuth (see [config/README.md](config/README.md)):
+   ```bash
+   cp /path/to/client_secret.json config/client_secret.json
+   ```
+
+3. Service account setup (for automated ingestion):
+   - Share Google Drive folders with: `rag-ingestion-bot@koi-sensor.iam.gserviceaccount.com`
+   - Grant "Viewer" access
+
+## OAuth Endpoints
+
+Once configured, users authenticate at:
+- Auth URL: `https://your-domain.com/api/koi/auth/initiate`
+- Callback: `https://your-domain.com/api/koi/auth/callback`
+- Status: `https://your-domain.com/api/koi/auth/status`
 
 1. **Clone and setup**:
 ```bash

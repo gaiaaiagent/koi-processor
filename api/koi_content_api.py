@@ -3,14 +3,21 @@
 KOI Content API - Serves real sensed content data from PostgreSQL
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import uvicorn
 import os
+import sys
+
+# Add parent directory to path to allow importing from src
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import auth components
+from src.services.auth_service import router as auth_router, get_authorized_user
 
 app = FastAPI(title="KOI Content API", version="1.0.0")
 
@@ -22,6 +29,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include Auth Router
+app.include_router(auth_router, prefix="/api/koi")
 
 # Database connection
 DB_CONFIG = {
@@ -40,6 +50,63 @@ def get_db_connection():
 async def health():
     """Health check endpoint"""
     return {"status": "healthy", "service": "KOI Content API"}
+
+@app.post("/api/koi/search")
+async def search(
+    query: str,
+    user_email: str = Depends(get_authorized_user) 
+):
+    """
+    Search KOI database.
+    The get_authorized_user dependency enforces that the user has a valid OAuth token
+    (proving they are @regen.network). If so, we include 'google_drive' results.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Simple keyword search across content
+        # In production, this would use vector search (pgvector)
+        
+        # Construct source list - authenticating enables google_drive
+        sources = ['discourse', 'docs', 'ledger', 'website', 'github', 'twitter', 'notion']
+        if user_email:
+            sources.append('google_drive')
+            
+        # SQL query
+        sql_query = """
+            SELECT 
+                content, 
+                metadata, 
+                created_at 
+            FROM koi_memories 
+            WHERE 
+                (content ILIKE %s OR metadata->>'title' ILIKE %s)
+                AND (
+                    metadata->>'source' = ANY(%s) 
+                    OR (metadata->>'source' IS NULL AND 'unknown' = ANY(%s))
+                )
+            LIMIT 20
+        """
+        
+        search_term = f"%{query}%"
+        cur.execute(sql_query, (search_term, search_term, sources, sources))
+        
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return {
+            "query": query,
+            "user": user_email,
+            "count": len(results),
+            "results": results
+        }
+        
+    except Exception as e:
+        # If get_authorized_user fails, it raises HTTPException(401) before reaching here.
+        # Other errors are 500.
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/koi/content/domains")
 async def get_domains():

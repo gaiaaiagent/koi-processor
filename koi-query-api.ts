@@ -698,8 +698,20 @@ app.post('/api/koi/graph', async (req, res) => {
           const limit = params.limit || 10;
           const repoFilter = params.repo_name ? `WHERE r.name = '${params.repo_name}'` : '';
 
+          // Backwards compatibility: map domain-specific types to generic types with domain filters
+          let typeMatch = '';
+          if (entityType === 'Keeper') {
+            typeMatch = `MATCH (n:Struct) WHERE n.domain_type = 'keeper'`;
+          } else if (entityType === 'Message') {
+            typeMatch = `MATCH (n:Struct) WHERE n.domain_type = 'message'`;
+          } else if (entityType === 'Handler') {
+            typeMatch = `MATCH (n:Function) WHERE n.domain_type = 'handler'`;
+          } else {
+            typeMatch = `MATCH (n:${entityType})`;
+          }
+
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
-            MATCH (n:${entityType})
+            ${typeMatch}
             ${repoFilter ? `MATCH (n)-[:DEFINED_IN]->(f:File)-[:IN_REPO]->(r:Repository) ${repoFilter}` : ''}
             RETURN properties(n) as entity
             LIMIT ${limit}
@@ -738,16 +750,20 @@ app.post('/api/koi/graph', async (req, res) => {
 
         case 'keeper_for_msg':
           const msgName = params.entity_name || '';
+          // Updated to query generic Struct with domain_type='keeper'
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
-            MATCH (msg {name: '${msgName}'})-[:HANDLED_BY]->(k:Keeper)
+            MATCH (msg {name: '${msgName}'})-[:HANDLED_BY]->(k:Struct)
+            WHERE k.domain_type = 'keeper'
             RETURN properties(k) as keeper
           $$) as (keeper agtype)`;
           break;
 
         case 'msgs_for_keeper':
           const keeperName = params.entity_name || '';
+          // Updated to query generic Struct with domain_type='keeper' and domain_type='message'
           cypherQuery = `SELECT * FROM cypher('regen_graph', $$
-            MATCH (k:Keeper {name: '${keeperName}'})<-[:HANDLED_BY]-(msg)
+            MATCH (k:Struct {name: '${keeperName}'})<-[:HANDLED_BY]-(msg:Struct)
+            WHERE k.domain_type = 'keeper' AND msg.domain_type = 'message'
             RETURN properties(msg) as message
           $$) as (message agtype)`;
           break;
