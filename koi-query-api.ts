@@ -98,15 +98,26 @@ function generateSessionToken(): string {
 // Session token lifetime (1 hour - shorter than Google OAuth token)
 const SESSION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 
+// Hash a token using SHA-256 for secure storage/lookup
+async function hashToken(token: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Create a new session token for an authenticated user
+// NOTE: This is kept for internal use only - MCP clients should use the device_code flow
 async function createSessionToken(userEmail: string, clientInfo?: string): Promise<string> {
   const sessionToken = generateSessionToken();
+  const tokenHash = await hashToken(sessionToken);
   const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
 
   await pool.query(
-    `INSERT INTO session_tokens (session_token, user_email, expires_at, client_info)
-     VALUES ($1, $2, $3, $4)`,
-    [sessionToken, userEmail, expiresAt, clientInfo || null]
+    `INSERT INTO session_tokens (session_token, token_hash, user_email, expires_at, client_info)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [sessionToken, tokenHash, userEmail, expiresAt, clientInfo || null]
   );
 
   console.log(`[Auth] Created session token for ${userEmail}, expires at ${expiresAt.toISOString()}`);
@@ -114,18 +125,20 @@ async function createSessionToken(userEmail: string, clientInfo?: string): Promi
 }
 
 // Validate a session token - returns user email if valid, null otherwise
-// SECURITY: This validates our own session tokens, NOT Google OAuth tokens
-// Session tokens are safe to expose to MCP clients
+// SECURITY: This validates by hashing the token and comparing to stored hash
+// This prevents timing attacks and protects against database leaks
 async function validateSessionToken(sessionToken: string | undefined): Promise<string | null> {
   if (!sessionToken) return null;
 
   try {
+    const tokenHash = await hashToken(sessionToken);
+
     const result = await pool.query(
       `SELECT user_email, expires_at FROM session_tokens
-       WHERE session_token = $1
+       WHERE token_hash = $1
        AND expires_at > NOW()
        AND revoked_at IS NULL`,
-      [sessionToken]
+      [tokenHash]
     );
 
     if (result.rows.length === 0) {
@@ -1149,11 +1162,11 @@ app.use('/api/koi/transformations', proxyToService('http://localhost:8002'));
 app.use('/api/koi/rids', proxyToService('http://localhost:8002'));
 
 // Auth status check - for MCP server to validate user authentication
-// SECURITY: Returns session tokens, NOT Google OAuth tokens
-// Session tokens are safe to expose - they only work with our API
+// SECURITY: Uses device_code binding to prevent IDOR attacks
+// Session tokens are returned ONCE only to the client that initiated the auth
 app.get('/api/koi/auth/status', async (req, res) => {
   try {
-    // Method 1: validate session_token from Authorization header
+    // Method 1: validate existing session_token from Authorization header
     const authHeader = req.headers['authorization'] as string | undefined;
     const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
 
@@ -1162,7 +1175,7 @@ app.get('/api/koi/auth/status', async (req, res) => {
     const tokenToValidate = sessionToken || queryToken;
 
     if (tokenToValidate) {
-      // Validate the provided session token
+      // Validate the provided session token (uses hash comparison)
       const authenticatedEmail = await validateSessionToken(tokenToValidate);
 
       if (!authenticatedEmail) {
@@ -1179,41 +1192,113 @@ app.get('/api/koi/auth/status', async (req, res) => {
       });
     }
 
-    // Method 2: Check by email and create new session token (for MCP OAuth polling)
-    // This allows MCP to get a session token after successful OAuth
-    const userEmail = req.query.user_email as string | undefined;
-    const clientInfo = req.headers['x-client-info'] as string | undefined;
+    // Method 2: Poll using device_code (SECURE - prevents IDOR)
+    // Only the client that initiated the auth can retrieve the session token
+    const deviceCode = req.query.device_code as string | undefined;
 
-    if (!userEmail) {
+    if (!deviceCode || deviceCode.length < 32) {
       return res.json({
         authenticated: false,
-        reason: 'No session token or user email provided'
+        reason: 'No session token or device_code provided. Use device_code to poll for auth status.'
       });
     }
 
-    // Check if user has completed OAuth (has valid Google token in oauth_tokens)
-    const hasOAuth = await hasValidOAuthToken(userEmail);
+    // Look up auth request by device_code
+    const authRequest = await pool.query(
+      `SELECT id, user_email, status, session_token_hash, expires_at
+       FROM auth_requests
+       WHERE device_code = $1`,
+      [deviceCode]
+    );
 
-    if (!hasOAuth) {
+    if (authRequest.rows.length === 0) {
       return res.json({
+        status: 'not_found',
         authenticated: false,
-        reason: 'OAuth not completed or token expired'
+        reason: 'Invalid or expired auth request'
       });
     }
 
-    // Create a new session token for this user
-    // SECURITY: This is our own token, NOT the Google OAuth token
-    // Safe to expose to MCP clients - only works with our API
-    const newSessionToken = await createSessionToken(userEmail, clientInfo);
-    const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
+    const row = authRequest.rows[0];
 
-    res.json({
-      authenticated: true,
-      user_email: userEmail,
-      session_token: newSessionToken,  // Safe to expose - not a Google token
-      token_expiry: expiresAt.toISOString(),
-      timestamp: new Date().toISOString()
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return res.json({
+        status: 'expired',
+        authenticated: false,
+        reason: 'Auth request expired'
+      });
+    }
+
+    if (row.status === 'pending') {
+      return res.json({
+        status: 'pending',
+        authenticated: false,
+        reason: 'User has not completed authentication yet'
+      });
+    }
+
+    if (row.status === 'rejected') {
+      return res.json({
+        status: 'rejected',
+        authenticated: false,
+        reason: 'Email domain not allowed'
+      });
+    }
+
+    if (row.status === 'used') {
+      // Token was already retrieved - don't return it again
+      return res.json({
+        status: 'already_retrieved',
+        authenticated: true,
+        user_email: row.user_email,
+        reason: 'Session token was already retrieved. Use the token you received earlier.'
+      });
+    }
+
+    if (row.status === 'authenticated') {
+      // First time polling after auth - retrieve session token and mark as used
+      const sessionResult = await pool.query(
+        `SELECT session_token FROM session_tokens
+         WHERE token_hash = $1 AND expires_at > NOW()`,
+        [row.session_token_hash]
+      );
+
+      if (sessionResult.rows.length === 0) {
+        return res.json({
+          status: 'error',
+          authenticated: false,
+          reason: 'Session token not found or expired'
+        });
+      }
+
+      // Mark as used so token can't be retrieved again
+      await pool.query(
+        `UPDATE auth_requests
+         SET status = 'used', used_at = CURRENT_TIMESTAMP
+         WHERE device_code = $1`,
+        [deviceCode]
+      );
+
+      console.log(`[Auth] Session token retrieved for ${row.user_email} via device_code ${deviceCode.substring(0, 8)}...`);
+
+      const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
+
+      return res.json({
+        status: 'authenticated',
+        authenticated: true,
+        user_email: row.user_email,
+        session_token: sessionResult.rows[0].session_token,  // Plain token, returned ONCE
+        token_expiry: expiresAt.toISOString(),
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Unknown status
+    return res.json({
+      status: row.status,
+      authenticated: false
     });
+
   } catch (error) {
     console.error('Auth status check error:', error);
     res.status(500).json({
