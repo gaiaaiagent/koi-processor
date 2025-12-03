@@ -85,36 +85,80 @@ function fixEntityPaths(entity: any): any {
 app.use(cors());
 app.use(express.json());
 
-// Auth validation - validates access_token against oauth_tokens table
-// SECURITY: We validate the actual token, not just an email claim
-// Returns the authenticated user's email if valid, or null if not authenticated
-async function validateAccessToken(accessToken: string | undefined): Promise<string | null> {
-  if (!accessToken) return null;
+// Generate a random session token (UUID v4 format)
+function generateSessionToken(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+// Session token lifetime (1 hour - shorter than Google OAuth token)
+const SESSION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+
+// Create a new session token for an authenticated user
+async function createSessionToken(userEmail: string, clientInfo?: string): Promise<string> {
+  const sessionToken = generateSessionToken();
+  const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
+
+  await pool.query(
+    `INSERT INTO session_tokens (session_token, user_email, expires_at, client_info)
+     VALUES ($1, $2, $3, $4)`,
+    [sessionToken, userEmail, expiresAt, clientInfo || null]
+  );
+
+  console.log(`[Auth] Created session token for ${userEmail}, expires at ${expiresAt.toISOString()}`);
+  return sessionToken;
+}
+
+// Validate a session token - returns user email if valid, null otherwise
+// SECURITY: This validates our own session tokens, NOT Google OAuth tokens
+// Session tokens are safe to expose to MCP clients
+async function validateSessionToken(sessionToken: string | undefined): Promise<string | null> {
+  if (!sessionToken) return null;
 
   try {
-    // Look up the token in oauth_tokens - this proves the caller has the actual token
     const result = await pool.query(
-      `SELECT user_email, token_expiry FROM oauth_tokens
-       WHERE access_token = $1 AND token_expiry > NOW()`,
-      [accessToken]
+      `SELECT user_email, expires_at FROM session_tokens
+       WHERE session_token = $1
+       AND expires_at > NOW()
+       AND revoked_at IS NULL`,
+      [sessionToken]
     );
 
     if (result.rows.length === 0) {
-      return null; // Token not found or expired
+      return null; // Token not found, expired, or revoked
     }
 
     const userEmail = result.rows[0].user_email;
 
     // Additional validation: ensure it's a @regen.network email
     if (!userEmail.endsWith('@regen.network')) {
-      console.warn(`Token found but email domain not @regen.network: ${userEmail}`);
+      console.warn(`Session token found but email domain not @regen.network: ${userEmail}`);
       return null;
     }
 
     return userEmail;
   } catch (error) {
-    console.error('Auth validation error:', error);
+    console.error('Session token validation error:', error);
     return null;
+  }
+}
+
+// Check if user has valid OAuth token (for creating session tokens)
+async function hasValidOAuthToken(userEmail: string): Promise<boolean> {
+  try {
+    const result = await pool.query(
+      `SELECT 1 FROM oauth_tokens
+       WHERE user_email = $1 AND token_expiry > NOW()`,
+      [userEmail]
+    );
+    return result.rows.length > 0;
+  } catch (error) {
+    console.error('OAuth token check error:', error);
+    return false;
   }
 }
 
@@ -491,20 +535,20 @@ app.post('/api/koi/query', async (req, res) => {
 
     const startTime = Date.now();
 
-    // Extract access token from Authorization header and validate
-    // Format: "Bearer <access_token>"
+    // Extract session token from Authorization header and validate
+    // Format: "Bearer <session_token>" - NOT the Google OAuth token
     const authHeader = req.headers['authorization'] as string | undefined;
-    const accessToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
 
-    // Validate token and get authenticated user email (if any)
-    const authenticatedEmail = await validateAccessToken(accessToken);
+    // Validate session token and get authenticated user email (if any)
+    const authenticatedEmail = await validateSessionToken(sessionToken);
     const isAuthenticated = !!authenticatedEmail;
     const privacyFilter = buildPrivacyFilter(isAuthenticated);
 
     // Log auth status for debugging (use X-User-Email for logging if no token, but it doesn't grant access)
     const logEmail = authenticatedEmail || req.headers['x-user-email'] as string | undefined;
-    if (logEmail || accessToken) {
-      console.log(`[Query] User: ${logEmail || 'unknown'}, Authenticated: ${isAuthenticated}${accessToken ? ' (token provided)' : ''}`);
+    if (logEmail || sessionToken) {
+      console.log(`[Query] User: ${logEmail || 'unknown'}, Authenticated: ${isAuthenticated}${sessionToken ? ' (session token provided)' : ''}`);
     }
 
     // Perform hybrid search with RRF
@@ -1105,26 +1149,26 @@ app.use('/api/koi/transformations', proxyToService('http://localhost:8002'));
 app.use('/api/koi/rids', proxyToService('http://localhost:8002'));
 
 // Auth status check - for MCP server to validate user authentication
-// SECURITY: Now validates actual access_token, not just email claim
-// Also supports retrieving token after OAuth (for MCP to get the token to use)
+// SECURITY: Returns session tokens, NOT Google OAuth tokens
+// Session tokens are safe to expose - they only work with our API
 app.get('/api/koi/auth/status', async (req, res) => {
   try {
-    // Method 1: validate access_token from Authorization header
+    // Method 1: validate session_token from Authorization header
     const authHeader = req.headers['authorization'] as string | undefined;
-    const accessToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
 
     // Also support token in query param for easier testing
-    const queryToken = req.query.access_token as string | undefined;
-    const tokenToValidate = accessToken || queryToken;
+    const queryToken = req.query.session_token as string | undefined;
+    const tokenToValidate = sessionToken || queryToken;
 
     if (tokenToValidate) {
-      // Validate the provided token
-      const authenticatedEmail = await validateAccessToken(tokenToValidate);
+      // Validate the provided session token
+      const authenticatedEmail = await validateSessionToken(tokenToValidate);
 
       if (!authenticatedEmail) {
         return res.json({
           authenticated: false,
-          reason: 'Invalid or expired token'
+          reason: 'Invalid or expired session token'
         });
       }
 
@@ -1135,38 +1179,39 @@ app.get('/api/koi/auth/status', async (req, res) => {
       });
     }
 
-    // Method 2: Check by email and return token (for MCP OAuth polling)
-    // This allows MCP to retrieve the token after successful OAuth
+    // Method 2: Check by email and create new session token (for MCP OAuth polling)
+    // This allows MCP to get a session token after successful OAuth
     const userEmail = req.query.user_email as string | undefined;
+    const clientInfo = req.headers['x-client-info'] as string | undefined;
 
     if (!userEmail) {
       return res.json({
         authenticated: false,
-        reason: 'No access token or user email provided'
+        reason: 'No session token or user email provided'
       });
     }
 
-    // Look up token by email
-    const result = await pool.query(
-      `SELECT access_token, token_expiry FROM oauth_tokens
-       WHERE user_email = $1 AND token_expiry > NOW()`,
-      [userEmail]
-    );
+    // Check if user has completed OAuth (has valid Google token in oauth_tokens)
+    const hasOAuth = await hasValidOAuthToken(userEmail);
 
-    if (result.rows.length === 0) {
+    if (!hasOAuth) {
       return res.json({
         authenticated: false,
-        reason: 'No valid token found for this email'
+        reason: 'OAuth not completed or token expired'
       });
     }
 
-    // Return the token so MCP can use it for future requests
-    // This is secure because only the authenticated user can complete OAuth
+    // Create a new session token for this user
+    // SECURITY: This is our own token, NOT the Google OAuth token
+    // Safe to expose to MCP clients - only works with our API
+    const newSessionToken = await createSessionToken(userEmail, clientInfo);
+    const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
+
     res.json({
       authenticated: true,
       user_email: userEmail,
-      access_token: result.rows[0].access_token,
-      token_expiry: result.rows[0].token_expiry,
+      session_token: newSessionToken,  // Safe to expose - not a Google token
+      token_expiry: expiresAt.toISOString(),
       timestamp: new Date().toISOString()
     });
   } catch (error) {
