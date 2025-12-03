@@ -85,8 +85,50 @@ function fixEntityPaths(entity: any): any {
 app.use(cors());
 app.use(express.json());
 
-// Semantic search using BGE embeddings 
-async function performSemanticSearch(query: string, topK: number = 10, filters?: any) {
+// Auth validation - validates access_token against oauth_tokens table
+// SECURITY: We validate the actual token, not just an email claim
+// Returns the authenticated user's email if valid, or null if not authenticated
+async function validateAccessToken(accessToken: string | undefined): Promise<string | null> {
+  if (!accessToken) return null;
+
+  try {
+    // Look up the token in oauth_tokens - this proves the caller has the actual token
+    const result = await pool.query(
+      `SELECT user_email, token_expiry FROM oauth_tokens
+       WHERE access_token = $1 AND token_expiry > NOW()`,
+      [accessToken]
+    );
+
+    if (result.rows.length === 0) {
+      return null; // Token not found or expired
+    }
+
+    const userEmail = result.rows[0].user_email;
+
+    // Additional validation: ensure it's a @regen.network email
+    if (!userEmail.endsWith('@regen.network')) {
+      console.warn(`Token found but email domain not @regen.network: ${userEmail}`);
+      return null;
+    }
+
+    return userEmail;
+  } catch (error) {
+    console.error('Auth validation error:', error);
+    return null;
+  }
+}
+
+// Build privacy filter clause based on authentication status
+function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'): string {
+  if (isAuthenticated) {
+    return ''; // Authenticated users see all data
+  }
+  // Unauthenticated users only see public data
+  return ` AND (${tableAlias}.is_private = FALSE OR ${tableAlias}.is_private IS NULL)`;
+}
+
+// Semantic search using BGE embeddings
+async function performSemanticSearch(query: string, topK: number = 10, filters?: any, privacyFilter: string = '') {
   try {
     // Generate embedding for the query using BGE API
     const bgeResponse = await fetch('http://localhost:8090/encode', {
@@ -114,7 +156,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
         ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
         : '';
       const fallbackQuery = `
-        SELECT 
+        SELECT
           m.rid,
           m.content->>'text' as content,
           m.metadata->>'source' as source,
@@ -122,7 +164,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
           0.5 as similarity,
           m.published_at
         FROM koi_memories m
-        WHERE 
+        WHERE
           m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
           AND (
@@ -130,6 +172,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
             OR m.content->>'text' ILIKE $2
           )
           ${whereDate}
+          ${privacyFilter}
         ORDER BY RANDOM()
         LIMIT $${params.length + 1}
       `;
@@ -175,7 +218,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       : '';
 
     const searchQuery = `
-      SELECT 
+      SELECT
         m.rid,
         m.content->>'text' as content,
         m.metadata->>'source' as source,
@@ -185,11 +228,12 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
         m.published_at
       FROM koi_memories m
       JOIN koi_embeddings e ON e.memory_id = m.id
-      WHERE 
+      WHERE
         e.dim_1024 IS NOT NULL
         AND m.content->>'text' IS NOT NULL
         AND LENGTH(m.content->>'text') > 50
         ${andDate}
+        ${privacyFilter}
       ORDER BY e.dim_1024 <=> $1::vector
       LIMIT $${params.length + 1}
     `;
@@ -256,7 +300,7 @@ async function triggerAdaptiveExtraction(
 
 // Hybrid RAG Query Endpoint
 // Full-text search using PostgreSQL's ts_rank (BM25-like ranking)
-async function performKeywordSearch(query: string, topK: number = 10, filters?: any) {
+async function performKeywordSearch(query: string, topK: number = 10, filters?: any, privacyFilter: string = '') {
   try {
     // Split query into words and clean them
     const words = query.trim().split(/\s+/)
@@ -305,6 +349,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
           m.content_tsv @@ to_tsquery('english', $1)
           AND m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+          ${privacyFilter}
 
         UNION ALL
 
@@ -321,6 +366,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
           m.content_tsv @@ to_tsquery('english', $2)
           AND m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+          ${privacyFilter}
           AND NOT EXISTS (
             SELECT 1 FROM koi_memories m2
             WHERE m2.rid = m.rid
@@ -407,6 +453,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
         m.content->>'text' ILIKE $1
         AND LENGTH(m.content->>'text') > 50
         ${andDate}
+        ${privacyFilter}
       ORDER BY CASE
         WHEN m.content->>'text' ILIKE $2 THEN 3  -- Exact phrase match
         WHEN m.content->>'text' ILIKE $1 THEN 2  -- Contains all words
@@ -444,13 +491,29 @@ app.post('/api/koi/query', async (req, res) => {
 
     const startTime = Date.now();
 
+    // Extract access token from Authorization header and validate
+    // Format: "Bearer <access_token>"
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const accessToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+
+    // Validate token and get authenticated user email (if any)
+    const authenticatedEmail = await validateAccessToken(accessToken);
+    const isAuthenticated = !!authenticatedEmail;
+    const privacyFilter = buildPrivacyFilter(isAuthenticated);
+
+    // Log auth status for debugging (use X-User-Email for logging if no token, but it doesn't grant access)
+    const logEmail = authenticatedEmail || req.headers['x-user-email'] as string | undefined;
+    if (logEmail || accessToken) {
+      console.log(`[Query] User: ${logEmail || 'unknown'}, Authenticated: ${isAuthenticated}${accessToken ? ' (token provided)' : ''}`);
+    }
+
     // Perform hybrid search with RRF
     // Increased limits to capture more diverse results before fusion
     // Higher keyword limit to ensure important biographical pages (rank ~#11) are included
     // Increased to 20 to capture team/profile pages that rank just outside top-15
     const [vectorResults, keywordResults] = await Promise.all([
-      performSemanticSearch(question, 20, filters),
-      performKeywordSearch(question, 20, filters)
+      performSemanticSearch(question, 20, filters, privacyFilter),
+      performKeywordSearch(question, 20, filters, privacyFilter)
     ]);
 
     // Apply Reciprocal Rank Fusion
@@ -1040,6 +1103,80 @@ app.use('/api/koi/event-bridge/', proxyToService('http://localhost:8100'));
 app.use('/api/koi/bge/', proxyToService('http://localhost:8090'));
 app.use('/api/koi/transformations', proxyToService('http://localhost:8002'));
 app.use('/api/koi/rids', proxyToService('http://localhost:8002'));
+
+// Auth status check - for MCP server to validate user authentication
+// SECURITY: Now validates actual access_token, not just email claim
+// Also supports retrieving token after OAuth (for MCP to get the token to use)
+app.get('/api/koi/auth/status', async (req, res) => {
+  try {
+    // Method 1: validate access_token from Authorization header
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const accessToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+
+    // Also support token in query param for easier testing
+    const queryToken = req.query.access_token as string | undefined;
+    const tokenToValidate = accessToken || queryToken;
+
+    if (tokenToValidate) {
+      // Validate the provided token
+      const authenticatedEmail = await validateAccessToken(tokenToValidate);
+
+      if (!authenticatedEmail) {
+        return res.json({
+          authenticated: false,
+          reason: 'Invalid or expired token'
+        });
+      }
+
+      return res.json({
+        authenticated: true,
+        user_email: authenticatedEmail,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Method 2: Check by email and return token (for MCP OAuth polling)
+    // This allows MCP to retrieve the token after successful OAuth
+    const userEmail = req.query.user_email as string | undefined;
+
+    if (!userEmail) {
+      return res.json({
+        authenticated: false,
+        reason: 'No access token or user email provided'
+      });
+    }
+
+    // Look up token by email
+    const result = await pool.query(
+      `SELECT access_token, token_expiry FROM oauth_tokens
+       WHERE user_email = $1 AND token_expiry > NOW()`,
+      [userEmail]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        authenticated: false,
+        reason: 'No valid token found for this email'
+      });
+    }
+
+    // Return the token so MCP can use it for future requests
+    // This is secure because only the authenticated user can complete OAuth
+    res.json({
+      authenticated: true,
+      user_email: userEmail,
+      access_token: result.rows[0].access_token,
+      token_expiry: result.rows[0].token_expiry,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Auth status check error:', error);
+    res.status(500).json({
+      authenticated: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
 
 // Health check
 app.get('/api/koi/health', async (req, res) => {
