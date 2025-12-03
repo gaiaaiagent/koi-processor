@@ -5,6 +5,13 @@ Security improvements over previous implementation:
 1. user_code: Short code user manually types (prevents phishing)
 2. state_id: Opaque ID for OAuth state (device_code never sent to Google)
 3. POST endpoints: Secrets in body, not URL (prevents logging exposure)
+4. Rate limiting: Prevents brute-force attacks on user codes
+5. JWT validation: Verifies Google ID tokens with proper claim checks
+
+LOGGING RULES (SECURITY CRITICAL):
+- NEVER log: device_code, session_token, session_token_hash, access_token, id_token
+- OK to log: user_code (public), user_email (for audit), IP addresses, timestamps
+- Log request failures without including request/response bodies
 """
 
 import os
@@ -37,6 +44,194 @@ SESSION_TOKEN_LIFETIME_SECONDS = 3600  # 1 hour
 DEVICE_CODE_LIFETIME_SECONDS = 600     # 10 minutes
 POLL_INTERVAL_SECONDS = 5              # Recommended poll interval
 
+# Rate Limiting Configuration
+ACTIVATE_RATE_LIMIT = 5          # Max attempts per IP per minute for /activate
+ACTIVATE_LOCKOUT_THRESHOLD = 5   # Lock out code after this many failed attempts
+TOKEN_RATE_LIMIT = 60            # Max requests per IP per minute for /auth/token
+SLOW_DOWN_INTERVAL = 10          # Increased interval when client polls too fast
+
+# =============================================================================
+# Rate Limiter (In-Memory)
+# =============================================================================
+from collections import defaultdict
+from dataclasses import dataclass, field
+from threading import Lock
+
+@dataclass
+class RateLimitEntry:
+    """Track rate limit state for an IP or code."""
+    count: int = 0
+    window_start: float = 0.0
+    slow_down_until: float = 0.0
+
+class RateLimiter:
+    """
+    Simple in-memory rate limiter with sliding window.
+    Thread-safe for async use.
+    """
+    def __init__(self, max_requests: int, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._entries: Dict[str, RateLimitEntry] = defaultdict(RateLimitEntry)
+        self._lock = Lock()
+
+    def is_allowed(self, key: str) -> tuple[bool, int]:
+        """
+        Check if request is allowed for given key (IP, code, etc).
+        Returns (allowed, retry_after_seconds).
+        """
+        now = time.time()
+        with self._lock:
+            entry = self._entries[key]
+
+            # Check slow_down penalty
+            if entry.slow_down_until > now:
+                return False, int(entry.slow_down_until - now)
+
+            # Reset window if expired
+            if now - entry.window_start > self.window_seconds:
+                entry.count = 0
+                entry.window_start = now
+
+            # Check limit
+            if entry.count >= self.max_requests:
+                return False, int(self.window_seconds - (now - entry.window_start))
+
+            # Allow and increment
+            entry.count += 1
+            return True, 0
+
+    def apply_slow_down(self, key: str, seconds: int = 5):
+        """Apply slow_down penalty to a key."""
+        with self._lock:
+            self._entries[key].slow_down_until = time.time() + seconds
+
+    def get_fail_count(self, key: str) -> int:
+        """Get current failure count for a key."""
+        with self._lock:
+            return self._entries.get(key, RateLimitEntry()).count
+
+    def cleanup_old_entries(self, max_age: int = 3600):
+        """Remove entries older than max_age seconds."""
+        now = time.time()
+        with self._lock:
+            keys_to_remove = [
+                k for k, v in self._entries.items()
+                if now - v.window_start > max_age
+            ]
+            for k in keys_to_remove:
+                del self._entries[k]
+
+# Global rate limiters
+activate_limiter = RateLimiter(max_requests=ACTIVATE_RATE_LIMIT, window_seconds=60)
+token_limiter = RateLimiter(max_requests=TOKEN_RATE_LIMIT, window_seconds=60)
+code_fail_limiter = RateLimiter(max_requests=ACTIVATE_LOCKOUT_THRESHOLD, window_seconds=600)
+
+# =============================================================================
+# Google JWT Validation
+# =============================================================================
+import base64
+import jwt  # PyJWT library
+
+# Google's public keys for JWT verification (cached)
+_google_public_keys: Dict[str, Any] = {}
+_google_keys_fetched_at: float = 0
+GOOGLE_KEYS_CACHE_SECONDS = 3600  # Refresh keys every hour
+
+async def get_google_public_keys() -> Dict[str, Any]:
+    """
+    Fetch Google's public keys for JWT verification.
+    Keys are cached for 1 hour.
+    """
+    global _google_public_keys, _google_keys_fetched_at
+
+    if time.time() - _google_keys_fetched_at < GOOGLE_KEYS_CACHE_SECONDS and _google_public_keys:
+        return _google_public_keys
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get("https://www.googleapis.com/oauth2/v3/certs")
+        if resp.status_code != 200:
+            raise ValueError("Failed to fetch Google public keys")
+
+        keys_data = resp.json()
+        _google_public_keys = {key["kid"]: key for key in keys_data.get("keys", [])}
+        _google_keys_fetched_at = time.time()
+
+    return _google_public_keys
+
+
+async def validate_google_id_token(id_token: str, expected_client_id: str) -> Dict[str, Any]:
+    """
+    Validate a Google ID token (JWT) and return the claims.
+
+    Validates:
+    - Signature against Google's public keys
+    - Issuer (iss) is Google
+    - Audience (aud) matches our client ID
+    - Token is not expired (exp)
+    - Email is verified (email_verified)
+
+    Returns the decoded claims on success.
+    Raises ValueError on validation failure.
+    """
+    try:
+        # Decode header to get key ID (kid)
+        header = jwt.get_unverified_header(id_token)
+        kid = header.get("kid")
+
+        if not kid:
+            raise ValueError("No key ID (kid) in token header")
+
+        # Get Google's public keys
+        public_keys = await get_google_public_keys()
+
+        if kid not in public_keys:
+            # Refresh keys and try again (key rotation)
+            global _google_keys_fetched_at
+            _google_keys_fetched_at = 0
+            public_keys = await get_google_public_keys()
+
+            if kid not in public_keys:
+                raise ValueError(f"Unknown key ID: {kid}")
+
+        # Convert JWK to public key
+        key_data = public_keys[kid]
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key_data))
+
+        # Decode and validate
+        claims = jwt.decode(
+            id_token,
+            public_key,
+            algorithms=["RS256"],
+            audience=expected_client_id,
+            issuer=["https://accounts.google.com", "accounts.google.com"],
+            options={
+                "verify_exp": True,
+                "verify_aud": True,
+                "verify_iss": True,
+            }
+        )
+
+        # Additional checks
+        if not claims.get("email_verified", False):
+            raise ValueError("Email is not verified")
+
+        if not claims.get("email"):
+            raise ValueError("No email in token")
+
+        return claims
+
+    except jwt.ExpiredSignatureError:
+        raise ValueError("Token has expired")
+    except jwt.InvalidAudienceError:
+        raise ValueError("Invalid audience - token not intended for this application")
+    except jwt.InvalidIssuerError:
+        raise ValueError("Invalid issuer - token not from Google")
+    except jwt.InvalidSignatureError:
+        raise ValueError("Invalid signature - token may be tampered")
+    except jwt.DecodeError as e:
+        raise ValueError(f"Failed to decode token: {e}")
+
 def hash_token(token: str) -> str:
     """SHA-256 hash a token for secure storage."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -57,10 +252,13 @@ def generate_user_code() -> str:
     """
     Generate a human-friendly user code (e.g., "WDJB-QK4Z").
     - 8 characters split by hyphen
-    - Uses unambiguous characters (no 0/O, 1/I/L)
+    - Uses unambiguous consonants + digits only
+    - No vowels (prevents accidental words), no confusable chars (0/O, 1/I/L, S/5)
+    - Entropy: ~34.5 bits (20^8 / 2^34.5), sufficient with rate limiting
     """
-    # Unambiguous uppercase letters and digits
-    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    # Base-20 alphabet: consonants only, no confusables
+    # Excludes: A,E,I,O,U (vowels), S (looks like 5), L (looks like 1), O (looks like 0)
+    alphabet = "BCDFGHJKMNPQRTVWXYZ2346789"
     code = ''.join(secrets.choice(alphabet) for _ in range(8))
     return f"{code[:4]}-{code[4:]}"
 
@@ -158,6 +356,7 @@ async def request_device_code(
 
 @router.post("/auth/token")
 async def exchange_device_code(
+    http_request: Request,
     request: TokenRequest,
     db=Depends(get_db)
 ):
@@ -169,7 +368,24 @@ async def exchange_device_code(
     SECURITY:
     - POST request keeps device_code out of URL/logs
     - Returns session token ONCE, then marks as 'used'
+    - Rate limited to prevent abuse
     """
+    # Get client IP for rate limiting
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    forwarded = http_request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    # Check rate limit (60 requests per minute per IP)
+    allowed, retry_after = token_limiter.is_allowed(client_ip)
+    if not allowed:
+        # Return slow_down error per RFC 8628
+        token_limiter.apply_slow_down(client_ip, SLOW_DOWN_INTERVAL)
+        return TokenErrorResponse(
+            error="slow_down",
+            error_description=f"Too many requests. Wait {retry_after} seconds."
+        )
+
     device_code = request.device_code
 
     if not device_code or len(device_code) < 32:
@@ -502,6 +718,7 @@ async def activate_page(error: Optional[str] = None):
             "invalid": "Invalid or expired code. Please check and try again.",
             "expired": "This code has expired. Please request a new one in Claude Code.",
             "used": "This code has already been used.",
+            "locked": "Too many failed attempts. This code has been locked for security.",
         }
         error_html = f'<div class="error">{error_messages.get(error, error)}</div>'
 
@@ -510,6 +727,7 @@ async def activate_page(error: Optional[str] = None):
 
 @router.post("/activate", response_class=HTMLResponse)
 async def activate_submit(
+    request: Request,
     code: str = Form(...),
     db=Depends(get_db)
 ):
@@ -517,11 +735,34 @@ async def activate_submit(
     Validate the user code and redirect to Google OAuth.
 
     SECURITY: User manually types code from their device, preventing phishing.
+    Rate limited to prevent brute-force guessing of user codes.
     """
+    # Get client IP for rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    # Check IP rate limit (5 attempts per minute)
+    allowed, retry_after = activate_limiter.is_allowed(client_ip)
+    if not allowed:
+        logger.warning(f"[Auth] Rate limit exceeded for IP {client_ip}")
+        return HTMLResponse(
+            content=f"<h1>Too Many Requests</h1><p>Please wait {retry_after} seconds before trying again.</p>",
+            status_code=429
+        )
+
     # Normalize code (remove hyphen, uppercase)
     user_code = code.upper().replace("-", "")
     if len(user_code) == 8:
         user_code = f"{user_code[:4]}-{user_code[4:]}"
+
+    # Check if this code has been failed too many times (lockout)
+    code_key = f"code:{user_code}"
+    allowed, _ = code_fail_limiter.is_allowed(code_key)
+    if not allowed:
+        logger.warning(f"[Auth] Code {user_code} locked out due to too many failed attempts")
+        return RedirectResponse(url="/activate?error=locked", status_code=303)
 
     # Look up the auth request by user_code
     row = await db.fetchrow("""
@@ -531,6 +772,8 @@ async def activate_submit(
     """, user_code)
 
     if not row:
+        # Track failed attempt for this code
+        code_fail_limiter.is_allowed(code_key)  # Increment failure count
         return RedirectResponse(url="/activate?error=invalid", status_code=303)
 
     if row["expires_at"].timestamp() < time.time():
@@ -605,27 +848,34 @@ async def auth_callback(code: str, state: str, db=Depends(get_db)):
     async with httpx.AsyncClient() as client:
         resp = await client.post(token_url, data=data)
         if resp.status_code != 200:
-            logger.error(f"Token exchange failed: {resp.text}")
+            # Log only that it failed, not the response body (may contain secrets)
+            logger.error("[Auth] Token exchange failed with Google")
             return HTMLResponse(content="<h1>Error</h1><p>Failed to verify with Google.</p>", status_code=400)
 
         tokens = resp.json()
 
-    # Get user info to verify email
-    access_token = tokens["access_token"]
-    async with httpx.AsyncClient() as client:
-        userinfo_resp = await client.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {access_token}"}
+    # Validate ID token (JWT) - this is more secure than using userinfo endpoint
+    # Validates: signature, issuer, audience, expiry, email_verified
+    id_token = tokens.get("id_token")
+    if not id_token:
+        logger.error("[Auth] No id_token in Google response")
+        return HTMLResponse(content="<h1>Error</h1><p>Invalid response from Google.</p>", status_code=400)
+
+    try:
+        claims = await validate_google_id_token(id_token, creds["client_id"])
+    except ValueError as e:
+        logger.warning(f"[Auth] JWT validation failed: {e}")
+        await db.execute("UPDATE auth_requests SET status = 'rejected' WHERE id = $1", auth_request['id'])
+        return HTMLResponse(
+            content=f"<h1>Verification Failed</h1><p>{str(e)}</p>",
+            status_code=400
         )
-        if userinfo_resp.status_code != 200:
-            return HTMLResponse(content="<h1>Error</h1><p>Failed to get user info from Google.</p>", status_code=400)
-        userinfo = userinfo_resp.json()
 
-    verified_email = userinfo.get("email", "").lower()
+    verified_email = claims.get("email", "").lower()
 
-    # Verify it's a @regen.network email
+    # Verify it's a @regen.network email (strict domain check)
     if not verified_email.endswith("@regen.network"):
-        logger.warning(f"[Auth] Rejected non-regen email: {verified_email}")
+        logger.warning(f"[Auth] Rejected non-regen email (domain check failed)")
         await db.execute("UPDATE auth_requests SET status = 'rejected' WHERE id = $1", auth_request['id'])
         return HTMLResponse(
             content="<h1>Access Denied</h1><p>Only @regen.network email addresses are permitted.</p>",
