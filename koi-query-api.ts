@@ -109,19 +109,21 @@ async function hashToken(token: string): Promise<string> {
 
 // Create a new session token for an authenticated user
 // NOTE: This is kept for internal use only - MCP clients should use the device_code flow
+// SECURITY: Plain token is returned to caller but NEVER stored in database
 async function createSessionToken(userEmail: string, clientInfo?: string): Promise<string> {
   const sessionToken = generateSessionToken();
   const tokenHash = await hashToken(sessionToken);
   const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
 
+  // Store ONLY the hash in session_tokens - plain token never touches the DB
   await pool.query(
-    `INSERT INTO session_tokens (session_token, token_hash, user_email, expires_at, client_info)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [sessionToken, tokenHash, userEmail, expiresAt, clientInfo || null]
+    `INSERT INTO session_tokens (token_hash, user_email, expires_at, client_info)
+     VALUES ($1, $2, $3, $4)`,
+    [tokenHash, userEmail, expiresAt, clientInfo || null]
   );
 
   console.log(`[Auth] Created session token for ${userEmail}, expires at ${expiresAt.toISOString()}`);
-  return sessionToken;
+  return sessionToken;  // Plain token only exists in memory, returned to caller
 }
 
 // Validate a session token - returns user email if valid, null otherwise
@@ -1204,8 +1206,9 @@ app.get('/api/koi/auth/status', async (req, res) => {
     }
 
     // Look up auth request by device_code
+    // SECURITY: session_token is stored temporarily here (not in long-lived session_tokens)
     const authRequest = await pool.query(
-      `SELECT id, user_email, status, session_token_hash, expires_at
+      `SELECT id, user_email, status, session_token, expires_at
        FROM auth_requests
        WHERE device_code = $1`,
       [deviceCode]
@@ -1256,25 +1259,23 @@ app.get('/api/koi/auth/status', async (req, res) => {
     }
 
     if (row.status === 'authenticated') {
-      // First time polling after auth - retrieve session token and mark as used
-      const sessionResult = await pool.query(
-        `SELECT session_token FROM session_tokens
-         WHERE token_hash = $1 AND expires_at > NOW()`,
-        [row.session_token_hash]
-      );
+      // First time polling after auth - get plain token from auth_requests
+      // SECURITY: Plain token is stored temporarily in auth_requests (short-lived)
+      // NOT in session_tokens (long-lived, stores only hashes)
+      const plainToken = row.session_token;
 
-      if (sessionResult.rows.length === 0) {
+      if (!plainToken) {
         return res.json({
           status: 'error',
           authenticated: false,
-          reason: 'Session token not found or expired'
+          reason: 'Session token not found or already retrieved'
         });
       }
 
-      // Mark as used so token can't be retrieved again
+      // Mark as used and NULL out the plain token (security: don't keep it around)
       await pool.query(
         `UPDATE auth_requests
-         SET status = 'used', used_at = CURRENT_TIMESTAMP
+         SET status = 'used', used_at = CURRENT_TIMESTAMP, session_token = NULL
          WHERE device_code = $1`,
         [deviceCode]
       );
@@ -1287,7 +1288,7 @@ app.get('/api/koi/auth/status', async (req, res) => {
         status: 'authenticated',
         authenticated: true,
         user_email: row.user_email,
-        session_token: sessionResult.rows[0].session_token,  // Plain token, returned ONCE
+        session_token: plainToken,  // Plain token, returned ONCE then NULLed from DB
         token_expiry: expiresAt.toISOString(),
         timestamp: new Date().toISOString()
       });

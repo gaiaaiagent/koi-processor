@@ -262,26 +262,29 @@ async def auth_callback(code: str, state: str, db=Depends(get_db)):
         await db.execute("UPDATE auth_requests SET status = 'rejected' WHERE device_code = $1", device_code)
         raise HTTPException(status_code=403, detail="Only @regen.network emails are allowed")
 
-    # Generate session token and store HASH only
+    # Generate session token and store HASH only in long-lived table
     session_token = generate_session_token()
     session_token_hash = hash_token(session_token)
     session_expiry = time.time() + SESSION_TOKEN_LIFETIME_SECONDS
 
-    # Update auth_request with session token hash (mark as authenticated)
+    # Update auth_request with PLAIN token (temporary, for one-time retrieval)
+    # and hash for linking to session_tokens
     await db.execute("""
         UPDATE auth_requests
         SET status = 'authenticated',
             user_email = $2,
-            session_token_hash = $3,
+            session_token = $3,
+            session_token_hash = $4,
             authenticated_at = CURRENT_TIMESTAMP
         WHERE device_code = $1
-    """, device_code, verified_email, session_token_hash)
+    """, device_code, verified_email, session_token, session_token_hash)
 
-    # Also store in session_tokens table (with hash)
+    # Store ONLY hash in session_tokens (long-lived table)
+    # Plain token is NEVER stored here - security improvement
     await db.execute("""
-        INSERT INTO session_tokens (session_token, token_hash, user_email, expires_at)
-        VALUES ($1, $2, $3, to_timestamp($4))
-    """, session_token, session_token_hash, verified_email, session_expiry)
+        INSERT INTO session_tokens (token_hash, user_email, expires_at)
+        VALUES ($1, $2, to_timestamp($3))
+    """, session_token_hash, verified_email, session_expiry)
 
     # NOTE: We do NOT store Google tokens long-term anymore
     # They were only needed to verify identity, which is now done
@@ -306,7 +309,7 @@ async def check_auth_status(device_code: str, db=Depends(get_db)):
         raise HTTPException(status_code=400, detail="device_code is required")
 
     row = await db.fetchrow("""
-        SELECT id, user_email, status, session_token_hash, expires_at
+        SELECT id, user_email, status, session_token, expires_at
         FROM auth_requests
         WHERE device_code = $1
     """, device_code)
@@ -325,20 +328,17 @@ async def check_auth_status(device_code: str, db=Depends(get_db)):
         return {"status": "already_retrieved", "authenticated": True, "user_email": row["user_email"]}
 
     if row["status"] == "authenticated":
-        # First time polling after auth - retrieve session token from session_tokens table
-        # and mark this auth request as used
-        session_row = await db.fetchrow("""
-            SELECT session_token FROM session_tokens
-            WHERE token_hash = $1 AND expires_at > NOW()
-        """, row["session_token_hash"])
+        # First time polling after auth - get plain token from auth_requests
+        # (stored temporarily here, NOT in long-lived session_tokens table)
+        plain_token = row["session_token"]
 
-        if not session_row:
+        if not plain_token:
             return {"status": "error", "authenticated": False, "message": "Session token not found"}
 
-        # Mark as used so token can't be retrieved again
+        # Mark as used and NULL out the plain token (security: don't keep it around)
         await db.execute("""
             UPDATE auth_requests
-            SET status = 'used', used_at = CURRENT_TIMESTAMP
+            SET status = 'used', used_at = CURRENT_TIMESTAMP, session_token = NULL
             WHERE device_code = $1
         """, device_code)
 
@@ -348,7 +348,7 @@ async def check_auth_status(device_code: str, db=Depends(get_db)):
             "status": "authenticated",
             "authenticated": True,
             "user_email": row["user_email"],
-            "session_token": session_row["session_token"]  # Plain token, returned ONCE
+            "session_token": plain_token  # Plain token, returned ONCE then NULLed
         }
 
     if row["status"] == "rejected":
