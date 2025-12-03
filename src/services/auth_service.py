@@ -287,6 +287,7 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "Bearer"
     expires_in: int
+    email: Optional[str] = None  # User email for client-side display
 
 class TokenErrorResponse(BaseModel):
     """RFC 8628 error response."""
@@ -454,7 +455,8 @@ async def exchange_device_code(
         return TokenResponse(
             access_token=plain_token,
             token_type="Bearer",
-            expires_in=SESSION_TOKEN_LIFETIME_SECONDS
+            expires_in=SESSION_TOKEN_LIFETIME_SECONDS,
+            email=row['user_email']
         )
 
     # Unknown status
