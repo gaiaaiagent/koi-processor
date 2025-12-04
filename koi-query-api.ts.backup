@@ -39,12 +39,15 @@ function parsePostgresUrl(url: string) {
 const dbConfig = parsePostgresUrl(POSTGRES_URL);
 const pool = new Pool(dbConfig);
 
+// HNSW index provides excellent recall without tuning parameters
+// No need to set probes or other runtime parameters
+
 // Middleware
 app.use(cors());
 app.use(express.json());
 
 // Semantic search using BGE embeddings 
-async function performSemanticSearch(query: string, topK: number = 10) {
+async function performSemanticSearch(query: string, topK: number = 10, filters?: any) {
   try {
     // Generate embedding for the query using BGE API
     const bgeResponse = await fetch('http://localhost:8090/encode', {
@@ -58,12 +61,27 @@ async function performSemanticSearch(query: string, topK: number = 10) {
     if (!bgeResponse.ok) {
       console.log('BGE API not available, falling back to ILIKE search');
       // Fallback to simple text search when BGE API is not available
+      const dateClauses: string[] = [];
+      const params: any[] = [`%${query}%`, `%${query.replace(/\s+/g, '%')}%`];
+      if (filters?.date_range?.start) {
+        dateClauses.push(`m.published_at >= $${params.length + 1}::timestamptz`);
+        params.push(filters.date_range.start);
+      }
+      if (filters?.date_range?.end) {
+        dateClauses.push(`m.published_at <= $${params.length + 1}::timestamptz`);
+        params.push(filters.date_range.end);
+      }
+      const whereDate = dateClauses.length
+        ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
+        : '';
       const fallbackQuery = `
         SELECT 
           m.rid,
           m.content->>'text' as content,
           m.metadata->>'source' as source,
-          0.5 as similarity
+          m.metadata->>'url' as url,
+          0.5 as similarity,
+          m.published_at
         FROM koi_memories m
         WHERE 
           m.content->>'text' IS NOT NULL
@@ -72,11 +90,12 @@ async function performSemanticSearch(query: string, topK: number = 10) {
             m.content->>'text' ILIKE $1
             OR m.content->>'text' ILIKE $2
           )
+          ${whereDate}
         ORDER BY RANDOM()
-        LIMIT $3
+        LIMIT $${params.length + 1}
       `;
-      
-      const results = await pool.query(fallbackQuery, [`%${query}%`, `%${query.replace(/\s+/g, '%')}%`, topK]);
+      params.push(topK);
+      const results = await pool.query(fallbackQuery, params);
       
       return results.rows.map(row => ({
         id: row.rid,
@@ -87,7 +106,9 @@ async function performSemanticSearch(query: string, topK: number = 10) {
         metadata: {
           rid: row.rid,
           source: row.source,
-          similarity: parseFloat(row.similarity)
+          url: row.url,
+          similarity: parseFloat(row.similarity),
+          published_at: row.published_at || null
         },
         rid: row.rid
       }));
@@ -99,25 +120,44 @@ async function performSemanticSearch(query: string, topK: number = 10) {
     // Convert array to PostgreSQL vector format
     const vectorString = `[${queryEmbedding.join(',')}]`;
 
+    // Optional date filters
+    const dateClauses: string[] = [];
+    const params: any[] = [vectorString];
+    if (filters?.date_range?.start) {
+      dateClauses.push(`m.published_at >= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.start);
+    }
+    if (filters?.date_range?.end) {
+      dateClauses.push(`m.published_at <= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.end);
+    }
+    const andDate = dateClauses.length
+      ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
+      : '';
+
     const searchQuery = `
       SELECT 
         m.rid,
         m.content->>'text' as content,
         m.metadata->>'source' as source,
+        m.metadata->>'url' as url,
         e.dim_1024 <=> $1::vector as distance,
-        1 - (e.dim_1024 <=> $1::vector) as similarity
+        1 - (e.dim_1024 <=> $1::vector) as similarity,
+        m.published_at
       FROM koi_memories m
       JOIN koi_embeddings e ON e.memory_id = m.id
       WHERE 
         e.dim_1024 IS NOT NULL
         AND m.content->>'text' IS NOT NULL
         AND LENGTH(m.content->>'text') > 50
+        ${andDate}
       ORDER BY e.dim_1024 <=> $1::vector
-      LIMIT $2
+      LIMIT $${params.length + 1}
     `;
 
-    const results = await pool.query(searchQuery, [vectorString, topK]);
-    
+    params.push(topK);
+    const results = await pool.query(searchQuery, params);
+
     return results.rows.map(row => ({
       id: row.rid,
       content: row.content.substring(0, 200) + "...",
@@ -127,7 +167,9 @@ async function performSemanticSearch(query: string, topK: number = 10) {
       metadata: {
         rid: row.rid,
         source: row.source,
-        similarity: parseFloat(row.similarity)
+        url: row.url,
+        similarity: parseFloat(row.similarity),
+        published_at: row.published_at || null
       },
       rid: row.rid
     }));
@@ -172,42 +214,191 @@ async function triggerAdaptiveExtraction(
   }
 }
 
-// Mock SPARQL search
-async function performSparqlSearch(query: string, topK: number = 5) {
-  const sparqlQuery = `
-    SELECT 
-      m.rid,
-      m.content->>'text' as content,
-      m.metadata->>'source' as source
-    FROM koi_memories m
-    WHERE 
-      m.content->>'text' ILIKE $1
-      AND LENGTH(m.content->>'text') > 50
-    ORDER BY RANDOM()
-    LIMIT $2
-  `;
-
-  const results = await pool.query(sparqlQuery, [`%${query}%`, topK]);
-  
-  return results.rows.map((row, index) => ({
-    id: row.rid,
-    content: row.content.substring(0, 200) + "...",
-    similarity: 1.0 - (index * 0.1),
-    score: 1.0 - (index * 0.1),
-    source: 'sparql' as const,
-    metadata: {
-      rid: row.rid,
-      source: row.source
-    },
-    rid: row.rid
-  }));
-}
 
 // Hybrid RAG Query Endpoint
+// Full-text search using PostgreSQL's ts_rank (BM25-like ranking)
+async function performKeywordSearch(query: string, topK: number = 10, filters?: any) {
+  try {
+    // Split query into words and clean them
+    const words = query.trim().split(/\s+/)
+      .map(word => word.replace(/[^a-zA-Z0-9]/g, ''))
+      .filter(w => w.length > 0);
+
+    if (words.length === 0) {
+      return [];
+    }
+
+    // Create both AND and OR queries for better name matching
+    // For names like "greg landua", we want to match "Gregory Landua" too
+    const andQuery = words.join(' & ');
+    const orQuery = words.join(' | ');
+
+    // Use prefix matching with :* for partial name matches
+    const prefixQuery = words.map(w => `${w}:*`).join(' | ');
+
+    // Try AND first, then fall back to OR with prefix matching
+    const dateClauses: string[] = [];
+    const params: any[] = [andQuery, orQuery];
+    if (filters?.date_range?.start) {
+      dateClauses.push(`published_at >= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.start);
+    }
+    if (filters?.date_range?.end) {
+      dateClauses.push(`published_at <= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.end);
+    }
+    const whereCombined = dateClauses.length
+      ? `WHERE (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR published_at IS NULL' : ''})`
+      : '';
+
+    const searchQuery = `
+      WITH combined AS (
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank,
+          'strict' as match_type,
+          m.published_at
+        FROM koi_memories m
+        WHERE
+          m.content_tsv @@ to_tsquery('english', $1)
+          AND m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+
+        UNION ALL
+
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          ts_rank_cd(m.content_tsv, to_tsquery('english', $2)) as rank,
+          'relaxed' as match_type,
+          m.published_at
+        FROM koi_memories m
+        WHERE
+          m.content_tsv @@ to_tsquery('english', $2)
+          AND m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND NOT EXISTS (
+            SELECT 1 FROM koi_memories m2
+            WHERE m2.rid = m.rid
+            AND m2.content_tsv @@ to_tsquery('english', $1)
+          )
+      )
+      SELECT * FROM combined
+      ${whereCombined}
+      ORDER BY rank DESC
+      LIMIT $${params.length + 1}
+    `;
+
+    // Increased multiplier to ensure OR results are well represented
+    // With AND getting ~10 results and OR getting ~10, we need more total results
+    params.push(Math.max(topK * 3, 50));
+    const results = await pool.query(searchQuery, params);
+
+    // Find max rank for normalization
+    const maxRank = results.rows.length > 0
+      ? Math.max(...results.rows.map(r => parseFloat(r.rank)))
+      : 1;
+
+    return results.rows.slice(0, topK).map(row => {
+      const rawRank = parseFloat(row.rank);
+
+      // Logarithmic scaling for better score discrimination
+      const normalizedScore = Math.log(1 + rawRank) / Math.log(1 + maxRank);
+
+      // Boost for exact phrase matches (case-insensitive)
+      const queryLower = query.toLowerCase();
+      const contentLower = row.content.toLowerCase();
+      const hasExactMatch = contentLower.includes(queryLower);
+
+      // Boost strict matches (AND query) over relaxed matches (OR query)
+      const matchTypeBoost = row.match_type === 'strict' ? 1.0 : 0.9;
+      const finalScore = (hasExactMatch ? normalizedScore * 1.2 : normalizedScore) * matchTypeBoost;
+
+      return {
+        id: row.rid,
+        content: row.content.substring(0, 200) + "...",
+        similarity: finalScore,
+        score: finalScore,
+        source: 'keyword' as const,
+        metadata: {
+          rid: row.rid,
+          source: row.source,
+          url: row.url,
+          published_at: row.published_at || null,
+          fts_rank: rawRank,
+          normalized_score: normalizedScore,
+          exact_match_boost: hasExactMatch,
+          match_type: row.match_type
+        },
+        rid: row.rid
+      };
+    });
+  } catch (error) {
+    console.error('[Keyword Search] Error:', error);
+    // Fallback to ILIKE if FTS fails
+    const dateClauses: string[] = [];
+    const params: any[] = [`%${query}%`, `%${query}%`];
+    if (filters?.date_range?.start) {
+      dateClauses.push(`m.published_at >= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.start);
+    }
+    if (filters?.date_range?.end) {
+      dateClauses.push(`m.published_at <= $${params.length + 1}::timestamptz`);
+      params.push(filters.date_range.end);
+    }
+    const andDate = dateClauses.length
+      ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
+      : '';
+
+    const fallbackQuery = `
+      SELECT
+        m.rid,
+        m.content->>'text' as content,
+        m.metadata->>'source' as source,
+        m.metadata->>'url' as url,
+        0.5 as rank,
+        m.published_at
+      FROM koi_memories m
+      WHERE
+        m.content->>'text' ILIKE $1
+        AND LENGTH(m.content->>'text') > 50
+        ${andDate}
+      ORDER BY CASE
+        WHEN m.content->>'text' ILIKE $2 THEN 3  -- Exact phrase match
+        WHEN m.content->>'text' ILIKE $1 THEN 2  -- Contains all words
+        ELSE 1
+      END DESC
+      LIMIT $${params.length + 1}
+    `;
+
+    params.push(topK);
+    const results = await pool.query(fallbackQuery, params);
+
+    return results.rows.map(row => ({
+      id: row.rid,
+      content: row.content.substring(0, 200) + "...",
+      similarity: parseFloat(row.rank),
+      score: parseFloat(row.rank),
+      source: 'keyword' as const,
+      metadata: {
+        rid: row.rid,
+        source: row.source,
+        url: row.url,
+        published_at: row.published_at || null
+      },
+      rid: row.rid
+    }));
+  }
+}
 app.post('/api/koi/query', async (req, res) => {
   try {
-    const { question, user_id = 'web-user', agent_id = 'koi-interface' } = req.body;
-    
+    const { question, user_id = 'web-user', agent_id = 'koi-interface', limit = 10, filters = {} } = req.body;
+
     if (!question) {
       return res.status(400).json({ error: 'Question is required' });
     }
@@ -215,13 +406,17 @@ app.post('/api/koi/query', async (req, res) => {
     const startTime = Date.now();
 
     // Perform hybrid search with RRF
-    const [vectorResults, sparqlResults] = await Promise.all([
-      performSemanticSearch(question, 8),
-      performSparqlSearch(question, 5)
+    // Increased limits to capture more diverse results before fusion
+    // Higher keyword limit to ensure important biographical pages (rank ~#11) are included
+    // Increased to 20 to capture team/profile pages that rank just outside top-15
+    const [vectorResults, keywordResults] = await Promise.all([
+      performSemanticSearch(question, 20, filters),
+      performKeywordSearch(question, 20, filters)
     ]);
 
     // Apply Reciprocal Rank Fusion
-    const fusedResults = reciprocalRankFusion(vectorResults, sparqlResults);
+    // Pass empty array for SPARQL results (not implemented yet)
+    const fusedResults = reciprocalRankFusion(vectorResults, [], keywordResults);
     
     // Calculate confidence
     const confidence = calculateConfidence(fusedResults);
@@ -249,15 +444,19 @@ app.post('/api/koi/query', async (req, res) => {
     const responseTime = Date.now() - startTime;
 
     // Log the query
-    await logQuery(pool, {
-      query_text: question,
-      user_id,
-      agent_id,
-      confidence_score: confidence,
-      triggered_extraction: triggeredExtraction,
-      response_time_ms: responseTime,
-      results: fusedResults.slice(0, 5)
-    });
+    try {
+      await logQuery(pool, {
+        query_text: question,
+        user_id,
+        agent_id,
+        confidence_score: confidence,
+        triggered_extraction: triggeredExtraction,
+        response_time_ms: responseTime,
+        results: fusedResults.slice(0, 5)
+      });
+    } catch (error) {
+      console.error('Query logging failed:', error);
+    }
 
     // Format response
     const response = {
@@ -266,12 +465,13 @@ app.post('/api/koi/query', async (req, res) => {
       confidence: confidence,
       execution_time: responseTime / 1000,
       triggered_extraction: triggeredExtraction,
-      results: fusedResults.slice(0, 10).map(r => ({
+      results: fusedResults.slice(0, limit).map(r => ({
         title: `Document ${r.rid}`,
         content: r.content,
         score: r.score,
         source: r.source,
-        rid: r.rid
+        rid: r.rid,
+        metadata: r.metadata || {}
       }))
     };
 
@@ -281,6 +481,472 @@ app.post('/api/koi/query', async (req, res) => {
     console.error('Query error:', error);
     res.status(500).json({ 
       error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Podcast chatbot endpoint with LLM synthesis
+app.post('/api/podcast/chat', async (req, res) => {
+  try {
+    const { question, limit = 5 } = req.body;
+
+    if (!question) {
+      return res.status(400).json({ error: 'Question is required' });
+    }
+
+    // Call the existing hybrid RAG API with larger limit to get podcast results after filtering
+    const ragResponse = await fetch('http://localhost:8301/api/koi/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question,
+        limit: 50  // Request more results so we can filter to podcasts and still have enough
+      })
+    });
+
+    if (!ragResponse.ok) {
+      return res.status(500).json({ error: 'Search failed', synthesized: false });
+    }
+
+    const ragData = await ragResponse.json();
+    const allResults = ragData.results || [];
+
+    // Filter to only podcast results, then limit to requested amount
+    const filteredResults = allResults.filter((r: any) => {
+      const rid = r.rid || '';
+      return rid.includes('podcast');
+    });
+    const results = filteredResults.slice(0, limit || 5);
+
+    console.log(`[Podcast Chat] Filtered ${filteredResults.length} podcast results from ${allResults.length} total, using top ${results.length}`);
+    if (results.length > 0) {
+      console.log(`[Podcast Chat] Sample RID: ${results[0].rid}`);
+    }
+
+    if (results.length === 0) {
+      return res.json({
+        question,
+        answer: 'No relevant information found about that in the podcast.',
+        synthesized: false
+      });
+    }
+
+    // Load podcast metadata
+    let podcastData: any = null;
+    try {
+      const fs = await import('fs');
+      const podcastJson = fs.readFileSync('/opt/projects/koi-processor/static/podcast/podcast_map_3d.json', 'utf8');
+      podcastData = JSON.parse(podcastJson);
+      console.log(`[Podcast Chat] Loaded ${podcastData.episodes?.length || 0} episodes from metadata`);
+    } catch (error) {
+      console.error('[Podcast Chat] Error loading podcast metadata:', error);
+    }
+
+    // Extract episodes and build context for LLM
+    const episodesInfo: Record<string, {url: string, episode_int_id: number}> = {};
+    const contextParts: string[] = [];
+
+    results.forEach((r: any, idx: number) => {
+      const content = r.content || '';
+      contextParts.push(`[${idx + 1}] ${content}`);
+
+      // Try to extract episode metadata from RID
+      // Format: regen.podcast:podcast_716040283#chunk34
+      const rid = r.rid || '';
+      const match = rid.match(/:podcast_(\d+)/);
+      if (match) {
+        const episodeIdStr = `podcast_${match[1]}`;
+        console.log(`[Episode Extract] RID: ${rid} -> episode_id: ${episodeIdStr}`);
+
+        if (podcastData && podcastData.episodes) {
+          // Find episode in podcast data by episode_id field
+          const episode = podcastData.episodes.find((ep: any) => ep.episode_id === episodeIdStr);
+          console.log(`[Episode Extract] Found episode:`, episode ? episode.title : 'NOT FOUND');
+
+          if (episode) {
+            const episodeTitle = episode.title || episodeIdStr;
+            const episodeUrl = episode.url || `https://regen.gaiaai.xyz/podcast`;
+            if (!(episodeTitle in episodesInfo)) {
+              episodesInfo[episodeTitle] = {
+                url: episodeUrl,
+                episode_int_id: episode.episode_int_id
+              };
+              console.log(`[Episode Extract] Added: ${episodeTitle}`);
+            }
+          }
+        }
+      } else {
+        console.log(`[Episode Extract] No match for RID: ${rid}`);
+      }
+    });
+
+    console.log(`[Episode Extract] Total episodes found: ${Object.keys(episodesInfo).length}`);
+
+    const context = contextParts.join('\n\n');
+
+    // LLM synthesis with OpenAI
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      return res.json({
+        question,
+        results: results.slice(0, 5),
+        synthesized: false,
+        error: 'OpenAI not configured'
+      });
+    }
+
+    try {
+      const systemPrompt = `You are a helpful AI assistant for the Planetary Regeneration Podcast.
+
+Answer questions based ONLY on the provided context from podcast transcripts. Be concise and direct in your response.
+
+Do NOT include any citations, source numbers, or episode lists in your answer. Just provide a clear, informative response to the question.`;
+
+      const userPrompt = `Question: ${question}
+
+Context from podcast:
+${context}
+
+Answer the question using the context above.`;
+
+      const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 600
+        })
+      });
+
+      if (!openaiResponse.ok) {
+        throw new Error(`OpenAI API error: ${openaiResponse.status}`);
+      }
+
+      const openaiData = await openaiResponse.json();
+      const answer = openaiData.choices[0].message.content;
+
+      return res.json({
+        question,
+        answer,
+        episodes: episodesInfo,
+        synthesized: true,
+        total_results: results.length
+      });
+
+    } catch (error) {
+      console.error('LLM synthesis error:', error);
+      return res.json({
+        question,
+        results: results.slice(0, 5),
+        synthesized: false,
+        error: error instanceof Error ? error.message : 'LLM error'
+      });
+    }
+
+  } catch (error) {
+    console.error('Podcast chat error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Graph Query Endpoint - Direct Apache AGE access
+app.post('/api/koi/graph', async (req, res) => {
+  try {
+    const { query_type, ...params } = req.body;
+
+    if (!query_type) {
+      return res.status(400).json({ error: 'query_type is required' });
+    }
+
+    // Create a client for this request to manage AGE setup
+    const client = await pool.connect();
+
+    try {
+      // Load AGE extension and set search path
+      await client.query("LOAD 'age'");
+      await client.query("SET search_path = ag_catalog, '$user', public");
+
+      let cypherQuery = '';
+      let queryParams: any[] = [];
+
+      // Build cypher query based on query_type
+      switch (query_type) {
+        case 'list_repos':
+          // Get all unique repository names from entities
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n) WHERE n.repo IS NOT NULL
+            WITH DISTINCT n.repo as repo_name, count(*) as entity_count
+            RETURN {name: repo_name} as repo, entity_count
+            ORDER BY repo_name
+          $$) as (repo agtype, entity_count agtype)`;
+          break;
+
+        case 'find_by_type':
+          const entityType = params.entity_type || 'Function';
+          const limit = params.limit || 10;
+          const repoFilter = params.repo_name ? `WHERE r.name = '${params.repo_name}'` : '';
+
+          // Backwards compatibility: map domain-specific types to generic types with domain filters
+          let typeMatch = '';
+          if (entityType === 'Keeper') {
+            typeMatch = `MATCH (n:Struct) WHERE n.domain_type = 'keeper'`;
+          } else if (entityType === 'Message') {
+            typeMatch = `MATCH (n:Struct) WHERE n.domain_type = 'message'`;
+          } else if (entityType === 'Handler') {
+            typeMatch = `MATCH (n:Function) WHERE n.domain_type = 'handler'`;
+          } else {
+            typeMatch = `MATCH (n:${entityType})`;
+          }
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            ${typeMatch}
+            ${repoFilter ? `MATCH (n)-[:DEFINED_IN]->(f:File)-[:IN_REPO]->(r:Repository) ${repoFilter}` : ''}
+            RETURN properties(n) as entity
+            LIMIT ${limit}
+          $$) as (entity agtype)`;
+          break;
+
+        case 'search_entities':
+          const searchTerm = params.entity_name || '';
+          const searchLimit = params.limit || 10;
+          const searchRepoFilter = params.repo_name ? `WHERE n.repo = '${params.repo_name}' AND` : 'WHERE';
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            ${searchRepoFilter} n.name =~ '(?i).*${searchTerm}.*'
+            RETURN labels(n)[0] as type, properties(n) as entity
+            LIMIT ${searchLimit}
+          $$) as (type agtype, entity agtype)`;
+          break;
+
+        case 'list_modules':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (m:Module)
+            RETURN properties(m) as module
+            ORDER BY m.name
+          $$) as (module agtype)`;
+          break;
+
+        case 'get_module':
+          const moduleName = params.module_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (m:Module {name: '${moduleName}'})
+            OPTIONAL MATCH (m)<-[:IN_MODULE]-(e)
+            RETURN properties(m) as module, labels(e)[0] as entity_type, properties(e) as entity
+          $$) as (module agtype, entity_type agtype, entity agtype)`;
+          break;
+
+        case 'keeper_for_msg':
+          const msgName = params.entity_name || '';
+          // Updated to query generic Struct with domain_type='keeper'
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (msg {name: '${msgName}'})-[:HANDLED_BY]->(k:Struct)
+            WHERE k.domain_type = 'keeper'
+            RETURN properties(k) as keeper
+          $$) as (keeper agtype)`;
+          break;
+
+        case 'msgs_for_keeper':
+          const keeperName = params.entity_name || '';
+          // Updated to query generic Struct with domain_type='keeper' and domain_type='message'
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (k:Struct {name: '${keeperName}'})<-[:HANDLED_BY]-(msg:Struct)
+            WHERE k.domain_type = 'keeper' AND msg.domain_type = 'message'
+            RETURN properties(msg) as message
+          $$) as (message agtype)`;
+          break;
+
+        case 'related_entities':
+          const entityName = params.entity_name || '';
+          const relatedLimit = params.limit || 10;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n {name: '${entityName}'})-[r]-(related)
+            RETURN labels(related)[0] as type, properties(related) as entity, type(r) as relationship
+            LIMIT ${relatedLimit}
+          $$) as (type agtype, entity agtype, relationship agtype)`;
+          break;
+
+        case 'list_entity_types':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WITH labels(n)[0] as entity_type, count(*) as count
+            WHERE entity_type IS NOT NULL
+            RETURN entity_type, count
+            ORDER BY count DESC
+          $$) as (entity_type agtype, count agtype)`;
+          break;
+
+        case 'get_entity_stats':
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WITH labels(n)[0] as entity_type,
+                 count(*) as count,
+                 collect(DISTINCT n.language)[0..5] as languages,
+                 collect(DISTINCT n.repo)[0..5] as repos
+            WHERE entity_type IS NOT NULL
+            RETURN entity_type, count, languages, repos
+            ORDER BY count DESC
+          $$) as (entity_type agtype, count agtype, languages agtype, repos agtype)`;
+          break;
+
+        case 'list_concepts':
+          // List all concepts with their descriptions
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Concept)
+            RETURN properties(c) as concept
+            ORDER BY c.name
+          $$) as (concept agtype)`;
+          break;
+
+        case 'explain_concept':
+          // Get a concept and its related entities via EXPLAINS edges
+          const conceptName = params.concept_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Concept {name: '${conceptName}'})
+            OPTIONAL MATCH (c)-[:EXPLAINS]->(e)
+            RETURN properties(c) as concept, 
+                   labels(e)[0] as entity_type,
+                   properties(e) as entity
+          $$) as (concept agtype, entity_type agtype, entity agtype)`;
+          break;
+
+        case 'find_concept_for_query':
+          // Find concepts matching a natural language query via keywords
+          const userQuery = params.query || '';
+          const queryLower = userQuery.toLowerCase();
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Concept)
+            WHERE c.keywords CONTAINS '${queryLower}'
+               OR toLower(c.name) CONTAINS '${queryLower}'
+               OR toLower(c.description) CONTAINS '${queryLower}'
+            RETURN properties(c) as concept
+            LIMIT 5
+          $$) as (concept agtype)`;
+          break;
+        case 'find_callers':
+          // Find all functions/methods that call a given entity
+          const targetName = params.entity_name || '';
+          const callersLimit = params.limit || 50;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (caller)-[:CALLS]->(callee)
+            WHERE callee.name = '${targetName}'
+            RETURN properties(caller) as caller,
+                   properties(callee) as callee
+            LIMIT ${callersLimit}
+          $$) as (caller agtype, callee agtype)`;
+          break;
+
+        case 'find_callees':
+          // Find all functions/methods called by a given entity
+          const callerName = params.entity_name || '';
+          const calleesLimit = params.limit || 50;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (caller {name: '${callerName}'})-[:CALLS]->(callee)
+            RETURN properties(caller) as caller,
+                   properties(callee) as callee
+            LIMIT ${calleesLimit}
+          $$) as (caller agtype, callee agtype)`;
+          break;
+
+        case 'find_call_graph':
+          // Return the local call graph (1-2 hops) around an entity
+          const centerEntity = params.entity_name || '';
+          const hops = params.hops || 1;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (center {name: '${centerEntity}'})
+            OPTIONAL MATCH (caller)-[:CALLS*1..${hops}]->(center)
+            OPTIONAL MATCH (center)-[:CALLS*1..${hops}]->(callee)
+            RETURN properties(center) as center,
+                   collect(DISTINCT properties(caller)) as callers,
+                   collect(DISTINCT properties(callee)) as callees
+          $$) as (center agtype, callers agtype, callees agtype)`;
+          break;
+
+        case 'find_orphaned_code':
+          // Find entities with no incoming or outgoing CALLS edges
+          const orphanType = params.entity_type || 'Function';
+          const orphanLimit = params.limit || 100;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WHERE (n.entity_type = '${orphanType}' OR labels(n)[0] = '${orphanType}')
+            OPTIONAL MATCH (n)-[r_out:CALLS]->()
+            OPTIONAL MATCH (n)<-[r_in:CALLS]-()
+            WHERE r_out IS NULL AND r_in IS NULL
+            RETURN properties(n) as orphan
+            LIMIT ${orphanLimit}
+          $$) as (orphan agtype)`;
+          break;
+
+        case 'trace_call_chain':
+          // Find the full call path from entity A to entity B
+          const fromName = params.from || '';
+          const toName = params.to || '';
+          const maxDepth = params.max_depth || 5;
+          const chainLimit = params.limit || 10;
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH path = (source {name: '${fromName}'})-[:CALLS*1..${maxDepth}]->(target {name: '${toName}'})
+            RETURN nodes(path) as chain
+            LIMIT ${chainLimit}
+          $$) as (chain agtype)`;
+          break;
+
+        default:
+          return res.status(400).json({ error: `Unknown query_type: ${query_type}` });
+      }
+
+      // Execute the cypher query
+      const result = await client.query(cypherQuery, queryParams);
+
+      // Convert agtype results to plain JSON
+      const rows = result.rows.map(row => {
+        const converted: any = {};
+        for (const key in row) {
+          const value = row[key];
+          // AGE returns values as JSON strings, parse them
+          if (value === null || value === undefined) {
+            converted[key] = null;
+          } else if (typeof value === 'string') {
+            try {
+              // Try to parse as JSON (AGE agtype format)
+              const parsed = JSON.parse(value);
+              converted[key] = parsed;
+            } catch {
+              // If not JSON, keep as string
+              converted[key] = value;
+            }
+          } else {
+            converted[key] = value;
+          }
+        }
+        return converted;
+      });
+
+      res.json({
+        query_type,
+        total_results: rows.length,
+        results: rows
+      });
+
+    } finally {
+      client.release();
+    }
+
+  } catch (error) {
+    console.error('Graph query error:', error);
+    res.status(500).json({
+      error: 'Graph query failed',
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }
@@ -302,17 +968,17 @@ const proxyToService = (serviceUrl: string) => {
 
       const data = await response.text();
       res.status(response.status);
-      
+
       // Set content type based on response
       const contentType = response.headers.get('content-type');
       if (contentType) {
         res.set('Content-Type', contentType);
       }
-      
+
       res.send(data);
     } catch (error) {
       console.error(`Proxy error for ${req.originalUrl}:`, error);
-      res.status(503).json({ 
+      res.status(503).json({
         error: 'Service unavailable',
         service: serviceUrl,
         message: error instanceof Error ? error.message : 'Unknown error'
@@ -322,7 +988,7 @@ const proxyToService = (serviceUrl: string) => {
 };
 
 // KOI Service Proxies (Development API Gateway)
-app.use('/api/koi/graph/', proxyToService('http://localhost:8002'));
+// Note: /api/koi/graph is handled directly above, not proxied
 app.use('/api/koi/coordinator/', proxyToService('http://localhost:8005'));
 app.use('/api/koi/event-bridge/', proxyToService('http://localhost:8100'));
 app.use('/api/koi/bge/', proxyToService('http://localhost:8090'));
@@ -351,6 +1017,205 @@ app.get('/api/koi/health', async (req, res) => {
 });
 
 // Start server
+
+// Statistics endpoint
+app.get('/api/koi/stats', async (req, res) => {
+  try {
+    // Total documents
+    const totalResult = await pool.query('SELECT COUNT(*) as total FROM koi_memories');
+    const total = parseInt(totalResult.rows[0].total);
+
+    // By source
+    const bySourceResult = await pool.query(`
+      SELECT
+        metadata->>'source' as source,
+        COUNT(*) as count
+      FROM koi_memories
+      WHERE metadata->>'source' IS NOT NULL
+      GROUP BY source
+      ORDER BY count DESC
+    `);
+
+    // Recent activity (last 7 days)
+    const recentResult = await pool.query(`
+      SELECT COUNT(*) as recent
+      FROM koi_memories
+      WHERE created_at > NOW() - INTERVAL '7 days'
+    `);
+    const recent = parseInt(recentResult.rows[0].recent);
+
+    // Format by_source as object
+    const by_source = {};
+    bySourceResult.rows.forEach(row => {
+      by_source[row.source] = parseInt(row.count);
+    });
+
+    res.json({
+      total_documents: total,
+      recent_7_days: recent,
+      by_source: by_source
+    });
+  } catch (error) {
+    console.error('Stats error:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+// Weekly digest endpoint - simplified version using search
+app.get('/api/koi/weekly-digest', async (req, res) => {
+  try {
+    const { start_date, end_date, format = 'markdown' } = req.query;
+
+    // Calculate dates
+    const now = new Date();
+    const endDateStr = end_date || now.toISOString().split('T')[0];
+    
+    let startDateStr = start_date;
+    if (!startDateStr) {
+      const weekAgo = new Date(now);
+      weekAgo.setDate(now.getDate() - 7);
+      startDateStr = weekAgo.toISOString().split('T')[0];
+    }
+
+    console.log(`Generating weekly digest from ${startDateStr} to ${endDateStr}`);
+
+    // Query for recent Regen Network activity
+    const searchQuery = 'Regen Network activity updates discussions governance proposals';
+    const topK = 50;
+
+    // Perform semantic search with date filters
+    const bgeResponse = await fetch('http://localhost:8090/encode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: searchQuery })
+    });
+
+    let results = [];
+    
+    if (bgeResponse.ok) {
+      const { embedding } = await bgeResponse.json();
+      
+      // Vector search with date range - use parameterized query
+      const vectorQuery = `
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          1 - (e.dim_1024 <=> $1::vector) as similarity,
+          m.published_at
+        FROM koi_memories m
+        JOIN koi_embeddings e ON m.id = e.memory_id
+        WHERE
+          m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND e.dim_1024 IS NOT NULL
+          AND m.published_at >= $2::timestamptz
+          AND m.published_at <= $3::timestamptz
+        ORDER BY e.dim_1024 <=> $1::vector
+        LIMIT $4
+      `;
+      
+      const queryResults = await pool.query(vectorQuery, [
+        JSON.stringify(embedding),
+        startDateStr,
+        endDateStr,
+        topK
+      ]);
+      
+      results = queryResults.rows;
+    } else {
+      // Fallback to keyword search
+      const fallbackQuery = `
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          0.5 as similarity,
+          m.published_at
+        FROM koi_memories m
+        WHERE
+          m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND m.published_at >= $1::timestamptz
+          AND m.published_at <= $2::timestamptz
+        ORDER BY m.published_at DESC
+        LIMIT $3
+      `;
+      
+      const queryResults = await pool.query(fallbackQuery, [startDateStr, endDateStr, topK]);
+      results = queryResults.rows;
+    }
+
+    // Generate markdown digest
+    let markdownContent = `# Regen Network Weekly Digest\\n\\n`;
+    markdownContent += `**Period:** ${startDateStr} to ${endDateStr}\\n\\n`;
+    markdownContent += `## Summary\\n\\n`;
+    markdownContent += `This digest contains ${results.length} recent documents and discussions from the Regen Network community.\\n\\n`;
+    markdownContent += `## Recent Activity\\n\\n`;
+
+    // Group by date
+    const byDate = {};
+    results.forEach(r => {
+      const date = r.published_at ? r.published_at.toISOString().split('T')[0] : 'undated';
+      if (!byDate[date]) byDate[date] = [];
+      byDate[date].push(r);
+    });
+
+    // Output results by date
+    Object.keys(byDate).sort().reverse().forEach(date => {
+      if (date !== 'undated') {
+        markdownContent += `### ${date}\\n\\n`;
+      }
+      byDate[date].forEach(item => {
+        const preview = item.content.substring(0, 200);
+        markdownContent += `**Source:** ${item.source}\\n`;
+        if (item.url) {
+          markdownContent += `**URL:** ${item.url}\\n`;
+        }
+        markdownContent += `${preview}...\\n\\n---\\n\\n`;
+      });
+    });
+
+    const wordCount = markdownContent.split(/\\s+/).length;
+
+    if (format === 'json') {
+      res.json({
+        success: true,
+        week_start: startDateStr,
+        week_end: endDateStr,
+        total_items: results.length,
+        content: markdownContent,
+        metadata: {
+          word_count: wordCount,
+          source_count: results.length
+        }
+      });
+    } else {
+      res.json({
+        success: true,
+        format: 'markdown',
+        content: markdownContent,
+        metadata: {
+          week_start: startDateStr,
+          week_end: endDateStr,
+          total_items: results.length,
+          word_count: wordCount
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Weekly digest error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate weekly digest'
+    });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`🚀 KOI Query API running on http://localhost:${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/api/koi/health`);

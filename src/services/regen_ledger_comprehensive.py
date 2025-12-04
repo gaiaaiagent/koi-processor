@@ -701,12 +701,34 @@ class RegenLedgerComprehensive:
         """
         Format comprehensive ledger data for weekly digest
         """
+        # Extract nested stats from the comprehensive summary statistics
         stats = summary.get("statistics", {})
+        gov_stats = stats.get("governance", {})
+        eco_stats = stats.get("ecocredit", {})
+        market_stats = stats.get("marketplace", {})
+        staking_stats = stats.get("staking", {})
+        network_stats = stats.get("network", {})
+
+        # Flatten stats into format expected by weekly curator
+        flattened_stats = {
+            "total_credit_batches": eco_stats.get("new_batches", 0),
+            "new_credits": eco_stats.get("new_batches", 0),  # Same as total for weekly
+            "active_proposals": gov_stats.get("active_proposals", 0),
+            "completed_proposals": gov_stats.get("passed_week", 0) + gov_stats.get("rejected_week", 0),
+            "sell_orders": market_stats.get("active_sell_orders", 0),
+            "buy_orders": market_stats.get("active_buy_orders", 0),
+            "total_validators": staking_stats.get("total_validators", 0),
+            "ibc_channels": network_stats.get("ibc_channels", 0),
+            "total_transactions": network_stats.get("total_transactions", 0)
+        }
 
         digest_data = {
             "title": "Regen Network Weekly On-Chain Activity",
             "summary": self.format_comprehensive_weekly_post(summary),
-            "sections": []
+            "statistics": flattened_stats,  # Add flattened statistics for weekly curator
+            "sections": [],
+            "proposals": summary.get("proposals", []),  # Include proposals list
+            "credit_batches": summary.get("credit_batches", [])  # Include batches list
         }
 
         # Governance section with details
@@ -714,7 +736,7 @@ class RegenLedgerComprehensive:
             gov_section = {
                 "title": "📊 Governance Activity",
                 "items": [],
-                "stats": stats.get("governance", {})
+                "stats": gov_stats
             }
             for prop in summary.get("proposals", [])[:10]:
                 gov_section["items"].append({
@@ -731,7 +753,7 @@ class RegenLedgerComprehensive:
             credit_section = {
                 "title": "🌱 Ecocredit Activity",
                 "items": [],
-                "stats": stats.get("ecocredit", {})
+                "stats": eco_stats
             }
             for batch in summary.get("credit_batches", [])[:10]:
                 credit_section["items"].append({
@@ -747,7 +769,7 @@ class RegenLedgerComprehensive:
         if market.get("sell_orders") or market.get("buy_orders"):
             market_section = {
                 "title": "💱 Marketplace Activity",
-                "stats": stats.get("marketplace", {}),
+                "stats": market_stats,
                 "items": []
             }
 
@@ -773,19 +795,19 @@ class RegenLedgerComprehensive:
             digest_data["sections"].append(market_section)
 
         # Network statistics section
-        avg_tx = stats.get('network', {}).get('avg_tx_per_block')
+        avg_tx = network_stats.get('avg_tx_per_block')
         avg_tx_str = f"{avg_tx:.2f}" if avg_tx is not None else "N/A"
-        total_tx = stats.get("network", {}).get("total_transactions")
+        total_tx = network_stats.get("total_transactions")
         total_tx_str = str(total_tx) if total_tx is not None else "N/A"
 
         network_section = {
             "title": "⛓️ Network Statistics",
-            "stats": stats.get("network", {}),
+            "stats": network_stats,
             "items": [
                 {"metric": "Total Transactions", "value": total_tx_str},
                 {"metric": "Avg TX/Block", "value": avg_tx_str},
-                {"metric": "Active Validators", "value": stats.get("staking", {}).get("total_validators", 0)},
-                {"metric": "IBC Channels", "value": stats.get("network", {}).get("ibc_channels", 0)}
+                {"metric": "Active Validators", "value": staking_stats.get("total_validators", 0)},
+                {"metric": "IBC Channels", "value": network_stats.get("ibc_channels", 0)}
             ]
         }
         digest_data["sections"].append(network_section)

@@ -2337,6 +2337,200 @@ Final fix: Query database directly, no circular MCP dependency
 Uses existing BGE embeddings in the database
 """
 
+@app.route('/api/koi/weekly-digest', methods=['GET'])
+def koi_weekly_digest():
+    """
+    API endpoint for MCP to fetch weekly digest.
+    Returns the most recent digest or generates a new one.
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+
+    try:
+        # Get parameters
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        format_type = request.args.get('format', 'markdown')
+
+        # Check for recent digest file first
+        output_dir = '/opt/projects/koi-processor/output/weekly_digests'
+        if os.path.exists(output_dir):
+            # Look for most recent digest file
+            files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
+            if files:
+                latest_file = os.path.join(output_dir, files[0])
+                # Check if file is recent (within last 24 hours)
+                file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
+                if datetime.now() - file_mtime < timedelta(hours=24):
+                    with open(latest_file, 'r') as f:
+                        content = f.read()
+                    logger.info(f"Returning cached digest from {latest_file}")
+                    return jsonify({
+                        'success': True,
+                        'content': content,
+                        'source': 'cached',
+                        'cached_file': files[0]
+                    })
+
+        # Generate new digest using WeeklyCuratorLLM
+        logger.info("Generating fresh weekly digest via API")
+
+        # Set date range environment variables if provided
+        if start_date:
+            os.environ['DIGEST_START_DATE'] = start_date
+        if end_date:
+            os.environ['DIGEST_END_DATE'] = end_date
+
+        # Import and run the curator
+        from src.content.weekly_curator_llm import WeeklyCuratorLLM
+
+        curator = WeeklyCuratorLLM()
+
+        # Run async function in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            digest = loop.run_until_complete(curator.generate_weekly_digest())
+        finally:
+            loop.close()
+
+        if digest and digest.get('brief'):
+            content = digest.get('brief', '')
+            logger.info(f"Generated fresh digest: {len(content)} chars")
+            return jsonify({
+                'success': True,
+                'content': content,
+                'source': 'generated',
+                'statistics': digest.get('statistics', {})
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': {'message': 'No content generated', 'code': 500}
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error generating weekly digest: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': {'message': str(e), 'code': 500}
+        }), 500
+
+@app.route('/api/koi/weekly-digest/notebooklm', methods=['GET'])
+def koi_weekly_digest_notebooklm():
+    """
+    API endpoint for MCP to fetch NotebookLM export.
+    Returns full content including forum posts and Notion pages.
+    Generates on demand if no recent export exists.
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+
+    try:
+        # Check for recent NotebookLM export file first
+        # NotebookLM exports are saved to /output/weekly/ (not /output/weekly_digests/)
+        output_dir = '/opt/projects/koi-processor/output/weekly'
+        if os.path.exists(output_dir):
+            # Look for most recent notebooklm file (format: weekly_digest_{date}_notebooklm.md)
+            files = sorted([f for f in os.listdir(output_dir) if f.endswith('_notebooklm.md')], reverse=True)
+            if files:
+                latest_file = os.path.join(output_dir, files[0])
+                # Check if file is recent (within last 24 hours)
+                file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
+                if datetime.now() - file_mtime < timedelta(hours=24):
+                    with open(latest_file, 'r') as f:
+                        content = f.read()
+
+                    # Get file stats
+                    word_count = len(content.split())
+                    char_count = len(content)
+
+                    logger.info(f"Returning cached NotebookLM export from {latest_file}")
+                    return jsonify({
+                        'success': True,
+                        'content': content,
+                        'source': 'cached',
+                        'cached_file': files[0],
+                        'statistics': {
+                            'word_count': word_count,
+                            'char_count': char_count
+                        }
+                    })
+
+        # No recent file - generate on demand
+        logger.info("No recent NotebookLM export found, generating on demand...")
+
+        # Get optional date range from query params
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+
+        if start_date:
+            os.environ['DIGEST_START_DATE'] = start_date
+        if end_date:
+            os.environ['DIGEST_END_DATE'] = end_date
+
+        # Import and run the curator
+        from src.content.weekly_curator_llm import WeeklyCuratorLLM
+
+        curator = WeeklyCuratorLLM()
+
+        # Run async functions in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # Generate digest first
+            digest = loop.run_until_complete(curator.generate_weekly_digest())
+
+            if not digest:
+                return jsonify({
+                    'success': False,
+                    'error': {'message': 'Failed to generate digest', 'code': 500}
+                }), 500
+
+            # Then export to NotebookLM format
+            loop.run_until_complete(curator.export_notebooklm_enhanced(digest))
+        finally:
+            loop.close()
+
+        # Now read the generated file
+        if os.path.exists(output_dir):
+            files = sorted([f for f in os.listdir(output_dir) if f.endswith('_notebooklm.md')], reverse=True)
+            if files:
+                latest_file = os.path.join(output_dir, files[0])
+                with open(latest_file, 'r') as f:
+                    content = f.read()
+
+                word_count = len(content.split())
+                char_count = len(content)
+
+                logger.info(f"Generated and returning NotebookLM export: {files[0]}")
+                return jsonify({
+                    'success': True,
+                    'content': content,
+                    'source': 'generated',
+                    'generated_file': files[0],
+                    'statistics': {
+                        'word_count': word_count,
+                        'char_count': char_count
+                    }
+                })
+
+        return jsonify({
+            'success': False,
+            'error': {'message': 'Failed to generate NotebookLM export', 'code': 500}
+        }), 500
+
+    except Exception as e:
+        logger.error(f"Error fetching/generating NotebookLM export: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': {'message': str(e), 'code': 500}
+        }), 500
+
 @app.route('/api/koi/query', methods=['POST'])
 @require_auth
 def koi_hybrid_query():

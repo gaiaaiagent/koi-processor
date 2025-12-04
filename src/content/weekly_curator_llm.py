@@ -22,9 +22,30 @@ import httpx
 import subprocess
 import tempfile
 from urllib.parse import urljoin, urlparse
+from uuid import UUID
+
+# Import URL enricher
+sys.path.insert(0, str(Path(__file__).parent))
+from url_enrichment import URLEnricher
 
 # Configure logging
 logger.add("logs/weekly_curator_llm.log", rotation="10 MB", retention="7 days")
+
+
+def convert_uuids_to_strings(obj: Any) -> Any:
+    """Recursively convert UUID and datetime objects to strings for JSON serialization"""
+    if isinstance(obj, UUID):
+        return str(obj)
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {key: convert_uuids_to_strings(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_uuids_to_strings(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_uuids_to_strings(item) for item in obj)
+    else:
+        return obj
 
 
 class WeeklyCuratorLLM:
@@ -47,6 +68,9 @@ class WeeklyCuratorLLM:
         self.max_stories = 10
         self.brief_word_target = 1000  # Increased from 800 for more comprehensive coverage
 
+        # URL enrichment
+        self.url_enricher = URLEnricher(self.db_url)
+
     async def get_ledger_data_for_week(self) -> Dict[str, Any]:
         """Get Regen ledger data for the weekly digest"""
         try:
@@ -61,7 +85,7 @@ class WeeklyCuratorLLM:
             logger.error(f"Error getting ledger data: {e}")
             return {}
 
-    async def get_weekly_content(self, days_back: int = 7, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    async def get_weekly_content(self, days_back: int = 7, start_date: Optional = None, end_date: Optional = None) -> List[Dict[str, Any]]:
         """
         Get ALL content PUBLISHED in the past week or within a specific date range
         NO LIMITS - we want complete context for the LLM
@@ -721,8 +745,7 @@ Format as structured JSON with these exact keys:
         days_back = 7
 
         if start_date_str and end_date_str:
-            # Parse dates
-            from datetime import datetime
+            # Parse dates (datetime already imported at module level)
             start_date = datetime.fromisoformat(start_date_str)
             end_date = datetime.fromisoformat(end_date_str)
             # Extend end_date to end of day
@@ -736,16 +759,21 @@ Format as structured JSON with these exact keys:
         items = await self.get_weekly_content(days_back=days_back, start_date=start_date, end_date=end_date)
         logger.info(f"Retrieved {len(items)} items from past {days_back} days")
 
+        # Enrich items with URL resolution
+        logger.info("Enriching content with URL resolution...")
+        enriched_items = await self.url_enricher.enrich_digest_items(items)
+        logger.info(f"URL enrichment complete - processed {len(enriched_items)} items")
+
         # Get ledger data for the week
         ledger_data = await self.get_ledger_data_for_week()
         logger.info(f"Retrieved ledger data: {ledger_data.get('statistics', {})}")
 
-        if not items and not ledger_data:
+        if not enriched_items and not ledger_data:
             logger.warning("No content found for weekly digest")
             return None
 
-        # Group by thread/discussion
-        thread_groups = self.group_by_thread(items)
+        # Group by thread/discussion (use enriched items)
+        thread_groups = self.group_by_thread(enriched_items)
         logger.info(f"Grouped into {len(thread_groups)} discussions")
 
         # Analyze with LLM, including ledger data
@@ -793,6 +821,7 @@ Format as structured JSON with these exact keys:
                 'source_breakdown': dict(source_counts),
                 'ledger_summary': ledger_data.get('summary', '') if ledger_data else ''
             },
+            'thread_groups': convert_uuids_to_strings(thread_groups),  # Include thread groups with enriched items (convert UUIDs to strings)
             'brief': self.format_brief(llm_analysis, actual_week_start, actual_week_end, len(thread_groups), len(items), ledger_data, items, thread_groups),
             'generated_at': now.isoformat(),
             'generator': 'weekly_curator_llm_v1'
@@ -800,7 +829,7 @@ Format as structured JSON with these exact keys:
 
         return digest
 
-    def format_brief(self, analysis: Dict, week_start: datetime, week_end: datetime,
+    def format_brief(self, analysis: Dict, week_start, week_end,
                      discussion_count: int, item_count: int, ledger_data: Optional[Dict] = None,
                      items: Optional[List[Dict]] = None, thread_groups: Optional[Dict] = None) -> str:
         """Format the digest as a readable brief"""
@@ -1473,8 +1502,8 @@ Format as structured JSON with these exact keys:
                 else:
                     return None
 
-            # Use Discourse API to fetch thread content
-            api_url = f"https://forum.regen.network/t/{thread_id}.json"
+            # Use Discourse API to fetch thread content with print=true to get ALL posts
+            api_url = f"https://forum.regen.network/t/{thread_id}.json?print=true"
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(api_url, timeout=10.0)
@@ -1484,20 +1513,25 @@ Format as structured JSON with these exact keys:
 
                 data = response.json()
 
-                # Extract post content
+                # Extract post content (print=true returns all posts)
                 posts = data.get('post_stream', {}).get('posts', [])
                 if not posts:
                     return None
 
-                # Format the thread content with ALL posts
+                # Format the thread content with posts (most recent first)
                 thread_content = f"**Thread Title**: {data.get('title', 'Untitled')}\n\n"
                 thread_content += f"**Category**: {data.get('category_id', 'General')}\n"
                 thread_content += f"**Total Posts**: {len(posts)}\n"
                 thread_content += f"**Thread URL**: {url}\n\n"
                 thread_content += "---\n\n"
 
-                # Include ALL posts for complete context
-                for i, post in enumerate(posts, 1):
+                # Reverse posts to show most recent first, then limit to last 30 posts
+                # This gives good recent context without overwhelming with very old threads
+                posts_to_include = list(reversed(posts))[:30]
+                thread_content += f"*Showing most recent {len(posts_to_include)} of {len(posts)} total posts*\n\n"
+
+                # Include posts (now newest first)
+                for i, post in enumerate(posts_to_include, 1):
                     username = post.get('username', 'Anonymous')
                     created = post.get('created_at', '')[:10]
                     content = post.get('cooked', '')  # 'cooked' is the rendered HTML
@@ -1577,6 +1611,12 @@ Format as structured JSON with these exact keys:
             # Extract all URLs by type
             forum_urls = set()
             website_urls = set()  # For regentokenomics.org and other websites
+            enriched_notion_content = {}  # Store enriched database content {url: content}
+
+            # DEBUG: Log digest structure
+            logger.info(f"[NotebookLM Export] Digest has thread_groups: {'thread_groups' in digest}")
+            if 'thread_groups' in digest:
+                logger.info(f"[NotebookLM Export] Thread groups count: {len(digest['thread_groups'])}")
 
             # From thread groups
             if 'thread_groups' in digest:
@@ -1587,6 +1627,26 @@ Format as structured JSON with these exact keys:
                         # EXCLUDE directory/index pages
                         if not re.match(r'.*regentokenomics\.org/weekly-meetups/?$', thread_url):
                             website_urls.add(thread_url)
+
+                # Extract enriched URLs from thread items
+                for thread_url, group in digest['thread_groups'].items():
+                    # Group is a list of items, not a dict with 'items' key
+                    if isinstance(group, list):
+                        logger.info(f"[NotebookLM Export] Thread {thread_url}: {len(group)} items")
+                        for item in group:
+                            if 'url_enrichments' in item:
+                                enrichments = item['url_enrichments'].get('enrichments', [])
+                                logger.info(f"[NotebookLM Export] Found {len(enrichments)} enrichments in item")
+                                for enrich in enrichments:
+                                    enrich_url = enrich.get('url', '')
+                                    enrich_source = enrich.get('source', '')
+                                    logger.info(f"[NotebookLM Export] Enrichment: {enrich_url} (source: {enrich_source})")
+                                    if enrich_url and enrich.get('source') == 'database':
+                                        # Store the database content for this URL
+                                        enriched_notion_content[enrich_url] = enrich
+                                        logger.info(f"[NotebookLM Export] ✅ Added to enriched_notion_content: {enrich_url}")
+
+            logger.info(f"[NotebookLM Export] Total enriched_notion_content entries: {len(enriched_notion_content)}")
 
             # From top stories
             for story in digest.get('top_stories', []):
@@ -1662,12 +1722,45 @@ Format as structured JSON with these exact keys:
                         f.write(prop_content)
                         f.write("---\n\n")
 
-            # Fetch and include website content (regentokenomics.org, etc.)
-            if website_urls:
-                f.write("\n\n# Complete Website Content & Transcriptions\n\n")
-                f.write(f"*Fetching full content from {len(website_urls)} website pages including video transcriptions...*\n\n")
+            # Include enriched Notion content from database first
+            if enriched_notion_content:
+                f.write("\n\n# Enriched Notion Page Content (from Database)\n\n")
+                f.write(f"*Including {len(enriched_notion_content)} Notion pages resolved from database...*\n\n")
 
-                for url in sorted(website_urls):
+                for url, enrich_data in sorted(enriched_notion_content.items()):
+                    f.write(f"## Notion Page: {url}\n\n")
+
+                    # Add metadata about chunks if available
+                    chunks_info = ""
+                    if 'chunks_combined' in enrich_data and 'chunk_total' in enrich_data:
+                        chunks_info = f" ({enrich_data['chunks_combined']}/{enrich_data['chunk_total']} chunks combined)"
+                    f.write(f"**Source**: Database (RID: {enrich_data.get('rid', 'N/A')}){chunks_info}\n\n")
+
+                    # Extract and format content - handle combined chunks properly
+                    content_obj = enrich_data.get('content', {})
+                    if isinstance(content_obj, dict) and 'text' in content_obj:
+                        # Write the actual text content, not the JSON representation
+                        f.write(content_obj['text'])
+                        f.write("\n")
+                    elif isinstance(content_obj, str):
+                        f.write(content_obj)
+                        f.write("\n")
+                    else:
+                        # Fallback: try to extract text or convert to string
+                        logger.warning(f"Unexpected content format for {url}: {type(content_obj)}")
+                        f.write(str(content_obj))
+                        f.write("\n")
+
+                    f.write("\n---\n\n")
+
+            # Fetch and include website content (regentokenomics.org, etc.)
+            # Skip URLs we already have enriched from database
+            remaining_website_urls = website_urls - set(enriched_notion_content.keys())
+            if remaining_website_urls:
+                f.write("\n\n# Complete Website Content & Transcriptions\n\n")
+                f.write(f"*Fetching full content from {len(remaining_website_urls)} website pages including video transcriptions...*\n\n")
+
+                for url in sorted(remaining_website_urls):
                     logger.info(f"Fetching website content: {url}")
                     content = await self.fetch_website_content(url)
                     if content:
@@ -1684,33 +1777,63 @@ Format as structured JSON with these exact keys:
                         f.write("*[Unable to fetch website content]*\n\n")
                         f.write("---\n\n")
 
-            # Fetch and include forum threads
+            # Include forum threads from database (thread_groups)
             if forum_urls:
                 f.write("\n\n# Complete Forum Thread Content\n\n")
-                f.write(f"*Fetching complete content from {len(forum_urls)} forum threads (every single post)...*\n\n")
+                f.write(f"*Including complete content from {len(forum_urls)} forum threads from database...*\n\n")
 
                 thread_count = 0
                 for url in sorted(forum_urls):
                     thread_count += 1
-                    logger.info(f"Fetching complete forum thread {thread_count}/{len(forum_urls)}: {url}")
-                    content = await self.fetch_forum_thread_content(url)
-                    if content:
+                    logger.info(f"Including forum thread {thread_count}/{len(forum_urls)} from database: {url}")
+
+                    # Extract forum content from thread_groups (already in database)
+                    thread_items = digest.get('thread_groups', {}).get(url, [])
+
+                    if thread_items:
                         f.write(f"## Forum Thread #{thread_count}\n\n")
-                        f.write(content)
-                        f.write("\n\n")
+                        f.write(f"**URL**: {url}\n\n")
+                        f.write(f"**Total Posts**: {len(thread_items)}\n\n")
+                        f.write("---\n\n")
+
+                        # Include all posts from the thread
+                        for i, item in enumerate(thread_items, 1):
+                            # Extract text content
+                            content_obj = item.get('content', '')
+                            if isinstance(content_obj, str):
+                                # Content might be a JSON string
+                                try:
+                                    import json
+                                    content_data = json.loads(content_obj)
+                                    text_content = content_data.get('text', content_obj)
+                                except:
+                                    text_content = content_obj
+                            elif isinstance(content_obj, dict):
+                                text_content = content_obj.get('text', str(content_obj))
+                            else:
+                                text_content = str(content_obj)
+
+                            # Write post content
+                            f.write(f"### Post {i}\n\n")
+                            f.write(text_content)
+                            f.write("\n\n---\n\n")
+
+                        logger.info(f"✅ Included {len(thread_items)} posts from forum thread: {url}")
                     else:
                         f.write(f"## Forum Thread #{thread_count}\n\n")
                         f.write(f"**URL**: {url}\n\n")
-                        f.write("*[Unable to fetch thread content - API access may be restricted]*\n\n")
+                        f.write("*[No forum posts found in database for this thread]*\n\n")
                         f.write("---\n\n")
+                        logger.warning(f"No posts found in thread_groups for: {url}")
 
             f.write("\n\n---\n\n")
             f.write("## Document Completeness\n\n")
             f.write("This comprehensive NotebookLM export contains:\n")
             f.write("- ✅ Complete weekly digest (800-1200 words)\n")
             f.write(f"- ✅ {len(proposal_ids) if proposal_ids else 0} full governance proposals with voting details\n")
-            f.write(f"- ✅ {len(forum_urls)} complete forum threads (every post included)\n")
-            f.write(f"- ✅ {len(website_urls) if website_urls else 0} website pages with full content\n")
+            f.write(f"- ✅ {len(forum_urls)} complete forum threads (most recent 30 posts per thread)\n")
+            f.write(f"- ✅ {len(enriched_notion_content)} Notion pages from database (URL-enriched)\n")
+            f.write(f"- ✅ {len(remaining_website_urls) if remaining_website_urls else 0} additional website pages with full content\n")
             f.write(f"- ✅ Video transcriptions where available\n")
             f.write("- ✅ All on-chain metrics and statistics\n")
             f.write("- ✅ No external sources needed - everything is here\n\n")

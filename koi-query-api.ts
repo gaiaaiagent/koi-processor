@@ -85,8 +85,109 @@ function fixEntityPaths(entity: any): any {
 app.use(cors());
 app.use(express.json());
 
-// Semantic search using BGE embeddings 
-async function performSemanticSearch(query: string, topK: number = 10, filters?: any) {
+// Generate a random session token (UUID v4 format)
+function generateSessionToken(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+// Session token lifetime (1 hour - shorter than Google OAuth token)
+const SESSION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+
+// Hash a token using SHA-256 for secure storage/lookup
+async function hashToken(token: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Create a new session token for an authenticated user
+// NOTE: This is kept for internal use only - MCP clients should use the device_code flow
+// SECURITY: Plain token is returned to caller but NEVER stored in database
+async function createSessionToken(userEmail: string, clientInfo?: string): Promise<string> {
+  const sessionToken = generateSessionToken();
+  const tokenHash = await hashToken(sessionToken);
+  const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
+
+  // Store ONLY the hash in session_tokens - plain token never touches the DB
+  await pool.query(
+    `INSERT INTO session_tokens (token_hash, user_email, expires_at, client_info)
+     VALUES ($1, $2, $3, $4)`,
+    [tokenHash, userEmail, expiresAt, clientInfo || null]
+  );
+
+  console.log(`[Auth] Created session token for ${userEmail}, expires at ${expiresAt.toISOString()}`);
+  return sessionToken;  // Plain token only exists in memory, returned to caller
+}
+
+// Validate a session token - returns user email if valid, null otherwise
+// SECURITY: This validates by hashing the token and comparing to stored hash
+// This prevents timing attacks and protects against database leaks
+async function validateSessionToken(sessionToken: string | undefined): Promise<string | null> {
+  if (!sessionToken) return null;
+
+  try {
+    const tokenHash = await hashToken(sessionToken);
+
+    const result = await pool.query(
+      `SELECT user_email, expires_at FROM session_tokens
+       WHERE token_hash = $1
+       AND expires_at > NOW()
+       AND revoked_at IS NULL`,
+      [tokenHash]
+    );
+
+    if (result.rows.length === 0) {
+      return null; // Token not found, expired, or revoked
+    }
+
+    const userEmail = result.rows[0].user_email;
+
+    // Additional validation: ensure it's a @regen.network email
+    if (!userEmail.endsWith('@regen.network')) {
+      console.warn(`Session token found but email domain not @regen.network: ${userEmail}`);
+      return null;
+    }
+
+    return userEmail;
+  } catch (error) {
+    console.error('Session token validation error:', error);
+    return null;
+  }
+}
+
+// Check if user has valid OAuth token (for creating session tokens)
+async function hasValidOAuthToken(userEmail: string): Promise<boolean> {
+  try {
+    const result = await pool.query(
+      `SELECT 1 FROM oauth_tokens
+       WHERE user_email = $1 AND token_expiry > NOW()`,
+      [userEmail]
+    );
+    return result.rows.length > 0;
+  } catch (error) {
+    console.error('OAuth token check error:', error);
+    return false;
+  }
+}
+
+// Build privacy filter clause based on authentication status
+function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'): string {
+  if (isAuthenticated) {
+    return ''; // Authenticated users see all data
+  }
+  // Unauthenticated users only see public data
+  return ` AND (${tableAlias}.is_private = FALSE OR ${tableAlias}.is_private IS NULL)`;
+}
+
+// Semantic search using BGE embeddings
+async function performSemanticSearch(query: string, topK: number = 10, filters?: any, privacyFilter: string = '') {
   try {
     // Generate embedding for the query using BGE API
     const bgeResponse = await fetch('http://localhost:8090/encode', {
@@ -114,7 +215,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
         ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
         : '';
       const fallbackQuery = `
-        SELECT 
+        SELECT
           m.rid,
           m.content->>'text' as content,
           m.metadata->>'source' as source,
@@ -122,7 +223,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
           0.5 as similarity,
           m.published_at
         FROM koi_memories m
-        WHERE 
+        WHERE
           m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
           AND (
@@ -130,6 +231,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
             OR m.content->>'text' ILIKE $2
           )
           ${whereDate}
+          ${privacyFilter}
         ORDER BY RANDOM()
         LIMIT $${params.length + 1}
       `;
@@ -175,7 +277,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       : '';
 
     const searchQuery = `
-      SELECT 
+      SELECT
         m.rid,
         m.content->>'text' as content,
         m.metadata->>'source' as source,
@@ -185,11 +287,12 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
         m.published_at
       FROM koi_memories m
       JOIN koi_embeddings e ON e.memory_id = m.id
-      WHERE 
+      WHERE
         e.dim_1024 IS NOT NULL
         AND m.content->>'text' IS NOT NULL
         AND LENGTH(m.content->>'text') > 50
         ${andDate}
+        ${privacyFilter}
       ORDER BY e.dim_1024 <=> $1::vector
       LIMIT $${params.length + 1}
     `;
@@ -256,7 +359,7 @@ async function triggerAdaptiveExtraction(
 
 // Hybrid RAG Query Endpoint
 // Full-text search using PostgreSQL's ts_rank (BM25-like ranking)
-async function performKeywordSearch(query: string, topK: number = 10, filters?: any) {
+async function performKeywordSearch(query: string, topK: number = 10, filters?: any, privacyFilter: string = '') {
   try {
     // Split query into words and clean them
     const words = query.trim().split(/\s+/)
@@ -305,6 +408,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
           m.content_tsv @@ to_tsquery('english', $1)
           AND m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+          ${privacyFilter}
 
         UNION ALL
 
@@ -321,6 +425,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
           m.content_tsv @@ to_tsquery('english', $2)
           AND m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+          ${privacyFilter}
           AND NOT EXISTS (
             SELECT 1 FROM koi_memories m2
             WHERE m2.rid = m.rid
@@ -407,6 +512,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
         m.content->>'text' ILIKE $1
         AND LENGTH(m.content->>'text') > 50
         ${andDate}
+        ${privacyFilter}
       ORDER BY CASE
         WHEN m.content->>'text' ILIKE $2 THEN 3  -- Exact phrase match
         WHEN m.content->>'text' ILIKE $1 THEN 2  -- Contains all words
@@ -444,13 +550,29 @@ app.post('/api/koi/query', async (req, res) => {
 
     const startTime = Date.now();
 
+    // Extract session token from Authorization header and validate
+    // Format: "Bearer <session_token>" - NOT the Google OAuth token
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+
+    // Validate session token and get authenticated user email (if any)
+    const authenticatedEmail = await validateSessionToken(sessionToken);
+    const isAuthenticated = !!authenticatedEmail;
+    const privacyFilter = buildPrivacyFilter(isAuthenticated);
+
+    // Log auth status for debugging (use X-User-Email for logging if no token, but it doesn't grant access)
+    const logEmail = authenticatedEmail || req.headers['x-user-email'] as string | undefined;
+    if (logEmail || sessionToken) {
+      console.log(`[Query] User: ${logEmail || 'unknown'}, Authenticated: ${isAuthenticated}${sessionToken ? ' (session token provided)' : ''}`);
+    }
+
     // Perform hybrid search with RRF
     // Increased limits to capture more diverse results before fusion
     // Higher keyword limit to ensure important biographical pages (rank ~#11) are included
     // Increased to 20 to capture team/profile pages that rank just outside top-15
     const [vectorResults, keywordResults] = await Promise.all([
-      performSemanticSearch(question, 20, filters),
-      performKeywordSearch(question, 20, filters)
+      performSemanticSearch(question, 20, filters, privacyFilter),
+      performKeywordSearch(question, 20, filters, privacyFilter)
     ]);
 
     // Apply Reciprocal Rank Fusion
@@ -1040,6 +1162,152 @@ app.use('/api/koi/event-bridge/', proxyToService('http://localhost:8100'));
 app.use('/api/koi/bge/', proxyToService('http://localhost:8090'));
 app.use('/api/koi/transformations', proxyToService('http://localhost:8002'));
 app.use('/api/koi/rids', proxyToService('http://localhost:8002'));
+
+// Auth status check - for MCP server to validate user authentication
+// SECURITY: Uses device_code binding to prevent IDOR attacks
+// Session tokens are returned ONCE only to the client that initiated the auth
+app.get('/api/koi/auth/status', async (req, res) => {
+  try {
+    // Method 1: validate existing session_token from Authorization header
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+
+    // Also support token in query param for easier testing
+    const queryToken = req.query.session_token as string | undefined;
+    const tokenToValidate = sessionToken || queryToken;
+
+    if (tokenToValidate) {
+      // Validate the provided session token (uses hash comparison)
+      const authenticatedEmail = await validateSessionToken(tokenToValidate);
+
+      if (!authenticatedEmail) {
+        return res.json({
+          authenticated: false,
+          reason: 'Invalid or expired session token'
+        });
+      }
+
+      return res.json({
+        authenticated: true,
+        user_email: authenticatedEmail,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Method 2: Poll using device_code (SECURE - prevents IDOR)
+    // Only the client that initiated the auth can retrieve the session token
+    const deviceCode = req.query.device_code as string | undefined;
+
+    if (!deviceCode || deviceCode.length < 32) {
+      return res.json({
+        authenticated: false,
+        reason: 'No session token or device_code provided. Use device_code to poll for auth status.'
+      });
+    }
+
+    // Look up auth request by device_code
+    // SECURITY: session_token is stored temporarily here (not in long-lived session_tokens)
+    const authRequest = await pool.query(
+      `SELECT id, user_email, status, session_token, expires_at
+       FROM auth_requests
+       WHERE device_code = $1`,
+      [deviceCode]
+    );
+
+    if (authRequest.rows.length === 0) {
+      return res.json({
+        status: 'not_found',
+        authenticated: false,
+        reason: 'Invalid or expired auth request'
+      });
+    }
+
+    const row = authRequest.rows[0];
+
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return res.json({
+        status: 'expired',
+        authenticated: false,
+        reason: 'Auth request expired'
+      });
+    }
+
+    if (row.status === 'pending') {
+      return res.json({
+        status: 'pending',
+        authenticated: false,
+        reason: 'User has not completed authentication yet'
+      });
+    }
+
+    if (row.status === 'rejected') {
+      return res.json({
+        status: 'rejected',
+        authenticated: false,
+        reason: 'Email domain not allowed'
+      });
+    }
+
+    if (row.status === 'used') {
+      // Token was already retrieved - don't return it again
+      return res.json({
+        status: 'already_retrieved',
+        authenticated: true,
+        user_email: row.user_email,
+        reason: 'Session token was already retrieved. Use the token you received earlier.'
+      });
+    }
+
+    if (row.status === 'authenticated') {
+      // First time polling after auth - get plain token from auth_requests
+      // SECURITY: Plain token is stored temporarily in auth_requests (short-lived)
+      // NOT in session_tokens (long-lived, stores only hashes)
+      const plainToken = row.session_token;
+
+      if (!plainToken) {
+        return res.json({
+          status: 'error',
+          authenticated: false,
+          reason: 'Session token not found or already retrieved'
+        });
+      }
+
+      // Mark as used and NULL out the plain token (security: don't keep it around)
+      await pool.query(
+        `UPDATE auth_requests
+         SET status = 'used', used_at = CURRENT_TIMESTAMP, session_token = NULL
+         WHERE device_code = $1`,
+        [deviceCode]
+      );
+
+      console.log(`[Auth] Session token retrieved for ${row.user_email} via device_code ${deviceCode.substring(0, 8)}...`);
+
+      const expiresAt = new Date(Date.now() + SESSION_TOKEN_LIFETIME_MS);
+
+      return res.json({
+        status: 'authenticated',
+        authenticated: true,
+        user_email: row.user_email,
+        session_token: plainToken,  // Plain token, returned ONCE then NULLed from DB
+        token_expiry: expiresAt.toISOString(),
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Unknown status
+    return res.json({
+      status: row.status,
+      authenticated: false
+    });
+
+  } catch (error) {
+    console.error('Auth status check error:', error);
+    res.status(500).json({
+      authenticated: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
 
 // Health check
 app.get('/api/koi/health', async (req, res) => {
