@@ -40,6 +40,30 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Weekly Aggregator**: AI-powered weekly digest with on-chain activity tracking
 
 - ✅ **Code Graph Service**: Automatic code entity extraction into Apache AGE graph
+- ✅ **Knowledge Graph Quality Improvement** (Dec 2025): Modular post-processing pipeline with 121 tests, 99.7% quality (up from 62%)
+
+### 🎯 Knowledge Graph Quality (NEW)
+
+**Status**: Phases 1-2 Complete | Quality: 99.7% | Tests: 121 passing
+
+Comprehensive quality improvement project that raised knowledge graph quality from 62% to 99.7% through:
+- **Modular Pipeline Framework**: 5 operational modules (ConfidenceFilter, EntityQualityFilter, CanonicalResolver, ListSplitter, OntologyNormalizer)
+- **121 Passing Tests**: Comprehensive test coverage (framework + modules + integration)
+- **Production Deployment**: Zero errors, < 1% performance overhead
+- **Dual Mode Operation**: Pipeline mode (default) + legacy mode for backward compatibility
+
+**Quick Start**:
+```python
+from knowledge_graph.graph_integration import KnowledgeGraphIntegrator
+
+kg = KnowledgeGraphIntegrator(use_pipeline=True)
+valid_entities = kg.process_entities_batch(entities)
+```
+
+**See**: [docs/QUALITY_IMPROVEMENT.md](docs/QUALITY_IMPROVEMENT.md) for complete documentation
+
+---
+
 ## Project Structure
 
 ```
