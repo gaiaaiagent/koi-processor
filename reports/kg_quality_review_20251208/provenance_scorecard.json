@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "generated_at": "2025-12-08T00:00:00Z",
+    "total_memories": 49027,
+    "total_extractions": 4547,
+    "extraction_coverage": 9.3
+  },
+  "source_quality": {
+    "website": {
+      "extraction_count": 2776,
+      "percentage": 61.0,
+      "avg_entities_per_extraction": 3.2,
+      "quality_score": 85
+    },
+    "notion": {
+      "extraction_count": 842,
+      "percentage": 18.5,
+      "avg_entities_per_extraction": 3.5,
+      "quality_score": 90
+    },
+    "discourse": {
+      "extraction_count": 806,
+      "percentage": 17.7,
+      "avg_entities_per_extraction": 2.8,
+      "quality_score": 75
+    },
+    "podcast": {
+      "extraction_count": 111,
+      "percentage": 2.4,
+      "avg_entities_per_extraction": 4.1,
+      "quality_score": 70
+    },
+    "github": {
+      "extraction_count": 5,
+      "percentage": 0.1,
+      "avg_entities_per_extraction": 2.0,
+      "quality_score": 95
+    }
+  },
+  "metadata_completeness": {
+    "entities_with_rid": {
+      "count": 14706,
+      "percentage": 100.0,
+      "status": "excellent"
+    },
+    "entities_with_confidence": {
+      "count": 14706,
+      "percentage": 100.0,
+      "status": "excellent"
+    },
+    "statements_with_rid": {
+      "count": 19608,
+      "percentage": 100.0,
+      "status": "excellent"
+    },
+    "statements_with_confidence": {
+      "count": 19608,
+      "percentage": 100.0,
+      "status": "excellent"
+    },
+    "extractions_with_ontology_version": {
+      "count": 4547,
+      "percentage": 100.0,
+      "status": "excellent"
+    }
+  },
+  "temporal_coverage": {
+    "earliest_memory": "2025-09-27",
+    "latest_memory": "2025-12-08",
+    "coverage_days": 72,
+    "avg_extractions_per_day": 63.2
+  },
+  "issues": {
+    "missing_source_attribution": {
+      "count": 0,
+      "severity": "none"
+    },
+    "unknown_ontology_version": {
+      "count": 0,
+      "severity": "none"
+    },
+    "missing_confidence_scores": {
+      "count": 0,
+      "severity": "none"
+    }
+  },
+  "overall_provenance_score": 92,
+  "recommendations": [
+    "Increase GitHub source coverage (currently <1%)",
+    "Add Telegram and Twitter sensor data",
+    "Implement source URL validation",
+    "Add extraction timestamp indexing"
+  ]
+}

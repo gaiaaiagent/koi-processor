@@ -1,0 +1,40 @@
+INFO: Quality controls initialized: EntityQualityFilter + CanonicalResolver
+
+======================================================================
+TESTING QUALITY CONTROLS
+======================================================================
+
+✓ PASSED: 'Regen Network' (ORGANIZATION)
+✓ PASSED: 'Gregory Landua' (PERSON)
+✓ PASSED: 'Ecocredit Module' (PROJECT)
+→ CANONICALIZED: 'regenerative agriculture' -> 'Regenerative Agriculture' (CONCEPT)
+→ CANONICALIZED: 'regen.network' -> 'Regen Network' (ORGANIZATION)
+→ CANONICALIZED: 'RND' -> 'Regen Network' (ORGANIZATION)
+→ CANONICALIZED: 'Greg Landua' -> 'Gregory Landua' (PERSON)
+→ CANONICALIZED: 'ecocredit' -> 'Ecocredit Module' (PROJECT)
+✗ BLOCKED: 'we' (PERSON)
+✗ BLOCKED: 'they' (PERSON)
+✗ BLOCKED: 'user' (PERSON)
+✗ BLOCKED: 'farmers' (PERSON)
+✗ BLOCKED: '2030' (EVENT)
+✗ BLOCKED: 'This is a sentence fragment that should be blocked' (CONCEPT)
+✗ BLOCKED: 'http://localhost:9090' (RESOURCE)
+
+======================================================================
+STATISTICS
+======================================================================
+
+Total Processed:  15
+Blocked:          7 (46.7%)
+Canonicalized:    8 (53.3%)
+Would Insert:     8 (53.3%)
+
+======================================================================
+VALIDATION
+======================================================================
+
+✓ Blocked count OK: 7 >= 6
+✓ Canonicalized count OK: 8 >= 4
+✓ Would-Insert count OK: 8 >= 4
+
+✓ All integration tests passed!

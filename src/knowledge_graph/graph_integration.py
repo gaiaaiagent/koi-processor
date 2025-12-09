@@ -1,6 +1,15 @@
 """
 Knowledge Graph Integration Module for KOI
 Connects extracted entities and relationships into unified RDF knowledge graph
+
+Includes quality controls via the post-processing pipeline:
+- ConfidenceFilterModule: Filters entities/relationships by confidence scores
+- CanonicalResolverModule: Maps aliases to canonical entity names
+- EntityQualityFilterModule: Blocks low-quality entities (pronouns, generics, etc.)
+- ListSplitterModule: Splits list-like entities into individuals
+- OntologyNormalizerModule: Normalizes entity types and predicates
+
+The pipeline framework provides modular, configurable quality control.
 """
 
 import json
@@ -18,20 +27,86 @@ except ImportError:
     print("Warning: rdflib not installed. Install with: pip install rdflib SPARQLWrapper")
     HAS_RDFLIB = False
 
+# Import quality control modules (legacy)
+try:
+    from knowledge_graph.improvements import EntityQualityFilter, FilterConfig, CanonicalResolver, ConfidenceFilter
+    HAS_QUALITY_CONTROLS = True
+except ImportError:
+    try:
+        from src.knowledge_graph.improvements import EntityQualityFilter, FilterConfig, CanonicalResolver, ConfidenceFilter
+        HAS_QUALITY_CONTROLS = True
+    except ImportError:
+        print("Warning: Quality control modules not found. Quality filtering disabled.")
+        HAS_QUALITY_CONTROLS = False
+
+# Import pipeline framework (new)
+try:
+    from knowledge_graph.postprocessing import (
+        PipelineOrchestrator,
+        ProcessingContext,
+        Entity as PipelineEntity,
+        Relationship as PipelineRelationship,
+        create_pipeline_from_config
+    )
+    from knowledge_graph.postprocessing.modules import (
+        ConfidenceFilterModule,
+        CanonicalResolverModule,
+        EntityQualityFilterModule,
+        ListSplitterModule,
+        OntologyNormalizerModule
+    )
+    HAS_PIPELINE = True
+except ImportError:
+    try:
+        from src.knowledge_graph.postprocessing import (
+            PipelineOrchestrator,
+            ProcessingContext,
+            Entity as PipelineEntity,
+            Relationship as PipelineRelationship,
+            create_pipeline_from_config
+        )
+        from src.knowledge_graph.postprocessing.modules import (
+            ConfidenceFilterModule,
+            CanonicalResolverModule,
+            EntityQualityFilterModule,
+            ListSplitterModule,
+            OntologyNormalizerModule
+        )
+        HAS_PIPELINE = True
+    except ImportError:
+        print("Warning: Pipeline framework not found. Using legacy quality controls.")
+        HAS_PIPELINE = False
+
 
 class KnowledgeGraphIntegrator:
     """
-    Integrates extracted entities and relationships into RDF knowledge graph
+    Integrates extracted entities and relationships into RDF knowledge graph.
+
+    Supports two modes for quality control:
+    1. Pipeline mode (default): Uses modular post-processing pipeline
+    2. Legacy mode: Uses individual filter classes directly
+
+    Args:
+        store_type: RDF store type ("memory", "postgresql", or "sparql")
+        store_config: Configuration for the store
+        enable_quality_controls: Enable entity quality filtering
+        use_pipeline: Use pipeline framework (True) or legacy filters (False)
+        pipeline_config_path: Path to pipeline configuration JSON
     """
 
     def __init__(
         self,
         store_type: str = "memory",  # memory, postgresql, or sparql
-        store_config: Dict[str, Any] = None
+        store_config: Dict[str, Any] = None,
+        enable_quality_controls: bool = True,
+        use_pipeline: bool = True,
+        pipeline_config_path: Optional[str] = None
     ):
         self.logger = logging.getLogger(__name__)
         self.store_type = store_type
         self.store_config = store_config or {}
+        self.enable_quality_controls = enable_quality_controls
+        self.use_pipeline = use_pipeline and HAS_PIPELINE
 
         if not HAS_RDFLIB:
             raise ImportError("rdflib is required for knowledge graph integration")
@@ -57,6 +132,85 @@ class KnowledgeGraphIntegrator:
 
         # Entity URI cache to avoid duplicates
         self.entity_cache: Dict[str, URIRef] = {}
+
+        # Initialize quality controls
+        self.pipeline = None
+        self.entity_filter = None
+        self.canonical_resolver = None
+        self.confidence_filter = None
+        self.quality_stats = {
+            'total_extracted': 0,
+            'blocked_by_filter': 0,
+            'blocked_by_confidence': 0,
+            'resolved_to_canonical': 0,
+            'inserted_to_graph': 0,
+            'pipeline_processed': 0
+        }
+
+        if self.enable_quality_controls:
+            if self.use_pipeline:
+                self._initialize_pipeline(pipeline_config_path)
+            else:
+                self._initialize_legacy_controls()
+
+    def _initialize_pipeline(self, config_path: Optional[str] = None):
+        """Initialize the post-processing pipeline."""
+        try:
+            if config_path:
+                # Load from specified config
+                self.pipeline = create_pipeline_from_config(config_path)
+            else:
+                # Try default config location
+                default_config = Path(__file__).parent / 'config' / 'pipeline_config.json'
+                if default_config.exists():
+                    self.pipeline = create_pipeline_from_config(str(default_config))
+                else:
+                    # Create default pipeline programmatically
+                    self.pipeline = PipelineOrchestrator([
+                        ConfidenceFilterModule({'entity_threshold': 0.70, 'relationship_threshold': 0.80}),
+                        CanonicalResolverModule(),
+                        EntityQualityFilterModule(),
+                        ListSplitterModule(),
+                        OntologyNormalizerModule()
+                    ])
+
+            self.logger.info(f"Pipeline initialized with {len(self.pipeline)} modules")
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize pipeline: {e}. Falling back to legacy controls.")
+            self.use_pipeline = False
+            self._initialize_legacy_controls()
+
+    def _initialize_legacy_controls(self):
+        """Initialize legacy quality control filters."""
+        if not HAS_QUALITY_CONTROLS:
+            self.logger.warning("Quality control modules not available")
+            self.enable_quality_controls = False
+            return
+
+        try:
+            self.entity_filter = EntityQualityFilter(FilterConfig())
+            self.canonical_resolver = CanonicalResolver()
+
+            # Initialize confidence filter from config
+            config_path = Path(__file__).parent / 'config' / 'quality_config.json'
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+                conf_thresholds = config.get('confidence_thresholds', {})
+                self.confidence_filter = ConfidenceFilter(
+                    entity_threshold=conf_thresholds.get('entity_min_confidence', 0.70),
+                    relationship_threshold=conf_thresholds.get('relationship_min_confidence', 0.80),
+                    allow_null=conf_thresholds.get('allow_null_confidence', True),
+                    strict_mode=conf_thresholds.get('strict_mode', False)
+                )
+                self.logger.info("Legacy quality controls initialized: EntityQualityFilter + CanonicalResolver + ConfidenceFilter")
+            else:
+                # Use default confidence filter settings
+                self.confidence_filter = ConfidenceFilter()
+                self.logger.info("Legacy quality controls initialized with defaults")
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize legacy quality controls: {e}")
+            self.enable_quality_controls = False
 
     def _initialize_graph(self) -> Graph:
         """Initialize RDF graph with appropriate store"""
@@ -126,6 +280,8 @@ class KnowledgeGraphIntegrator:
         report = {
             "document_uri": None,
             "entities_created": [],
+            "entities_blocked": 0,
+            "entities_canonicalized": 0,
             "relationships_created": [],
             "triples_added": 0
         }
@@ -142,10 +298,18 @@ class KnowledgeGraphIntegrator:
 
             # Process extracted entities
             if extraction_metadata:
+                initial_blocked = self.quality_stats['blocked_by_filter']
+                initial_resolved = self.quality_stats['resolved_to_canonical']
+
                 entities = extraction_metadata.get("extracted_entities", [])
                 for entity in entities:
                     entity_uri = self._add_entity(entity, doc_uri)
-                    report["entities_created"].append(str(entity_uri))
+                    if entity_uri:  # Only add if not blocked by quality controls
+                        report["entities_created"].append(str(entity_uri))
+
+                # Track quality control actions for this document
+                report["entities_blocked"] = self.quality_stats['blocked_by_filter'] - initial_blocked
+                report["entities_canonicalized"] = self.quality_stats['resolved_to_canonical'] - initial_resolved
 
                 # Process extracted relationships
                 relationships = extraction_metadata.get("extracted_relationships", [])
@@ -234,21 +398,185 @@ class KnowledgeGraphIntegrator:
         self.entity_cache[cache_key] = author_uri
         return author_uri
 
-    def _add_entity(self, entity: Dict[str, Any], doc_uri: URIRef) -> URIRef:
-        """Add entity to graph"""
+    def process_entity(self, entity_name: str, entity_type: str, confidence: Optional[float] = None, **kwargs) -> Optional[Tuple[str, str]]:
+        """
+        Process entity with quality controls before graph insertion.
 
-        # Generate entity URI
+        Uses pipeline if available, otherwise falls back to legacy filters.
+
+        Pipeline mode applies modules in sequence:
+        1. ConfidenceFilter - blocks low-confidence entities
+        2. CanonicalResolver - normalizes known aliases
+        3. EntityQualityFilter - blocks low-quality patterns
+        4. ListSplitter - splits list-like entities (returns first item)
+        5. OntologyNormalizer - normalizes entity types
+
+        Legacy mode applies (in order):
+        1. Confidence filter (early exit for low-confidence entities)
+        2. Canonical resolution (normalizes known aliases - bypasses pattern filter)
+        3. Quality filter (blocks low-quality entities if not known)
+
+        Args:
+            entity_name: The entity name to process
+            entity_type: The entity type
+            confidence: Optional confidence score (0.0-1.0) from extraction
+            **kwargs: Additional entity properties
+
+        Returns:
+            Tuple of (processed_name, processed_type) if valid, None if blocked
+        """
+        self.quality_stats['total_extracted'] += 1
+
+        # Use pipeline if available
+        if self.use_pipeline and self.pipeline:
+            return self._process_entity_with_pipeline(entity_name, entity_type, confidence)
+
+        # Legacy mode
+        return self._process_entity_legacy(entity_name, entity_type, confidence)
+
+    def _process_entity_with_pipeline(self, entity_name: str, entity_type: str, confidence: Optional[float]) -> Optional[Tuple[str, str]]:
+        """Process entity using the pipeline framework."""
+        # Create pipeline entity
+        entity = PipelineEntity(
+            name=entity_name,
+            type=entity_type,
+            confidence=confidence
+        )
+
+        # Create context with single entity
+        context = ProcessingContext(entities=[entity])
+
+        # Run pipeline
+        result = self.pipeline.process(context)
+        self.quality_stats['pipeline_processed'] += 1
+
+        # Check if entity was blocked
+        if len(result.entities) == 0:
+            self.quality_stats['blocked_by_filter'] += 1
+            self.logger.debug(f"Pipeline blocked entity '{entity_name}' ({entity_type})")
+            return None
+
+        # Get processed entity (may have been split or modified)
+        processed = result.entities[0]
+
+        # Track modifications
+        if processed.name != entity_name:
+            self.quality_stats['resolved_to_canonical'] += 1
+            self.logger.debug(f"Pipeline modified '{entity_name}' -> '{processed.name}'")
+
+        return processed.name, processed.type
+
+    def _process_entity_legacy(self, entity_name: str, entity_type: str, confidence: Optional[float]) -> Optional[Tuple[str, str]]:
+        """Process entity using legacy filter classes."""
+        # Step 1: Confidence filter (early exit for performance)
+        if self.enable_quality_controls and self.confidence_filter:
+            is_valid, reason = self.confidence_filter.filter_entity(entity_name, entity_type, confidence)
+            if not is_valid:
+                self.quality_stats['blocked_by_confidence'] += 1
+                self.logger.debug(f"Blocked low-confidence entity '{entity_name}' ({entity_type}): {reason}")
+                return None
+
+        # Step 2: Check canonical resolver (known entities bypass pattern filter)
+        processed_name = entity_name
+        if self.enable_quality_controls and self.canonical_resolver:
+            if self.canonical_resolver.is_known_entity(entity_name):
+                canonical_name, was_resolved = self.canonical_resolver.resolve(entity_name, entity_type)
+                if was_resolved:
+                    self.quality_stats['resolved_to_canonical'] += 1
+                    self.logger.debug(f"Resolved '{entity_name}' -> '{canonical_name}' (known entity)")
+                    return canonical_name, entity_type
+                else:
+                    # Known entity but not resolved to different name - still trusted
+                    return entity_name, entity_type
+
+        # Step 3: Pattern-based quality filter (only for unknown entities)
+        if self.enable_quality_controls and self.entity_filter:
+            is_valid, reasons = self.entity_filter.filter_with_reasons(entity_name, entity_type)
+            if not is_valid:
+                self.quality_stats['blocked_by_filter'] += 1
+                self.logger.debug(f"Blocked entity '{entity_name}': {', '.join(reasons)}")
+                return None
+
+        return processed_name, entity_type
+
+    def process_entities_batch(self, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Process a batch of entities through the pipeline.
+
+        This method is more efficient for batch processing as it runs
+        all entities through the pipeline at once.
+
+        Args:
+            entities: List of entity dictionaries with 'name', 'type', 'confidence'
+
+        Returns:
+            List of valid entities after pipeline processing
+        """
+        if not self.use_pipeline or not self.pipeline:
+            # Fall back to individual processing
+            results = []
+            for e in entities:
+                result = self.process_entity(e.get('name', ''), e.get('type', ''), e.get('confidence'))
+                if result:
+                    name, etype = result
+                    results.append({'name': name, 'type': etype, 'confidence': e.get('confidence')})
+            return results
+
+        # Convert to pipeline entities
+        pipeline_entities = [
+            PipelineEntity(
+                name=e.get('name', ''),
+                type=e.get('type', ''),
+                confidence=e.get('confidence'),
+                metadata=e.get('metadata', {})
+            )
+            for e in entities
+        ]
+
+        # Create context and process
+        context = ProcessingContext(entities=pipeline_entities)
+        result = self.pipeline.process(context)
+
+        # Update stats
+        self.quality_stats['total_extracted'] += len(entities)
+        self.quality_stats['pipeline_processed'] += len(entities)
+        self.quality_stats['blocked_by_filter'] += len(result.blocked_entities)
+
+        # Convert back to dictionaries
+        return [
+            {
+                'name': e.name,
+                'type': e.type,
+                'confidence': e.confidence,
+                'metadata': e.metadata
+            }
+            for e in result.entities
+        ]
+
+    def _add_entity(self, entity: Dict[str, Any], doc_uri: URIRef) -> Optional[URIRef]:
+        """Add entity to graph with quality controls"""
+
         entity_name = entity.get("name", "unknown")
         entity_type = entity.get("type", "regen:Entity")
-        entity_id = hashlib.sha256(f"{entity_type}:{entity_name}".encode()).hexdigest()[:16]
+        confidence = entity.get("confidence")  # May be None
+
+        # Apply quality controls (including confidence filtering)
+        result = self.process_entity(entity_name, entity_type, confidence=confidence)
+        if result is None:
+            return None  # Entity was blocked
+
+        processed_name, processed_type = result
+
+        # Generate entity URI using processed name
+        entity_id = hashlib.sha256(f"{processed_type}:{processed_name}".encode()).hexdigest()[:16]
         entity_uri = self.KOI[f"entity:{entity_id}"]
 
         # Add type assertion
-        type_uri = self._parse_type_uri(entity_type)
+        type_uri = self._parse_type_uri(processed_type)
         self.graph.add((entity_uri, RDF.type, type_uri))
 
-        # Add name
-        self.graph.add((entity_uri, self.SCHEMA.name, Literal(entity_name)))
+        # Add name (use processed/canonical name)
+        self.graph.add((entity_uri, self.SCHEMA.name, Literal(processed_name)))
 
         # Add properties
         for key, value in entity.get("properties", {}).items():
@@ -258,22 +586,38 @@ class KnowledgeGraphIntegrator:
         # Link to source document
         self.graph.add((entity_uri, self.PROV.wasDerivedFrom, doc_uri))
 
+        self.quality_stats['inserted_to_graph'] += 1
         return entity_uri
 
     def _add_relationship(self, rel: Dict[str, Any], doc_uri: URIRef) -> Optional[Tuple]:
-        """Add relationship to graph"""
+        """Add relationship to graph, respecting quality controls"""
 
         try:
             subject_name = rel.get("subject")
             predicate = rel.get("predicate")
             object_name = rel.get("object")
+            confidence = rel.get("confidence")  # May be None
 
             if not all([subject_name, predicate, object_name]):
                 return None
 
-            # Get or create subject and object URIs
+            # Check relationship confidence first (early exit)
+            if self.enable_quality_controls and self.confidence_filter:
+                is_valid, reason = self.confidence_filter.filter_relationship(
+                    subject_name, predicate, object_name, confidence
+                )
+                if not is_valid:
+                    self.logger.debug(f"Blocked low-confidence relationship: ({subject_name})-[{predicate}]->({object_name}): {reason}")
+                    return None
+
+            # Get or create subject and object URIs (may be blocked by quality controls)
             subject_uri = self._get_or_create_entity_by_name(subject_name)
             object_uri = self._get_or_create_entity_by_name(object_name)
+
+            # Skip relationship if either entity was blocked
+            if subject_uri is None or object_uri is None:
+                self.logger.debug(f"Skipping relationship: entity blocked by quality controls")
+                return None
 
             # Parse predicate
             pred_uri = self._parse_type_uri(predicate)
@@ -290,20 +634,28 @@ class KnowledgeGraphIntegrator:
             self.logger.warning(f"Failed to add relationship: {e}")
             return None
 
-    def _get_or_create_entity_by_name(self, name: str) -> URIRef:
-        """Get or create entity by name"""
+    def _get_or_create_entity_by_name(self, name: str) -> Optional[URIRef]:
+        """Get or create entity by name, applying quality controls"""
 
-        cache_key = f"entity:{name}"
+        # Apply quality controls to get processed name
+        result = self.process_entity(name, "regen:Entity")
+        if result is None:
+            return None  # Entity was blocked
+
+        processed_name, _ = result
+
+        cache_key = f"entity:{processed_name}"
         if cache_key in self.entity_cache:
             return self.entity_cache[cache_key]
 
-        entity_id = hashlib.sha256(name.encode()).hexdigest()[:16]
+        entity_id = hashlib.sha256(processed_name.encode()).hexdigest()[:16]
         entity_uri = self.KOI[f"entity:{entity_id}"]
 
         # Add basic triple if entity doesn't exist
         if (entity_uri, None, None) not in self.graph:
             self.graph.add((entity_uri, RDF.type, self.REGEN.Entity))
-            self.graph.add((entity_uri, self.SCHEMA.name, Literal(name)))
+            self.graph.add((entity_uri, self.SCHEMA.name, Literal(processed_name)))
+            self.quality_stats['inserted_to_graph'] += 1
 
         self.entity_cache[cache_key] = entity_uri
         return entity_uri
@@ -395,6 +747,67 @@ class KnowledgeGraphIntegrator:
             stats[f"count_{entity_type.split('#')[-1]}"] = count
 
         return stats
+
+    def get_quality_stats(self) -> Dict[str, Any]:
+        """Get quality control statistics"""
+        stats = self.quality_stats.copy()
+
+        # Calculate total blocked
+        stats['blocked_total'] = stats['blocked_by_filter'] + stats['blocked_by_confidence']
+
+        # Calculate rates
+        if stats['total_extracted'] > 0:
+            stats['block_rate'] = round(stats['blocked_total'] / stats['total_extracted'] * 100, 2)
+            stats['confidence_block_rate'] = round(stats['blocked_by_confidence'] / stats['total_extracted'] * 100, 2)
+            stats['pattern_block_rate'] = round(stats['blocked_by_filter'] / stats['total_extracted'] * 100, 2)
+            stats['resolution_rate'] = round(stats['resolved_to_canonical'] / stats['total_extracted'] * 100, 2)
+            stats['pass_rate'] = round(stats['inserted_to_graph'] / stats['total_extracted'] * 100, 2)
+        else:
+            stats['block_rate'] = 0
+            stats['confidence_block_rate'] = 0
+            stats['pattern_block_rate'] = 0
+            stats['resolution_rate'] = 0
+            stats['pass_rate'] = 0
+
+        # Add mode indicator
+        stats['mode'] = 'pipeline' if self.use_pipeline else 'legacy'
+
+        # Include pipeline stats if using pipeline
+        if self.use_pipeline and self.pipeline:
+            stats['pipeline_statistics'] = self.pipeline.get_statistics()
+
+        # Include filter stats if available (legacy mode)
+        if self.entity_filter:
+            stats['filter_breakdown'] = self.entity_filter.get_stats()
+
+        # Include resolver stats if available (legacy mode)
+        if self.canonical_resolver:
+            stats['resolver_breakdown'] = self.canonical_resolver.get_stats()
+
+        # Include confidence filter stats if available (legacy mode)
+        if self.confidence_filter:
+            stats['confidence_breakdown'] = self.confidence_filter.get_stats()
+
+        return stats
+
+    def reset_quality_stats(self):
+        """Reset quality control statistics"""
+        self.quality_stats = {
+            'total_extracted': 0,
+            'blocked_by_filter': 0,
+            'blocked_by_confidence': 0,
+            'resolved_to_canonical': 0,
+            'inserted_to_graph': 0,
+            'pipeline_processed': 0
+        }
+        if self.pipeline:
+            self.pipeline.reset()
+        if self.entity_filter:
+            self.entity_filter.reset_stats()
+        if self.canonical_resolver:
+            self.canonical_resolver.reset_stats()
+        if self.confidence_filter:
+            self.confidence_filter.reset_stats()
 
 
 # Example usage

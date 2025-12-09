@@ -1,0 +1,323 @@
+{
+  "timestamp": "2025-12-08T17:27:47.451596",
+  "summary": {
+    "total_flagged": 3690,
+    "blocked_by_poc": 333,
+    "block_rate_pct": 9.02,
+    "still_need_review": 3357
+  },
+  "by_issue_category": {
+    "low_confidence": {
+      "total": 3021,
+      "blocked": 272,
+      "block_rate_pct": 9.0
+    },
+    "short_acronym": {
+      "total": 610,
+      "blocked": 4,
+      "block_rate_pct": 0.66
+    },
+    "generic_noun": {
+      "total": 26,
+      "blocked": 24,
+      "block_rate_pct": 92.31
+    },
+    "plural_generic": {
+      "total": 33,
+      "blocked": 33,
+      "block_rate_pct": 100.0
+    }
+  },
+  "by_block_reason": {
+    "technical_pattern": 76,
+    "sentence_like": 124,
+    "lowercase_person": 121,
+    "stop_word": 63,
+    "generic_pattern": 45,
+    "too_long": 3
+  },
+  "sample_blocked": [
+    {
+      "entity_name": "DIGEST_ALGORITHM_BLAKE2B_256",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.75,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "GRAPH_CANONICALIZATION_ALGORITHM_URDNA2015",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.75,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "GRAPH_MERKLE_TREE_NONE_UNSPECIFIED",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "grpcurl",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "grpcurl",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "localhost:9090",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "http://foo.bar",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "entity_type": "Person",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "DIGEST_ALGORITHM_BLAKE2B_256",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "GRAPH_CANONICALIZATION_ALGORITHM_URDNA2015",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "http://foo.bar",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.5,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "entity_type": "Person",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.4,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "localhost:9090",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.4,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "grpcurl",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "entity_name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "entity_type": "Person",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": true,
+      "poc_block_reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    }
+  ],
+  "sample_needing_review": [
+    {
+      "entity_name": "regen",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.8,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "ContentHash",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.6,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "IRI",
+      "entity_type": "Project",
+      "quality_review_issue": "short_acronym",
+      "confidence": 0.6,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "REGEN/USDC LP incentives",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.75,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "Offset campaigns",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.75,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "Eco-credit retirements",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.8,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "Relayer support",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "Strangelove",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.8,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "Notional",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.75,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "REGEN/USDT LP rewards",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.75,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "IBC",
+      "entity_type": "Project",
+      "quality_review_issue": "short_acronym",
+      "confidence": 0.9,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "Hub validators",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "msg",
+      "entity_type": "Project",
+      "quality_review_issue": "short_acronym",
+      "confidence": 0.96,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "i18n",
+      "entity_type": "Project",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    },
+    {
+      "entity_name": "VSCode",
+      "entity_type": "Organization",
+      "quality_review_issue": "low_confidence",
+      "confidence": 0.7,
+      "poc_would_block": false,
+      "poc_block_reasons": []
+    }
+  ],
+  "garbage_entity_filter": {
+    "total": 59,
+    "blocked": 57,
+    "block_rate_pct": 96.61
+  }
+}

@@ -1,0 +1,3915 @@
+{
+  "timestamp": "2025-12-08T21:04:41.727829",
+  "graph_name": "regen_graph",
+  "mode": "dry_run",
+  "entities_analyzed": 3690,
+  "would_block": [
+    {
+      "name": "DIGEST_ALGORITHM_BLAKE2B_256",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "GRAPH_CANONICALIZATION_ALGORITHM_URDNA2015",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "GRAPH_MERKLE_TREE_NONE_UNSPECIFIED",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "grpcurl",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "grpcurl",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "localhost:9090",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "http://foo.bar",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "DIGEST_ALGORITHM_BLAKE2B_256",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "GRAPH_CANONICALIZATION_ALGORITHM_URDNA2015",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "http://foo.bar",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "localhost:9090",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "grpcurl",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "x/marketplace",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "x/feegrant",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "currency_allow_list",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regentokenomics.org weekly sessions notes (Jun 25)",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "@lingui/core",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Staying Safe on Discord!",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Curated list of contributors and how to set up contributor profile",
+      "type": "Project",
+      "reasons": [
+        "too_long"
+      ]
+    },
+    {
+      "name": "How Tracking Affects Email Notifications",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ecosystem participants",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Unknown Speaker",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "bridge.eco",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "core.memo.regen-x-thought-leadership-strategy.v1.0.0",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "core.memo.ai-agent-marketing-initiative.v1.0.0",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "core.framework.regen-agent-coordination-architecture.vTBD",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "US",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "farmers",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "interviewee",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "BioFi.earth",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "indigenous",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "theigc.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "projectrg.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "undp.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "investor",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "wildlabs.net",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "pmiclimate.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "theclimatewarehouse.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "climateactiondata.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "A Dow Jones Company",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "climateactiondata.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "pmiclimate.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "conservation.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "profor.infoprofor.info",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "smallholders",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "sciencedirect.com",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "conservation.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "tapchimoitruong.vn",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "laseg.cat",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "tapchimoitruong.vn",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "tapchimoitruong.vn",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "tapchimoitruong.vn",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "3.5 million hectares",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "farmer",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "community members",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "farmers",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Regen Proposal Writer v0.1",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Many Mangos",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "eliza.how",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Gate.com",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "Gaia Phase-1/1.5",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "forum.regen.network",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "domingo",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "app.regen.claim",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "app.regen.evidence",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "app.regen.method",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Version 1.0",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Scientific Publishing 2.0",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "researchers",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "researchers",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "info@desci.com",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "User",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "stake2.me",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Stakley.io",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "cyberG",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "company",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "k0kk0k",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "the company",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "the company",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "bridge.blockscape.network",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "USDC.noble",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "company",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "the company",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "its suppliers",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "artists",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "communities",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "company",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "tmo",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Drop.money",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "m3metix",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "ecocredit participants",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "lars",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Stakley.io Validator",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Stargaze.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "localhost",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "localhost",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "Stargaze.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "coinswap.market",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen:13toVgf5aZqSVSeJQv562xkkeoe3rr3bJWa29PHVKVf77VAkVMcDvVd.rdf",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen1k82wewrfkhdmegw6uxrgwwzrsd7593t8tej2d5",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "The Legitimacy Paradox",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Stake.su",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Melea.xyz",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "cyberG",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Stakley.io",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Regenerative.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen.ecocredit.v1",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regen.ecocredit.basket.v1",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "regen.ecocredit.marketplace.v1",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "farmers",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "grpcurl",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "Regenerative.fi",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "USDC.noble",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "USDT.kava",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "tayken",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Cosmos SDK 0.53",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "delegator",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "validator",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "validator",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "delegator",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "genesis.json",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "validator",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "delegator",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Emerging Technologies for Indigenous Peoples and Land Steward Community",
+      "type": "Project",
+      "reasons": [
+        "too_long"
+      ]
+    },
+    {
+      "name": "The Legitimacy Paradox",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "A Bank for DAOs",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Spinach.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "paul121",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "earthboy",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "market participants",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "regentokenomics.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "anilcse",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Tokenomics paper 2.0",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regentokenomics.org",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ERC-Compatible Wrapping & Fractionalization of Regen Credits for DeFi Integration",
+      "type": "Project",
+      "reasons": [
+        "too_long"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "earthboy",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Drop.money",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "noahdaodao",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "regensohto",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "Validator",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "The Chicken Coop",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "buyers",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Community",
+      "type": "Person",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Bridge.eco",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Spinach.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "the Foundation",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "API",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "paul121",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ryanchristo",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "USDC.noble",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "mintscan.io",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "human",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "pete-Regenerator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "ecowealth.klima",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "BioFi.earth",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "elders",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "rebecca_regen",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "chris",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "our team",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "The Biocultural Paradigm",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "technologists",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "technologists",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "The Regenerative Standard",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "AEI-SOC-Regenerative Standard-Methodology-Final Version v2.0-May 2025",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "farmers",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "Community",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "IBC community members",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Will Szal",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "USDC.noble",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "USDT.kava",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "the network",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "chrisaiki55",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "solarmonk",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Stakley.io",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "SDK",
+      "type": "Project",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "SEEA 6.1",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "our nonprofit",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "ryanchristo",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "ryanchristo",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "mhagel",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "ryanchristo-Chora_Validator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "Masternode24.de",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "solarmonk",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "regen.data.v2",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "Drop.money",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "guides.regen.network",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "ecowealth.klima",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Will Masters",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ecowealth.klima",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "USDC.noble",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "communities",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "Stake.su",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Validator",
+      "type": "Person",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "communities",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "families",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "ourselves",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "Validators",
+      "type": "Project",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "Will Szal",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ryanchristo-Chora_Validator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Will Szal",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "IBC community members",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "stride_zone",
+      "type": "Organization",
+      "reasons": [
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "IUCN GET 2.0",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ryanchristo-Chora_Validator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "regen.admin",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "IPBES - Nature\u2019s Contributions to People",
+      "type": "Project",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "SEEA 6.1",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "patogit",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Stargaze.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "em_ly",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "usdc.noble",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "usdt.kava",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "ballzach",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "dave_fortson-LOA_Labs_Validator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "ryanchristo-Chora_Validator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "zmanian",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "freind_ly",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "aaronc",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "daodao.zone",
+      "type": "Project",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Stargaze.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "The Chicken Coop",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "corlock_RND",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "beccahRND",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "daodao.zone",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "0base.vc",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "Stargaze.fi",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "anilcse",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "aariq",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "regenald",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "ryanchristo-Chora_Validator",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Stakley.io",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "cyberG",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Genesis Founding Member",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "A Geek",
+      "type": "Person",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "scientists",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "guides.regen.network",
+      "type": "Project",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "economists",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "reasons": [
+        "stop_word",
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "The Chicken Coop Homestead",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "Will",
+      "type": "Person",
+      "reasons": [
+        "sentence_like"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "Validator",
+      "type": "Organization",
+      "reasons": [
+        "stop_word"
+      ]
+    },
+    {
+      "name": "the Foundation",
+      "type": "Organization",
+      "reasons": [
+        "generic_pattern"
+      ]
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "jasonandmatthew",
+      "type": "Person",
+      "reasons": [
+        "lowercase_person"
+      ]
+    },
+    {
+      "name": "civilizationemerging.com",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    },
+    {
+      "name": "pacificbiochar.com",
+      "type": "Organization",
+      "reasons": [
+        "sentence_like",
+        "technical_pattern"
+      ]
+    }
+  ],
+  "would_canonicalize": [
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "ecometric",
+      "canonical": "Ecometric",
+      "type": "Organization"
+    },
+    {
+      "original": "ecometric",
+      "canonical": "Ecometric",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "VERRA",
+      "canonical": "Verra",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "BlockScience",
+      "canonical": "Blockscience",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN token",
+      "canonical": "$regen token",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "BlockScience",
+      "canonical": "Blockscience",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "DeSci Publish",
+      "canonical": "Desci Publish",
+      "type": "Project"
+    },
+    {
+      "original": "DeSci Publish",
+      "canonical": "Desci Publish",
+      "type": "Project"
+    },
+    {
+      "original": "Regen Chain",
+      "canonical": "Regen Ledger",
+      "type": "Project"
+    },
+    {
+      "original": "DeSci Publish",
+      "canonical": "Desci Publish",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "metamask",
+      "canonical": "Metamask",
+      "type": "Organization"
+    },
+    {
+      "original": "axelar",
+      "canonical": "Axelar",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "MetaMask",
+      "canonical": "Metamask",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "dREGEN",
+      "canonical": "dRegen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Christian",
+      "canonical": "Christian Shearer",
+      "type": "Person"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "foundation",
+      "canonical": "Foundation",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "Regen App",
+      "canonical": "Regen app",
+      "type": "Project"
+    },
+    {
+      "original": "cosmos",
+      "canonical": "Cosmos",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Cosmos ZERO",
+      "canonical": "Cosmos Zero",
+      "type": "Project"
+    },
+    {
+      "original": "Christian",
+      "canonical": "Christian Shearer",
+      "type": "Person"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "MetaMask",
+      "canonical": "Metamask",
+      "type": "Organization"
+    },
+    {
+      "original": "Regen Community",
+      "canonical": "Regen community",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN Coin",
+      "canonical": "Regen Coin",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecocredits",
+      "canonical": "Ecocredits",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$regen",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecocredits",
+      "canonical": "Ecocredits",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "dREGEN",
+      "canonical": "dRegen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "the Foundation",
+      "canonical": "Regen Foundation",
+      "type": "Organization"
+    },
+    {
+      "original": "Regen App",
+      "canonical": "Regen app",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN coin",
+      "canonical": "Regen Coin",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN coin",
+      "canonical": "Regen Coin",
+      "type": "Project"
+    },
+    {
+      "original": "Christian",
+      "canonical": "Christian Shearer",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "dREGEN",
+      "canonical": "dRegen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "Sharamentsa Community",
+      "canonical": "Sharamentsa community",
+      "type": "Organization"
+    },
+    {
+      "original": "Sharamentsa Community",
+      "canonical": "Sharamentsa community",
+      "type": "Organization"
+    },
+    {
+      "original": "EVMOS",
+      "canonical": "Evmos",
+      "type": "Project"
+    },
+    {
+      "original": "cosmos hub",
+      "canonical": "Cosmos Hub",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Sharamentsa Community",
+      "canonical": "Sharamentsa community",
+      "type": "Organization"
+    },
+    {
+      "original": "Biocultural Crediting Pilot",
+      "canonical": "Biocultural crediting pilot",
+      "type": "Project"
+    },
+    {
+      "original": "ecoToken",
+      "canonical": "EcoToken",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND INC",
+      "canonical": "RND inc",
+      "type": "Organization"
+    },
+    {
+      "original": "$regen",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "Cosmos ZERO",
+      "canonical": "Cosmos Zero",
+      "type": "Project"
+    },
+    {
+      "original": "Regen App",
+      "canonical": "Regen app",
+      "type": "Project"
+    },
+    {
+      "original": "Sharamentsa Community",
+      "canonical": "Sharamentsa community",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "JeanCarlo Barrios",
+      "canonical": "Jeancarlo Barrios",
+      "type": "Person"
+    },
+    {
+      "original": "ecoToken",
+      "canonical": "EcoToken",
+      "type": "Organization"
+    },
+    {
+      "original": "regen",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecoCredits",
+      "canonical": "Ecocredits",
+      "type": "Project"
+    },
+    {
+      "original": "JeanCarlo",
+      "canonical": "Jeancarlo",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "regen",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "climate wiki",
+      "canonical": "Climate Wiki",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "JeanCarlo Barrios",
+      "canonical": "Jeancarlo Barrios",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecocredits",
+      "canonical": "Ecocredits",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "Cosmos ZERO",
+      "canonical": "Cosmos Zero",
+      "type": "Project"
+    },
+    {
+      "original": "Sharamentsa Community",
+      "canonical": "Sharamentsa community",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecocredits",
+      "canonical": "Ecocredits",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "regen ledger",
+      "canonical": "Regen Ledger",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "dREGEN",
+      "canonical": "dRegen",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$regen",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecoToken",
+      "canonical": "EcoToken",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "blockscience",
+      "canonical": "Blockscience",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "Christian",
+      "canonical": "Christian Shearer",
+      "type": "Person"
+    },
+    {
+      "original": "REGEN community",
+      "canonical": "Regen community",
+      "type": "Organization"
+    },
+    {
+      "original": "Christian",
+      "canonical": "Christian Shearer",
+      "type": "Person"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$regen",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "usdc.noble",
+      "canonical": "USDC.noble",
+      "type": "Project"
+    },
+    {
+      "original": "Cosmos ZERO",
+      "canonical": "Cosmos Zero",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "foundation",
+      "canonical": "Foundation",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "osmosis",
+      "canonical": "Osmosis",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN token",
+      "canonical": "$regen token",
+      "type": "Project"
+    },
+    {
+      "original": "ecoCredits",
+      "canonical": "Ecocredits",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$regen",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "regenald",
+      "canonical": "Regenald",
+      "type": "Person"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "EVMOS",
+      "canonical": "Evmos",
+      "type": "Project"
+    },
+    {
+      "original": "regen community",
+      "canonical": "Regen community",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "MetaMask",
+      "canonical": "Metamask",
+      "type": "Organization"
+    },
+    {
+      "original": "MetaMask",
+      "canonical": "Metamask",
+      "type": "Organization"
+    },
+    {
+      "original": "EVMOS",
+      "canonical": "Evmos",
+      "type": "Project"
+    },
+    {
+      "original": "$REGEN",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "commonwealth",
+      "canonical": "Commonwealth",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "regen ledger",
+      "canonical": "Regen Ledger",
+      "type": "Project"
+    },
+    {
+      "original": "DAODAO",
+      "canonical": "DAOdao",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecoToken",
+      "canonical": "EcoToken",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "$REGEN token",
+      "canonical": "$regen token",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "blockscience",
+      "canonical": "Blockscience",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "ecoToken",
+      "canonical": "EcoToken",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN",
+      "canonical": "Regen",
+      "type": "Project"
+    },
+    {
+      "original": "$regen",
+      "canonical": "$Regen",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN community",
+      "canonical": "Regen community",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "the Foundation",
+      "canonical": "Regen Foundation",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN LEDGER",
+      "canonical": "Regen Ledger",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN TOKEN",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "REGEN coin",
+      "canonical": "Regen Coin",
+      "type": "Project"
+    },
+    {
+      "original": "Regen App",
+      "canonical": "Regen app",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN coin",
+      "canonical": "Regen Coin",
+      "type": "Project"
+    },
+    {
+      "original": "foundation",
+      "canonical": "Foundation",
+      "type": "Organization"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "REGEN token",
+      "canonical": "Regen Token",
+      "type": "Project"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "ecocredit",
+      "canonical": "Ecocredit Module",
+      "type": "Project"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    },
+    {
+      "original": "RND",
+      "canonical": "Regen Network",
+      "type": "Organization"
+    },
+    {
+      "original": "Gregory",
+      "canonical": "Gregory Landua",
+      "type": "Person"
+    }
+  ],
+  "duplicates_found": {
+    "$regen": [
+      "$Regen",
+      "$regen",
+      "$REGEN"
+    ],
+    "daodao": [
+      "DAOdao",
+      "DAODAO"
+    ],
+    "cosmos": [
+      "cosmos",
+      "Cosmos"
+    ],
+    "ecometric": [
+      "Ecometric",
+      "ecometric"
+    ],
+    "regen network": [
+      "Regen Network",
+      "RND"
+    ],
+    "gregory landua": [
+      "Gregory",
+      "Gregory Landua"
+    ],
+    "regen coin": [
+      "Regen Coin",
+      "REGEN Coin",
+      "REGEN coin"
+    ],
+    "verra": [
+      "VERRA",
+      "Verra"
+    ],
+    "regen ledger": [
+      "REGEN LEDGER",
+      "regen ledger",
+      "Regen Ledger",
+      "Regen Chain"
+    ],
+    "sharamentsa community": [
+      "Sharamentsa community",
+      "Sharamentsa Community"
+    ],
+    "blockscience": [
+      "BlockScience",
+      "blockscience"
+    ],
+    "$regen token": [
+      "$REGEN token",
+      "$regen token"
+    ],
+    "regen foundation": [
+      "Regen Foundation",
+      "the Foundation"
+    ],
+    "climate wiki": [
+      "climate wiki",
+      "Climate Wiki"
+    ],
+    "metamask": [
+      "MetaMask",
+      "metamask",
+      "Metamask"
+    ],
+    "axelar": [
+      "axelar",
+      "Axelar"
+    ],
+    "regen": [
+      "regen",
+      "REGEN",
+      "Regen"
+    ],
+    "usdc.noble": [
+      "USDC.noble",
+      "usdc.noble"
+    ],
+    "evmos": [
+      "Evmos",
+      "EVMOS"
+    ],
+    "regen community": [
+      "regen community",
+      "Regen Community",
+      "Regen community",
+      "REGEN community"
+    ],
+    "regenald": [
+      "Regenald",
+      "regenald"
+    ],
+    "cosmos zero": [
+      "Cosmos ZERO",
+      "Cosmos Zero"
+    ],
+    "regen token": [
+      "REGEN token",
+      "Regen Token",
+      "REGEN TOKEN"
+    ],
+    "foundation": [
+      "foundation",
+      "Foundation"
+    ],
+    "osmosis": [
+      "Osmosis",
+      "osmosis"
+    ],
+    "ecocredits": [
+      "Ecocredits",
+      "ecoCredits",
+      "ecocredits"
+    ],
+    "commonwealth": [
+      "commonwealth",
+      "Commonwealth"
+    ]
+  },
+  "by_block_reason": {
+    "technical_pattern": 69,
+    "sentence_like": 124,
+    "lowercase_person": 121,
+    "stop_word": 63,
+    "generic_pattern": 45,
+    "too_long": 3
+  },
+  "quality_score": 91.17
+}

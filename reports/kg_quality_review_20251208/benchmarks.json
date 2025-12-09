@@ -1,0 +1,99 @@
+{
+  "metadata": {
+    "generated_at": "2025-12-08T00:00:00Z",
+    "graph_name": "regen_graph",
+    "database": "eliza",
+    "host": "202.61.196.119:5433"
+  },
+  "current_statistics": {
+    "total_entities": 14706,
+    "total_statements": 19608,
+    "total_extractions": 4547,
+    "entity_types": {
+      "Organization": 6922,
+      "Project": 5154,
+      "Person": 2630
+    },
+    "confidence_distribution": {
+      "entities": {
+        "0.95+": 2962,
+        "0.90-0.94": 4110,
+        "0.85-0.89": 4354,
+        "0.80-0.84": 2382,
+        "0.70-0.79": 849,
+        "below_0.70": 49
+      },
+      "statements": {
+        "0.95+": 214,
+        "0.90-0.94": 2803,
+        "0.85-0.89": 7084,
+        "0.80-0.84": 6238,
+        "0.70-0.79": 3217,
+        "below_0.70": 52
+      }
+    },
+    "source_distribution": {
+      "website": 2776,
+      "notion": 842,
+      "discourse": 806,
+      "podcast": 111,
+      "github": 5
+    }
+  },
+  "quality_issues": {
+    "case_insensitive_duplicates": {
+      "affected_entities": 50,
+      "total_duplicate_occurrences": 3847
+    },
+    "cross_type_duplicates": {
+      "affected_entities": 25,
+      "examples": [
+        {"name": "Regen Network", "types": ["Organization", "Project"]},
+        {"name": "Regen Registry", "types": ["Organization", "Project"]},
+        {"name": "Regen Ledger", "types": ["Organization", "Project"]}
+      ]
+    },
+    "generic_noun_entities": {
+      "count": 26,
+      "examples": ["User", "farmers", "company", "network"]
+    },
+    "low_confidence_entities": {
+      "below_0.85": 3280,
+      "percentage": 22.3
+    },
+    "low_confidence_statements": {
+      "below_0.85": 9507,
+      "percentage": 48.5
+    },
+    "short_acronym_entities": {
+      "count": 247,
+      "examples": ["RND", "GoE", "NCT", "RF"]
+    }
+  },
+  "projected_post_cleanup": {
+    "total_entities": 11426,
+    "reduction_percentage": 22.3,
+    "unique_entities_after_dedup": 10500,
+    "quality_score_improvement": {
+      "current": 62,
+      "projected": 78
+    }
+  },
+  "recommendations": {
+    "immediate": [
+      "Merge case-insensitive duplicates",
+      "Remove generic noun entities",
+      "Resolve cross-type conflicts"
+    ],
+    "short_term": [
+      "Add confidence threshold to RAG queries",
+      "Implement entity resolution in extraction pipeline",
+      "Expand acronym entities"
+    ],
+    "long_term": [
+      "Build entity embedding index",
+      "Create entity relationship graph in AGE",
+      "Implement automated contradiction detection"
+    ]
+  }
+}

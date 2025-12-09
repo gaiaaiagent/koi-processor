@@ -1,0 +1,522 @@
+[
+  {
+    "normalized_key": "regen-network",
+    "canonical_name": "Regen network",
+    "aliases": [
+      "regen network",
+      "Regen Network",
+      "REGEN Network"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 911,
+    "variant_count": 4
+  },
+  {
+    "normalized_key": "regen",
+    "canonical_name": "Regen",
+    "aliases": [
+      "regen",
+      "REGEN"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 465,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "regen-ledger",
+    "canonical_name": "Regen Ledger",
+    "aliases": [
+      "regen ledger",
+      "REGEN LEDGER"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 283,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "regen-registry",
+    "canonical_name": "Regen Registry",
+    "aliases": [
+      "REGEN REGISTRY"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 212,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "regen",
+    "canonical_name": "Regen",
+    "aliases": [
+      "regen",
+      "REGEN"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 157,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "regen-foundation",
+    "canonical_name": "Regen Foundation",
+    "aliases": [
+      "regen foundation"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 144,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "$regen",
+    "canonical_name": "$Regen",
+    "aliases": [
+      "$regen",
+      "$REGEN"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 138,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "desci-publish",
+    "canonical_name": "Desci Publish",
+    "aliases": [
+      "DeSci Publish"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 78,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "ecometric",
+    "canonical_name": "Ecometric",
+    "aliases": [
+      "ecometric",
+      "EcoMetric"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 73,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "hylo",
+    "canonical_name": "Hylo",
+    "aliases": [
+      "hylo"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 45,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "regen-coin",
+    "canonical_name": "Regen Coin",
+    "aliases": [
+      "REGEN coin",
+      "REGEN Coin"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 34,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "axelar",
+    "canonical_name": "Axelar",
+    "aliases": [
+      "axelar"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 33,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "osmosis",
+    "canonical_name": "Osmosis",
+    "aliases": [
+      "osmosis"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 33,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "sharamentsa-community",
+    "canonical_name": "Sharamentsa community",
+    "aliases": [
+      "Sharamentsa Community"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 33,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "celo",
+    "canonical_name": "Celo",
+    "aliases": [
+      "CELO"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 31,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "will",
+    "canonical_name": "Will",
+    "aliases": [
+      "WIll"
+    ],
+    "entity_type": "PERSON",
+    "total_occurrences": 29,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "commonwealth",
+    "canonical_name": "Commonwealth",
+    "aliases": [
+      "commonwealth"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 29,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "verra",
+    "canonical_name": "Verra",
+    "aliases": [
+      "VERRA"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 28,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "climate-wiki",
+    "canonical_name": "Climate Wiki",
+    "aliases": [
+      "climate wiki"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 27,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "regen-token",
+    "canonical_name": "Regen Token",
+    "aliases": [
+      "regen token",
+      "REGEN token",
+      "REGEN TOKEN"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 27,
+    "variant_count": 4
+  },
+  {
+    "normalized_key": "osmosis",
+    "canonical_name": "Osmosis",
+    "aliases": [
+      "osmosis"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 25,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "blockscience",
+    "canonical_name": "Blockscience",
+    "aliases": [
+      "blockscience",
+      "BlockScience"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 25,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "cosmos",
+    "canonical_name": "Cosmos",
+    "aliases": [
+      "cosmos"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 25,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "era-brazil",
+    "canonical_name": "ERA Brazil",
+    "aliases": [
+      "era brazil"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 25,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "regen-app",
+    "canonical_name": "Regen app",
+    "aliases": [
+      "Regen App"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 24,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "regen-community",
+    "canonical_name": "Regen community",
+    "aliases": [
+      "regen community",
+      "Regen Community",
+      "REGEN community",
+      "REGEN Community"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 24,
+    "variant_count": 5
+  },
+  {
+    "normalized_key": "regen-registry-program",
+    "canonical_name": "Regen Registry program",
+    "aliases": [
+      "Regen Registry Program"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 21,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "vitwit",
+    "canonical_name": "Vitwit",
+    "aliases": [
+      "vitwit",
+      "VitWit"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 18,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "biocultural-crediting-pilot",
+    "canonical_name": "Biocultural crediting pilot",
+    "aliases": [
+      "Biocultural Crediting Pilot"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 18,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "evmos",
+    "canonical_name": "Evmos",
+    "aliases": [
+      "EVMOS"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 17,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "becca-harman",
+    "canonical_name": "Becca Harman",
+    "aliases": [
+      "becca harman"
+    ],
+    "entity_type": "PERSON",
+    "total_occurrences": 17,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "metamask",
+    "canonical_name": "Metamask",
+    "aliases": [
+      "metamask",
+      "MetaMask"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 17,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "ecotoken",
+    "canonical_name": "EcoToken",
+    "aliases": [
+      "ecoToken"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 16,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "foundation",
+    "canonical_name": "Foundation",
+    "aliases": [
+      "foundation"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 16,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "daodao",
+    "canonical_name": "DAOdao",
+    "aliases": [
+      "DAODAO"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 16,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "usdc.noble",
+    "canonical_name": "USDC.noble",
+    "aliases": [
+      "usdc.noble"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 16,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "jeancarlo-barrios",
+    "canonical_name": "Jeancarlo Barrios",
+    "aliases": [
+      "JeanCarlo Barrios"
+    ],
+    "entity_type": "PERSON",
+    "total_occurrences": 15,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "github",
+    "canonical_name": "GitHub",
+    "aliases": [
+      "github"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 15,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "rnd-inc",
+    "canonical_name": "RND inc",
+    "aliases": [
+      "RND Inc",
+      "RND INC"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 15,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "ecocredits",
+    "canonical_name": "Ecocredits",
+    "aliases": [
+      "ecocredits",
+      "ecoCredits",
+      "EcoCredits"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 15,
+    "variant_count": 4
+  },
+  {
+    "normalized_key": "$regen-token",
+    "canonical_name": "$regen token",
+    "aliases": [
+      "$REGEN token",
+      "$REGEN Token"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 15,
+    "variant_count": 3
+  },
+  {
+    "normalized_key": "regenald",
+    "canonical_name": "Regenald",
+    "aliases": [
+      "regenald"
+    ],
+    "entity_type": "PERSON",
+    "total_occurrences": 13,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "seatrees",
+    "canonical_name": "Seatrees",
+    "aliases": [
+      "SeaTrees"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 13,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "cosmos-zero",
+    "canonical_name": "Cosmos Zero",
+    "aliases": [
+      "Cosmos ZERO"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 13,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "evmos",
+    "canonical_name": "Evmos",
+    "aliases": [
+      "EVMOS"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 13,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "cosmos-hub",
+    "canonical_name": "Cosmos Hub",
+    "aliases": [
+      "cosmos hub"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 13,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "hylo",
+    "canonical_name": "Hylo",
+    "aliases": [
+      "hylo"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 12,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "asha",
+    "canonical_name": "Asha",
+    "aliases": [
+      "ASHA"
+    ],
+    "entity_type": "ORGANIZATION",
+    "total_occurrences": 12,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "dregen",
+    "canonical_name": "dRegen",
+    "aliases": [
+      "dREGEN"
+    ],
+    "entity_type": "PROJECT",
+    "total_occurrences": 12,
+    "variant_count": 2
+  },
+  {
+    "normalized_key": "jeancarlo",
+    "canonical_name": "Jeancarlo",
+    "aliases": [
+      "JeanCarlo"
+    ],
+    "entity_type": "PERSON",
+    "total_occurrences": 12,
+    "variant_count": 2
+  }
+]

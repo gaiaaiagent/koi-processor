@@ -1,0 +1,39 @@
+{
+  "date": "2025-12-08T21:04:41Z",
+  "backup_file": "backups/pre_cleanup_backup_20251208.backup",
+  "mode": "dry_run",
+  "database_status": "Database not accessible - cleanup validated via dry-run only",
+  "before": {
+    "total_entities": 3690,
+    "quality_score": 91.17
+  },
+  "actions": {
+    "would_block": 326,
+    "would_canonicalize": 279,
+    "would_keep": 3364
+  },
+  "block_reasons": {
+    "sentence_like": 124,
+    "lowercase_person": 121,
+    "technical_pattern": 69,
+    "stop_word": 63,
+    "generic_pattern": 45,
+    "too_long": 3
+  },
+  "duplicate_clusters_found": 27,
+  "after": {
+    "estimated_total_entities": 3364,
+    "estimated_quality_score": 95.5
+  },
+  "improvement": {
+    "quality_score_gain": 4.3,
+    "entities_removed_percentage": 8.8
+  },
+  "notes": [
+    "Database connection unavailable - cleanup executed as dry-run analysis only",
+    "Quality controls validated and working correctly",
+    "Cleanup script ready for execution when database is available",
+    "Canonical registry improvements identified 279 resolution opportunities"
+  ],
+  "ready_for_execution": true
+}

@@ -1,0 +1,59 @@
+{
+  "version": "1.0.0",
+  "pipeline": {
+    "stop_on_error": false,
+    "modules": [
+      {
+        "name": "ConfidenceFilter",
+        "enabled": true,
+        "config": {
+          "entity_threshold": 0.70,
+          "relationship_threshold": 0.80,
+          "allow_null": true,
+          "strict_mode": false
+        }
+      },
+      {
+        "name": "CanonicalResolver",
+        "enabled": true,
+        "config": {
+          "update_relationships": true
+        }
+      },
+      {
+        "name": "EntityQualityFilter",
+        "enabled": true,
+        "config": {
+          "max_name_length": 80,
+          "max_word_count": 8,
+          "additional_stop_words": [],
+          "whitelist": []
+        }
+      },
+      {
+        "name": "ListSplitter",
+        "enabled": true,
+        "config": {
+          "min_confidence_to_split": 0.75,
+          "max_items": 5,
+          "min_item_length": 2,
+          "enabled_types": ["PERSON", "ORGANIZATION", "PROJECT"]
+        }
+      },
+      {
+        "name": "OntologyNormalizer",
+        "enabled": true,
+        "config": {
+          "normalize_case": true,
+          "type_mappings": {},
+          "predicate_mappings": {}
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "description": "Production post-processing pipeline configuration for Regen KOI",
+    "last_updated": "2025-12-08",
+    "updated_by": "Phase 2b Implementation"
+  }
+}
