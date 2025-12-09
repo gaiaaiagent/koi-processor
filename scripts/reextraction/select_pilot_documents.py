@@ -79,22 +79,22 @@ def get_documents_by_quality(conn, min_conf: float, max_conf: float,
     query = f"""
     WITH doc_quality AS (
         SELECT
-            m.rid as document_rid,
+            SPLIT_PART(m.rid, '#', 1) as document_rid,
             m.source_sensor,
             (m.content->>'title')::text as title,
             (m.content->>'url')::text as url,
             AVG(e.confidence_score) as avg_confidence,
-            COUNT(DISTINCT e.id) as entity_count,
-            jsonb_array_length(e.entities) as entities_per_extraction,
-            m.created_at
+            COUNT(DISTINCT e.id) as extraction_count,
+            SUM(jsonb_array_length(COALESCE(e.entities, '[]'::jsonb))) as entity_count,
+            MAX(m.created_at) as created_at
         FROM koi_kg_extractions e
-        JOIN koi_memories m ON m.rid = SPLIT_PART(e.memory_rid, '#', 1)
+        JOIN koi_memories m ON m.rid = e.memory_rid
         WHERE
             e.confidence_score BETWEEN %s AND %s
             {source_clause}
             AND e.entities IS NOT NULL
             AND jsonb_array_length(e.entities) > 0
-        GROUP BY m.rid, m.source_sensor, m.content, m.created_at
+        GROUP BY SPLIT_PART(m.rid, '#', 1), m.source_sensor, m.content->>'title', m.content->>'url'
         HAVING COUNT(DISTINCT e.id) >= 1
     )
     SELECT
@@ -103,6 +103,7 @@ def get_documents_by_quality(conn, min_conf: float, max_conf: float,
         title,
         url,
         avg_confidence,
+        extraction_count,
         entity_count,
         created_at
     FROM doc_quality

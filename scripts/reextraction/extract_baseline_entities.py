@@ -188,7 +188,7 @@ def extract_baseline_entities(conn, pilot_docs: List[Dict]) -> Dict[str, Dict]:
 
     for i, doc in enumerate(pilot_docs, 1):
         doc_rid = doc.get('document_rid', doc.get('rid', ''))
-        title = doc.get('title', 'Untitled')[:50]
+        title = (doc.get('title') or 'Untitled')[:50]
 
         # Progress indicator
         if i % 10 == 0 or i == len(pilot_docs):

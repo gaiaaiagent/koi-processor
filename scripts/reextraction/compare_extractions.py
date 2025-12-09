@@ -59,6 +59,7 @@ def calculate_metrics(baseline: Dict, results: Dict) -> Dict[str, Any]:
     # Block reason tracking
     block_reasons = Counter()
     blocked_by_module = Counter()
+    block_patterns = Counter()  # Track pattern types (e.g., stop_word, technical_pattern)
 
     # Transformation tracking
     modified_entities = []
@@ -136,6 +137,13 @@ def calculate_metrics(baseline: Dict, results: Dict) -> Dict[str, Any]:
             module = blocked.get('blocked_by', 'Unknown')
             blocked_by_module[module] += 1
 
+            # Extract patterns from reason (e.g., "stop_word, technical_pattern" -> ["stop_word", "technical_pattern"])
+            if reason and reason != 'Unknown':
+                for pattern in reason.split(', '):
+                    pattern = pattern.strip()
+                    if pattern:
+                        block_patterns[pattern] += 1
+
         # Track transformations
         modified_entities.extend(changes.get('modified', []))
         split_entities.extend(changes.get('split', []))
@@ -162,7 +170,8 @@ def calculate_metrics(baseline: Dict, results: Dict) -> Dict[str, Any]:
         },
         'block_analysis': {
             'by_reason': dict(block_reasons.most_common(20)),
-            'by_module': dict(blocked_by_module.most_common(10))
+            'by_module': dict(blocked_by_module.most_common(10)),
+            'by_pattern': dict(block_patterns.most_common(15))
         },
         'transformations': {
             'canonical_resolutions': len(modified_entities),
@@ -244,7 +253,15 @@ def generate_markdown_report(metrics: Dict, output_path: str):
         pct = count / total_blocked * 100 if total_blocked else 0
         report.append(f"| {module} | {count:,} | {pct:.1f}% |")
 
-    report.append("\n### By Reason (Top 10)")
+    if block_analysis.get('by_pattern'):
+        report.append("\n### By Pattern")
+        report.append("\n| Pattern | Count | Percentage |")
+        report.append("|---------|-------|------------|")
+        for pattern, count in sorted(block_analysis['by_pattern'].items(), key=lambda x: -x[1]):
+            pct = count / sum(block_analysis['by_pattern'].values()) * 100 if block_analysis['by_pattern'] else 0
+            report.append(f"| {pattern} | {count:,} | {pct:.1f}% |")
+
+    report.append("\n### By Reason (Detailed)")
     report.append("\n| Reason | Count |")
     report.append("|--------|-------|")
     for reason, count in list(block_analysis['by_reason'].items())[:10]:

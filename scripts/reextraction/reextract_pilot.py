@@ -168,7 +168,7 @@ def process_document(
             'name': blocked.name,
             'type': blocked.type,
             'confidence': blocked.confidence,
-            'reason': blocked.metadata.get('block_reason', 'Unknown'),
+            'reason': blocked.metadata.get('blocked_reason', 'Unknown'),
             'blocked_by': blocked.metadata.get('blocked_by', 'Unknown')
         })
 

@@ -41,6 +41,109 @@ from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import dataclass, field
 
 
+# ============================================================================
+# Built-in Entity Whitelist
+# ============================================================================
+# Common abbreviations and entity names that should NOT be blocked
+# even though they might match pronoun/generic patterns.
+# These are checked before any blocking patterns.
+# ============================================================================
+
+# ISO 3166-1 alpha-2 country codes (commonly used as entities)
+COUNTRY_CODES = {
+    # Major countries
+    'US', 'UK', 'EU', 'CA', 'AU', 'NZ', 'FR', 'DE', 'IT',
+    'JP', 'CN', 'IN', 'BR', 'MX', 'ZA', 'KR', 'ES', 'SE', 'NO',
+    'DK', 'FI', 'NL', 'BE', 'AT', 'CH', 'IE', 'PT', 'GR', 'PL',
+    'CZ', 'HU', 'RO', 'BG', 'HR', 'SK', 'SI', 'EE', 'LV', 'LT',
+    'CY', 'MT', 'LU', 'IS', 'LI', 'MC', 'SM', 'VA', 'AD', 'AL',
+    'RU', 'UA', 'BY', 'MD', 'GE', 'AM', 'AZ', 'KZ', 'UZ', 'TM',
+    'KG', 'TJ', 'MN', 'PH', 'TH', 'VN', 'MY', 'SG', 'ID', 'PK',
+    'BD', 'LK', 'NP', 'MM', 'KH', 'LA', 'BN', 'TW', 'HK', 'MO',
+    'AE', 'SA', 'IL', 'TR', 'IR', 'IQ', 'SY', 'JO', 'LB', 'QA',
+    'KW', 'BH', 'OM', 'YE', 'EG', 'LY', 'TN', 'DZ', 'MA', 'SD',
+    'KE', 'NG', 'GH', 'TZ', 'ET', 'UG', 'RW', 'ZW', 'ZM', 'BW',
+    'MW', 'MZ', 'AO', 'NA', 'SN', 'CI', 'CM', 'ML', 'BF', 'NE',
+    'AR', 'CL', 'CO', 'PE', 'VE', 'EC', 'BO', 'PY', 'UY', 'SR',
+    'GY', 'CR', 'PA', 'GT', 'HN', 'SV', 'NI', 'BZ', 'CU', 'DO',
+    'HT', 'JM', 'TT', 'BB', 'BS', 'PR', 'FJ', 'PG', 'WS', 'TO',
+}
+
+# International organizations and government agencies
+ORGANIZATIONS = {
+    # International
+    'UN', 'NATO', 'ASEAN', 'OPEC', 'WTO', 'IMF', 'WHO', 'OECD', 'G7', 'G20',
+    'UNESCO', 'UNICEF', 'UNHCR', 'WFP', 'FAO', 'ILO', 'IAEA', 'ICAO', 'IMO',
+    'WIPO', 'ITU', 'UNEP', 'UNDP', 'WB', 'IFC', 'ADB', 'AIIB', 'EBRD', 'IDB',
+    'IPCC', 'UNFCCC', 'CBD', 'CITES', 'IUCN', 'WWF', 'WRI', 'GCF', 'GEF',
+
+    # US Government
+    'NASA', 'NOAA', 'EPA', 'FDA', 'CDC', 'NIH', 'NSF', 'USDA', 'USGS', 'NPS',
+    'DARPA', 'ARPA', 'DOE', 'DOD', 'DHS', 'FBI', 'CIA', 'NSA', 'DOJ', 'DOS',
+    'HUD', 'DOT', 'DOL', 'HHS', 'VA', 'FCC', 'SEC', 'FTC', 'CFTC', 'FDIC',
+    'FEMA', 'SSA', 'SBA', 'GSA', 'OPM', 'OMB', 'GAO', 'CBO', 'NIST', 'NTIA',
+
+    # Other government agencies
+    'ESA', 'JAXA', 'CERN', 'ITER', 'CSIRO', 'DLR', 'CNSA', 'ISRO', 'KARI',
+    'DEFRA', 'BEIS', 'FSA', 'NHS', 'BBC', 'CBC', 'ABC', 'NHK', 'RAI', 'ARD',
+
+    # Standards organizations
+    'ISO', 'IEEE', 'IETF', 'W3C', 'ANSI', 'NIST', 'IEC', 'ITU', 'ETSI', 'CEN',
+    'BSI', 'DIN', 'JIS', 'GB', 'GOST', 'AS', 'NZS', 'CSA', 'UL', 'CE', 'FCC',
+}
+
+# Technology and science abbreviations
+TECH_SCIENCE = {
+    # Academic
+    'MIT', 'UCLA', 'USC', 'NYU', 'CMU', 'UCB', 'UCSF', 'UCSD', 'UCI', 'UCD',
+    'GTech', 'UMD', 'UVA', 'UNC', 'OSU', 'PSU', 'MSU', 'ASU', 'UW', 'UT',
+    'Harvard', 'Stanford', 'Yale', 'Princeton', 'Cornell', 'Columbia', 'Penn',
+    'CalTech', 'JHU', 'Duke', 'Northwestern', 'Vanderbilt', 'WashU', 'Rice',
+    'Oxford', 'Cambridge', 'Imperial', 'UCL', 'LSE', 'KCL', 'Edinburgh', 'Bristol',
+    'ETH', 'EPFL', 'TUM', 'LMU', 'KIT', 'RWTH', 'TU', 'Delft', 'KTH', 'DTU',
+
+    # Tech companies (commonly referenced as entities)
+    'IBM', 'HP', 'AMD', 'ARM', 'NVIDIA', 'TSMC', 'ASML', 'SAP', 'Oracle', 'Dell',
+    'Cisco', 'Intel', 'Qualcomm', 'Broadcom', 'TI', 'Analog', 'NXP', 'STM',
+
+    # Scientific terms commonly used as entities
+    'DNA', 'RNA', 'AI', 'ML', 'NLP', 'CV', 'RL', 'DL', 'NN', 'CNN', 'RNN', 'GAN',
+    'GPS', 'GIS', 'LiDAR', 'SAR', 'NDVI', 'EVI', 'LAI', 'NPP', 'GPP', 'NEE',
+    'API', 'SDK', 'IDE', 'CLI', 'GUI', 'OS', 'CPU', 'GPU', 'TPU', 'RAM', 'ROM',
+    'SSD', 'HDD', 'NVMe', 'SATA', 'USB', 'HDMI', 'PCIe', 'DDR', 'LPDDR', 'GDDR',
+    'IoT', 'IIoT', 'M2M', 'V2X', 'LTE', '5G', '6G', 'WiFi', 'BLE', 'NFC', 'RFID',
+
+    # Environmental/Climate science (Regen-specific)
+    'GHG', 'CO2', 'CH4', 'N2O', 'HFC', 'PFC', 'SF6', 'CFC', 'HCFC', 'VOC',
+    'MRV', 'ERW', 'DAC', 'BECCS', 'CCS', 'CCU', 'CDR', 'NET', 'NbS', 'NCS',
+    'SOC', 'SIC', 'DOC', 'POC', 'DIC', 'TIC', 'TOC', 'TN', 'TP', 'TSS', 'TDS',
+    'GWP', 'ODP', 'AP', 'EP', 'POCP', 'LCA', 'LCI', 'LCIA', 'EPD', 'CFP', 'WFP',
+}
+
+# Currency codes (ISO 4217)
+CURRENCY_CODES = {
+    'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'INR', 'BRL', 'MXN', 'RUB', 'KRW',
+    'CAD', 'AUD', 'NZD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF',
+    'TRY', 'ZAR', 'SGD', 'HKD', 'TWD', 'THB', 'MYR', 'IDR', 'PHP', 'VND',
+    'AED', 'SAR', 'ILS', 'EGP', 'NGN', 'KES', 'ARS', 'CLP', 'COP', 'PEN',
+    'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'XRP', 'ADA', 'SOL', 'DOT', 'DOGE',
+    'ATOM', 'REGEN', 'OSMO', 'JUNO', 'STARS', 'EVMOS', 'INJ', 'KAVA', 'AKT',
+}
+
+# Common person names that match verb patterns but are valid names
+# These prevent false positives from sentence_like pattern matching names like "Will"
+PERSON_NAMES_WHITELIST = {
+    # Names that match modal verbs
+    'Will', 'May', 'Can', 'Art', 'Bill', 'Rob', 'Mark', 'Grant', 'Dawn',
+    'Faith', 'Hope', 'Grace', 'Joy', 'Chance', 'Chase', 'Miles', 'Hunter',
+    # Common validator/forum usernames in Regen ecosystem
+    'vitwit', 'swidnikk', 'ryanchristo',
+}
+
+# Combine into master whitelist
+ENTITY_WHITELIST = COUNTRY_CODES | ORGANIZATIONS | TECH_SCIENCE | CURRENCY_CODES | PERSON_NAMES_WHITELIST
+
+
 @dataclass
 class FilterConfig:
     """Configuration for entity quality filter."""
@@ -124,13 +227,19 @@ class EntityQualityFilter:
         'example', 'examples', 'case', 'cases',
     }
 
-    # Patterns for generic person descriptions
+    # Patterns for generic person/entity descriptions
+    # NOTE: These must distinguish between generic descriptions and proper names
+    # Generic: "the character", "a user" (determiner + lowercase generic noun)
+    # Proper: "The Ministry for the Future", "The World Bank" (determiner + capitalized proper name)
     GENERIC_PERSON_PATTERNS: List[re.Pattern] = [
-        # Determiner start
-        re.compile(r'^(the |a |an |our |their |my |your |his |her |its )', re.IGNORECASE),
-        # Generic group noun endings
+        # Determiner + lowercase word = generic description
+        # "the character", "a user", "an expert" - but NOT "The Ministry", "A Novel"
+        # Match: determiner (case-insensitive) followed by space and LOWERCASE letter
+        # Note: No IGNORECASE flag so [a-z] only matches lowercase
+        re.compile(r'^(?i:the|a|an|our|their|my|your|his|her|its) [a-z]'),
+        # Generic group noun endings (these are almost always generic regardless of case)
         re.compile(r'(friends|teachers|officials|people|generations|characters?|speakers?|participants?|members?|users?)s?$', re.IGNORECASE),
-        # Relative/demonstrative pronouns
+        # Relative/demonstrative pronouns starting a phrase
         re.compile(r'^(who|which|that|those|these|some|many|few|all|most|several) ', re.IGNORECASE),
         # Indefinite references
         re.compile(r'^(someone|anyone|everyone|nobody|somebody|anybody|everybody) ', re.IGNORECASE),
@@ -139,14 +248,20 @@ class EntityQualityFilter:
     ]
 
     # Patterns indicating sentence-like structures
+    # NOTE: These patterns must be carefully tuned to avoid false positives
+    # Common false positives: version numbers (v2.0), domains (.fi), person names (Will)
     SENTENCE_PATTERNS: List[re.Pattern] = [
         # Common verbs indicating sentence structure
-        re.compile(r'\b(is|are|was|were|has|have|had|will|would|could|should|can|may|might|must)\b', re.IGNORECASE),
-        # Phrase structures
+        # EXCLUDED from standalone match: "will" (common name), "can" (ambiguous)
+        # These verbs strongly indicate a sentence when surrounded by words
+        re.compile(r'\b(is|are|was|were|has|have|had|would|could|should|may|might|must)\b', re.IGNORECASE),
+        # Phrase structures (these are clearly sentence-like)
         re.compile(r'\b(the most|in order to|according to|in terms of|as well as|such as|rather than)\b', re.IGNORECASE),
-        # Sentence punctuation (but not after common abbreviations)
-        # Match period/!/? only if NOT preceded by common abbreviations
-        re.compile(r'(?<![A-Z]r)(?<!Inc)(?<!Corp)(?<!Ltd)(?<!Jr)(?<!Sr)(?<!Mr)(?<!Ms)(?<!Mrs)(?<!Ph\.D)(?<!M\.D)[.!?;](?!\s*[A-Z])'),
+        # Sentence punctuation - REFINED to avoid false positives:
+        # - Don't match period followed by digit (v2.0, 3.14)
+        # - Don't match period in common TLDs or crypto tokens (.fi, .io, .noble, .network)
+        # Only match: !, ?, ;
+        re.compile(r'[!?;]'),
         # Multiple commas (likely a list, not an entity)
         re.compile(r',.*,.*,'),
         # Question patterns
@@ -198,6 +313,13 @@ class EntityQualityFilter:
         # Build effective stop word set
         self._stop_words = self.DEFAULT_STOP_WORDS.union(self.config.additional_stop_words)
 
+        # Build effective whitelist (built-in + user config)
+        # Store both original case and lowercase for case-insensitive matching
+        self._whitelist = ENTITY_WHITELIST.copy()
+        if self.config.whitelist:
+            self._whitelist.update(self.config.whitelist)
+        self._whitelist_lower = {w.lower() for w in self._whitelist}
+
         # Initialize statistics
         self._stats = {
             'total_checked': 0,
@@ -214,6 +336,22 @@ class EntityQualityFilter:
                 'technical_pattern': 0,
             }
         }
+
+    def is_whitelisted(self, name: str) -> bool:
+        """
+        Check if entity name is in the whitelist.
+
+        Whitelist includes country codes, organization abbreviations,
+        tech terms, and currency codes that should never be blocked.
+
+        Args:
+            name: Entity name to check
+
+        Returns:
+            True if name is whitelisted (should NOT be blocked)
+        """
+        normalized = name.strip().lower()
+        return normalized in self._whitelist_lower
 
     def is_stop_word(self, name: str) -> bool:
         """
@@ -273,6 +411,7 @@ class EntityQualityFilter:
 
         Blocks: ("mom", "PERSON"), ("friend", "PERSON")
         Allows: ("Aaron", "PERSON"), ("John Smith", "PERSON")
+        Allows: Usernames/handles with special chars: ("ryanchristo-Validator", "PERSON")
 
         Args:
             name: Entity name to check
@@ -286,12 +425,17 @@ class EntityQualityFilter:
 
         stripped = name.strip()
 
-        # Must be single word
+        # Must be single word (no spaces)
         if ' ' in stripped:
             return False
 
         # Must start with lowercase
         if not stripped or not stripped[0].islower():
+            return False
+
+        # If contains special characters (-, _, numbers), it's likely a username/handle
+        # Usernames should NOT be blocked even if lowercase
+        if '-' in stripped or '_' in stripped or any(c.isdigit() for c in stripped):
             return False
 
         return True
@@ -395,6 +539,10 @@ class EntityQualityFilter:
             - (True, []) if entity passes all filters
             - (False, ["reason1", "reason2", ...]) if entity should be filtered
         """
+        # 0. Whitelist check - if whitelisted, skip all other checks
+        if self.is_whitelisted(name):
+            return True, []
+
         reasons = []
 
         # 1. Stop word check
@@ -447,8 +595,8 @@ class EntityQualityFilter:
         name = entity.get('name', '')
         entity_type = entity.get('type', '')
 
-        # Check whitelist first
-        if name.strip().lower() in self.config.whitelist:
+        # Check whitelist first (includes built-in + user config)
+        if self.is_whitelisted(name):
             return (True, "")
 
         # 1. Stop word check
