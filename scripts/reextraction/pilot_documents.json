@@ -1,0 +1,121 @@
+{
+  "generated_at": "2025-12-09T08:33:18.927391",
+  "total_count": 10,
+  "by_tier": {
+    "high": 5,
+    "medium": 3,
+    "low": 2
+  },
+  "documents": [
+    {
+      "document_rid": "orn:web.page:registry.regen.network/2358b5280140344b",
+      "source_sensor": "website-sensor-1759273298.773726",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8833333333333333,
+      "extraction_count": 1,
+      "entity_count": 3,
+      "created_at": "2025-10-01T00:02:58.999110+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2",
+      "source_sensor": "website-sensor-1759273298.773726",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.85,
+      "extraction_count": 1,
+      "entity_count": 3,
+      "created_at": "2025-10-01T00:02:31.384616+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "regen.forum-post:forum.regen.network_136_post_1",
+      "source_sensor": "discourse-sensor-1759265784.306514",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8772727272727273,
+      "extraction_count": 2,
+      "entity_count": 10,
+      "created_at": "2025-09-30T23:05:33.282423+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "regen.forum-post:forum.regen.network_467_post_1",
+      "source_sensor": "discourse-sensor-1759263473.505621",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8694444444444445,
+      "extraction_count": 3,
+      "entity_count": 10,
+      "created_at": "2025-09-30T20:22:09.657542+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "regen.podcast:podcast_882604015",
+      "source_sensor": "podcast-sensor-1760233121.273056",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8642857142857142,
+      "extraction_count": 1,
+      "entity_count": 3,
+      "created_at": "2025-10-12T01:49:44.472601+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871",
+      "source_sensor": "notion-sensor-1759463727.344542",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8318181818181819,
+      "extraction_count": 1,
+      "entity_count": 4,
+      "created_at": "2025-10-03T04:19:21.345953+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-post:forum.regen.network_30_post_5",
+      "source_sensor": "discourse-sensor-1759265784.306514",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.83125,
+      "extraction_count": 1,
+      "entity_count": 4,
+      "created_at": "2025-09-30T21:59:47.370519+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d",
+      "source_sensor": "notion-sensor-1759463727.344542",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8357142857142856,
+      "extraction_count": 1,
+      "entity_count": 4,
+      "created_at": "2025-10-03T04:19:33.961075+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580",
+      "source_sensor": "notion-sensor-1759463727.344542",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.0,
+      "extraction_count": 1,
+      "entity_count": 1,
+      "created_at": "2025-10-03T04:14:51.694923+00:00",
+      "quality_tier": "low"
+    },
+    {
+      "document_rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea",
+      "source_sensor": "website-sensor-1759273298.773726",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.0,
+      "extraction_count": 1,
+      "entity_count": 1,
+      "created_at": "2025-10-01T00:01:59.768350+00:00",
+      "quality_tier": "low"
+    }
+  ]
+}

@@ -1,0 +1,2536 @@
+{
+  "generated_at": "2025-12-09T08:33:39.188999",
+  "document_count": 10,
+  "total_entities": 109,
+  "total_relations": 0,
+  "documents": {
+    "orn:web.page:registry.regen.network/2358b5280140344b": {
+      "document": {
+        "rid": "orn:web.page:registry.regen.network/2358b5280140344b",
+        "title": null,
+        "url": null,
+        "source_sensor": "website-sensor-1759273298.773726",
+        "quality_tier": "high",
+        "avg_confidence": 0.8833333333333333
+      },
+      "extraction": {
+        "document_rid": "orn:web.page:registry.regen.network/2358b5280140344b",
+        "extraction_count": 2,
+        "entities": [
+          {
+            "name": "Sam Bennetts",
+            "type": "Person",
+            "confidence": 0.95,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0",
+            "extraction_id": 5833,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0:entity:person:sam-bennetts"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0",
+            "extraction_id": 5833,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0:entity:project:regen-registry"
+            }
+          },
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0",
+            "extraction_id": 5833,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1",
+            "extraction_id": 5832,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "Regen Marketplace",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1",
+            "extraction_id": 5832,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:entity:project:regen-marketplace"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1",
+            "extraction_id": 5832,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:entity:project:regen-ledger"
+            }
+          },
+          {
+            "name": "Regen Network Development",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1",
+            "extraction_id": 5832,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:entity:organization:regen-network-development"
+            }
+          },
+          {
+            "name": "Hylo community",
+            "type": "Organization",
+            "confidence": 0.8,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1",
+            "extraction_id": 5832,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:entity:organization:hylo-community"
+            }
+          },
+          {
+            "name": "EcoBuilder Lab",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1",
+            "extraction_id": 5832,
+            "metadata": {
+              "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:entity:project:ecobuilder-lab"
+            }
+          }
+        ],
+        "entity_count": 9,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0:statement:claim:000",
+            "object": "applied scientist and GIS developer",
+            "subject": "Sam Bennetts",
+            "predicate": "has experience as",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0:statement:claim:001",
+            "object": "anyone to generate ecological credits on the blockchain",
+            "subject": "Regen Registry",
+            "predicate": "allows",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk0:statement:claim:002",
+            "object": "Regen Registry",
+            "subject": "Regen Network",
+            "predicate": "is associated with",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:statement:claim:000",
+            "object": "resources and support",
+            "subject": "Regen Network",
+            "predicate": "provides",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:statement:claim:001",
+            "object": "Regen Network",
+            "subject": "Regen Network Development",
+            "predicate": "is associated with",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:registry.regen.network/2358b5280140344b#chunk1:statement:claim:002",
+            "object": "Regen Network",
+            "subject": "Hylo community",
+            "predicate": "is part of",
+            "confidence": 0.75,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 6,
+        "total_tokens": 1432,
+        "total_cost_usd": 0.00043599999999999997,
+        "avg_confidence": 0.8611111111111112,
+        "min_confidence": 0.8388888888888889,
+        "max_confidence": 0.8833333333333333
+      }
+    },
+    "orn:web.page:forum.regen.network/bb4dcea1606fdac2": {
+      "document": {
+        "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2",
+        "title": null,
+        "url": null,
+        "source_sensor": "website-sensor-1759273298.773726",
+        "quality_tier": "high",
+        "avg_confidence": 0.85
+      },
+      "extraction": {
+        "document_rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2",
+        "extraction_count": 1,
+        "entities": [
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0",
+            "extraction_id": 6128,
+            "metadata": {
+              "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "LiquidityDAO",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0",
+            "extraction_id": 6128,
+            "metadata": {
+              "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0:entity:organization:liquiditydao"
+            }
+          },
+          {
+            "name": "Regen Botanical Garden",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0",
+            "extraction_id": 6128,
+            "metadata": {
+              "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0:entity:project:regen-botanical-garden"
+            }
+          }
+        ],
+        "entity_count": 3,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0:statement:claim:000",
+            "object": "Ecosystem Narrative & Fundraising Alignment Facilitation Work",
+            "subject": "Regen Network",
+            "predicate": "is associated with",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0:statement:claim:001",
+            "object": "Emissions Transfer",
+            "subject": "LiquidityDAO",
+            "predicate": "conducts",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2#chunk0:statement:claim:002",
+            "object": "Regen Botanical Garden",
+            "subject": "Community Spend Proposal - Stage 1",
+            "predicate": "is related to",
+            "confidence": 0.75,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 3,
+        "total_tokens": 773,
+        "total_cost_usd": 0.000213,
+        "avg_confidence": 0.85,
+        "min_confidence": 0.85,
+        "max_confidence": 0.85
+      }
+    },
+    "regen.forum-post:forum.regen.network_136_post_1": {
+      "document": {
+        "rid": "regen.forum-post:forum.regen.network_136_post_1",
+        "title": null,
+        "url": null,
+        "source_sensor": "discourse-sensor-1759265784.306514",
+        "quality_tier": "high",
+        "avg_confidence": 0.8772727272727273
+      },
+      "extraction": {
+        "document_rid": "regen.forum-post:forum.regen.network_136_post_1",
+        "extraction_count": 3,
+        "entities": [
+          {
+            "name": "Evmos",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0",
+            "extraction_id": 7269,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:entity:project:evmos"
+            }
+          },
+          {
+            "name": "Regen",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0",
+            "extraction_id": 7269,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:entity:organization:regen"
+            }
+          },
+          {
+            "name": "Nemus",
+            "type": "Person",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0",
+            "extraction_id": 7269,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:entity:person:nemus"
+            }
+          },
+          {
+            "name": "Stakecito",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0",
+            "extraction_id": 7269,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:entity:organization:stakecito"
+            }
+          },
+          {
+            "name": "Kalia Validator",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0",
+            "extraction_id": 7269,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:entity:organization:kalia-validator"
+            }
+          },
+          {
+            "name": "Evmos",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1",
+            "extraction_id": 7266,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:entity:project:evmos"
+            }
+          },
+          {
+            "name": "REGEN",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1",
+            "extraction_id": 7266,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:entity:project:regen"
+            }
+          },
+          {
+            "name": "Keplr",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1",
+            "extraction_id": 7266,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:entity:organization:keplr"
+            }
+          },
+          {
+            "name": "MetaMask",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1",
+            "extraction_id": 7266,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:entity:organization:metamask"
+            }
+          },
+          {
+            "name": "Ledger",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1",
+            "extraction_id": 7266,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:entity:organization:ledger"
+            }
+          },
+          {
+            "name": "Evmos",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2",
+            "extraction_id": 7265,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2:entity:organization:evmos"
+            }
+          },
+          {
+            "name": "EVMOS",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2",
+            "extraction_id": 7265,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2:entity:project:evmos"
+            }
+          }
+        ],
+        "entity_count": 12,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:statement:claim:000",
+            "object": "to offset the carbon emissions of the Evmos network on Regen for the year 2022",
+            "subject": "Evmos community",
+            "predicate": "decided",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:statement:claim:001",
+            "object": "Evmos in the Cosmos ecosystem",
+            "subject": "Regen",
+            "predicate": "has a relationship with",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:statement:claim:002",
+            "object": "four major criteria for the analysis of any token applying to the Regen Network community",
+            "subject": "Regen",
+            "predicate": "proposed",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:statement:claim:003",
+            "object": "an EVM-compatible Cosmos native cryptocurrency",
+            "subject": "EVMOS",
+            "predicate": "is",
+            "confidence": 0.95,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:statement:claim:004",
+            "object": "IBC-compatible",
+            "subject": "Evmos",
+            "predicate": "is",
+            "confidence": 0.95,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk0:statement:claim:005",
+            "object": "REGEN",
+            "subject": "Evmos",
+            "predicate": "has more liquidity than",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:statement:claim:000",
+            "object": "REGEN",
+            "subject": "Evmos",
+            "predicate": "has more liquidity than",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:statement:claim:001",
+            "object": "true",
+            "subject": "Evmos",
+            "predicate": "is safe to use from a technical perspective",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:statement:claim:002",
+            "object": "true",
+            "subject": "Evmos",
+            "predicate": "is not a stablecoin",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:statement:claim:003",
+            "object": "true",
+            "subject": "Evmos",
+            "predicate": "has a decent onboarding experience",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:statement:claim:004",
+            "object": "true",
+            "subject": "EVMOS",
+            "predicate": "will be added to the allow list",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk1:statement:claim:005",
+            "object": "$0.50 and $0.28",
+            "subject": "Evmos",
+            "predicate": "fluctuates between",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2:statement:claim:000",
+            "object": "users migrating",
+            "subject": "Evmos",
+            "predicate": "is associated with",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2:statement:claim:001",
+            "object": "EVMOS to the allow list",
+            "subject": "Proposal",
+            "predicate": "will add",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_136_post_1#chunk2:statement:claim:002",
+            "object": "May 5th, 2023",
+            "subject": "Target on-chain date",
+            "predicate": "is",
+            "confidence": 0.85,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 15,
+        "total_tokens": 2555,
+        "total_cost_usd": 0.000817,
+        "avg_confidence": 0.8615151515151517,
+        "min_confidence": 0.8300000000000001,
+        "max_confidence": 0.8863636363636364
+      }
+    },
+    "regen.forum-post:forum.regen.network_467_post_1": {
+      "document": {
+        "rid": "regen.forum-post:forum.regen.network_467_post_1",
+        "title": null,
+        "url": null,
+        "source_sensor": "discourse-sensor-1759263473.505621",
+        "quality_tier": "high",
+        "avg_confidence": 0.8694444444444445
+      },
+      "extraction": {
+        "document_rid": "regen.forum-post:forum.regen.network_467_post_1",
+        "extraction_count": 5,
+        "entities": [
+          {
+            "name": "Regen DAO",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0",
+            "extraction_id": 9891,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0:entity:project:regen-dao"
+            }
+          },
+          {
+            "name": "Twitter",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0",
+            "extraction_id": 9891,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0:entity:organization:twitter"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0",
+            "extraction_id": 9915,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:entity:project:regen-ledger"
+            }
+          },
+          {
+            "name": "DAO DAO",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0",
+            "extraction_id": 9915,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:entity:project:dao-dao"
+            }
+          },
+          {
+            "name": "Regen",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0",
+            "extraction_id": 9915,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:entity:organization:regen"
+            }
+          },
+          {
+            "name": "CosmWasm",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0",
+            "extraction_id": 9915,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:entity:project:cosmwasm"
+            }
+          },
+          {
+            "name": "DAO DAO",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1",
+            "extraction_id": 9914,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:entity:organization:dao-dao"
+            }
+          },
+          {
+            "name": "Regen",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1",
+            "extraction_id": 9914,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:entity:organization:regen"
+            }
+          },
+          {
+            "name": "Polytone",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1",
+            "extraction_id": 9914,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:entity:organization:polytone"
+            }
+          },
+          {
+            "name": "DAO DAO",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2",
+            "extraction_id": 9911,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2:entity:project:dao-dao"
+            }
+          },
+          {
+            "name": "Polytone",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2",
+            "extraction_id": 9911,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2:entity:project:polytone"
+            }
+          },
+          {
+            "name": "GitHub",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2",
+            "extraction_id": 9911,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2:entity:organization:github"
+            }
+          },
+          {
+            "name": "DAO",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3",
+            "extraction_id": 9910,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:entity:organization:dao"
+            }
+          },
+          {
+            "name": "GitHub",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3",
+            "extraction_id": 9910,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:entity:organization:github"
+            }
+          },
+          {
+            "name": "Polytone",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3",
+            "extraction_id": 9910,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:entity:project:polytone"
+            }
+          },
+          {
+            "name": "CosmWasm",
+            "type": "Project",
+            "confidence": 0.75,
+            "chunk_rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3",
+            "extraction_id": 9910,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:entity:project:cosmwasm"
+            }
+          }
+        ],
+        "entity_count": 16,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0:statement:claim:000",
+            "object": "lift off",
+            "subject": "Folks",
+            "predicate": "have",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0:statement:claim:001",
+            "object": "Regen DAO",
+            "subject": "Folks",
+            "predicate": "create",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_10#chunk0:statement:claim:002",
+            "object": "it publicly on Twitter",
+            "subject": "Folks",
+            "predicate": "will announce",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:statement:claim:000",
+            "object": "v6",
+            "subject": "Regen Ledger",
+            "predicate": "has landed",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:statement:claim:001",
+            "object": "daodao.zone",
+            "subject": "DAO DAO",
+            "predicate": "is deployed on",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:statement:claim:002",
+            "object": "the deployer for smart contracts",
+            "subject": "Regen",
+            "predicate": "requires governance to authorize",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:statement:claim:003",
+            "object": "best-in-class DAO tooling",
+            "subject": "DAO DAO",
+            "predicate": "provides access to",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk0:statement:claim:004",
+            "object": "better, more flexible governance systems",
+            "subject": "Our mission",
+            "predicate": "is to build",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:statement:claim:000",
+            "object": "to build better, more flexible governance systems",
+            "subject": "DAO DAO",
+            "predicate": "has a mission",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:statement:claim:001",
+            "object": "to experiment with and scale governance infrastructure",
+            "subject": "DAO DAO",
+            "predicate": "makes governance easy",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:statement:claim:002",
+            "object": "over 6,049 DAOs across 13 chains",
+            "subject": "DAO DAO",
+            "predicate": "has created",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:statement:claim:003",
+            "object": "24,368 proposals encompassing 41,305 unique DAO members",
+            "subject": "DAO DAO",
+            "predicate": "has been tested by",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk1:statement:claim:004",
+            "object": "over $2M into research and development",
+            "subject": "DAO DAO",
+            "predicate": "has invested",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2:statement:claim:000",
+            "object": "smart contract management",
+            "subject": "DAO DAO",
+            "predicate": "provides",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2:statement:claim:001",
+            "object": "accounts, smart contracts, and DAOs to control accounts on other chains",
+            "subject": "Polytone",
+            "predicate": "allows",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk2:statement:claim:002",
+            "object": "veto and approval flows",
+            "subject": "DAO DAO",
+            "predicate": "has",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:statement:claim:000",
+            "object": "smart contracts for Interchain DAOs",
+            "subject": "DAO",
+            "predicate": "has",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:statement:claim:001",
+            "object": "InterChain DAO tooling UI",
+            "subject": "DAO",
+            "predicate": "provides",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_467_post_1#chunk3:statement:claim:002",
+            "object": "ibc-apps/cosmwasm/polytone at main \u00b7 cosmos/ibc-apps \u00b7 GitHub",
+            "subject": "Polytone",
+            "predicate": "is located at",
+            "confidence": 0.75,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 19,
+        "total_tokens": 3894,
+        "total_cost_usd": 0.001166,
+        "avg_confidence": 0.8521666666666668,
+        "min_confidence": 0.8125,
+        "max_confidence": 0.8833333333333333
+      }
+    },
+    "regen.podcast:podcast_882604015": {
+      "document": {
+        "rid": "regen.podcast:podcast_882604015",
+        "title": null,
+        "url": null,
+        "source_sensor": "podcast-sensor-1760233121.273056",
+        "quality_tier": "high",
+        "avg_confidence": 0.8642857142857142
+      },
+      "extraction": {
+        "document_rid": "regen.podcast:podcast_882604015",
+        "extraction_count": 1,
+        "entities": [
+          {
+            "name": "Nora Bateson",
+            "type": "Person",
+            "confidence": 0.95,
+            "chunk_rid": "regen.podcast:podcast_882604015#chunk0",
+            "extraction_id": 9572,
+            "metadata": {
+              "rid": "regen.podcast:podcast_882604015#chunk0:entity:person:nora-bateson"
+            }
+          },
+          {
+            "name": "Planetary Regeneration Podcast",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "regen.podcast:podcast_882604015#chunk0",
+            "extraction_id": 9572,
+            "metadata": {
+              "rid": "regen.podcast:podcast_882604015#chunk0:entity:project:planetary-regeneration-podcast"
+            }
+          },
+          {
+            "name": "SoundCloud",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "regen.podcast:podcast_882604015#chunk0",
+            "extraction_id": 9572,
+            "metadata": {
+              "rid": "regen.podcast:podcast_882604015#chunk0:entity:organization:soundcloud"
+            }
+          }
+        ],
+        "entity_count": 3,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "regen.podcast:podcast_882604015#chunk0:statement:claim:000",
+            "object": "Planetary Regeneration Podcast Episode 30",
+            "subject": "Nora Bateson",
+            "predicate": "is featured in",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.podcast:podcast_882604015#chunk0:statement:claim:001",
+            "object": "SoundCloud",
+            "subject": "Planetary Regeneration Podcast",
+            "predicate": "is published on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.podcast:podcast_882604015#chunk0:statement:claim:002",
+            "object": "45 minutes",
+            "subject": "Planetary Regeneration Podcast Episode 30",
+            "predicate": "has duration of",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.podcast:podcast_882604015#chunk0:statement:claim:003",
+            "object": "2020-08-26T22:02:54Z",
+            "subject": "Planetary Regeneration Podcast Episode 30",
+            "predicate": "was published on",
+            "confidence": 0.8,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 4,
+        "total_tokens": 796,
+        "total_cost_usd": 0.000261,
+        "avg_confidence": 0.8642857142857142,
+        "min_confidence": 0.8642857142857142,
+        "max_confidence": 0.8642857142857142
+      }
+    },
+    "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871": {
+      "document": {
+        "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871",
+        "title": null,
+        "url": null,
+        "source_sensor": "notion-sensor-1759463727.344542",
+        "quality_tier": "medium",
+        "avg_confidence": 0.8318181818181819
+      },
+      "extraction": {
+        "document_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871",
+        "extraction_count": 2,
+        "entities": [
+          {
+            "name": "Regen",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0",
+            "extraction_id": 457,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:entity:project:regen"
+            }
+          },
+          {
+            "name": "Carbon Landscapes",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0",
+            "extraction_id": 457,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:entity:organization:carbon-landscapes"
+            }
+          },
+          {
+            "name": "Mallee fowl",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0",
+            "extraction_id": 457,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:entity:project:mallee-fowl"
+            }
+          },
+          {
+            "name": "Orange-bellied Parrot",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0",
+            "extraction_id": 457,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:entity:project:orange-bellied-parrot"
+            }
+          },
+          {
+            "name": "Carbon Landscapes",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1",
+            "extraction_id": 456,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:entity:organization:carbon-landscapes"
+            }
+          },
+          {
+            "name": "Mallee fowl",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1",
+            "extraction_id": 456,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:entity:project:mallee-fowl"
+            }
+          },
+          {
+            "name": "Orange-bellied Parrot",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1",
+            "extraction_id": 456,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:entity:project:orange-bellied-parrot"
+            }
+          },
+          {
+            "name": "Regen",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1",
+            "extraction_id": 456,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:entity:organization:regen"
+            }
+          }
+        ],
+        "entity_count": 8,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:statement:claim:000",
+            "object": "a pitch-ground for international investment",
+            "subject": "Regen",
+            "predicate": "is used as",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:statement:claim:001",
+            "object": "the best projects will stand up",
+            "subject": "We",
+            "predicate": "feel",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:statement:claim:002",
+            "object": "collaboratively at landscape scale",
+            "subject": "We",
+            "predicate": "are trying to work",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:statement:claim:003",
+            "object": "benchmarks for each property in 2025",
+            "subject": "We",
+            "predicate": "are setting",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:statement:claim:004",
+            "object": "away from carbon to nature",
+            "subject": "We",
+            "predicate": "are shifting",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk0:statement:claim:005",
+            "object": "threatened species",
+            "subject": "Carbon Landscapes",
+            "predicate": "is working with",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:statement:claim:000",
+            "object": "threatened species",
+            "subject": "Carbon Landscapes",
+            "predicate": "is working with",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:statement:claim:001",
+            "object": "biodiversity wins",
+            "subject": "Carbon Landscapes",
+            "predicate": "has documented",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:statement:claim:002",
+            "object": "scalable, storytelling-forward infrastructure",
+            "subject": "Carbon Landscapes",
+            "predicate": "seeks",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871#chunk1:statement:claim:003",
+            "object": "clear onboarding checklist for participating in Regen\u2019s system",
+            "subject": "Carbon Landscapes",
+            "predicate": "requests",
+            "confidence": 0.85,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 10,
+        "total_tokens": 1695,
+        "total_cost_usd": 0.00056,
+        "avg_confidence": 0.850284090909091,
+        "min_confidence": 0.8318181818181819,
+        "max_confidence": 0.86875
+      }
+    },
+    "regen.forum-post:forum.regen.network_30_post_5": {
+      "document": {
+        "rid": "regen.forum-post:forum.regen.network_30_post_5",
+        "title": null,
+        "url": null,
+        "source_sensor": "discourse-sensor-1759265784.306514",
+        "quality_tier": "medium",
+        "avg_confidence": 0.83125
+      },
+      "extraction": {
+        "document_rid": "regen.forum-post:forum.regen.network_30_post_5",
+        "extraction_count": 1,
+        "entities": [
+          {
+            "name": "Christian",
+            "type": "Person",
+            "confidence": 0.85,
+            "chunk_rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0",
+            "extraction_id": 9333,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:entity:person:christian"
+            }
+          },
+          {
+            "name": "REGEN",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0",
+            "extraction_id": 9333,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:entity:organization:regen"
+            }
+          },
+          {
+            "name": "Aerodrome",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0",
+            "extraction_id": 9333,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:entity:organization:aerodrome"
+            }
+          },
+          {
+            "name": "DAO",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0",
+            "extraction_id": 9333,
+            "metadata": {
+              "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:entity:project:dao"
+            }
+          }
+        ],
+        "entity_count": 4,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:statement:claim:000",
+            "object": "commitment to REGEN liquidity",
+            "subject": "Christian",
+            "predicate": "supports",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:statement:question:001",
+            "object": "whitelisting before a full vote is finalized",
+            "subject": "Aerodrome",
+            "predicate": "approve",
+            "confidence": 0.8,
+            "statementType": "question"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:statement:question:002",
+            "object": "structure for the end proposal",
+            "subject": "DAO",
+            "predicate": "finalize",
+            "confidence": 0.8,
+            "statementType": "question"
+          },
+          {
+            "rid": "regen.forum-post:forum.regen.network_30_post_5#chunk0:statement:claim:003",
+            "object": "increase liquidity should more than compensate for the lowering of validator emissions",
+            "subject": "validator",
+            "predicate": "realizes",
+            "confidence": 0.75,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 4,
+        "total_tokens": 783,
+        "total_cost_usd": 0.00025,
+        "avg_confidence": 0.83125,
+        "min_confidence": 0.83125,
+        "max_confidence": 0.83125
+      }
+    },
+    "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d": {
+      "document": {
+        "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d",
+        "title": null,
+        "url": null,
+        "source_sensor": "notion-sensor-1759463727.344542",
+        "quality_tier": "medium",
+        "avg_confidence": 0.8357142857142856
+      },
+      "extraction": {
+        "document_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d",
+        "extraction_count": 1,
+        "entities": [
+          {
+            "name": "China",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0",
+            "extraction_id": 419,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:entity:organization:china"
+            }
+          },
+          {
+            "name": "France",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0",
+            "extraction_id": 419,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:entity:organization:france"
+            }
+          },
+          {
+            "name": "US",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0",
+            "extraction_id": 419,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:entity:organization:us"
+            }
+          },
+          {
+            "name": "Regen",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0",
+            "extraction_id": 419,
+            "metadata": {
+              "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:entity:organization:regen"
+            }
+          }
+        ],
+        "entity_count": 4,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:statement:claim:000",
+            "object": "sustainability credits into RWA and tokenize them under full regulatory compliance",
+            "subject": "Regen",
+            "predicate": "wants to turn",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:statement:claim:001",
+            "object": "China, France, and the US to standardize nuclear REC",
+            "subject": "Regen",
+            "predicate": "is negotiating with",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d#chunk0:statement:claim:002",
+            "object": "crucial integration of trustable scientific governance and transparent token-level traceability",
+            "subject": "Regen",
+            "predicate": "brings",
+            "confidence": 0.85,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 3,
+        "total_tokens": 775,
+        "total_cost_usd": 0.000229,
+        "avg_confidence": 0.8357142857142856,
+        "min_confidence": 0.8357142857142856,
+        "max_confidence": 0.8357142857142856
+      }
+    },
+    "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580": {
+      "document": {
+        "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580",
+        "title": null,
+        "url": null,
+        "source_sensor": "notion-sensor-1759463727.344542",
+        "quality_tier": "low",
+        "avg_confidence": 0.0
+      },
+      "extraction": {
+        "document_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580",
+        "extraction_count": 22,
+        "entities": [
+          {
+            "name": "Bluesky AT Protocol",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0",
+            "extraction_id": 1586,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:entity:organization:bluesky-at-protocol"
+            }
+          },
+          {
+            "name": "Hypercerts",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0",
+            "extraction_id": 1586,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:entity:project:hypercerts"
+            }
+          },
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1",
+            "extraction_id": 1585,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1",
+            "extraction_id": 1585,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:entity:organization:regen-registry"
+            }
+          },
+          {
+            "name": "Ethereum",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1",
+            "extraction_id": 1585,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:entity:organization:ethereum"
+            }
+          },
+          {
+            "name": "Cosmos",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1",
+            "extraction_id": 1585,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:entity:organization:cosmos"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1",
+            "extraction_id": 1585,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:entity:project:regen-ledger"
+            }
+          },
+          {
+            "name": "Hypercerts",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1",
+            "extraction_id": 1585,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:entity:project:hypercerts"
+            }
+          },
+          {
+            "name": "Regen Data",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk10",
+            "extraction_id": 1556,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk10:entity:project:regen-data"
+            }
+          },
+          {
+            "name": "Regen Data",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk13",
+            "extraction_id": 1553,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk13:entity:project:regen-data"
+            }
+          },
+          {
+            "name": "ATProto",
+            "type": "Organization",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk13",
+            "extraction_id": 1553,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk13:entity:organization:atproto"
+            }
+          },
+          {
+            "name": "Regen Data",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk14",
+            "extraction_id": 1552,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk14:entity:project:regen-data"
+            }
+          },
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk14",
+            "extraction_id": 1552,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk14:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk15",
+            "extraction_id": 1549,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk15:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "Regen Data",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk18",
+            "extraction_id": 1546,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk18:entity:project:regen-data"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Organization",
+            "confidence": 0.95,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2",
+            "extraction_id": 1582,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:entity:organization:regen-ledger"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2",
+            "extraction_id": 1582,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:entity:project:regen-registry"
+            }
+          },
+          {
+            "name": "Hypercert",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2",
+            "extraction_id": 1582,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:entity:project:hypercert"
+            }
+          },
+          {
+            "name": "Bluesky PDS",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2",
+            "extraction_id": 1582,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:entity:project:bluesky-pds"
+            }
+          },
+          {
+            "name": "Regen Network",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20",
+            "extraction_id": 1542,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20:entity:organization:regen-network"
+            }
+          },
+          {
+            "name": "PDS",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20",
+            "extraction_id": 1542,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20:entity:project:pds"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3",
+            "extraction_id": 1579,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:entity:organization:regen-registry"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Organization",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3",
+            "extraction_id": 1579,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:entity:organization:regen-ledger"
+            }
+          },
+          {
+            "name": "Hypercerts",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3",
+            "extraction_id": 1579,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:entity:project:hypercerts"
+            }
+          },
+          {
+            "name": "Bluesky PDS",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3",
+            "extraction_id": 1579,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:entity:project:bluesky-pds"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4",
+            "extraction_id": 1578,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4:entity:organization:regen-ledger"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4",
+            "extraction_id": 1578,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4:entity:project:regen-registry"
+            }
+          },
+          {
+            "name": "ATProto",
+            "type": "Project",
+            "confidence": 0.75,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4",
+            "extraction_id": 1578,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4:entity:project:atproto"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5",
+            "extraction_id": 1577,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:entity:project:regen-registry"
+            }
+          },
+          {
+            "name": "PDS Bridge",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5",
+            "extraction_id": 1577,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:entity:project:pds-bridge"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5",
+            "extraction_id": 1577,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:entity:project:regen-ledger"
+            }
+          },
+          {
+            "name": "ATProto",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6",
+            "extraction_id": 1576,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:entity:project:atproto"
+            }
+          },
+          {
+            "name": "RND",
+            "type": "Organization",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6",
+            "extraction_id": 1576,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:entity:organization:rnd"
+            }
+          },
+          {
+            "name": "Hypercerts",
+            "type": "Project",
+            "confidence": 0.75,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6",
+            "extraction_id": 1576,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:entity:project:hypercerts"
+            }
+          },
+          {
+            "name": "PDS",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7",
+            "extraction_id": 1572,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:entity:project:pds"
+            }
+          },
+          {
+            "name": "RND",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7",
+            "extraction_id": 1572,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:entity:organization:rnd"
+            }
+          },
+          {
+            "name": "ATProto",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7",
+            "extraction_id": 1572,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:entity:project:atproto"
+            }
+          },
+          {
+            "name": "app.regen.claim",
+            "type": "Project",
+            "confidence": 0.75,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7",
+            "extraction_id": 1572,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:entity:project:appregenclaim"
+            }
+          },
+          {
+            "name": "app.regen.evidence",
+            "type": "Project",
+            "confidence": 0.75,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7",
+            "extraction_id": 1572,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:entity:project:appregenevidence"
+            }
+          },
+          {
+            "name": "app.regen.method",
+            "type": "Project",
+            "confidence": 0.75,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7",
+            "extraction_id": 1572,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:entity:project:appregenmethod"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Organization",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8",
+            "extraction_id": 1571,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:entity:organization:regen-ledger"
+            }
+          },
+          {
+            "name": "Ma Earth",
+            "type": "Organization",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8",
+            "extraction_id": 1571,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:entity:organization:ma-earth"
+            }
+          },
+          {
+            "name": "RND",
+            "type": "Organization",
+            "confidence": 0.75,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8",
+            "extraction_id": 1571,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:entity:organization:rnd"
+            }
+          },
+          {
+            "name": "ATProto",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8",
+            "extraction_id": 1571,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:entity:project:atproto"
+            }
+          },
+          {
+            "name": "Regen Registry",
+            "type": "Project",
+            "confidence": 0.9,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9",
+            "extraction_id": 1557,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:entity:project:regen-registry"
+            }
+          },
+          {
+            "name": "Hypercerts",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9",
+            "extraction_id": 1557,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:entity:project:hypercerts"
+            }
+          },
+          {
+            "name": "Bluesky PDS",
+            "type": "Project",
+            "confidence": 0.85,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9",
+            "extraction_id": 1557,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:entity:project:bluesky-pds"
+            }
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "Project",
+            "confidence": 0.8,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9",
+            "extraction_id": 1557,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:entity:project:regen-ledger"
+            }
+          },
+          {
+            "name": "PDS Bridge",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9",
+            "extraction_id": 1557,
+            "metadata": {
+              "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:entity:project:pds-bridge"
+            }
+          }
+        ],
+        "entity_count": 49,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:statement:claim:000",
+            "object": "impact claims",
+            "subject": "Hypercerts",
+            "predicate": "define and track",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:statement:claim:001",
+            "object": "user-centric data host",
+            "subject": "Bluesky AT Protocol",
+            "predicate": "serves as",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:statement:claim:002",
+            "object": "modularity and interoperability",
+            "subject": "Hypercerts",
+            "predicate": "emphasizes",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:statement:claim:003",
+            "object": "individuals and organizations to store, update, and manage hypercert claims off-chain",
+            "subject": "PDS",
+            "predicate": "allows",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk0:statement:claim:004",
+            "object": "integrity and timestamping",
+            "subject": "blockchains",
+            "predicate": "ensure",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:statement:claim:000",
+            "object": "a pointer system for on-chain records",
+            "subject": "Hypercerts",
+            "predicate": "uses",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:statement:claim:001",
+            "object": "blockchain transactions",
+            "subject": "PDS",
+            "predicate": "syncs with",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:statement:claim:002",
+            "object": "an off-chain database for project documentation",
+            "subject": "Regen Registry",
+            "predicate": "uses",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:statement:claim:003",
+            "object": "claims in a PDS referencing Regen Registry\u2019s database entries",
+            "subject": "Hypercerts v0.2",
+            "predicate": "could overlay",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk1:statement:claim:004",
+            "object": "credits",
+            "subject": "Regen Registry",
+            "predicate": "registers",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk10:statement:claim:000",
+            "object": "custom Lexicons for PDS",
+            "subject": "Regen Data",
+            "predicate": "utilizes",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk10:statement:claim:001",
+            "object": "publish/redaction rules",
+            "subject": "Registry",
+            "predicate": "enforces",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk10:statement:claim:002",
+            "object": "registry_object and evidence_item entities",
+            "subject": "Relational Data Model",
+            "predicate": "includes",
+            "confidence": 0.7,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk13:statement:claim:000",
+            "object": "IRI rules consistent with Regen Data module",
+            "subject": "Regen Data",
+            "predicate": "provides",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk13:statement:claim:001",
+            "object": "tooling for finalizing namespaces",
+            "subject": "ATProto",
+            "predicate": "develops",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk14:statement:claim:000",
+            "object": "evidence items and bundles",
+            "subject": "Regen Data",
+            "predicate": "is associated with",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk14:statement:claim:001",
+            "object": "evidence bundle and method types",
+            "subject": "Regen Network",
+            "predicate": "develops",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk18:statement:claim:000",
+            "object": "anchoring for records missing anchors",
+            "subject": "Regen Data",
+            "predicate": "provides",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk18:statement:claim:001",
+            "object": "DB triggers",
+            "subject": "CDC (Change Data Capture)",
+            "predicate": "is implemented via",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk18:statement:claim:002",
+            "object": "object types to Lexicon collections",
+            "subject": "PDS Bridge Service",
+            "predicate": "maps",
+            "confidence": 0.7,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:000",
+            "object": "credits",
+            "subject": "Regen Registry",
+            "predicate": "registers",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:001",
+            "object": "Regen\u2019s off-chain DB",
+            "subject": "Verification documents",
+            "predicate": "live in",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:002",
+            "object": "Bluesky PDS",
+            "subject": "Hypercert v0.2 claim",
+            "predicate": "is created in",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:003",
+            "object": "verification documents",
+            "subject": "Hypercert v0.2 claim",
+            "predicate": "references",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:004",
+            "object": "the hash of that claim",
+            "subject": "Regen Ledger",
+            "predicate": "anchors",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:005",
+            "object": "reputationally tracked or bundled into broader impact portfolios",
+            "subject": "Hypercert",
+            "predicate": "can be traded",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:006",
+            "object": "a polyglot architecture",
+            "subject": "Hypercerts v0.2",
+            "predicate": "shifts toward",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:007",
+            "object": "a sovereign, user-controlled data layer",
+            "subject": "Bluesky PDS",
+            "predicate": "provides",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk2:statement:claim:008",
+            "object": "standardizing references (IRIs/CIDs)",
+            "subject": "The integration path",
+            "predicate": "lies in",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20:statement:claim:000",
+            "object": "multi-tenant PDS",
+            "subject": "Regen Network",
+            "predicate": "operates",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20:statement:question:001",
+            "object": "verifier JWS on app.regen.claim",
+            "subject": "PDS",
+            "predicate": "requires",
+            "confidence": 0.75,
+            "statementType": "question"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk20:statement:claim:002",
+            "object": "tiling/streaming for large geometries",
+            "subject": "PDS",
+            "predicate": "may need",
+            "confidence": 0.7,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk21:statement:claim:000",
+            "object": "finalizing canonicalization spec and Lexicon drafts",
+            "subject": "Next Steps",
+            "predicate": "includes",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk21:statement:claim:001",
+            "object": "standing up a sandbox PDS and dry-running publish for 2\u20133 real Registry objects",
+            "subject": "Next Steps",
+            "predicate": "includes",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk21:statement:claim:002",
+            "object": "implementing CDC + Bridge MVP and validating end-to-end links",
+            "subject": "Next Steps",
+            "predicate": "includes",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:statement:question:000",
+            "object": "its DB",
+            "subject": "Regen Registry",
+            "predicate": "must change",
+            "confidence": 0.75,
+            "statementType": "question"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:statement:claim:001",
+            "object": "additional capabilities",
+            "subject": "Hypercerts v0.2 + Bluesky PDS",
+            "predicate": "requires",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:statement:claim:002",
+            "object": "the same payload",
+            "subject": "Regen Ledger\u2019s Data module",
+            "predicate": "anchors",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk3:statement:claim:003",
+            "object": "deterministic JSON",
+            "subject": "evidence bundles",
+            "predicate": "should be created as",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4:statement:claim:000",
+            "object": "PDS",
+            "subject": "Regen Registry",
+            "predicate": "could be containerized as",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk4:statement:claim:001",
+            "object": "PDS Bridge service",
+            "subject": "Regen Registry",
+            "predicate": "is recommended to use",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:statement:claim:000",
+            "object": "a small containerized service",
+            "subject": "PDS Bridge",
+            "predicate": "is recommended as",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:statement:claim:001",
+            "object": "Registry DB or its event stream",
+            "subject": "PDS Bridge",
+            "predicate": "reads from",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:statement:claim:002",
+            "object": "ATProto records into a multi-tenant PDS",
+            "subject": "PDS Bridge",
+            "predicate": "publishes",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk5:statement:claim:003",
+            "object": "ATProto/PDS changes",
+            "subject": "Registry",
+            "predicate": "is coupled to",
+            "confidence": 0.7,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:statement:claim:000",
+            "object": "ATProto/PDS changes",
+            "subject": "Registry",
+            "predicate": "is coupled to",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:statement:question:001",
+            "object": "to be a PDS",
+            "subject": "Registry",
+            "predicate": "is desirable",
+            "confidence": 0.7,
+            "statementType": "question"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:statement:claim:002",
+            "object": "credibly anchoring evidence and composability with Hypercerts",
+            "subject": "RND",
+            "predicate": "aims for",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk6:statement:claim:003",
+            "object": "90% of the benefit with ~10\u201320% of the effort of a full PDS rewrite",
+            "subject": "PDS Bridge",
+            "predicate": "provides",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:000",
+            "object": "to ensure practical migration path with minimal disruption",
+            "subject": "PDS",
+            "predicate": "is being rewritten",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:001",
+            "object": "columns: content_cid, iri, schema_version, policy_label, did_owner, did_verifier",
+            "subject": "PDS",
+            "predicate": "requires",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:002",
+            "object": "a library to serialize evidence \u2192 CID + IRI generation",
+            "subject": "PDS",
+            "predicate": "needs to implement",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:003",
+            "object": "every new/updated artifact is anchored via Data module",
+            "subject": "PDS",
+            "predicate": "should ensure",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:004",
+            "object": "PDS Bridge",
+            "subject": "PDS",
+            "predicate": "will stand up",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:005",
+            "object": "DB change events",
+            "subject": "PDS Bridge",
+            "predicate": "will ingest",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:006",
+            "object": "Registry entities to ATProto record types",
+            "subject": "PDS Bridge",
+            "predicate": "maps",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:007",
+            "object": "records to a RND-operated multi-tenant PDS",
+            "subject": "PDS",
+            "predicate": "will publish",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:008",
+            "object": "public summary + gated details patterns in the bridge",
+            "subject": "PDS",
+            "predicate": "will implement",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:009",
+            "object": "backfilling legacy records and anchoring where missing",
+            "subject": "PDS",
+            "predicate": "requires",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk7:statement:claim:010",
+            "object": "round-trip checks",
+            "subject": "PDS",
+            "predicate": "needs QA & cross-verify",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:statement:claim:000",
+            "object": "PDS record",
+            "subject": "Regen Ledger",
+            "predicate": "anchors",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:statement:claim:001",
+            "object": "ensure sensitive data is not published",
+            "subject": "PDS",
+            "predicate": "is designed to",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:statement:question:002",
+            "object": "shared PDS",
+            "subject": "RND",
+            "predicate": "hosts",
+            "confidence": 0.7,
+            "statementType": "question"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:statement:claim:003",
+            "object": "a PDS later",
+            "subject": "Registry",
+            "predicate": "becomes",
+            "confidence": 0.75,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk8:statement:claim:004",
+            "object": "clean schemas for claims/evidence",
+            "subject": "ATProto",
+            "predicate": "requires",
+            "confidence": 0.9,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:statement:claim:000",
+            "object": "interoperate Regen Registry with Hypercerts and Bluesky PDS",
+            "subject": "PDS Bridge",
+            "predicate": "is designed to",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:statement:claim:001",
+            "object": "a relational data model sketch, ATProto record stubs, and a pragmatic DB migration checklist",
+            "subject": "PDS Bridge",
+            "predicate": "includes",
+            "confidence": 0.8,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:statement:claim:002",
+            "object": "Registry objects into deterministic JSON",
+            "subject": "PDS Bridge",
+            "predicate": "canonicalizes",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580#chunk9:statement:claim:003",
+            "object": "publish policy",
+            "subject": "PDS Bridge",
+            "predicate": "enforces",
+            "confidence": 0.75,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 69,
+        "total_tokens": 17640,
+        "total_cost_usd": 0.004753,
+        "avg_confidence": 0.8206932773109243,
+        "min_confidence": 0.775,
+        "max_confidence": 0.875
+      }
+    },
+    "orn:web.page:forum.regen.network/605c00ac4fbed6ea": {
+      "document": {
+        "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea",
+        "title": null,
+        "url": null,
+        "source_sensor": "website-sensor-1759273298.773726",
+        "quality_tier": "low",
+        "avg_confidence": 0.0
+      },
+      "extraction": {
+        "document_rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea",
+        "extraction_count": 2,
+        "entities": [
+          {
+            "name": "Community Call",
+            "type": "Project",
+            "confidence": 0.95,
+            "chunk_rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0",
+            "extraction_id": 6380,
+            "metadata": {
+              "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:entity:project:community-call"
+            }
+          }
+        ],
+        "entity_count": 1,
+        "relations": [],
+        "relation_count": 0,
+        "statements": [
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:000",
+            "object": "July 3 2025",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:001",
+            "object": "January 30 2025",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:002",
+            "object": "February 20 2025",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:003",
+            "object": "April 17 2025",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:004",
+            "object": "June 5 2025",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:005",
+            "object": "December 12 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:006",
+            "object": "November 14 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:007",
+            "object": "September 19 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:008",
+            "object": "June 20 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:009",
+            "object": "May 23 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:010",
+            "object": "April 25 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:011",
+            "object": "February 22 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          },
+          {
+            "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea#chunk0:statement:claim:012",
+            "object": "January 25 2024",
+            "subject": "Community Call",
+            "predicate": "occurs on",
+            "confidence": 0.85,
+            "statementType": "claim"
+          }
+        ],
+        "statement_count": 13,
+        "total_tokens": 1140,
+        "total_cost_usd": 0.00018199999999999998,
+        "avg_confidence": null,
+        "min_confidence": null,
+        "max_confidence": null
+      }
+    }
+  }
+}

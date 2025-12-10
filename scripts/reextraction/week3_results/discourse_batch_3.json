@@ -1,0 +1,127 @@
+{
+  "batch_number": 3,
+  "total_in_batch": 11,
+  "documents": [
+    {
+      "document_rid": "regen.forum-post:regencommons.discourse.group_5_post_1",
+      "source_sensor": "discourse-sensor-1759263473.505621",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.9,
+      "extraction_count": 1,
+      "entity_count": 2,
+      "created_at": "2025-09-30T20:22:41.602865+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "regen.forum-post:regencommons.discourse.group_72_post_1",
+      "source_sensor": "discourse-sensor-1759263473.505621",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.83125,
+      "extraction_count": 4,
+      "entity_count": 11,
+      "created_at": "2025-09-30T20:22:52.654876+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-post:regencommons.discourse.group_79_post_1",
+      "source_sensor": "discourse-sensor-1759263473.505621",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8276913265306123,
+      "extraction_count": 14,
+      "entity_count": 46,
+      "created_at": "2025-09-30T20:22:47.520504+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-post:regencommons.discourse.group_79_post_2",
+      "source_sensor": "discourse-sensor-1759263473.505621",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.825,
+      "extraction_count": 1,
+      "entity_count": 2,
+      "created_at": "2025-09-30T20:22:48.536460+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-post:regencommons.discourse.group_81_post_1",
+      "source_sensor": "discourse-sensor-1759263473.505621",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.826,
+      "extraction_count": 5,
+      "entity_count": 14,
+      "created_at": "2025-09-30T20:22:43.694272+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-topic:forum.regen.network_topic_113",
+      "source_sensor": "discourse-sensor-1759007418.634527",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.825,
+      "extraction_count": 1,
+      "entity_count": 2,
+      "created_at": "2025-09-28T00:16:46.133135+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-topic:forum.regen.network_topic_144",
+      "source_sensor": "discourse-sensor-1759007418.634527",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8571428571428571,
+      "extraction_count": 1,
+      "entity_count": 5,
+      "created_at": "2025-09-28T01:17:45.021377+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "regen.forum-topic:forum.regen.network_topic_162",
+      "source_sensor": "discourse-sensor-1759007418.634527",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.85,
+      "extraction_count": 1,
+      "entity_count": 2,
+      "created_at": "2025-09-28T01:17:45.572143+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-topic:forum.regen.network_topic_424",
+      "source_sensor": "discourse-sensor-1759007418.634527",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.8999999999999999,
+      "extraction_count": 1,
+      "entity_count": 1,
+      "created_at": "2025-09-27T22:12:07.839401+00:00",
+      "quality_tier": "high"
+    },
+    {
+      "document_rid": "regen.forum-topic:forum.regen.network_topic_463",
+      "source_sensor": "discourse-sensor-1759007418.634527",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.775,
+      "extraction_count": 1,
+      "entity_count": 2,
+      "created_at": "2025-09-27T21:14:10.152296+00:00",
+      "quality_tier": "medium"
+    },
+    {
+      "document_rid": "regen.forum-topic:forum.regen.network_topic_92",
+      "source_sensor": "discourse-sensor-1759007418.634527",
+      "title": null,
+      "url": null,
+      "avg_confidence": 0.9,
+      "extraction_count": 1,
+      "entity_count": 2,
+      "created_at": "2025-09-28T00:15:08.180088+00:00",
+      "quality_tier": "high"
+    }
+  ]
+}

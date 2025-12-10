@@ -12,9 +12,9 @@ Components:
 Available Modules:
 - ConfidenceFilterModule: Filters by confidence scores
 - CanonicalResolverModule: Resolves entity aliases
-- EntityQualityFilterModule: Pattern-based quality filtering
-- ListSplitterModule: Splits list-like entities
-- OntologyNormalizerModule: Normalizes entity types and predicates
+ - EntityQualityFilterModule: Pattern-based quality filtering
+ - ListSplitterModule: Splits list-like entities
+ - OntologyNormalizerModule: Normalizes entity types and predicates
 
 Usage:
     from src.knowledge_graph.postprocessing import (

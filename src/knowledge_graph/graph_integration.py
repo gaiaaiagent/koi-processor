@@ -39,6 +39,18 @@ except ImportError:
         print("Warning: Quality control modules not found. Quality filtering disabled.")
         HAS_QUALITY_CONTROLS = False
 
+# Import entity resolver for deduplication
+try:
+    from knowledge_graph.entity_resolver import EntityResolver
+    HAS_ENTITY_RESOLVER = True
+except ImportError:
+    try:
+        from src.knowledge_graph.entity_resolver import EntityResolver
+        HAS_ENTITY_RESOLVER = True
+    except ImportError:
+        print("Warning: EntityResolver not found. Deduplication disabled.")
+        HAS_ENTITY_RESOLVER = False
+
 # Import pipeline framework (new)
 try:
     from knowledge_graph.postprocessing import (
@@ -86,12 +98,20 @@ class KnowledgeGraphIntegrator:
     1. Pipeline mode (default): Uses modular post-processing pipeline
     2. Legacy mode: Uses individual filter classes directly
 
+    Additionally supports entity deduplication via EntityResolver (pgvector-based):
+    - Tier 1: Exact match (B-Tree, microseconds)
+    - Tier 2: Semantic match (HNSW vector, milliseconds)
+    - Tier 3: Create new (deterministic URI)
+
     Args:
         store_type: RDF store type ("memory", "postgresql", or "sparql")
         store_config: Configuration for the store
         enable_quality_controls: Enable entity quality filtering
         use_pipeline: Use pipeline framework (True) or legacy filters (False)
         pipeline_config_path: Path to pipeline configuration JSON
+        enable_deduplication: Enable pgvector-based entity deduplication
+        dedup_db_config: Database config for entity_registry (defaults to env vars)
+        dedup_threshold: Similarity threshold for semantic matching (default: 0.95)
     """
 
     def __init__(
@@ -100,13 +120,17 @@ class KnowledgeGraphIntegrator:
         store_config: Dict[str, Any] = None,
         enable_quality_controls: bool = True,
         use_pipeline: bool = True,
-        pipeline_config_path: Optional[str] = None
+        pipeline_config_path: Optional[str] = None,
+        enable_deduplication: bool = True,
+        dedup_db_config: Dict[str, Any] = None,
+        dedup_threshold: float = 0.95
     ):
         self.logger = logging.getLogger(__name__)
         self.store_type = store_type
         self.store_config = store_config or {}
         self.enable_quality_controls = enable_quality_controls
         self.use_pipeline = use_pipeline and HAS_PIPELINE
+        self.enable_deduplication = enable_deduplication and HAS_ENTITY_RESOLVER
 
         if not HAS_RDFLIB:
             raise ImportError("rdflib is required for knowledge graph integration")
@@ -138,13 +162,17 @@ class KnowledgeGraphIntegrator:
         self.entity_filter = None
         self.canonical_resolver = None
         self.confidence_filter = None
+        self.entity_resolver = None
         self.quality_stats = {
             'total_extracted': 0,
             'blocked_by_filter': 0,
             'blocked_by_confidence': 0,
             'resolved_to_canonical': 0,
             'inserted_to_graph': 0,
-            'pipeline_processed': 0
+            'pipeline_processed': 0,
+            'dedup_exact_hits': 0,
+            'dedup_semantic_hits': 0,
+            'dedup_new_entities': 0
         }
 
         if self.enable_quality_controls:
@@ -152,6 +180,10 @@ class KnowledgeGraphIntegrator:
                 self._initialize_pipeline(pipeline_config_path)
             else:
                 self._initialize_legacy_controls()
+
+        # Initialize entity deduplication
+        if self.enable_deduplication:
+            self._initialize_entity_resolver(dedup_db_config, dedup_threshold)
 
     def _initialize_pipeline(self, config_path: Optional[str] = None):
         """Initialize the post-processing pipeline."""
@@ -211,6 +243,47 @@ class KnowledgeGraphIntegrator:
         except Exception as e:
             self.logger.warning(f"Failed to initialize legacy quality controls: {e}")
             self.enable_quality_controls = False
+
+    def _initialize_entity_resolver(
+        self,
+        db_config: Dict[str, Any] = None,
+        threshold: float = 0.95
+    ):
+        """
+        Initialize entity resolver for pgvector-based deduplication.
+
+        Args:
+            db_config: Database connection config (defaults to env vars)
+            threshold: Similarity threshold for semantic matching
+        """
+        if not HAS_ENTITY_RESOLVER:
+            self.logger.warning("EntityResolver not available. Deduplication disabled.")
+            self.enable_deduplication = False
+            return
+
+        try:
+            # Build database config from env vars if not provided
+            if db_config is None:
+                db_config = {
+                    "host": os.getenv("POSTGRES_HOST", "localhost"),
+                    "port": int(os.getenv("POSTGRES_PORT", 5433)),
+                    "database": os.getenv("POSTGRES_DB", "eliza"),
+                    "user": os.getenv("POSTGRES_USER", "postgres"),
+                    "password": os.getenv("POSTGRES_PASSWORD", "postgres")
+                }
+
+            self.entity_resolver = EntityResolver(
+                db_config=db_config,
+                fuzzy_threshold=threshold
+            )
+            self.logger.info(
+                f"EntityResolver initialized (threshold: {threshold}, "
+                f"db: {db_config.get('host')}:{db_config.get('port')}/{db_config.get('database')})"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize EntityResolver: {e}")
+            self.enable_deduplication = False
+            self.entity_resolver = None
 
     def _initialize_graph(self) -> Graph:
         """Initialize RDF graph with appropriate store"""
@@ -634,16 +707,75 @@ class KnowledgeGraphIntegrator:
             self.logger.warning(f"Failed to add relationship: {e}")
             return None
 
-    def _get_or_create_entity_by_name(self, name: str) -> Optional[URIRef]:
-        """Get or create entity by name, applying quality controls"""
+    def _get_or_create_entity_by_name(self, name: str, entity_type: str = "ENTITY") -> Optional[URIRef]:
+        """
+        Get or create entity by name, applying quality controls and deduplication.
 
+        Uses three-tier waterfall if deduplication is enabled:
+        1. Tier 1: Exact match (B-Tree, microseconds)
+        2. Tier 2: Semantic match (pgvector HNSW, milliseconds)
+        3. Tier 3: Create new (deterministic URI)
+
+        Args:
+            name: Entity name
+            entity_type: Entity type (defaults to "ENTITY")
+
+        Returns:
+            URIRef for the entity, or None if blocked by quality controls
+        """
         # Apply quality controls to get processed name
-        result = self.process_entity(name, "regen:Entity")
+        result = self.process_entity(name, entity_type)
         if result is None:
             return None  # Entity was blocked
 
-        processed_name, _ = result
+        processed_name, processed_type = result
 
+        # Use EntityResolver for deduplication if available
+        if self.enable_deduplication and self.entity_resolver:
+            try:
+                dedup_result = self.entity_resolver.get_or_create_entity(
+                    processed_name,
+                    processed_type
+                )
+
+                # Track deduplication stats
+                if dedup_result["match_method"] == "tier1_exact":
+                    self.quality_stats['dedup_exact_hits'] += 1
+                elif dedup_result["match_method"] == "tier2_semantic":
+                    self.quality_stats['dedup_semantic_hits'] += 1
+                elif dedup_result["match_method"] == "tier3_new":
+                    self.quality_stats['dedup_new_entities'] += 1
+
+                # Log deduplication info
+                if dedup_result["matched"]:
+                    self.logger.debug(
+                        f"Dedup: '{name}' -> '{dedup_result['entity_text']}' "
+                        f"via {dedup_result['match_method']} "
+                        f"(score: {dedup_result['match_score']:.3f})"
+                    )
+
+                # Use the URI from entity_resolver
+                entity_uri = URIRef(dedup_result["uri"])
+
+                # Sync to local graph (self-healing)
+                if (entity_uri, None, None) not in self.graph:
+                    self._sync_entity_to_graph(
+                        entity_uri,
+                        dedup_result["entity_text"],
+                        processed_type
+                    )
+
+                # Cache for future in-memory lookups
+                cache_key = f"entity:{processed_name}"
+                self.entity_cache[cache_key] = entity_uri
+
+                return entity_uri
+
+            except Exception as e:
+                self.logger.warning(f"EntityResolver failed, falling back: {e}")
+                # Fall through to legacy method
+
+        # Legacy method (no deduplication)
         cache_key = f"entity:{processed_name}"
         if cache_key in self.entity_cache:
             return self.entity_cache[cache_key]
@@ -659,6 +791,27 @@ class KnowledgeGraphIntegrator:
 
         self.entity_cache[cache_key] = entity_uri
         return entity_uri
+
+    def _sync_entity_to_graph(self, uri: URIRef, name: str, entity_type: str):
+        """
+        Sync entity to local RDF graph.
+
+        This is a self-healing mechanism - if entity exists in registry
+        but not in local graph, add it.
+
+        Args:
+            uri: Entity URI
+            name: Entity name
+            entity_type: Entity type
+        """
+        # Add type assertion
+        type_uri = self._parse_type_uri(f"regen:{entity_type}")
+        self.graph.add((uri, RDF.type, type_uri))
+
+        # Add name
+        self.graph.add((uri, self.SCHEMA.name, Literal(name)))
+
+        self.quality_stats['inserted_to_graph'] += 1
 
     def _process_discourse_elements(self, doc_uri: URIRef, metadata: Dict[str, Any]):
         """Process claims, evidence, and questions"""
@@ -788,6 +941,20 @@ class KnowledgeGraphIntegrator:
         if self.confidence_filter:
             stats['confidence_breakdown'] = self.confidence_filter.get_stats()
 
+        # Include deduplication stats
+        stats['deduplication_enabled'] = self.enable_deduplication
+        if self.enable_deduplication and self.entity_resolver:
+            dedup_total = (
+                stats.get('dedup_exact_hits', 0) +
+                stats.get('dedup_semantic_hits', 0) +
+                stats.get('dedup_new_entities', 0)
+            )
+            if dedup_total > 0:
+                stats['dedup_exact_rate'] = round(stats.get('dedup_exact_hits', 0) / dedup_total * 100, 2)
+                stats['dedup_semantic_rate'] = round(stats.get('dedup_semantic_hits', 0) / dedup_total * 100, 2)
+                stats['dedup_new_rate'] = round(stats.get('dedup_new_entities', 0) / dedup_total * 100, 2)
+            stats['entity_resolver_stats'] = self.entity_resolver.get_stats()
+
         return stats
 
     def reset_quality_stats(self):
@@ -798,7 +965,10 @@ class KnowledgeGraphIntegrator:
             'blocked_by_confidence': 0,
             'resolved_to_canonical': 0,
             'inserted_to_graph': 0,
-            'pipeline_processed': 0
+            'pipeline_processed': 0,
+            'dedup_exact_hits': 0,
+            'dedup_semantic_hits': 0,
+            'dedup_new_entities': 0
         }
         if self.pipeline:
             self.pipeline.reset()
@@ -808,6 +978,8 @@ class KnowledgeGraphIntegrator:
             self.canonical_resolver.reset_stats()
         if self.confidence_filter:
             self.confidence_filter.reset_stats()
+        if self.entity_resolver:
+            self.entity_resolver.reset_stats()
 
 
 # Example usage

@@ -1,0 +1,253 @@
+{
+  "overview": {
+    "document_count": 99,
+    "total_baseline_entities": 2350,
+    "total_passed_entities": 2309,
+    "total_blocked_entities": 60,
+    "overall_pass_rate": 98.25531914893617,
+    "overall_block_rate": 2.553191489361702,
+    "quality_improvement": 97.44680851063829
+  },
+  "block_analysis": {
+    "by_reason": {
+      "technical_pattern": 28,
+      "lowercase_person": 16,
+      "generic_pattern": 6,
+      "confidence_too_low": 6,
+      "stop_word, lowercase_person": 2,
+      "too_long": 1,
+      "sentence_like, too_long": 1
+    },
+    "by_module": {
+      "EntityQualityFilter": 54,
+      "ConfidenceFilter": 6
+    },
+    "by_pattern": {
+      "technical_pattern": 28,
+      "lowercase_person": 18,
+      "generic_pattern": 6,
+      "confidence_too_low": 6,
+      "stop_word": 2,
+      "too_long": 2,
+      "sentence_like": 1
+    }
+  },
+  "transformations": {
+    "canonical_resolutions": 500,
+    "list_splits": 44,
+    "type_normalizations": 2309,
+    "sample_resolutions": [
+      {
+        "original": "Regen Network",
+        "resolved": "Regen Network",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "Commonwealth",
+        "resolved": "Commonwealth",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "$REGEN",
+        "resolved": "$Regen",
+        "type": "PROJECT"
+      },
+      {
+        "original": "$REGEN",
+        "resolved": "$Regen",
+        "type": "PROJECT"
+      },
+      {
+        "original": "Regen Network",
+        "resolved": "Regen Network",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "REGEN token",
+        "resolved": "Regen Token",
+        "type": "PROJECT"
+      },
+      {
+        "original": "Regen Ledger",
+        "resolved": "Regen Ledger",
+        "type": "PROJECT"
+      },
+      {
+        "original": "ecocredit",
+        "resolved": "Ecocredit Module",
+        "type": "PROJECT"
+      },
+      {
+        "original": "Regen Network",
+        "resolved": "Regen Network",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "$REGEN",
+        "resolved": "$Regen",
+        "type": "PROJECT"
+      }
+    ],
+    "sample_splits": [
+      {
+        "original": "Ministry of Environment and Sustainable Development of Colombia",
+        "result": "Ministry of Environment",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "Ministry of Environment and Sustainable Development of Colombia",
+        "result": "Sustainable Development of Colombia",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "Center for Biodiversity and Conservation",
+        "result": "Center for Biodiversity",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "Center for Biodiversity and Conservation",
+        "result": "Conservation",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "Indigenous peoples and land based communities",
+        "result": "Indigenous peoples",
+        "type": "PROJECT"
+      },
+      {
+        "original": "Indigenous peoples and land based communities",
+        "result": "land based communities",
+        "type": "PROJECT"
+      },
+      {
+        "original": "Indigenous Peoples and Local Communities",
+        "result": "Indigenous Peoples",
+        "type": "PROJECT"
+      },
+      {
+        "original": "Indigenous Peoples and Local Communities",
+        "result": "Local Communities",
+        "type": "PROJECT"
+      },
+      {
+        "original": "indigenous and local communities",
+        "result": "indigenous",
+        "type": "ORGANIZATION"
+      },
+      {
+        "original": "Indigenous Peoples and Local Communities",
+        "result": "Indigenous Peoples",
+        "type": "PROJECT"
+      }
+    ],
+    "sample_normalizations": [
+      {
+        "name": "Regen Network",
+        "original_type": "Organization",
+        "normalized_type": "ORGANIZATION"
+      },
+      {
+        "name": "Commonwealth",
+        "original_type": "Organization",
+        "normalized_type": "ORGANIZATION"
+      },
+      {
+        "name": "Mark",
+        "original_type": "Person",
+        "normalized_type": "PERSON"
+      },
+      {
+        "name": "Special Purpose Vehicle",
+        "original_type": "Project",
+        "normalized_type": "PROJECT"
+      },
+      {
+        "name": "Liquidity DAO",
+        "original_type": "Project",
+        "normalized_type": "PROJECT"
+      },
+      {
+        "name": "$Regen",
+        "original_type": "Project",
+        "normalized_type": "PROJECT"
+      },
+      {
+        "name": "SPV",
+        "original_type": "Organization",
+        "normalized_type": "ORGANIZATION"
+      },
+      {
+        "name": "Regen Commons",
+        "original_type": "Organization",
+        "normalized_type": "ORGANIZATION"
+      },
+      {
+        "name": "Max",
+        "original_type": "Person",
+        "normalized_type": "PERSON"
+      },
+      {
+        "name": "$Regen",
+        "original_type": "Project",
+        "normalized_type": "PROJECT"
+      }
+    ]
+  },
+  "type_analysis": {
+    "baseline_types": {
+      "Organization": 1082,
+      "Project": 835,
+      "Person": 433
+    },
+    "passed_types": {
+      "ORGANIZATION": 1075,
+      "PROJECT": 823,
+      "PERSON": 411
+    },
+    "blocked_types": {
+      "Person": 24,
+      "Project": 20,
+      "Organization": 16
+    }
+  },
+  "confidence_analysis": {
+    "baseline": {
+      "count": 2350,
+      "avg": 0.8664595744680821,
+      "min": 0.6,
+      "max": 0.95
+    },
+    "passed": {
+      "count": 2309,
+      "avg": 0.8672498917280179,
+      "min": 0.7,
+      "max": 0.95
+    },
+    "blocked": {
+      "count": 60,
+      "avg": 0.7908333333333333,
+      "min": 0.6,
+      "max": 0.95
+    }
+  },
+  "tier_analysis": {
+    "high": {
+      "baseline": 1148,
+      "passed": 1140,
+      "blocked": 16,
+      "docs": 49
+    },
+    "medium": {
+      "baseline": 1146,
+      "passed": 1116,
+      "blocked": 41,
+      "docs": 47
+    },
+    "low": {
+      "baseline": 56,
+      "passed": 53,
+      "blocked": 3,
+      "docs": 3
+    }
+  }
+}

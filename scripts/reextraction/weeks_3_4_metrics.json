@@ -1,0 +1,380 @@
+{
+  "generated_at": "2025-12-09T02:14:06.837693",
+  "totals": {
+    "documents": 400,
+    "baseline": 2467,
+    "passed": 2429,
+    "blocked": 49,
+    "pass_rate": 98.46,
+    "block_rate": 1.99
+  },
+  "by_source": {
+    "discourse": {
+      "docs": 400,
+      "baseline": 2467,
+      "passed": 2429,
+      "blocked": 49
+    }
+  },
+  "by_module": {
+    "EntityQualityFilter": 48,
+    "ConfidenceFilter": 1
+  },
+  "by_pattern": {
+    "technical_pattern": 18,
+    "lowercase_person": 19,
+    "stop_word": 7,
+    "generic_pattern": 4,
+    "confidence_too_low": 1
+  },
+  "by_confidence": {
+    "high": 1848,
+    "medium": 581,
+    "low": 0
+  },
+  "blocked_sample": [
+    {
+      "name": "redel.ecobridge.earth",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "earthboy",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "Every.org",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "currency_allow_list",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "x/marketplace",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "x/feegrant",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "noahdaodao",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "guides.regen.network",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "rebecca_regen",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "Validator",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word",
+      "source": "discourse"
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word, lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "economists",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "owocki",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "guides.regen.network",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "Regeneration.org",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "app.regen.network",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word, lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "human",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "our nonprofit",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "generic_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "farmers",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word, lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "our nonprofit",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "generic_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "the network",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "generic_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word, lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "IBC community members",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "generic_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "LunarPunkLabs.org",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "solarmonk",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "regentokenomics.org",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "regentokenomics.org",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "stride_zone",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "stride_zone",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "module": "EntityQualityFilter",
+      "reason": "lowercase_person",
+      "source": "discourse"
+    },
+    {
+      "name": "stride_zone",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "stride_zone",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    },
+    {
+      "name": "Community",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word",
+      "source": "discourse"
+    },
+    {
+      "name": "Speculators",
+      "type": "Person",
+      "module": "ConfidenceFilter",
+      "reason": "confidence_too_low",
+      "source": "discourse"
+    },
+    {
+      "name": "Validator",
+      "type": "Organization",
+      "module": "EntityQualityFilter",
+      "reason": "stop_word",
+      "source": "discourse"
+    },
+    {
+      "name": "regen.data.v2",
+      "type": "Project",
+      "module": "EntityQualityFilter",
+      "reason": "technical_pattern",
+      "source": "discourse"
+    }
+  ]
+}

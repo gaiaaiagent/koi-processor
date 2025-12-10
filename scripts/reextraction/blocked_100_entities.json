@@ -1,0 +1,485 @@
+{
+  "total_blocked": 60,
+  "entities": [
+    {
+      "name": "farmers",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "stop_word, lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:guides.regen.network/fd057a76699b3d31"
+    },
+    {
+      "name": "ballzach",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/fc457fcd428c5248"
+    },
+    {
+      "name": "app.regen.network",
+      "type": "Project",
+      "confidence": 0.9,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "regen.forum-post:forum.regen.network_100_post_1"
+    },
+    {
+      "name": "validators",
+      "type": "Person",
+      "confidence": 0.7,
+      "reason": "stop_word, lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/ddeed02c5688af6a"
+    },
+    {
+      "name": "regen.ecocredit.v1",
+      "type": "Project",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:docs.regen.network/7eab69da46c5391f"
+    },
+    {
+      "name": "regen.ecocredit.basket.v1",
+      "type": "Project",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:docs.regen.network/7eab69da46c5391f"
+    },
+    {
+      "name": "regen.ecocredit.marketplace.v1",
+      "type": "Project",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:docs.regen.network/7eab69da46c5391f"
+    },
+    {
+      "name": "regen.ecocredit.marketplace.v1",
+      "type": "Project",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:docs.regen.network/7eab69da46c5391f"
+    },
+    {
+      "name": "regen.ecocredit.v1",
+      "type": "Project",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:docs.regen.network/7eab69da46c5391f"
+    },
+    {
+      "name": "regen.ecocredit.basket.v1",
+      "type": "Project",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:docs.regen.network/7eab69da46c5391f"
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "confidence": 0.85,
+      "reason": "generic_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/199eb340000b7464"
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "confidence": 0.85,
+      "reason": "generic_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/199eb340000b7464"
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "confidence": 0.85,
+      "reason": "generic_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/199eb340000b7464"
+    },
+    {
+      "name": "elders",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/199eb340000b7464"
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "generic_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/199eb340000b7464"
+    },
+    {
+      "name": "Indigenous Peoples",
+      "type": "Person",
+      "confidence": 0.85,
+      "reason": "generic_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/199eb340000b7464"
+    },
+    {
+      "name": "Emerging Technologies for Indigenous Peoples and Land Steward Community",
+      "type": "Project",
+      "confidence": 0.75,
+      "reason": "too_long",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:registry.regen.network/5090860296d81698"
+    },
+    {
+      "name": "pmiclimate.org",
+      "type": "Organization",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "climateactiondata.org",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "pmiclimate.org",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "theclimatewarehouse.org",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "pmiclimate.org",
+      "type": "Organization",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "climateactiondata.org",
+      "type": "Organization",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "climateactiondata.org",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "pmiclimate.org",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8058-a804-c9d55f74d138"
+    },
+    {
+      "name": "lars",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:www.regen.foundation/923702f009059703"
+    },
+    {
+      "name": "Dynamic World",
+      "type": "Project",
+      "confidence": 0.65,
+      "reason": "confidence_too_low",
+      "blocked_by": "ConfidenceFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/90aee025915bfe1d"
+    },
+    {
+      "name": "NatureServe IVC",
+      "type": "Project",
+      "confidence": 0.6,
+      "reason": "confidence_too_low",
+      "blocked_by": "ConfidenceFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/90aee025915bfe1d"
+    },
+    {
+      "name": "WWF 200",
+      "type": "Project",
+      "confidence": 0.65,
+      "reason": "confidence_too_low",
+      "blocked_by": "ConfidenceFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/90aee025915bfe1d"
+    },
+    {
+      "name": "Ecoregions",
+      "type": "Project",
+      "confidence": 0.6,
+      "reason": "confidence_too_low",
+      "blocked_by": "ConfidenceFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/90aee025915bfe1d"
+    },
+    {
+      "name": "Bioregions 2023",
+      "type": "Project",
+      "confidence": 0.6,
+      "reason": "confidence_too_low",
+      "blocked_by": "ConfidenceFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/90aee025915bfe1d"
+    },
+    {
+      "name": "IPBES - Nature\u2019s Contributions to People",
+      "type": "Project",
+      "confidence": 0.8,
+      "reason": "generic_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/90aee025915bfe1d"
+    },
+    {
+      "name": "domingo",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/27725b77-eda1-8031-bb1d-eab993abb555"
+    },
+    {
+      "name": "Regenerative Soil Organic Carbon Methodology for Rangeland, Grassland, Agricultural, and Conservation Lands V2.0",
+      "type": "Project",
+      "confidence": 0.85,
+      "reason": "sentence_like, too_long",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:handbook.regen.network/ebe2dffba9d5fffe"
+    },
+    {
+      "name": "redel.ecobridge.earth",
+      "type": "Project",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "regen.forum-post:forum.regen.network_39_post_3"
+    },
+    {
+      "name": "biofin.org",
+      "type": "Organization",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "enterprise-development.org",
+      "type": "Organization",
+      "confidence": 0.85,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "smallholders",
+      "type": "Person",
+      "confidence": 0.75,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "profor.infoprofor.info",
+      "type": "Organization",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "sciencedirect.com",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "conservation.org",
+      "type": "Organization",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "conservation.org",
+      "type": "Organization",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "conservation.org",
+      "type": "Organization",
+      "confidence": 0.9,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/25325b77-eda1-8037-96b6-d85260f56c71"
+    },
+    {
+      "name": "chris",
+      "type": "Person",
+      "confidence": 0.7,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/ac6da1cef64238ef"
+    },
+    {
+      "name": "patogit",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/31a5e9dac708a192"
+    },
+    {
+      "name": "shanev",
+      "type": "Person",
+      "confidence": 0.9,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/31a5e9dac708a192"
+    },
+    {
+      "name": "em_ly",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/4cb2763ff5b4fd94"
+    },
+    {
+      "name": "Stakley.io",
+      "type": "Organization",
+      "confidence": 0.8,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/21f28375c5966642"
+    },
+    {
+      "name": "cyberG",
+      "type": "Person",
+      "confidence": 0.75,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/21f28375c5966642"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/cbd3f207e1332b37"
+    },
+    {
+      "name": "jaguars",
+      "type": "Project",
+      "confidence": 0.6,
+      "reason": "confidence_too_low",
+      "blocked_by": "ConfidenceFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/7a549da119f8045a"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "confidence": 0.9,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/7a549da119f8045a"
+    },
+    {
+      "name": "brawlaphant",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/7a549da119f8045a"
+    },
+    {
+      "name": "mhagel",
+      "type": "Person",
+      "confidence": 0.9,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/808dd0ebacaef8bf"
+    },
+    {
+      "name": "beccahRND",
+      "type": "Person",
+      "confidence": 0.95,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/808dd0ebacaef8bf"
+    },
+    {
+      "name": "mhagel",
+      "type": "Person",
+      "confidence": 0.85,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/808dd0ebacaef8bf"
+    },
+    {
+      "name": "corlock",
+      "type": "Person",
+      "confidence": 0.8,
+      "reason": "lowercase_person",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:web.page:forum.regen.network/808dd0ebacaef8bf"
+    },
+    {
+      "name": "app.regen.claim",
+      "type": "Project",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580"
+    },
+    {
+      "name": "app.regen.evidence",
+      "type": "Project",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580"
+    },
+    {
+      "name": "app.regen.method",
+      "type": "Project",
+      "confidence": 0.75,
+      "reason": "technical_pattern",
+      "blocked_by": "EntityQualityFilter",
+      "doc_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580"
+    }
+  ]
+}

@@ -1,0 +1,1931 @@
+{
+  "generated_at": "2025-12-09T08:45:59.244691",
+  "results": {
+    "orn:web.page:registry.regen.network/2358b5280140344b": {
+      "document_rid": "orn:web.page:registry.regen.network/2358b5280140344b",
+      "document": {
+        "rid": "orn:web.page:registry.regen.network/2358b5280140344b",
+        "title": null,
+        "url": null,
+        "source_sensor": "website-sensor-1759273298.773726",
+        "quality_tier": "high",
+        "avg_confidence": 0.8833333333333333
+      },
+      "baseline": {
+        "entity_count": 9,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 9,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Sam Bennetts",
+            "type": "PERSON",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Registry",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Marketplace",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Hylo community",
+            "type": "ORGANIZATION",
+            "confidence": 0.8
+          },
+          {
+            "name": "EcoBuilder Lab",
+            "type": "PROJECT",
+            "confidence": 0.8
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Ledger",
+            "resolved": "Regen Ledger",
+            "type": "PROJECT"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Sam Bennetts",
+            "original_type": "Person",
+            "normalized_type": "PERSON"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Marketplace",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Hylo community",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "EcoBuilder Lab",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 4,
+        "split_count": 0,
+        "type_normalized_count": 9
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 0.000161
+      }
+    },
+    "orn:web.page:forum.regen.network/bb4dcea1606fdac2": {
+      "document_rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2",
+      "document": {
+        "rid": "orn:web.page:forum.regen.network/bb4dcea1606fdac2",
+        "title": null,
+        "url": null,
+        "source_sensor": "website-sensor-1759273298.773726",
+        "quality_tier": "high",
+        "avg_confidence": 0.85
+      },
+      "baseline": {
+        "entity_count": 3,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 3,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "LiquidityDAO",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Botanical Garden",
+            "type": "PROJECT",
+            "confidence": 0.85
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "LiquidityDAO",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Botanical Garden",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 1,
+        "split_count": 0,
+        "type_normalized_count": 3
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 3.5000000000000004e-05
+      }
+    },
+    "regen.forum-post:forum.regen.network_136_post_1": {
+      "document_rid": "regen.forum-post:forum.regen.network_136_post_1",
+      "document": {
+        "rid": "regen.forum-post:forum.regen.network_136_post_1",
+        "title": null,
+        "url": null,
+        "source_sensor": "discourse-sensor-1759265784.306514",
+        "quality_tier": "high",
+        "avg_confidence": 0.8772727272727273
+      },
+      "baseline": {
+        "entity_count": 12,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 12,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Evmos",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Nemus",
+            "type": "PERSON",
+            "confidence": 0.85
+          },
+          {
+            "name": "Stakecito",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Kalia Validator",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Evmos",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "Keplr",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "Metamask",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "Ledger",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "Evmos",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Evmos",
+            "type": "PROJECT",
+            "confidence": 0.95
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [
+          {
+            "original": "Evmos",
+            "resolved": "Evmos",
+            "type": "PROJECT"
+          },
+          {
+            "original": "Evmos",
+            "resolved": "Evmos",
+            "type": "PROJECT"
+          },
+          {
+            "original": "REGEN",
+            "resolved": "Regen",
+            "type": "PROJECT"
+          },
+          {
+            "original": "Keplr",
+            "resolved": "Keplr",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "MetaMask",
+            "resolved": "Metamask",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Evmos",
+            "resolved": "Evmos",
+            "type": "PROJECT"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Evmos",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Nemus",
+            "original_type": "Person",
+            "normalized_type": "PERSON"
+          },
+          {
+            "name": "Stakecito",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Kalia Validator",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Evmos",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Keplr",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Metamask",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Ledger",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Evmos",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Evmos",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 6,
+        "split_count": 0,
+        "type_normalized_count": 12
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 0.000109
+      }
+    },
+    "regen.forum-post:forum.regen.network_467_post_1": {
+      "document_rid": "regen.forum-post:forum.regen.network_467_post_1",
+      "document": {
+        "rid": "regen.forum-post:forum.regen.network_467_post_1",
+        "title": null,
+        "url": null,
+        "source_sensor": "discourse-sensor-1759263473.505621",
+        "quality_tier": "high",
+        "avg_confidence": 0.8694444444444445
+      },
+      "baseline": {
+        "entity_count": 16,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 16,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Regen DAO",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "Twitter",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "DAOdao",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "CosmWasm",
+            "type": "PROJECT",
+            "confidence": 0.75
+          },
+          {
+            "name": "DAO DAO",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Polytone",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "DAOdao",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Polytone",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "GitHub",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "DAO",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "GitHub",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Polytone",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "CosmWasm",
+            "type": "PROJECT",
+            "confidence": 0.75
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [
+          {
+            "original": "Regen Ledger",
+            "resolved": "Regen Ledger",
+            "type": "PROJECT"
+          },
+          {
+            "original": "DAO DAO",
+            "resolved": "DAOdao",
+            "type": "PROJECT"
+          },
+          {
+            "original": "CosmWasm",
+            "resolved": "CosmWasm",
+            "type": "PROJECT"
+          },
+          {
+            "original": "DAO DAO",
+            "resolved": "DAOdao",
+            "type": "PROJECT"
+          },
+          {
+            "original": "GitHub",
+            "resolved": "GitHub",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "GitHub",
+            "resolved": "GitHub",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "CosmWasm",
+            "resolved": "CosmWasm",
+            "type": "PROJECT"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Regen DAO",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Twitter",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "DAOdao",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "CosmWasm",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "DAO DAO",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Polytone",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "DAOdao",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Polytone",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "GitHub",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "DAO",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "GitHub",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Polytone",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "CosmWasm",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 7,
+        "split_count": 0,
+        "type_normalized_count": 16
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 0.000144
+      }
+    },
+    "regen.podcast:podcast_882604015": {
+      "document_rid": "regen.podcast:podcast_882604015",
+      "document": {
+        "rid": "regen.podcast:podcast_882604015",
+        "title": null,
+        "url": null,
+        "source_sensor": "podcast-sensor-1760233121.273056",
+        "quality_tier": "high",
+        "avg_confidence": 0.8642857142857142
+      },
+      "baseline": {
+        "entity_count": 3,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 3,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Nora Bateson",
+            "type": "PERSON",
+            "confidence": 0.95
+          },
+          {
+            "name": "Planetary Regeneration Podcast",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "SoundCloud",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Nora Bateson",
+            "original_type": "Person",
+            "normalized_type": "PERSON"
+          },
+          {
+            "name": "Planetary Regeneration Podcast",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "SoundCloud",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 0,
+        "split_count": 0,
+        "type_normalized_count": 3
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 3.3e-05
+      }
+    },
+    "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871": {
+      "document_rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871",
+      "document": {
+        "rid": "orn:notion.page:regen/24e25b77-eda1-809d-aa08-e6639fbd9871",
+        "title": null,
+        "url": null,
+        "source_sensor": "notion-sensor-1759463727.344542",
+        "quality_tier": "medium",
+        "avg_confidence": 0.8318181818181819
+      },
+      "baseline": {
+        "entity_count": 8,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 8,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Regen",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Carbon Landscapes",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Mallee fowl",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "Orange-bellied Parrot",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "Carbon Landscapes",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Mallee fowl",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "Orange-bellied Parrot",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "Regen",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [
+          {
+            "original": "Regen",
+            "resolved": "Regen",
+            "type": "PROJECT"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Regen",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Carbon Landscapes",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Mallee fowl",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Orange-bellied Parrot",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Carbon Landscapes",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Mallee fowl",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Orange-bellied Parrot",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 1,
+        "split_count": 0,
+        "type_normalized_count": 8
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 7.800000000000001e-05
+      }
+    },
+    "regen.forum-post:forum.regen.network_30_post_5": {
+      "document_rid": "regen.forum-post:forum.regen.network_30_post_5",
+      "document": {
+        "rid": "regen.forum-post:forum.regen.network_30_post_5",
+        "title": null,
+        "url": null,
+        "source_sensor": "discourse-sensor-1759265784.306514",
+        "quality_tier": "medium",
+        "avg_confidence": 0.83125
+      },
+      "baseline": {
+        "entity_count": 4,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 4,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Christian Shearer",
+            "type": "PERSON",
+            "confidence": 0.85
+          },
+          {
+            "name": "REGEN",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Aerodrome",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "DAO",
+            "type": "PROJECT",
+            "confidence": 0.8
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [
+          {
+            "original": "Christian",
+            "resolved": "Christian Shearer",
+            "type": "PERSON"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Christian Shearer",
+            "original_type": "Person",
+            "normalized_type": "PERSON"
+          },
+          {
+            "name": "REGEN",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Aerodrome",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "DAO",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 1,
+        "split_count": 0,
+        "type_normalized_count": 4
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 3.9e-05
+      }
+    },
+    "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d": {
+      "document_rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d",
+      "document": {
+        "rid": "orn:notion.page:regen/24e25b77-eda1-8013-a478-f0dec96b5a2d",
+        "title": null,
+        "url": null,
+        "source_sensor": "notion-sensor-1759463727.344542",
+        "quality_tier": "medium",
+        "avg_confidence": 0.8357142857142856
+      },
+      "baseline": {
+        "entity_count": 4,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 3,
+        "blocked_count": 1,
+        "passed_entities": [
+          {
+            "name": "China",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "France",
+            "type": "ORGANIZATION",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          }
+        ],
+        "blocked_entities": [
+          {
+            "name": "US",
+            "type": "Organization",
+            "confidence": 0.85,
+            "reason": "stop_word",
+            "blocked_by": "EntityQualityFilter"
+          }
+        ]
+      },
+      "changes": {
+        "blocked": [
+          {
+            "name": "US",
+            "type": "Organization",
+            "confidence": 0.85,
+            "reason": "stop_word",
+            "blocked_by": "EntityQualityFilter"
+          }
+        ],
+        "modified": [],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "China",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "France",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 25.0,
+        "pass_rate": 75.0,
+        "modified_count": 0,
+        "split_count": 0,
+        "type_normalized_count": 3
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 2.9e-05
+      }
+    },
+    "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580": {
+      "document_rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580",
+      "document": {
+        "rid": "orn:notion.page:regen/27e25b77-eda1-80e2-8f6d-f1481b467580",
+        "title": null,
+        "url": null,
+        "source_sensor": "notion-sensor-1759463727.344542",
+        "quality_tier": "low",
+        "avg_confidence": 0.0
+      },
+      "baseline": {
+        "entity_count": 49,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 46,
+        "blocked_count": 3,
+        "passed_entities": [
+          {
+            "name": "Bluesky AT Protocol",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Hypercerts",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Registry",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Ethereum",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Cosmos",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "Hypercerts",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Data",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Data",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "ATProto",
+            "type": "ORGANIZATION",
+            "confidence": 0.8
+          },
+          {
+            "name": "Regen Data",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Data",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Registry",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "Hypercert",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "Bluesky PDS",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "PDS",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Registry",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Hypercerts",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Bluesky PDS",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Regen Registry",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "ATProto",
+            "type": "PROJECT",
+            "confidence": 0.75
+          },
+          {
+            "name": "Regen Registry",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "PDS Bridge",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "ATProto",
+            "type": "PROJECT",
+            "confidence": 0.75
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "Hypercerts",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "PDS",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "ATProto",
+            "type": "PROJECT",
+            "confidence": 0.75
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "ORGANIZATION",
+            "confidence": 0.95
+          },
+          {
+            "name": "Ma Earth",
+            "type": "ORGANIZATION",
+            "confidence": 0.8
+          },
+          {
+            "name": "Regen Network",
+            "type": "ORGANIZATION",
+            "confidence": 0.9
+          },
+          {
+            "name": "ATProto",
+            "type": "PROJECT",
+            "confidence": 0.75
+          },
+          {
+            "name": "Regen Registry",
+            "type": "PROJECT",
+            "confidence": 0.9
+          },
+          {
+            "name": "Hypercerts",
+            "type": "PROJECT",
+            "confidence": 0.95
+          },
+          {
+            "name": "Bluesky PDS",
+            "type": "PROJECT",
+            "confidence": 0.85
+          },
+          {
+            "name": "Regen Ledger",
+            "type": "PROJECT",
+            "confidence": 0.8
+          },
+          {
+            "name": "PDS Bridge",
+            "type": "PROJECT",
+            "confidence": 0.85
+          }
+        ],
+        "blocked_entities": [
+          {
+            "name": "app.regen.claim",
+            "type": "Project",
+            "confidence": 0.75,
+            "reason": "sentence_like, technical_pattern",
+            "blocked_by": "EntityQualityFilter"
+          },
+          {
+            "name": "app.regen.evidence",
+            "type": "Project",
+            "confidence": 0.75,
+            "reason": "sentence_like, technical_pattern",
+            "blocked_by": "EntityQualityFilter"
+          },
+          {
+            "name": "app.regen.method",
+            "type": "Project",
+            "confidence": 0.75,
+            "reason": "sentence_like, technical_pattern",
+            "blocked_by": "EntityQualityFilter"
+          }
+        ]
+      },
+      "changes": {
+        "blocked": [
+          {
+            "name": "app.regen.claim",
+            "type": "Project",
+            "confidence": 0.75,
+            "reason": "sentence_like, technical_pattern",
+            "blocked_by": "EntityQualityFilter"
+          },
+          {
+            "name": "app.regen.evidence",
+            "type": "Project",
+            "confidence": 0.75,
+            "reason": "sentence_like, technical_pattern",
+            "blocked_by": "EntityQualityFilter"
+          },
+          {
+            "name": "app.regen.method",
+            "type": "Project",
+            "confidence": 0.75,
+            "reason": "sentence_like, technical_pattern",
+            "blocked_by": "EntityQualityFilter"
+          }
+        ],
+        "modified": [
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Registry",
+            "resolved": "Regen Registry",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Ledger",
+            "resolved": "Regen Ledger",
+            "type": "PROJECT"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Registry",
+            "resolved": "Regen Registry",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Ledger",
+            "resolved": "Regen Ledger",
+            "type": "PROJECT"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Network",
+            "resolved": "Regen Network",
+            "type": "ORGANIZATION"
+          },
+          {
+            "original": "Regen Ledger",
+            "resolved": "Regen Ledger",
+            "type": "PROJECT"
+          }
+        ],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Bluesky AT Protocol",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Hypercerts",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Ethereum",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Cosmos",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Hypercerts",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Data",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Data",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "ATProto",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Data",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Data",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Hypercert",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Bluesky PDS",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "PDS",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Hypercerts",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Bluesky PDS",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "ATProto",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "PDS Bridge",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "ATProto",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Hypercerts",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "PDS",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "ATProto",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Ma Earth",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "Regen Network",
+            "original_type": "Organization",
+            "normalized_type": "ORGANIZATION"
+          },
+          {
+            "name": "ATProto",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Registry",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Hypercerts",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Bluesky PDS",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "Regen Ledger",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          },
+          {
+            "name": "PDS Bridge",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 6.122448979591836,
+        "pass_rate": 93.87755102040816,
+        "modified_count": 12,
+        "split_count": 0,
+        "type_normalized_count": 46
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 0.0006299999999999999
+      }
+    },
+    "orn:web.page:forum.regen.network/605c00ac4fbed6ea": {
+      "document_rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea",
+      "document": {
+        "rid": "orn:web.page:forum.regen.network/605c00ac4fbed6ea",
+        "title": null,
+        "url": null,
+        "source_sensor": "website-sensor-1759273298.773726",
+        "quality_tier": "low",
+        "avg_confidence": 0.0
+      },
+      "baseline": {
+        "entity_count": 1,
+        "relation_count": 0
+      },
+      "pipeline_result": {
+        "passed_count": 1,
+        "blocked_count": 0,
+        "passed_entities": [
+          {
+            "name": "Community Call",
+            "type": "PROJECT",
+            "confidence": 0.95
+          }
+        ],
+        "blocked_entities": []
+      },
+      "changes": {
+        "blocked": [],
+        "modified": [],
+        "split": [],
+        "type_normalized": [
+          {
+            "name": "Community Call",
+            "original_type": "Project",
+            "normalized_type": "PROJECT"
+          }
+        ]
+      },
+      "statistics": {
+        "block_rate": 0.0,
+        "pass_rate": 100.0,
+        "modified_count": 0,
+        "split_count": 0,
+        "type_normalized_count": 1
+      },
+      "pipeline_stats": {
+        "modules": {
+          "ConfidenceFilter": {
+            "enabled": true
+          },
+          "CanonicalResolver": {
+            "enabled": true
+          },
+          "EntityQualityFilter": {
+            "enabled": true
+          },
+          "ListSplitter": {
+            "enabled": true
+          },
+          "OntologyNormalizer": {
+            "types_normalized": 1,
+            "enabled": true
+          }
+        },
+        "execution_times": {
+          "ConfidenceFilter": 1e-06,
+          "CanonicalResolver": 1e-06,
+          "EntityQualityFilter": 7e-06,
+          "ListSplitter": 2e-06,
+          "OntologyNormalizer": 2e-06
+        },
+        "total_time": 1.3e-05
+      }
+    }
+  },
+  "summary": {
+    "document_count": 10,
+    "total_baseline_entities": 109,
+    "total_passed": 105,
+    "total_blocked": 4,
+    "overall_pass_rate": 96.3302752293578,
+    "overall_block_rate": 3.669724770642202
+  },
+  "errors": []
+}
