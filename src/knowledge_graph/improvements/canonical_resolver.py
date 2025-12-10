@@ -88,7 +88,9 @@ class CanonicalResolver:
                 confidence = entity_data.get('confidence', 1.0)
 
                 # Add canonical name itself
-                self.alias_to_canonical[canonical.lower()] = (canonical, entity_type, confidence)
+                canonical_key = canonical.lower()
+                if canonical_key not in self.alias_to_canonical:
+                    self.alias_to_canonical[canonical_key] = (canonical, entity_type, confidence)
 
                 # Add all aliases
                 for alias in entity_data.get('aliases', []):
@@ -97,13 +99,19 @@ class CanonicalResolver:
                     if alias_lower not in self.alias_to_canonical:
                         self.alias_to_canonical[alias_lower] = (canonical, entity_type, confidence)
 
-    def resolve(self, entity_name: str, entity_type: Optional[str] = None) -> Tuple[str, bool]:
+    def resolve(
+        self,
+        entity_name: str,
+        entity_type: Optional[str] = None,
+        allow_type_mismatch: bool = False
+    ) -> Tuple[str, bool]:
         """
         Resolve entity name to canonical form.
 
         Args:
             entity_name: The entity name to resolve
             entity_type: Optional entity type for type-aware resolution
+            allow_type_mismatch: Resolve even when provided type differs from canonical
 
         Returns:
             Tuple of (resolved_name, was_resolved)
@@ -118,7 +126,7 @@ class CanonicalResolver:
             canonical, canonical_type, confidence = self.alias_to_canonical[lookup_key]
 
             # If type provided, only resolve if types are compatible
-            if entity_type:
+            if entity_type and not allow_type_mismatch:
                 if not self._types_compatible(entity_type, canonical_type):
                     self.stats.not_resolved += 1
                     return entity_name, False
@@ -142,7 +150,7 @@ class CanonicalResolver:
         # Compatible mappings
         compatible_groups = [
             {'ORGANIZATION', 'ORG', 'FORMALORGANIZATION', 'COMPANY'},
-            {'PROJECT', 'PRODUCT', 'SOFTWARE', 'MODULE'},
+            {'PROJECT', 'PRODUCT', 'SOFTWARE', 'MODULE', 'TECHNOLOGY'},
             {'PERSON', 'HUMAN', 'HUMANACTOR'},
             {'CONCEPT', 'TOPIC', 'THEME'},
         ]
@@ -226,12 +234,13 @@ class CanonicalResolver:
 
         return aliases
 
-    def resolve_batch(self, entities: List[Dict]) -> List[Dict]:
+    def resolve_batch(self, entities: List[Dict], allow_type_mismatch: bool = False) -> List[Dict]:
         """
         Resolve a batch of entities to canonical forms.
 
         Args:
             entities: List of entity dictionaries with 'name' and optionally 'type'
+            allow_type_mismatch: Resolve even when provided type differs from canonical
 
         Returns:
             List of entities with names resolved to canonical forms
@@ -242,7 +251,11 @@ class CanonicalResolver:
             name = entity.get('name', '')
             entity_type = entity.get('type', '')
 
-            canonical_name, was_resolved = self.resolve(name, entity_type)
+            canonical_name, was_resolved = self.resolve(
+                name,
+                entity_type,
+                allow_type_mismatch=allow_type_mismatch
+            )
 
             resolved_entity = entity.copy()
             resolved_entity['name'] = canonical_name
@@ -290,19 +303,24 @@ class CanonicalResolver:
 
 
 # Convenience function
-def resolve_entity(name: str, entity_type: Optional[str] = None) -> Tuple[str, bool]:
+def resolve_entity(
+    name: str,
+    entity_type: Optional[str] = None,
+    allow_type_mismatch: bool = False
+) -> Tuple[str, bool]:
     """
     Quick utility to resolve a single entity.
 
     Args:
         name: Entity name to resolve
         entity_type: Optional entity type
+        allow_type_mismatch: Resolve even when provided type differs from canonical
 
     Returns:
         Tuple of (resolved_name, was_resolved)
     """
     resolver = CanonicalResolver()
-    return resolver.resolve(name, entity_type)
+    return resolver.resolve(name, entity_type, allow_type_mismatch=allow_type_mismatch)
 
 
 # Demo function

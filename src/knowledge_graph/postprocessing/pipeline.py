@@ -319,6 +319,7 @@ def create_default_pipeline() -> PipelineOrchestrator:
     from .modules import (
         ConfidenceFilterModule,
         CanonicalResolverModule,
+        DocumentLevelDeduplicator,
         EntityQualityFilterModule,
         ListSplitterModule,
         OntologyNormalizerModule
@@ -326,6 +327,7 @@ def create_default_pipeline() -> PipelineOrchestrator:
 
     return PipelineOrchestrator([
         ConfidenceFilterModule(),
+        DocumentLevelDeduplicator(),
         CanonicalResolverModule(),
         EntityQualityFilterModule(),
         ListSplitterModule(),
@@ -347,6 +349,7 @@ def create_pipeline_from_config(config_path: str) -> PipelineOrchestrator:
     from .modules import (
         ConfidenceFilterModule,
         CanonicalResolverModule,
+        DocumentLevelDeduplicator,
         EntityQualityFilterModule,
         ListSplitterModule,
         OntologyNormalizerModule
@@ -355,6 +358,7 @@ def create_pipeline_from_config(config_path: str) -> PipelineOrchestrator:
     builder = PipelineBuilder()
     builder.register_module('ConfidenceFilter', ConfidenceFilterModule)
     builder.register_module('CanonicalResolver', CanonicalResolverModule)
+    builder.register_module('DocumentLevelDeduplicator', DocumentLevelDeduplicator)
     builder.register_module('EntityQualityFilter', EntityQualityFilterModule)
     builder.register_module('ListSplitter', ListSplitterModule)
     builder.register_module('OntologyNormalizer', OntologyNormalizerModule)

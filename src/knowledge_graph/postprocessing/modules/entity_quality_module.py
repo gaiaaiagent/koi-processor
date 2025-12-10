@@ -25,6 +25,8 @@ class EntityQualityFilterModule(PostProcessingModule):
     - Numerics
     - Tautological entities (name equals type)
     - Lowercase single-word PERSON entities
+    - Template IDs (JIRA/issue keys, ERC standards)
+    - Boilerplate phrases and placeholder PERSON values
 
     Configuration:
         additional_stop_words: Extra words to block
@@ -68,6 +70,24 @@ class EntityQualityFilterModule(PostProcessingModule):
             'farmer', 'farmers', 'developer', 'developers',
             'validator', 'validators', 'contributor', 'contributors'
         }
+        self._boilerplate_blocklist = {
+            "testing instructions",
+            "dry principles",
+            "test plan",
+            "acceptance criteria",
+            "definition of done",
+            "success criteria",
+            "knowledge network expands with data ingestion",
+            "strengthening collective intelligence",
+            "building regenerative economies",
+            "more information needed",
+            "further research required",
+            "additional context",
+            "n/a",
+            "tbd",
+            "todo",
+        }
+        self._placeholder_persons = {"public users", "unknown", "anonymous"}
 
         self._generic_patterns = [
             re.compile(r'^(the |a |an |our |their |my |your )', re.IGNORECASE),
@@ -87,6 +107,8 @@ class EntityQualityFilterModule(PostProcessingModule):
             re.compile(r'^regen1[a-z0-9]{38,}$'),
             re.compile(r'\.(md|js|ts|py|go|json)$', re.IGNORECASE),
         ]
+        self._jira_pattern = re.compile(r'^[A-Z]+-\d+$', re.IGNORECASE)
+        self._erc_pattern = re.compile(r'^ERC-\d+$', re.IGNORECASE)
 
         self._max_length = self.config.get('max_name_length', 80)
         self._max_words = self.config.get('max_word_count', 8)
@@ -126,45 +148,60 @@ class EntityQualityFilterModule(PostProcessingModule):
 
         # Inline implementation
         reasons = []
+        normalized = name.strip()
+        normalized_lower = normalized.lower()
 
         # Stop word check
-        if name.strip().lower() in self._stop_words:
+        if normalized_lower in self._stop_words:
             reasons.append("stop_word")
 
         # Numeric only check
-        if name.strip().isdigit():
+        if normalized.isdigit():
             reasons.append("numeric_only")
 
         # Tautological check
-        if entity_type and name.strip().lower().rstrip('s') == entity_type.strip().lower().rstrip('s'):
+        if entity_type and normalized_lower.rstrip('s') == entity_type.strip().lower().rstrip('s'):
             reasons.append("tautological")
 
         # Lowercase single-word PERSON check
         if entity_type and entity_type.upper() == 'PERSON':
-            stripped = name.strip()
+            stripped = normalized
             if ' ' not in stripped and stripped and stripped[0].islower():
                 reasons.append("lowercase_person")
 
+            if normalized_lower in self._placeholder_persons:
+                reasons.append("placeholder_person")
+
+        # Template/ID patterns
+        if self._erc_pattern.match(normalized):
+            reasons.append("erc_standard")
+        elif self._jira_pattern.match(normalized):
+            reasons.append("jira_issue_id")
+
+        # Known boilerplate phrases
+        if normalized_lower in self._boilerplate_blocklist:
+            reasons.append("boilerplate")
+
         # Generic pattern check
         for pattern in self._generic_patterns:
-            if pattern.search(name):
+            if pattern.search(normalized):
                 reasons.append("generic_pattern")
                 break
 
         # Sentence-like check
         for pattern in self._sentence_patterns:
-            if pattern.search(name):
+            if pattern.search(normalized):
                 reasons.append("sentence_like")
                 break
 
         # Technical pattern check
         for pattern in self._technical_patterns:
-            if pattern.search(name):
+            if pattern.search(normalized):
                 reasons.append("technical_pattern")
                 break
 
         # Length check
-        if len(name) > self._max_length or len(name.split()) > self._max_words:
+        if len(normalized) > self._max_length or len(normalized.split()) > self._max_words:
             reasons.append("too_long")
 
         is_valid = len(reasons) == 0

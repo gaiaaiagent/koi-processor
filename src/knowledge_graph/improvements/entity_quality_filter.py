@@ -168,14 +168,18 @@ class EntityQualityFilter:
     """
     Filters low-quality entities from knowledge graph extraction results.
 
-    Implements seven filter checks:
-    1. Stop-word entities (pronouns, generic nouns)
-    2. Numeric-only entities
-    3. Tautological entities (name equals type)
-    4. Lowercase single-word PERSON entities
-    5. Generic person patterns
-    6. Sentence-like entities
-    7. Length limit violations
+    Implements pattern and template-based checks, including:
+    - Stop-word entities (pronouns, generic nouns)
+    - Placeholder PERSON entities ("Public Users", "Unknown", "Anonymous")
+    - JIRA/issue IDs and ERC standards (APP-776, ERC-20)
+    - Boilerplate/template phrases ("Testing Instructions", "DRY Principles")
+    - Numeric-only entities
+    - Tautological entities (name equals type)
+    - Lowercase single-word PERSON entities
+    - Generic person patterns
+    - Sentence-like entities
+    - Length limit violations
+    - Technical patterns (URLs, code identifiers)
 
     Attributes:
         config: FilterConfig instance with customization options
@@ -300,6 +304,37 @@ class EntityQualityFilter:
         re.compile(r'^[a-f0-9]{32,}$', re.IGNORECASE),  # MD5/SHA hashes
     ]
 
+    # Patterns and blocklists for known noisy entities
+    JIRA_ISSUE_PATTERN = re.compile(r'^[A-Z]+-\d+$', re.IGNORECASE)  # APP-776
+    ERC_STANDARD_PATTERN = re.compile(r'^ERC-\d+$', re.IGNORECASE)  # ERC-20, ERC-721
+
+    # Lowercase comparison for boilerplate/template text that should be blocked
+    BOILERPLATE_BLOCKLIST: Set[str] = {
+        # Issue / PR templates
+        "testing instructions",
+        "dry principles",
+        "test plan",
+        "acceptance criteria",
+        "definition of done",
+        "success criteria",
+
+        # Forum boilerplate
+        "knowledge network expands with data ingestion",
+        "strengthening collective intelligence",
+        "building regenerative economies",
+
+        # Generic filler
+        "more information needed",
+        "further research required",
+        "additional context",
+        "n/a",
+        "tbd",
+        "todo",
+    }
+
+    # Placeholder PERSON entities to drop
+    PLACEHOLDER_PERSONS: Set[str] = {"public users", "unknown", "anonymous"}
+
     def __init__(self, config: Optional[FilterConfig] = None):
         """
         Initialize the entity quality filter.
@@ -334,6 +369,10 @@ class EntityQualityFilter:
                 'sentence_like': 0,
                 'too_long': 0,
                 'technical_pattern': 0,
+                'jira_issue_id': 0,
+                'erc_standard': 0,
+                'boilerplate': 0,
+                'placeholder_person': 0,
             }
         }
 
@@ -482,6 +521,24 @@ class EntityQualityFilter:
 
         return False
 
+    def is_jira_issue_id(self, name: str) -> bool:
+        """Check if name looks like a JIRA/issue identifier (e.g., APP-776)."""
+        return bool(self.JIRA_ISSUE_PATTERN.match(name.strip()))
+
+    def is_erc_standard(self, name: str) -> bool:
+        """Check if name matches an ERC standard identifier (e.g., ERC-20)."""
+        return bool(self.ERC_STANDARD_PATTERN.match(name.strip()))
+
+    def is_boilerplate(self, name: str) -> bool:
+        """Check if name matches known boilerplate/template phrases."""
+        return name.strip().lower() in self.BOILERPLATE_BLOCKLIST
+
+    def is_placeholder_person(self, name: str, entity_type: str) -> bool:
+        """Check for placeholder PERSON entities like 'Public Users'."""
+        if not entity_type or entity_type.upper() != 'PERSON':
+            return False
+        return name.strip().lower() in self.PLACEHOLDER_PERSONS
+
     def exceeds_length_limits(self, name: str) -> bool:
         """
         Check if name exceeds length limits.
@@ -561,19 +618,33 @@ class EntityQualityFilter:
         if self.is_lowercase_person(name, entity_type):
             reasons.append("lowercase_person")
 
-        # 5. Generic pattern check
+        # 5. Placeholder PERSON entities
+        if self.is_placeholder_person(name, entity_type):
+            reasons.append("placeholder_person")
+
+        # 6. Template/ID patterns
+        if self.is_erc_standard(name):
+            reasons.append("erc_standard")
+        elif self.is_jira_issue_id(name):
+            reasons.append("jira_issue_id")
+
+        # 7. Boilerplate/template text
+        if self.is_boilerplate(name):
+            reasons.append("boilerplate")
+
+        # 8. Generic pattern check
         if self.matches_generic_pattern(name):
             reasons.append("generic_pattern")
 
-        # 6. Sentence-like check
+        # 9. Sentence-like check
         if self.is_sentence_like(name):
             reasons.append("sentence_like")
 
-        # 7. Length limits check
+        # 10. Length limits check
         if self.exceeds_length_limits(name):
             reasons.append("too_long")
 
-        # 8. Technical pattern check
+        # 11. Technical pattern check
         if self.is_technical_pattern(name):
             reasons.append("technical_pattern")
 
@@ -615,19 +686,33 @@ class EntityQualityFilter:
         if self.is_lowercase_person(name, entity_type):
             return (False, "lowercase_person")
 
-        # 5. Generic pattern check
+        # 5. Placeholder PERSON entities
+        if self.is_placeholder_person(name, entity_type):
+            return (False, "placeholder_person")
+
+        # 6. Template/ID patterns
+        if self.is_erc_standard(name):
+            return (False, "erc_standard")
+        if self.is_jira_issue_id(name):
+            return (False, "jira_issue_id")
+
+        # 7. Boilerplate/template text
+        if self.is_boilerplate(name):
+            return (False, "boilerplate")
+
+        # 8. Generic pattern check
         if self.matches_generic_pattern(name):
             return (False, "generic_pattern")
 
-        # 6. Sentence-like check
+        # 9. Sentence-like check
         if self.is_sentence_like(name):
             return (False, "sentence_like")
 
-        # 7. Length limits check
+        # 10. Length limits check
         if self.exceeds_length_limits(name):
             return (False, "too_long")
 
-        # 8. Technical pattern check
+        # 11. Technical pattern check
         if self.is_technical_pattern(name):
             return (False, "technical_pattern")
 
@@ -690,6 +775,10 @@ class EntityQualityFilter:
                 'sentence_like': 0,
                 'too_long': 0,
                 'technical_pattern': 0,
+                'jira_issue_id': 0,
+                'erc_standard': 0,
+                'boilerplate': 0,
+                'placeholder_person': 0,
             }
         }
 

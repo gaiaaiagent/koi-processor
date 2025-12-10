@@ -63,6 +63,7 @@ try:
     from knowledge_graph.postprocessing.modules import (
         ConfidenceFilterModule,
         CanonicalResolverModule,
+        DocumentLevelDeduplicator,
         EntityQualityFilterModule,
         ListSplitterModule,
         OntologyNormalizerModule
@@ -80,6 +81,7 @@ except ImportError:
         from src.knowledge_graph.postprocessing.modules import (
             ConfidenceFilterModule,
             CanonicalResolverModule,
+            DocumentLevelDeduplicator,
             EntityQualityFilterModule,
             ListSplitterModule,
             OntologyNormalizerModule
@@ -200,6 +202,7 @@ class KnowledgeGraphIntegrator:
                     # Create default pipeline programmatically
                     self.pipeline = PipelineOrchestrator([
                         ConfidenceFilterModule({'entity_threshold': 0.70, 'relationship_threshold': 0.80}),
+                        DocumentLevelDeduplicator(),
                         CanonicalResolverModule(),
                         EntityQualityFilterModule(),
                         ListSplitterModule(),

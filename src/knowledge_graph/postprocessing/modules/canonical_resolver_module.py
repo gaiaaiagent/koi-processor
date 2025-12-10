@@ -26,6 +26,8 @@ class CanonicalResolverModule(PostProcessingModule):
     Configuration:
         registry_path: Path to canonical_entities.json (optional)
         update_relationships: Update relationship sources/targets (default: True)
+        allow_type_mismatch: Resolve even when provided type differs (default: True)
+        use_canonical_type: Replace entity type with canonical type when available (default: True)
     """
 
     def __init__(self, config: Dict[str, Any] = None):
@@ -33,6 +35,8 @@ class CanonicalResolverModule(PostProcessingModule):
 
         self._resolver = None
         self._update_relationships = self.config.get('update_relationships', True)
+        self._allow_type_mismatch = self.config.get('allow_type_mismatch', True)
+        self._use_canonical_type = self.config.get('use_canonical_type', True)
 
         # Try to import and use existing CanonicalResolver
         try:
@@ -64,17 +68,24 @@ class CanonicalResolverModule(PostProcessingModule):
         for entity in list(context.entities):  # Copy to allow modification
             canonical_name, was_resolved = self._resolver.resolve(
                 entity.name,
-                entity.type
+                entity.type,
+                allow_type_mismatch=self._allow_type_mismatch
             )
 
             if was_resolved:
-                # Track mapping
-                name_mappings[entity.name] = canonical_name
+                canonical_type = self._resolver.get_canonical_type(canonical_name) if self._use_canonical_type else None
+                target_type = canonical_type or entity.type
+                name_changed = canonical_name != entity.name
+                type_changed = target_type != entity.type
+
+                # Track mapping only when name actually changes
+                if name_changed:
+                    name_mappings[entity.name] = canonical_name
 
                 # Create modified entity with canonical name
                 canonical_entity = Entity(
                     name=canonical_name,
-                    type=entity.type,
+                    type=target_type,
                     confidence=entity.confidence,
                     metadata={
                         **entity.metadata,
@@ -83,8 +94,14 @@ class CanonicalResolverModule(PostProcessingModule):
                     }
                 )
 
-                context.modify_entity(entity, canonical_entity, self.get_name())
-                self.stats['entities_canonicalized'] += 1
+                if type_changed:
+                    canonical_entity.metadata['original_type'] = entity.type
+
+                if name_changed or type_changed:
+                    context.modify_entity(entity, canonical_entity, self.get_name())
+                    self.stats['entities_canonicalized'] += 1
+                    if type_changed:
+                        self.stats['types_aligned'] += 1
 
         # Update relationship sources and targets
         if self._update_relationships and name_mappings:

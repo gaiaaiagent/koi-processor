@@ -14,10 +14,20 @@
         }
       },
       {
+        "name": "DocumentLevelDeduplicator",
+        "enabled": true,
+        "config": {
+          "case_insensitive": true,
+          "normalize_type_case": true
+        }
+      },
+      {
         "name": "CanonicalResolver",
         "enabled": true,
         "config": {
-          "update_relationships": true
+          "update_relationships": true,
+          "allow_type_mismatch": true,
+          "use_canonical_type": true
         }
       },
       {
@@ -53,7 +63,7 @@
   },
   "metadata": {
     "description": "Production post-processing pipeline configuration for Regen KOI",
-    "last_updated": "2025-12-08",
-    "updated_by": "Phase 2b Implementation"
+    "last_updated": "2025-12-10",
+    "updated_by": "PROMPT_24 quality fixes"
   }
 }

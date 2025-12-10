@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "last_updated": "2025-12-08",
+  "last_updated": "2025-12-10",
   "description": "Canonical entity registry for Regen KOI knowledge graph deduplication - Expanded Week 1",
   "entities": {
     "organizations": {
@@ -391,7 +391,7 @@
           "Regen Chain",
           "regen-ledger"
         ],
-        "entity_type": "PROJECT",
+        "entity_type": "TECHNOLOGY",
         "confidence": 1.0,
         "occurrences": 283,
         "notes": "Cosmos SDK-based blockchain"
@@ -435,6 +435,17 @@
         "entity_type": "PROJECT",
         "confidence": 1.0,
         "occurrences": 34
+      },
+      "regen-marketplace": {
+        "canonical_name": "Regen Marketplace",
+        "aliases": [
+          "Regen marketplace",
+          "regen marketplace"
+        ],
+        "entity_type": "TECHNOLOGY",
+        "confidence": 1.0,
+        "occurrences": 0,
+        "notes": "Marketplace for ecological credits in the Regen ecosystem"
       },
       "climate-wiki": {
         "canonical_name": "Climate Wiki",
