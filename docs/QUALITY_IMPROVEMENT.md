@@ -1,8 +1,9 @@
 # Knowledge Graph Quality Improvement Project
 
-**Status**: ✅ Phases 1-2 Complete | 🎯 Re-extraction Planned
+**Status**: ✅ ALL PHASES COMPLETE | Production Deployment v1.1
 **Quality**: 62% → 99.7% (+61%)
 **Tests**: 121 passing
+**Deduplication**: 70.10% (12,985 entities from 43,430 mentions)
 **Performance**: < 1% overhead
 
 ---
@@ -268,25 +269,50 @@ pytest tests/test_pipeline_framework.py tests/test_pipeline_modules.py tests/tes
 
 ---
 
-## Next Steps
+## Phase 3: Cross-Document Deduplication & Consolidation
 
-### 🎯 Phase 3: Re-extraction (PLANNED)
+### ✅ Phase 3a: Entity Deduplication (COMPLETE)
 
-**Objective**: Re-extract all 3,497 documents with pipeline framework to realize full quality benefits.
+**Objective**: Implement cross-document entity deduplication using semantic matching.
 
-**Approach**: Option A - Incremental re-extraction over 6 weeks
+**Delivered** (2025-12-10):
+- **3-Tier Deduplication Waterfall**:
+  - Tier 1 (Exact): B-Tree index matching (~microseconds) - 58.0% hit rate
+  - Tier 2 (Semantic): pgvector HNSW + OpenAI embeddings (~milliseconds) - 10.6% hit rate
+  - Tier 3 (New): Insert new entities - 31.4% new entities
+- **Entity Resolver**: Semantic similarity matching (0.88 threshold)
+- **Production Stats**: 12,985 unique entities from 43,430 mentions (70.10% dedup rate)
+- **Code Quality**: A+ grade, 35 passing tests
 
-**Timeline**:
-- **Week 1**: Secure backups + build re-extraction scripts
-- **Week 2**: Pilot re-extraction (100 documents)
-- **Week 3**: Discourse re-extraction (1,407 documents)
-- **Week 4**: Remaining sources (2,090 documents)
-- **Week 5**: Validation & analysis
-- **Week 6**: Optimization & cleanup
+**Implementation**: `src/knowledge_graph/entity_resolver.py`
 
-**Expected Outcome**: Quality 99.7% → 99.9%+
+### ✅ Phase 3b: Batch Consolidation (COMPLETE)
 
-**See**: Working documents (not in public repo - contact team for access)
+**Objective**: Consolidate semantically similar entities via batch clustering.
+
+**Delivered** (2025-12-10):
+- **Semantic Clustering**: Agglomerative clustering with 0.88 similarity threshold
+- **Type-Safe Merging**: No cross-type merges allowed
+- **Domain Expert Review**: 11 questionable merges reviewed (9 splits, 2 keeps)
+- **Results**: 189 entities merged, zero type collisions
+- **Final State**: 12,985 entities, 70.10% dedup rate
+
+**Implementation**: `scripts/batch_semantic_consolidation.py`, `scripts/interactive_merge_review.py`
+
+### ✅ Phase 3c: Knowledge Graph Deployment (COMPLETE)
+
+**Objective**: Deploy synchronized knowledge graph to production.
+
+**Delivered** (2025-12-11):
+- **Fuseki Graph Regeneration**: 12,985 entities → 64,925 RDF triples
+- **Graph Synchronization**: PostgreSQL ↔ Fuseki synchronized
+- **Production Endpoints**: http://localhost:3030/koi (SPARQL queries)
+- **Validation**: Triple count verified, sample queries tested
+- **Backups**: 767MB PostgreSQL + 3.6MB Fuseki
+
+**Implementation**: `scripts/regenerate_fuseki_graph.py`
+
+**See**: [PRODUCTION_DEPLOYMENT_SUMMARY.md](../PRODUCTION_DEPLOYMENT_SUMMARY.md) for complete deployment documentation
 
 ---
 
@@ -402,6 +428,6 @@ koi-processor/
 
 ---
 
-**Last Updated**: 2025-12-08
-**Version**: Phase 2b Complete
-**Status**: Production operational, re-extraction planning
+**Last Updated**: 2025-12-11
+**Version**: v1.1 Production Deployment
+**Status**: All phases complete, knowledge graph deployed to production

@@ -7,30 +7,22 @@
       "regen-network": {
         "canonical_name": "Regen Network",
         "aliases": [
-          "regen network",
+          "regen",
+          "Regen",
           "REGEN Network",
-          "regen.network",
-          "RND",
+          "regen network",
           "Regen Network Development",
+          "Regen Network Development Inc",
           "Regen Network Inc",
+          "regen.network",
           "RegenNetwork",
-          "Regen Network Development Inc"
+          "RND"
         ],
         "canonical_uri": "https://regen.network",
         "entity_type": "ORGANIZATION",
         "confidence": 1.0,
         "occurrences": 911,
         "notes": "Primary organization behind Regen Ledger and Registry"
-      },
-      "regen": {
-        "canonical_name": "Regen",
-        "aliases": [
-          "regen",
-          "REGEN"
-        ],
-        "entity_type": "ORGANIZATION",
-        "confidence": 1.0,
-        "occurrences": 465
       },
       "regen-registry": {
         "canonical_name": "Regen Registry",
@@ -377,6 +369,16 @@
         "entity_type": "ORGANIZATION",
         "confidence": 1.0,
         "notes": "Carbon credit tokenization protocol"
+      },
+      "desci-labs": {
+        "canonical_name": "DeSci Labs AG",
+        "aliases": [
+          "DeSci Labs",
+          "DeSci"
+        ],
+        "entity_type": "ORGANIZATION",
+        "confidence": 1.0,
+        "notes": "DeSci Labs organization (AG)"
       }
     },
     "projects": {
@@ -409,32 +411,29 @@
       "$regen": {
         "canonical_name": "$Regen",
         "aliases": [
+          "$REGEN",
           "$regen",
-          "$REGEN"
+          "$REGEN Coin",
+          "$REGEN Token",
+          "$REGEN token",
+          "$Regen token",
+          "Regen Coin",
+          "REGEN Coin"
         ],
         "entity_type": "PROJECT",
         "confidence": 1.0,
         "occurrences": 138
       },
       "desci-publish": {
-        "canonical_name": "Desci Publish",
+        "canonical_name": "DeSci Publish",
         "aliases": [
-          "DeSci Publish",
-          "desci publish"
+          "DeSci Publi",
+          "desci publish",
+          "DeSci Publish"
         ],
         "entity_type": "PROJECT",
         "confidence": 1.0,
         "occurrences": 78
-      },
-      "regen-coin": {
-        "canonical_name": "Regen Coin",
-        "aliases": [
-          "REGEN coin",
-          "REGEN Coin"
-        ],
-        "entity_type": "PROJECT",
-        "confidence": 1.0,
-        "occurrences": 34
       },
       "regen-marketplace": {
         "canonical_name": "Regen Marketplace",
@@ -550,16 +549,6 @@
           "ecocredits",
           "ecoCredits",
           "EcoCredits"
-        ],
-        "entity_type": "PROJECT",
-        "confidence": 1.0,
-        "occurrences": 15
-      },
-      "$regen-token": {
-        "canonical_name": "$regen token",
-        "aliases": [
-          "$REGEN token",
-          "$REGEN Token"
         ],
         "entity_type": "PROJECT",
         "confidence": 1.0,
@@ -756,10 +745,19 @@
       "gregory-landua": {
         "canonical_name": "Gregory Landua",
         "aliases": [
+          "@gregory_landua",
+          "G. Landua",
+          "glandua",
+          "Greg",
           "Greg Landua",
-          "Gregory",
           "greg landua",
-          "Greg"
+          "Gregory",
+          "Gregory Landau",
+          "Gregory Regen",
+          "Gregory | RND INC",
+          "Gregory0",
+          "Gregory_RND",
+          "Landua"
         ],
         "entity_type": "PERSON",
         "confidence": 1.0,

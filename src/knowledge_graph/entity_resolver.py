@@ -41,7 +41,7 @@ class EntityResolver:
         self,
         db_config: Dict[str, Any],
         openai_api_key: str = None,
-        fuzzy_threshold: float = 0.95,
+        fuzzy_threshold: float = 0.88,
         embedding_model: str = "text-embedding-ada-002"
     ):
         """
@@ -60,6 +60,7 @@ class EntityResolver:
         self.uri_gen = DeterministicURIGenerator()
         self.fuzzy_threshold = fuzzy_threshold
         self.logger = logging.getLogger(__name__)
+        self._canonical_mappings = self._load_canonical_mappings()
 
         # OpenAI client for embeddings
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -74,6 +75,7 @@ class EntityResolver:
         # Statistics
         self.stats = {
             "tier1_exact_hits": 0,
+            "tier1_5_canonical_hits": 0,
             "tier2_semantic_hits": 0,
             "tier3_new_entities": 0,
             "race_condition_hits": 0,
@@ -83,6 +85,87 @@ class EntityResolver:
     def _get_connection(self):
         """Get a database connection."""
         return psycopg2.connect(**self.db_config)
+
+    def _load_canonical_mappings(self) -> Dict[str, str]:
+        """
+        Load canonical entity mappings from data/canonical_entities.json.
+
+        Returns:
+            Dict mapping (alias_lower, entity_type) -> canonical_name
+        """
+        try:
+            from pathlib import Path
+
+            canonical_path = Path(__file__).parents[2] / "data" / "canonical_entities.json"
+            if not canonical_path.exists():
+                self.logger.warning(f"Canonical mappings not found: {canonical_path}")
+                return {}
+
+            with open(canonical_path, "r") as f:
+                data = json.load(f)
+
+            lookup: Dict[str, str] = {}
+            for section, entities in data.get("entities", {}).items():
+                for _, entry in entities.items():
+                    canonical_name = entry.get("canonical_name")
+                    entity_type = entry.get("entity_type")
+                    aliases = entry.get("aliases", [])
+                    if not canonical_name or not entity_type:
+                        continue
+
+                    # Map canonical name
+                    lookup[(canonical_name.lower(), entity_type.upper())] = canonical_name
+                    # Map aliases
+                    for alias in aliases:
+                        lookup[(alias.lower(), entity_type.upper())] = canonical_name
+
+            self.logger.info(f"Loaded {len(lookup)} canonical mappings for Tier 1.5 resolution")
+            return lookup
+        except Exception as e:
+            self.logger.warning(f"Failed to load canonical mappings: {e}")
+            return {}
+
+    def _tier1_5_canonical_lookup(self, cursor, entity_text: str, entity_type: str):
+        """
+        Tier 1.5: Canonical mapping lookup using alias registry.
+
+        Returns:
+            (fuseki_uri, canonical_text) if found, else None
+        """
+        if not self._canonical_mappings:
+            return None
+
+        entity_type_upper = entity_type.upper()
+        canonical_name = self._canonical_mappings.get((entity_text.strip().lower(), entity_type_upper))
+        if not canonical_name:
+            return None
+
+        normalized_canonical = self.uri_gen.normalize_name(canonical_name)
+        cursor.execute(
+            """
+            SELECT fuseki_uri, entity_text, occurrence_count
+            FROM entity_registry
+            WHERE normalized_text = %s AND entity_type = %s
+            """,
+            (normalized_canonical, entity_type_upper),
+        )
+        match = cursor.fetchone()
+        if not match:
+            return None
+
+        uri, canonical_text, count = match
+        cursor.execute(
+            """
+            UPDATE entity_registry
+            SET occurrence_count = occurrence_count + 1,
+                last_seen_at = NOW()
+            WHERE fuseki_uri = %s
+            """,
+            (uri,),
+        )
+        self.stats["tier1_5_canonical_hits"] += 1
+        self.logger.debug(f"Tier 1.5 canonical: '{entity_text}' -> '{canonical_text}'")
+        return uri, canonical_text
 
     def get_or_create_entity(
         self,
@@ -144,6 +227,21 @@ class EntityResolver:
                     "uri": uri,
                     "matched": True,
                     "match_method": "tier1_exact",
+                    "match_score": 1.0,
+                    "entity_text": canonical_text
+                }
+
+            # -------------------------------------------------------------------
+            # TIER 1.5: CANONICAL MAPPING (deterministic alias resolution)
+            # -------------------------------------------------------------------
+            canonical_match = self._tier1_5_canonical_lookup(cursor, entity_text, entity_type_upper)
+            if canonical_match:
+                uri, canonical_text = canonical_match
+                conn.commit()
+                return {
+                    "uri": uri,
+                    "matched": True,
+                    "match_method": "tier1_5_canonical",
                     "match_score": 1.0,
                     "entity_text": canonical_text
                 }
@@ -347,6 +445,7 @@ class EntityResolver:
         """Get lookup statistics."""
         total = (
             self.stats["tier1_exact_hits"] +
+            self.stats["tier1_5_canonical_hits"] +
             self.stats["tier2_semantic_hits"] +
             self.stats["tier3_new_entities"]
         )
@@ -356,6 +455,7 @@ class EntityResolver:
                 **self.stats,
                 "total_lookups": 0,
                 "tier1_hit_rate": 0.0,
+                "tier1_5_hit_rate": 0.0,
                 "tier2_hit_rate": 0.0,
                 "tier3_new_rate": 0.0,
             }
@@ -364,6 +464,7 @@ class EntityResolver:
             **self.stats,
             "total_lookups": total,
             "tier1_hit_rate": round(self.stats["tier1_exact_hits"] / total, 4),
+            "tier1_5_hit_rate": round(self.stats["tier1_5_canonical_hits"] / total, 4),
             "tier2_hit_rate": round(self.stats["tier2_semantic_hits"] / total, 4),
             "tier3_new_rate": round(self.stats["tier3_new_entities"] / total, 4),
         }

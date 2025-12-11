@@ -18,6 +18,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
+import os
 
 try:
     from rdflib import Graph, Namespace, URIRef, Literal, RDF, RDFS, OWL, XSD

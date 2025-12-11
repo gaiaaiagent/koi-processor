@@ -1,0 +1,167 @@
+{
+  "summary": {
+    "documents": 20,
+    "jira_ids": {
+      "baseline": 6,
+      "improved": 0,
+      "reduction_pct": 100.0
+    },
+    "template_text": {
+      "baseline": 3,
+      "improved": 0,
+      "reduction_pct": 100.0
+    },
+    "placeholders": {
+      "baseline": 2,
+      "improved": 0,
+      "reduction_pct": 100.0
+    },
+    "chunk_repetition": {
+      "baseline_duplicates": 210,
+      "improved_duplicates": 10,
+      "reduction_pct": 95.24
+    }
+  },
+  "documents": [
+    {
+      "source_uri": "regen.github:github_regen-ledger_specs_rfcs_README.md#chunk2",
+      "baseline_entities": 2,
+      "improved_entities": 2,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "orn:web.page:docs.regen.network/7eab69da46c5391f#chunk0",
+      "baseline_entities": 16,
+      "improved_entities": 13,
+      "baseline_duplicates": 4,
+      "improved_duplicates": 1
+    },
+    {
+      "source_uri": "orn:web.page:regencommons.discourse.group/6749672d6a897dc4#chunk0",
+      "baseline_entities": 22,
+      "improved_entities": 9,
+      "baseline_duplicates": 12,
+      "improved_duplicates": 1
+    },
+    {
+      "source_uri": "regen.github:github_regen-ledger_x_ecocredit_spec_README.md#chunk5",
+      "baseline_entities": 4,
+      "improved_entities": 4,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "orn:web.page:regencommons.discourse.group/6749672d6a897dc4#chunk4",
+      "baseline_entities": 5,
+      "improved_entities": 3,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "orn:web.page:docs.regen.network/7eab69da46c5391f#chunk5",
+      "baseline_entities": 7,
+      "improved_entities": 4,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.github:github_koi-processor_PODCAST_MAP_SETUP.md#chunk0",
+      "baseline_entities": 2,
+      "improved_entities": 2,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.issue:regen-network/regen-web/issue/2737#chunk0",
+      "baseline_entities": 2,
+      "improved_entities": 0,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.issue:regen-network/regen-web/issue/2724#chunk0",
+      "baseline_entities": 5,
+      "improved_entities": 4,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.github:github_koi-processor_PODCAST_MAP_SETUP.md#chunk5",
+      "baseline_entities": 4,
+      "improved_entities": 4,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.issue:regen-network/regen-web/issue/2756#chunk2",
+      "baseline_entities": 5,
+      "improved_entities": 4,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.issue:regen-network/regen-web/issue/2665#chunk1",
+      "baseline_entities": 7,
+      "improved_entities": 6,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.issue:regen-network/regen-web/issue/2724#chunk2",
+      "baseline_entities": 2,
+      "improved_entities": 1,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.forum-post:forum.regen.network_297_post_1#chunk0",
+      "baseline_entities": 4,
+      "improved_entities": 4,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "regen.forum-post:forum.regen.network_345_post_1#chunk1",
+      "baseline_entities": 3,
+      "improved_entities": 3,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "orn:notion.page:regen/25425b77-eda1-80fc-89ae-f93d02be0eb3#chunk6",
+      "baseline_entities": 2,
+      "improved_entities": 1,
+      "baseline_duplicates": 0,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "orn:web.page:forum.regen.network/ddeed02c5688af6a#chunk0",
+      "baseline_entities": 153,
+      "improved_entities": 69,
+      "baseline_duplicates": 89,
+      "improved_duplicates": 6
+    },
+    {
+      "source_uri": "orn:notion.page:regen/25425b77-eda1-80a8-b05c-eeb9322f1843#chunk0",
+      "baseline_entities": 82,
+      "improved_entities": 35,
+      "baseline_duplicates": 49,
+      "improved_duplicates": 2
+    },
+    {
+      "source_uri": "orn:web.page:desci.com/2aac1a886912c206#chunk0",
+      "baseline_entities": 35,
+      "improved_entities": 7,
+      "baseline_duplicates": 28,
+      "improved_duplicates": 0
+    },
+    {
+      "source_uri": "orn:web.page:desci.com/fb0c10576f742e88#chunk0",
+      "baseline_entities": 35,
+      "improved_entities": 7,
+      "baseline_duplicates": 28,
+      "improved_duplicates": 0
+    }
+  ]
+}

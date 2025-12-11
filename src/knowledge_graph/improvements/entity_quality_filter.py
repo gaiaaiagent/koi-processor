@@ -335,6 +335,30 @@ class EntityQualityFilter:
     # Placeholder PERSON entities to drop
     PLACEHOLDER_PERSONS: Set[str] = {"public users", "unknown", "anonymous"}
 
+    # Generic group terms that should not be tagged as PERSON entities
+    GENERIC_GROUP_TERMS: Set[str] = {
+        # Economic actors
+        "buyers", "sellers", "traders", "investors", "stakeholders",
+        "partners", "sponsors", "funders", "donors", "backers",
+
+        # Organizational roles
+        "users", "members", "participants", "contributors", "volunteers",
+        "admins", "administrators", "moderators", "coordinators",
+        "validators", "delegators", "voters", "creators",
+
+        # Service providers
+        "utilities", "providers", "suppliers", "vendors", "contractors",
+        "developers", "builders", "consultants", "advisors",
+
+        # Community groups
+        "community", "communities", "groups", "teams", "organizations",
+        "networks", "alliances", "consortiums", "coalitions",
+
+        # Governance/management
+        "board", "committee", "council", "panel", "taskforce",
+        "staff", "employees", "workforce", "personnel",
+    }
+
     def __init__(self, config: Optional[FilterConfig] = None):
         """
         Initialize the entity quality filter.
@@ -373,6 +397,7 @@ class EntityQualityFilter:
                 'erc_standard': 0,
                 'boilerplate': 0,
                 'placeholder_person': 0,
+                'generic_group': 0,
             }
         }
 
@@ -531,13 +556,45 @@ class EntityQualityFilter:
 
     def is_boilerplate(self, name: str) -> bool:
         """Check if name matches known boilerplate/template phrases."""
-        return name.strip().lower() in self.BOILERPLATE_BLOCKLIST
+        normalized = name.strip().lower()
+        return any(phrase in normalized for phrase in self.BOILERPLATE_BLOCKLIST)
 
     def is_placeholder_person(self, name: str, entity_type: str) -> bool:
         """Check for placeholder PERSON entities like 'Public Users'."""
         if not entity_type or entity_type.upper() != 'PERSON':
             return False
         return name.strip().lower() in self.PLACEHOLDER_PERSONS
+
+    def is_generic_group(self, name: str, entity_type: str) -> bool:
+        """
+        Check for generic group terms that should not be PERSON entities.
+
+        Blocks: "Buyers", "Partners", "water utilities", "carbon credit buyers"
+        Allows: Proper person names.
+        """
+        if not entity_type or entity_type.upper() != 'PERSON':
+            return False
+
+        normalized = name.strip().lower()
+
+        # Standalone terms (e.g., "buyers", "partners")
+        if normalized in self.GENERIC_GROUP_TERMS:
+            return True
+
+        # Singular form of plural (e.g., "contributors" -> "contributor")
+        if normalized.endswith("s") and normalized[:-1] in self.GENERIC_GROUP_TERMS:
+            return True
+
+        # Compound terms: check last token ("water utilities", "carbon credit buyers")
+        parts = normalized.split()
+        if len(parts) >= 2:
+            last = parts[-1]
+            if last in self.GENERIC_GROUP_TERMS:
+                return True
+            if last.endswith("s") and last[:-1] in self.GENERIC_GROUP_TERMS:
+                return True
+
+        return False
 
     def exceeds_length_limits(self, name: str) -> bool:
         """
@@ -622,6 +679,10 @@ class EntityQualityFilter:
         if self.is_placeholder_person(name, entity_type):
             reasons.append("placeholder_person")
 
+        # 5.5 Generic group terms extracted as PERSON
+        if self.is_generic_group(name, entity_type):
+            reasons.append("generic_group")
+
         # 6. Template/ID patterns
         if self.is_erc_standard(name):
             reasons.append("erc_standard")
@@ -689,6 +750,10 @@ class EntityQualityFilter:
         # 5. Placeholder PERSON entities
         if self.is_placeholder_person(name, entity_type):
             return (False, "placeholder_person")
+
+        # 5.5 Generic group terms as PERSON
+        if self.is_generic_group(name, entity_type):
+            return (False, "generic_group")
 
         # 6. Template/ID patterns
         if self.is_erc_standard(name):
@@ -779,6 +844,7 @@ class EntityQualityFilter:
                 'erc_standard': 0,
                 'boilerplate': 0,
                 'placeholder_person': 0,
+                'generic_group': 0,
             }
         }
 

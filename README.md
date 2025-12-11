@@ -44,7 +44,7 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 
 ### 🎯 Knowledge Graph Quality (Dec 2025)
 
-**Status**: ✅ PHASE 3 COMPLETE | Quality: 99.7% | Tests: 121 passing | Dedup: 69.88%
+**Status**: ✅ PRODUCTION DEPLOYMENT v1.1 | Quality: 99.7% | Tests: 121 passing | Dedup: 70.10%
 
 Comprehensive three-phase quality improvement project completed successfully:
 
@@ -59,9 +59,10 @@ Comprehensive three-phase quality improvement project completed successfully:
   - Tier 1 (Exact): B-Tree index match (~microseconds) - 58.0% hit rate
   - Tier 2 (Semantic): pgvector HNSW + OpenAI embeddings (~milliseconds) - 10.6% hit rate
   - Tier 3 (New): Insert new entities - 31.4% new entities
-- **Production Stats** (as of 2025-12-10):
-  - **13,227 unique entities** from 43,909 raw entity mentions
-  - **69.88% deduplication rate** (target: 65-75%)
+- **Production Stats** (as of 2025-12-11):
+  - **12,985 unique entities** from 43,430 raw entity mentions
+  - **70.10% deduplication rate** (target: 65-75%)
+  - **64,925 RDF triples** (Fuseki knowledge graph deployed)
   - **Zero type collisions** (all type mismatches resolved)
   - **Zero placeholder entities** (all "Unknown"/"Anonymous" removed)
   - **Zero errors** in production
@@ -85,6 +86,7 @@ valid_entities = kg.process_entities_batch(entities)
 ```
 
 **Documentation**:
+- [PRODUCTION_DEPLOYMENT_SUMMARY.md](PRODUCTION_DEPLOYMENT_SUMMARY.md) - Production deployment status & rollback procedures
 - [prompts/ALL_PROMPTS_SUMMARY.md](prompts/ALL_PROMPTS_SUMMARY.md) - Complete project workflow
 - [CLAUDE.md](CLAUDE.md) - Current project context
 

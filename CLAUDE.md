@@ -57,6 +57,18 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
    - Final state: 13,227 unique entities, 43,909 mentions, 69.88% dedup
    - Quality: Production-ready with zero errors
 
+6. ✅ Batch Semantic Consolidation (PROMPT_30) - COMPLETE 2025-12-10:
+   - Semantic clustering (0.88 threshold): 189 entities merged
+   - Domain expert review: 9 false positives split, 2 keeps validated
+   - Final state: 12,985 unique entities, 43,430 mentions, 70.10% dedup
+   - Quality: Zero type collisions, production-ready
+
+7. ✅ Knowledge Graph Deployment (2025-12-11):
+   - Fuseki graph regenerated from entity_registry
+   - PostgreSQL → RDF export: 12,985 entities → 64,925 triples
+   - Graph synchronized (PostgreSQL + Fuseki)
+   - Production endpoints: http://localhost:3030/koi
+
 ---
 
 ## Key Files
@@ -67,6 +79,7 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 - `ALL_PROMPTS_SUMMARY.md` - Complete project history summary
 - `PROMPT_24_PIPELINE_IMPROVEMENTS_QUALITY_FIXES.md` - Quality improvements (JIRA/boilerplate/dedup)
 - `PROMPT_27_ENTITY_REGISTRY_CONSOLIDATION.md` - Type fixes + semantic consolidation
+- `PROMPT_30_BATCH_CONSOLIDATION_REVIEW.md` - Batch semantic consolidation + user review
 
 **Archived Prompts** (`prompts/archive/`):
 - `PROMPT_1-23` - Phase 1-3 implementation history (21 prompts)
@@ -185,9 +198,10 @@ ssh darren@202.61.196.119 "curl -s 'http://localhost:3030/koi/sparql' --data-url
 ## Important Notes
 
 ### Production Safety
-- ✅ Backups exist (651MB PostgreSQL + 3.6MB Fuseki)
-- ✅ Rollback procedure documented
+- ✅ Backups exist (767MB PostgreSQL + 3.6MB Fuseki)
+- ✅ Rollback procedure documented (PRODUCTION_DEPLOYMENT_SUMMARY.md:218-232)
 - ✅ Both pipeline and legacy modes work
+- ✅ Knowledge graph synchronized (PostgreSQL ↔ Fuseki)
 - ⚠️ Always backup before re-extraction
 
 ### Code Quality
@@ -223,9 +237,10 @@ ssh darren@202.61.196.119 "curl -s 'http://localhost:3030/koi/sparql' --data-url
 
 ---
 
-**Last Updated**: 2025-12-10
-**Phase**: Phase 3 COMPLETE
-**Status**: ✅ PRODUCTION READY
-**Entity Registry**: 13,227 unique entities, 43,909 mentions, 69.88% dedup rate
+**Last Updated**: 2025-12-11
+**Phase**: Production Deployment v1.1
+**Status**: ✅ PRODUCTION READY + DEPLOYED
+**Entity Registry**: 12,985 unique entities, 43,430 mentions, 70.10% dedup rate
+**Knowledge Graph**: 64,925 RDF triples (Fuseki synchronized)
 **Quality**: Zero type collisions, zero placeholders, zero errors
-**Systems**: Tier 1+2 dedup active, all pipeline modules operational
+**Systems**: Tier 1+2 dedup active, all pipeline modules operational, Fuseki graph deployed

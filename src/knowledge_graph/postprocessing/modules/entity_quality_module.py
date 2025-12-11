@@ -179,7 +179,7 @@ class EntityQualityFilterModule(PostProcessingModule):
             reasons.append("jira_issue_id")
 
         # Known boilerplate phrases
-        if normalized_lower in self._boilerplate_blocklist:
+        if any(phrase in normalized_lower for phrase in self._boilerplate_blocklist):
             reasons.append("boilerplate")
 
         # Generic pattern check
