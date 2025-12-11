@@ -1,8 +1,8 @@
 # Project Context for Claude
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
-**Current Phase**: Phase 3 PAUSED - Implementing Cross-Document Deduplication
-**Status**: CRITICAL - Extraction stopped at 300/4,710 docs
+**Current Phase**: Phase 3 COMPLETE - Production Ready
+**Status**: ✅ ALL SYSTEMS OPERATIONAL
 **Your Role**: AI coding assistant helping with knowledge graph quality
 
 ---
@@ -20,67 +20,60 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 
 ## Current State
 
-### ✅ Complete (Phases 1-2)
+### ✅ Complete (All Phases)
+
+**Phase 1-2** (Quality & Pipeline):
 - Quality filters (EntityQualityFilter, CanonicalResolver)
 - Pipeline framework (5 modules, 121 tests)
 - Graph integration (pipeline + legacy modes)
 - Production deployment (zero errors)
 
-### ⚠️ CURRENT CRITICAL ISSUE (2025-12-09)
+**Phase 3** (Cross-Document Deduplication) - COMPLETE 2025-12-10:
+1. ✅ Investigation & Design (PROMPT_19-21)
+   - Discovered pgvector infrastructure
+   - Implemented 3-tier deduplication waterfall
+   - 35 tests passing, A+ code quality grade
 
-**Extraction STOPPED**: GitHub extraction paused at 300/4,710 docs
+2. ✅ Infrastructure Deployment (PROMPT_21-22)
+   - Tier 1 (Exact): B-Tree index matching (microseconds)
+   - Tier 2 (Semantic): pgvector + OpenAI embeddings (milliseconds)
+   - Tier 3 (New): Insert new entities
+   - Backfill: 76.8% dedup rate achieved
 
-**Reason**: Critical gap discovered - no cross-document entity deduplication
+3. ✅ Quality Improvements (PROMPT_24)
+   - EntityQualityFilter: JIRA/boilerplate/placeholder blocking
+   - DocumentDedupModule: Prevents chunk repetition
+   - CanonicalResolver: Type mismatch handling + Regen brand terms
+   - Validation: 100% JIRA reduction, 95% chunk dedup
 
-**Problem**:
-- "Regen Network" + "Regen" + "REGEN" + "$REGEN" = 2,261 duplicate entries
-- "Gregory Landua" + "Gregory" + "Gregory_RND" = 290 duplicate entries
-- ~30-40% entity fragmentation across knowledge graph
+4. ✅ Full Re-extraction (PROMPT_26)
+   - Re-extracted 878 Discourse + GitHub Issues documents
+   - Applied all PROMPT_24 improvements
+   - Result: ALL bad entities eliminated (0 occurrences)
 
-**Solution**: pgvector-based semantic deduplication (PROMPT_21)
-
-**Action Items**:
-1. ✅ Investigation complete (PROMPT_19) - Initial findings
-2. ✅ Comprehensive investigation (PROMPT_20) - yonearth modules documented
-3. ✅ **Graph insertion strategy** (PROMPT_20B) - yonearth uses batch model, not incremental
-4. ✅ **pgvector investigation** - Discovered existing infrastructure, revised architecture
-5. ✅ **Implement pgvector deduplication** (PROMPT_21) - COMPLETE (35 tests passing, A+ grade)
-6. ✅ **Backfill existing entities** (PROMPT_22) - COMPLETE (76.8% dedup, 29,577 → 6,842 unique)
-7. ✅ **Fix .env loading** - Added load_dotenv() to backfill script (Tier 2 now enabled)
-8. 🔄 **Resume GitHub extraction** (PROMPT_23) - READY (4,410 docs remaining, ~5-7 hours)
-
-### 🎯 Phase 3 Status
-- ✅ Re-extraction: 1,016 docs complete (97.63% quality)
-- ✅ Fresh extraction: Discourse (839), YouTube (15), GitLab (200), GitHub Activity (51)
-- 🟡 Fresh extraction: GitHub Markdown (300/4,710) - **PAUSED**
+5. ✅ Entity Consolidation (PROMPT_27)
+   - Fixed type mismatches: 678 merges, 0 collisions remaining
+   - Enabled Tier 2 semantic dedup: 68.6% dedup rate
+   - Final state: 13,227 unique entities, 43,909 mentions, 69.88% dedup
+   - Quality: Production-ready with zero errors
 
 ---
 
 ## Key Files
 
 ### Prompts (How We Got Here)
-All in root directory:
-- `PROMPT_1_KG_QUALITY_REVIEW.md` - Initial quality audit
-- `PROMPT_2_EXTRACTION_METHOD_IMPROVEMENT.md` - Investigation & design
-- `PROMPT_3_PHASE1_IMPLEMENTATION.md` - Quality filters implementation
-- `PROMPT_4_WEEK1_PRODUCTION_DEPLOYMENT.md` - Cleanup & deployment
-- `PROMPT_5_PHASE2A_CONFIDENCE_FILTERING.md` - Confidence filtering
-- `PROMPT_6_PHASE2B_PIPELINE_FRAMEWORK.md` - Pipeline framework
-- `PROMPT_7_GRAPH_INTEGRATION.md` - Graph integration
-- `PROMPT_18_FRESH_EXTRACTION_EXECUTION.md` - Fresh document extraction
-- `PROMPT_19_DEDUPLICATION_INVESTIGATION.md` - Initial dedup gap investigation
-- `PROMPT_20_COMPREHENSIVE_DEDUP_INVESTIGATION.md` - ✅ Complete yonearth module analysis
-- `PROMPT_20B_GRAPH_INSERTION_INVESTIGATION.md` - ✅ Graph-as-registry investigation
-- `PGVECTOR_INVESTIGATION_FINDINGS.md` - ✅ pgvector infrastructure analysis
-- `PROMPT_21_IMPLEMENT_PGVECTOR_DEDUPLICATION.md` - ✅ **COMPLETE** - pgvector dedup (35 tests, A+ grade)
-- `PROMPT_21_OLD_JENA_TEXT_APPROACH.md` - Archived: Original Jena Text approach
-- `EXPERT_FEEDBACK_INCORPORATED.md` - ✅ Expert review changes (A- → A+)
-- `PROMPT_22_BACKFILL_EXISTING_ENTITIES.md` - ✅ **COMPLETE** - Backfill (76.8% dedup, 29,577 → 6,842)
-- `BACKFILL_RESULTS_ANALYSIS.md` - ✅ Analysis of backfill results
-- `BACKFILL_DOTENV_FIX.md` - ✅ Fix for .env loading issue (Tier 2 now enabled)
-- `PROMPT_23_RESUME_GITHUB_EXTRACTION.md` - **READY** - Resume extraction (4,410 docs, 5-7 hours)
 
-**Summary**: `ALL_PROMPTS_SUMMARY.md`
+**Active Prompts** (`prompts/`):
+- `ALL_PROMPTS_SUMMARY.md` - Complete project history summary
+- `PROMPT_24_PIPELINE_IMPROVEMENTS_QUALITY_FIXES.md` - Quality improvements (JIRA/boilerplate/dedup)
+- `PROMPT_27_ENTITY_REGISTRY_CONSOLIDATION.md` - Type fixes + semantic consolidation
+
+**Archived Prompts** (`prompts/archive/`):
+- `PROMPT_1-23` - Phase 1-3 implementation history (21 prompts)
+- Supporting docs: Investigation findings, expert feedback, analysis reports
+
+**Key Reports** (`reports/phase3/`):
+- Production server only - generated during execution
 
 ### Code
 Main codebase: `koi-processor/`
@@ -231,5 +224,8 @@ ssh darren@202.61.196.119 "curl -s 'http://localhost:3030/koi/sparql' --data-url
 ---
 
 **Last Updated**: 2025-12-10
-**Phase**: Phase 3 - Cross-Document Deduplication
-**Status**: Infrastructure COMPLETE (A+ grade) - PROMPT_23 ready for execution (4,410 docs, 5-7 hours)
+**Phase**: Phase 3 COMPLETE
+**Status**: ✅ PRODUCTION READY
+**Entity Registry**: 13,227 unique entities, 43,909 mentions, 69.88% dedup rate
+**Quality**: Zero type collisions, zero placeholders, zero errors
+**Systems**: Tier 1+2 dedup active, all pipeline modules operational
