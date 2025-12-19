@@ -276,24 +276,50 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
       : '';
 
+    // UNION query to search both legacy (koi_embeddings) and new (koi_memory_chunks) tables
     const searchQuery = `
-      SELECT
-        m.rid,
-        m.content->>'text' as content,
-        m.metadata->>'source' as source,
-        m.metadata->>'url' as url,
-        e.dim_1024 <=> $1::vector as distance,
-        1 - (e.dim_1024 <=> $1::vector) as similarity,
-        m.published_at
-      FROM koi_memories m
-      JOIN koi_embeddings e ON e.memory_id = m.id
-      WHERE
-        e.dim_1024 IS NOT NULL
-        AND m.content->>'text' IS NOT NULL
-        AND LENGTH(m.content->>'text') > 50
-        ${andDate}
-        ${privacyFilter}
-      ORDER BY e.dim_1024 <=> $1::vector
+      WITH combined_results AS (
+        -- Legacy embeddings (koi_embeddings)
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          1 - (e.dim_1024 <=> $1::vector) as similarity,
+          m.published_at,
+          'legacy' as embedding_source
+        FROM koi_memories m
+        JOIN koi_embeddings e ON e.memory_id = m.id
+        WHERE
+          e.dim_1024 IS NOT NULL
+          AND m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          ${andDate}
+          ${privacyFilter}
+        
+        UNION ALL
+        
+        -- New chunked embeddings (koi_memory_chunks) for YouTube, etc.
+        SELECT
+          mc.chunk_rid as rid,
+          mc.content->>'text' as content,
+          parent.metadata->>'source' as source,
+          parent.metadata->>'url' as url,
+          1 - (mc.embedding <=> $1::vector) as similarity,
+          parent.published_at,
+          'chunks' as embedding_source
+        FROM koi_memory_chunks mc
+        JOIN koi_memories parent ON mc.document_rid = parent.rid
+        WHERE
+          mc.embedding IS NOT NULL
+          AND mc.content->>'text' IS NOT NULL
+          AND LENGTH(mc.content->>'text') > 50
+          ${andDate.replace(/m\./g, 'parent.')}
+          ${privacyFilter.replace(/m\./g, 'parent.')}
+      )
+      SELECT rid, content, source, url, similarity, published_at, embedding_source
+      FROM combined_results
+      ORDER BY similarity DESC
       LIMIT $${params.length + 1}
     `;
 
@@ -337,7 +363,7 @@ async function triggerAdaptiveExtraction(
     };
 
     // Call Python adaptive extraction service
-    const response = await fetch('http://localhost:8350/extract', {
+    const response = await fetch('http://localhost:8351/extract', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

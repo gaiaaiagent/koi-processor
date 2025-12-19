@@ -81,7 +81,7 @@ OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
 # Initialize semantic extraction components
 # Use OpenAI GPT-4o-mini for extraction instead of Ollama
 llm_extractor = OpenAIExtractor(
-    model="gpt-4o-mini",
+    model=os.getenv('OPENAI_EXTRACT_MODEL', 'gpt-4o-mini'),
     use_batch_api=False  # Set to True for batch processing
 )
 

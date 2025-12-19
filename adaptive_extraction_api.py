@@ -193,7 +193,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "adaptive_extraction_api:app",
         host="0.0.0.0",
-        port=8350,
+        port=8351,
         reload=True,
         log_level="info"
     )

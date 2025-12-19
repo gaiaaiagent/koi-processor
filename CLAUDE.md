@@ -1,58 +1,41 @@
 # Project Context for Claude
 
-**Project**: Regen Network Knowledge Graph Quality Improvement
-**Current Phase**: Phase 3 PAUSED - Implementing Cross-Document Deduplication
-**Status**: CRITICAL - Extraction stopped at 300/4,710 docs
-**Your Role**: AI coding assistant helping with knowledge graph quality
+**Project**: Regen Network Knowledge Graph & RAG System
+**Current Phase**: RAG Search Working, Entity Extraction Enhancement Pending
+**Status**: YouTube searchable via RAG, Jena extraction needs schema work
+**Your Role**: AI coding assistant for KOI knowledge infrastructure
 
 ---
 
 ## What This Project Is
 
-Improving the quality of Regen Network's knowledge graph (KOI system) through:
-1. Better entity extraction
-2. Modular post-processing pipeline
-3. Quality control filters
+The KOI (Knowledge Organization Infrastructure) system for Regen Network:
+1. **Document ingestion** via sensors (YouTube, GitHub, Discourse, etc.)
+2. **Vector embeddings** for semantic search (RAG)
+3. **Entity extraction** to knowledge graphs (Apache AGE for code, Jena for general)
+4. **Quality pipeline** with filters and normalization
 
-**Result**: Quality improved from 62% → 99.7%
+**Quality Result**: 62% → 99.7% entity quality
 
 ---
 
-## Current State
+## Current State (2025-12-19)
 
-### ✅ Complete (Phases 1-2)
+### ✅ Recently Completed
+- **YouTube Transcription Fixed**: Scribe API parsing corrected (`transcript_text` field)
+- **RAG Search UNION**: Queries both `koi_embeddings` (49K) and `koi_memory_chunks` (1K+)
+- **YouTube Searchable**: "Karl Friston active inference" returns YouTube chunks
+- **Service Ports Separated**: Code Graph (8350), Adaptive Extraction (8351), Hybrid RAG (8301)
+
+### 🔄 In Progress
+- **Jena Entity Extraction**: Schema mismatches blocking extraction
+- See `docs/ADAPTIVE_EXTRACTION_SCHEMA_TODO.md` for details
+
+### ✅ Previously Complete (Phases 1-3)
 - Quality filters (EntityQualityFilter, CanonicalResolver)
 - Pipeline framework (5 modules, 121 tests)
-- Graph integration (pipeline + legacy modes)
-- Production deployment (zero errors)
-
-### ⚠️ CURRENT CRITICAL ISSUE (2025-12-09)
-
-**Extraction STOPPED**: GitHub extraction paused at 300/4,710 docs
-
-**Reason**: Critical gap discovered - no cross-document entity deduplication
-
-**Problem**:
-- "Regen Network" + "Regen" + "REGEN" + "$REGEN" = 2,261 duplicate entries
-- "Gregory Landua" + "Gregory" + "Gregory_RND" = 290 duplicate entries
-- ~30-40% entity fragmentation across knowledge graph
-
-**Solution**: pgvector-based semantic deduplication (PROMPT_21)
-
-**Action Items**:
-1. ✅ Investigation complete (PROMPT_19) - Initial findings
-2. ✅ Comprehensive investigation (PROMPT_20) - yonearth modules documented
-3. ✅ **Graph insertion strategy** (PROMPT_20B) - yonearth uses batch model, not incremental
-4. ✅ **pgvector investigation** - Discovered existing infrastructure, revised architecture
-5. ✅ **Implement pgvector deduplication** (PROMPT_21) - COMPLETE (35 tests passing, A+ grade)
-6. ✅ **Backfill existing entities** (PROMPT_22) - COMPLETE (76.8% dedup, 29,577 → 6,842 unique)
-7. ✅ **Fix .env loading** - Added load_dotenv() to backfill script (Tier 2 now enabled)
-8. 🔄 **Resume GitHub extraction** (PROMPT_23) - READY (4,410 docs remaining, ~5-7 hours)
-
-### 🎯 Phase 3 Status
-- ✅ Re-extraction: 1,016 docs complete (97.63% quality)
-- ✅ Fresh extraction: Discourse (839), YouTube (15), GitLab (200), GitHub Activity (51)
-- 🟡 Fresh extraction: GitHub Markdown (300/4,710) - **PAUSED**
+- pgvector deduplication (76.8% dedup, 29,577 → 6,842 unique)
+- Cross-document entity resolution
 
 ---
 
@@ -103,16 +86,29 @@ Main codebase: `koi-processor/`
 
 ## Production Environment
 
-**Server**: `darren@202.61.196.119:5433`
-**Database**: PostgreSQL (eliza)
-**Graph**: Apache Jena Fuseki (http://localhost:3030/koi)
-**Pipeline Status**: ACTIVE (default mode)
+**Server**: `darren@202.61.196.119`
+**Database**: PostgreSQL on port 5433 (database: eliza)
+
+### Service Ports
+| Service | Port | Purpose |
+|---------|------|---------|
+| Coordinator | 8005 | Event routing from sensors |
+| Semantic Bridge | 8004 | Event processing, embeddings |
+| Hybrid RAG API | 8301 | Unified search (koi-query-api.ts) |
+| Code Graph Service | 8350 | GitHub code → Apache AGE |
+| Adaptive Extraction | 8351 | General entities → Jena |
+| Apache Jena Fuseki | 3030 | Knowledge graph (SPARQL) |
+| BGE Embedding Server | 8090 | Text embeddings |
+
+### Databases
+- **PostgreSQL + pgvector**: Document embeddings (`koi_embeddings`, `koi_memory_chunks`)
+- **PostgreSQL + Apache AGE**: Code entity graph (`regen_graph`)
+- **Apache Jena Fuseki**: General knowledge graph (155K triples)
 
 **Metrics**:
 - Quality: 99.7%
 - Tests: 121/121 passing
-- Performance: < 1% overhead
-- Documents: 3,497 processed
+- YouTube docs: 47 videos, 1,068 chunks with transcripts
 
 ---
 
@@ -230,6 +226,6 @@ ssh darren@202.61.196.119 "curl -s 'http://localhost:3030/koi/sparql' --data-url
 
 ---
 
-**Last Updated**: 2025-12-10
-**Phase**: Phase 3 - Cross-Document Deduplication
-**Status**: Infrastructure COMPLETE (A+ grade) - PROMPT_23 ready for execution (4,410 docs, 5-7 hours)
+**Last Updated**: 2025-12-19
+**Phase**: RAG Search Complete, Entity Extraction Enhancement
+**Status**: YouTube searchable via RAG UNION query. Jena extraction pending schema fixes.
