@@ -1,0 +1,35 @@
+# PROMPT_24 Validation Report
+
+- Documents evaluated: 20
+
+## Quality Metrics
+| Metric | Baseline | Improved | Reduction |
+|--------|----------|----------|-----------|
+| JIRA IDs | 6 | 0 | 100.0% |
+| Template text | 3 | 0 | 100.0% |
+| Placeholders | 2 | 0 | 100.0% |
+| Duplicate claims | 210 | 10 | 95.24% |
+
+## Per-document Duplicate Claims
+| Source URI | Baseline Duplicates | Improved Duplicates |
+|------------|---------------------|----------------------|
+| regen.github:github_regen-ledger_specs_rfcs_README.md#chunk2 | 0 | 0 |
+| orn:web.page:docs.regen.network/7eab69da46c5391f#chunk0 | 4 | 1 |
+| orn:web.page:regencommons.discourse.group/6749672d6a897dc4#chunk0 | 12 | 1 |
+| regen.github:github_regen-ledger_x_ecocredit_spec_README.md#chunk5 | 0 | 0 |
+| orn:web.page:regencommons.discourse.group/6749672d6a897dc4#chunk4 | 0 | 0 |
+| orn:web.page:docs.regen.network/7eab69da46c5391f#chunk5 | 0 | 0 |
+| regen.github:github_koi-processor_PODCAST_MAP_SETUP.md#chunk0 | 0 | 0 |
+| regen.issue:regen-network/regen-web/issue/2737#chunk0 | 0 | 0 |
+| regen.issue:regen-network/regen-web/issue/2724#chunk0 | 0 | 0 |
+| regen.github:github_koi-processor_PODCAST_MAP_SETUP.md#chunk5 | 0 | 0 |
+| regen.issue:regen-network/regen-web/issue/2756#chunk2 | 0 | 0 |
+| regen.issue:regen-network/regen-web/issue/2665#chunk1 | 0 | 0 |
+| regen.issue:regen-network/regen-web/issue/2724#chunk2 | 0 | 0 |
+| regen.forum-post:forum.regen.network_297_post_1#chunk0 | 0 | 0 |
+| regen.forum-post:forum.regen.network_345_post_1#chunk1 | 0 | 0 |
+| orn:notion.page:regen/25425b77-eda1-80fc-89ae-f93d02be0eb3#chunk6 | 0 | 0 |
+| orn:web.page:forum.regen.network/ddeed02c5688af6a#chunk0 | 89 | 6 |
+| orn:notion.page:regen/25425b77-eda1-80a8-b05c-eeb9322f1843#chunk0 | 49 | 2 |
+| orn:web.page:desci.com/2aac1a886912c206#chunk0 | 28 | 0 |
+| orn:web.page:desci.com/fb0c10576f742e88#chunk0 | 28 | 0 |

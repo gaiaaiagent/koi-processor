@@ -1,6 +1,0 @@
-# KOI Processor Scheduled Tasks - Milestone B
-# Daily curator runs at 12:00 ET (17:00 UTC) Monday-Friday
-0 17 * * 1-5 /opt/projects/koi-processor/scripts/cron_daily_curator.sh >> /opt/projects/koi-processor/logs/daily_curator_cron.log 2>&1
-
-# Weekly aggregator runs at 14:00 ET (19:00 UTC) on Fridays
-0 19 * * 5 /opt/projects/koi-processor/scripts/cron_weekly_aggregator.sh >> /opt/projects/koi-processor/logs/weekly_aggregator_cron.log 2>&1

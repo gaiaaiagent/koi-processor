@@ -136,17 +136,116 @@ class OntologyLLMExtractor:
         content_snippet = content[:1500] if len(content) > 1500 else content
 
         # Ultra-simplified prompt for Mistral 7B
-        prompt = f"""Extract from: {content_snippet[:500]}
+        prompt = f"""Extract structured data from this {source_type} content.
 
-Return JSON:
+CONTENT:
+{content_snippet}
+
+Extract and return JSON with:
+1. Metadata fields with confidence scores (0.0-1.0)
+2. Entities based on Regen ontology (HumanActor/PERSON, ORGANIZATION, PROJECT, CONCEPT, TECHNOLOGY, CLAIM, EVIDENCE, QUESTION)
+3. Relationships between entities
+4. Summary
+
+JSON structure required:
 {{
   "metadata": {{
-    "title": {{"value": "extracted title"}},
-    "author": {{"value": "author name"}}
+    "title": {{"value": "...", "confidence": 0.9}},
+    "author": {{"value": "...", "confidence": 0.8}},
+    "published_date": {{"value": "ISO date", "confidence": 0.7}},
+    "organization": {{"value": "...", "confidence": 0.6}},
+    "tags": {{"value": ["tag1", "tag2"], "confidence": 0.8}}
   }},
-  "entities": [],
-  "summary": "one line"
-}}"""
+  "entities": [
+    {{"type": "PERSON", "name": "...", "confidence": 0.9}},
+    {{"type": "ORGANIZATION", "name": "...", "confidence": 0.9}},
+    {{"type": "PROJECT", "name": "...", "confidence": 0.9}},
+    {{"type": "CONCEPT", "name": "...", "confidence": 0.9}},
+    {{"type": "TECHNOLOGY", "name": "...", "confidence": 0.9}},
+    {{"type": "CLAIM", "name": "...", "confidence": 0.8}},
+    {{"type": "EVIDENCE", "name": "...", "confidence": 0.8}},
+    {{"type": "QUESTION", "name": "...", "confidence": 0.8}}
+  ],
+  "relationships": [
+    {{"subject": "entity1", "predicate": "supports", "object": "entity2"}}
+  ],
+  "summary": "one sentence summary"
+}}
+
+Focus on regenerative finance, ecological, and commons-oriented content.
+Return ONLY valid JSON, no additional text.
+
+## Entity Type Selection Guidelines
+
+CONCEPT vs PROJECT:
+- CONCEPT: Abstract ideas, methodologies, frameworks, theories, movements.
+  Examples: "regenerative agriculture", "proof of stake", "tokenomics", "MRV", "carbon sequestration"
+  NOT: Specific organizations or projects implementing the idea.
+- PROJECT: Concrete initiatives, platforms, software, named programs.
+  Examples: "Regen Ledger" (software), "Koi Project" (initiative), "DeSci Publish" (platform)
+  NOT: General concepts like "blockchain" or "carbon credits"
+- Rule: If abstract → CONCEPT. If named implementation → PROJECT/ORGANIZATION.
+
+PERSON vs GROUP:
+- PERSON: Named individuals with proper names.
+  Examples: "Gregory Landua", "Sarah Bax", "Will Szal"
+- DO NOT EXTRACT as PERSON:
+  - Generic groups: "buyers", "sellers", "partners", "users", "members", "contributors"
+  - Plural collectives: "stakeholders", "participants", "investors", "validators"
+  - Roles without names: "administrators", "developers", "moderators"
+  - Utilities/services: "water utilities", "providers", "suppliers"
+  → Extract as ORGANIZATION or omit entirely.
+
+LOCATION vs PROJECT:
+- Country codes (UK, US, EU, CA, AU) → LOCATION/ORGANIZATION as context; never PROJECT.
+
+LICENSE/STANDARD as CONCEPT:
+- Licenses: "Apache License", "MIT License"
+- Technical standards: "ERC-20", "ERC-721" (as standards, not projects)
+
+## Extraction Quality Rules
+
+DO NOT EXTRACT:
+- Pronouns (we, they, it, our, their)
+- Generic nouns (people, user, member, organization)
+- JIRA IDs (APP-776, ERC-123)
+- Template text ("Testing Instructions", "Acceptance Criteria", "DRY Principles")
+- Placeholders ("Unknown", "Anonymous", "Public Users", "TBD")
+- Technical paths (app.regen.claim, api.regen.network)
+- Pure numbers (2030, 35)
+- URLs or code identifiers
+
+Confidence Scoring:
+- HIGH (0.85-1.0): Explicit named mention ("Regen Network announced...")
+- MEDIUM (0.70-0.84): Implied/contextual ("the network launched...")
+- LOW (<0.70): DO NOT EXTRACT (skip)
+
+## Few-Shot Examples
+
+Example 1: Governance Discussion
+Input: "Gregory Landua and Sarah Bax discussed regenerative agriculture principles at the Regen Network community meeting."
+Extract:
+- "Gregory Landua" (PERSON, 0.95)
+- "Sarah Bax" (PERSON, 0.95)
+- "regenerative agriculture" (CONCEPT, 0.90)
+- "Regen Network" (ORGANIZATION, 0.95)
+Do NOT extract: "community", "meeting"
+
+Example 2: Technical Documentation
+Input: "The Regen Ledger blockchain uses proof of stake consensus. Carbon credits are tokenized as ERC-20 compatible assets."
+Extract:
+- "Regen Ledger" (TECHNOLOGY, 0.95)
+- "proof of stake" (CONCEPT, 0.90)
+- "carbon credits" (CONCEPT, 0.85)
+- "ERC-20" (CONCEPT, 0.80)
+Do NOT extract: "blockchain", "consensus", "assets"
+
+Example 3: Project Template
+Input: "Testing Instructions: Verify APP-776 implements DRY principles. Acceptance Criteria: All buyers can purchase credits."
+Extract:
+- NOTHING (template/boilerplate)
+Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
+"""
 
         return prompt
 

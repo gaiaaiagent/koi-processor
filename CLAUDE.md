@@ -32,38 +32,72 @@ The KOI (Knowledge Organization Infrastructure) system for Regen Network:
 - See `docs/ADAPTIVE_EXTRACTION_SCHEMA_TODO.md` for details
 
 ### ✅ Previously Complete (Phases 1-3)
+
+**Phase 1-2** (Quality & Pipeline):
 - Quality filters (EntityQualityFilter, CanonicalResolver)
 - Pipeline framework (5 modules, 121 tests)
-- pgvector deduplication (76.8% dedup, 29,577 → 6,842 unique)
-- Cross-document entity resolution
+- Graph integration (pipeline + legacy modes)
+- Production deployment (zero errors)
+
+**Phase 3** (Cross-Document Deduplication) - COMPLETE 2025-12-10:
+1. ✅ Investigation & Design (PROMPT_19-21)
+   - Discovered pgvector infrastructure
+   - Implemented 3-tier deduplication waterfall
+   - 35 tests passing, A+ code quality grade
+
+2. ✅ Infrastructure Deployment (PROMPT_21-22)
+   - Tier 1 (Exact): B-Tree index matching (microseconds)
+   - Tier 2 (Semantic): pgvector + OpenAI embeddings (milliseconds)
+   - Tier 3 (New): Insert new entities
+   - Backfill: 76.8% dedup rate achieved
+
+3. ✅ Quality Improvements (PROMPT_24)
+   - EntityQualityFilter: JIRA/boilerplate/placeholder blocking
+   - DocumentDedupModule: Prevents chunk repetition
+   - CanonicalResolver: Type mismatch handling + Regen brand terms
+   - Validation: 100% JIRA reduction, 95% chunk dedup
+
+4. ✅ Full Re-extraction (PROMPT_26)
+   - Re-extracted 878 Discourse + GitHub Issues documents
+   - Applied all PROMPT_24 improvements
+   - Result: ALL bad entities eliminated (0 occurrences)
+
+5. ✅ Entity Consolidation (PROMPT_27)
+   - Fixed type mismatches: 678 merges, 0 collisions remaining
+   - Enabled Tier 2 semantic dedup: 68.6% dedup rate
+   - Final state: 13,227 unique entities, 43,909 mentions, 69.88% dedup
+   - Quality: Production-ready with zero errors
+
+6. ✅ Batch Semantic Consolidation (PROMPT_30) - COMPLETE 2025-12-10:
+   - Semantic clustering (0.88 threshold): 189 entities merged
+   - Domain expert review: 9 false positives split, 2 keeps validated
+   - Final state: 12,985 unique entities, 43,430 mentions, 70.10% dedup
+   - Quality: Zero type collisions, production-ready
+
+7. ✅ Knowledge Graph Deployment (2025-12-11):
+   - Fuseki graph regenerated from entity_registry
+   - PostgreSQL → RDF export: 12,985 entities → 64,925 triples
+   - Graph synchronized (PostgreSQL + Fuseki)
+   - Production endpoints: http://localhost:3030/koi
 
 ---
 
 ## Key Files
 
 ### Prompts (How We Got Here)
-All in root directory:
-- `PROMPT_1_KG_QUALITY_REVIEW.md` - Initial quality audit
-- `PROMPT_2_EXTRACTION_METHOD_IMPROVEMENT.md` - Investigation & design
-- `PROMPT_3_PHASE1_IMPLEMENTATION.md` - Quality filters implementation
-- `PROMPT_4_WEEK1_PRODUCTION_DEPLOYMENT.md` - Cleanup & deployment
-- `PROMPT_5_PHASE2A_CONFIDENCE_FILTERING.md` - Confidence filtering
-- `PROMPT_6_PHASE2B_PIPELINE_FRAMEWORK.md` - Pipeline framework
-- `PROMPT_7_GRAPH_INTEGRATION.md` - Graph integration
-- `PROMPT_18_FRESH_EXTRACTION_EXECUTION.md` - Fresh document extraction
-- `PROMPT_19_DEDUPLICATION_INVESTIGATION.md` - Initial dedup gap investigation
-- `PROMPT_20_COMPREHENSIVE_DEDUP_INVESTIGATION.md` - ✅ Complete yonearth module analysis
-- `PROMPT_20B_GRAPH_INSERTION_INVESTIGATION.md` - ✅ Graph-as-registry investigation
-- `PGVECTOR_INVESTIGATION_FINDINGS.md` - ✅ pgvector infrastructure analysis
-- `PROMPT_21_IMPLEMENT_PGVECTOR_DEDUPLICATION.md` - ✅ **COMPLETE** - pgvector dedup (35 tests, A+ grade)
-- `PROMPT_21_OLD_JENA_TEXT_APPROACH.md` - Archived: Original Jena Text approach
-- `EXPERT_FEEDBACK_INCORPORATED.md` - ✅ Expert review changes (A- → A+)
-- `PROMPT_22_BACKFILL_EXISTING_ENTITIES.md` - ✅ **COMPLETE** - Backfill (76.8% dedup, 29,577 → 6,842)
-- `BACKFILL_RESULTS_ANALYSIS.md` - ✅ Analysis of backfill results
-- `BACKFILL_DOTENV_FIX.md` - ✅ Fix for .env loading issue (Tier 2 now enabled)
-- `PROMPT_23_RESUME_GITHUB_EXTRACTION.md` - **READY** - Resume extraction (4,410 docs, 5-7 hours)
 
-**Summary**: `ALL_PROMPTS_SUMMARY.md`
+**Active Prompts** (`prompts/`):
+- `ALL_PROMPTS_SUMMARY.md` - Complete project history summary
+- `PROMPT_24_PIPELINE_IMPROVEMENTS_QUALITY_FIXES.md` - Quality improvements (JIRA/boilerplate/dedup)
+- `PROMPT_27_ENTITY_REGISTRY_CONSOLIDATION.md` - Type fixes + semantic consolidation
+- `PROMPT_30_BATCH_CONSOLIDATION_REVIEW.md` - Batch semantic consolidation + user review
+
+**Archived Prompts** (`prompts/archive/`):
+- `PROMPT_1-23` - Phase 1-3 implementation history (21 prompts)
+- Supporting docs: Investigation findings, expert feedback, analysis reports
+
+**Key Reports** (`reports/phase3/`):
+- Production server only - generated during execution
 
 ### Code
 Main codebase: `koi-processor/`
@@ -109,6 +143,8 @@ Main codebase: `koi-processor/`
 - Quality: 99.7%
 - Tests: 121/121 passing
 - YouTube docs: 47 videos, 1,068 chunks with transcripts
+- Entity Registry: 12,985 unique entities, 43,430 mentions, 70.10% dedup rate
+- Knowledge Graph: 64,925 RDF triples (Fuseki synchronized)
 
 ---
 
@@ -149,7 +185,8 @@ See `koi-processor/src/knowledge_graph/README.md` for full docs.
 ## Next Steps
 
 ### Immediate
-User wants to push to GitHub, then plan re-extraction
+- Complete Jena entity extraction (fix schema issues in `docs/ADAPTIVE_EXTRACTION_SCHEMA_TODO.md`)
+- Consider batch extraction for existing YouTube content
 
 ### Re-extraction Plan
 See `RE_EXTRACTION_PLAN.md` for full strategy.
@@ -188,9 +225,10 @@ ssh darren@202.61.196.119 "curl -s 'http://localhost:3030/koi/sparql' --data-url
 ## Important Notes
 
 ### Production Safety
-- ✅ Backups exist (651MB PostgreSQL + 3.6MB Fuseki)
-- ✅ Rollback procedure documented
+- ✅ Backups exist (767MB PostgreSQL + 3.6MB Fuseki)
+- ✅ Rollback procedure documented (PRODUCTION_DEPLOYMENT_SUMMARY.md:218-232)
 - ✅ Both pipeline and legacy modes work
+- ✅ Knowledge graph synchronized (PostgreSQL ↔ Fuseki)
 - ⚠️ Always backup before re-extraction
 
 ### Code Quality
@@ -227,5 +265,6 @@ ssh darren@202.61.196.119 "curl -s 'http://localhost:3030/koi/sparql' --data-url
 ---
 
 **Last Updated**: 2025-12-19
-**Phase**: RAG Search Complete, Entity Extraction Enhancement
+**Phase**: RAG Search Complete, Entity Extraction Enhancement Pending
 **Status**: YouTube searchable via RAG UNION query. Jena extraction pending schema fixes.
+**Systems**: Tier 1+2 dedup active, all pipeline modules operational, Fuseki graph deployed

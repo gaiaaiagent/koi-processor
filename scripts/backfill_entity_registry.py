@@ -19,9 +19,12 @@ import os
 import json
 import logging
 import argparse
+from pathlib import Path
 from typing import Dict, List, Any
 from collections import defaultdict
 from datetime import datetime
+
+from dotenv import load_dotenv
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -32,6 +35,8 @@ try:
 except ImportError:
     print("ERROR: psycopg2 required. Install with: pip install psycopg2-binary")
     sys.exit(1)
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from knowledge_graph.entity_resolver import EntityResolver
 
