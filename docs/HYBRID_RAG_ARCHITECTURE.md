@@ -11,6 +11,25 @@ system that combines three search modalities:
 
 ## Key Components
 
+### 0. Content Deduplication (3-Layer Protection)
+
+Prevents duplicate content from appearing in search results:
+
+**Query-Level (koi-query-api.ts):**
+- `md5(content)` PARTITION BY in all search CTEs
+- Groups identical content, keeps highest-scoring instance
+- Safety net for historical duplicates
+
+**Storage-Level (koi_event_bridge_v2.py):**
+- `content_hash` column (SHA-256) on koi_memories
+- Global check: rejects new entries if content_hash already exists
+- Catches cross-RID duplicates from sensors
+
+**Sensor-Level (gitlab/github sensors):**
+- Canonical RIDs without run-specific info (no temp dir names)
+- Format: `gitlab_regen-public-docs_WhitePaper.tex` (not `gitlab_sensor_xyz123/...`)
+- Prevents duplicates at the source
+
 ### 1. Entity Registry (koi_entity_registry)
 
 Stores canonical entities with deduplication:
@@ -89,10 +108,12 @@ the best answers. The 0.15 boost rewards this overlap.
 
 ## Files Reference
 
-- koi-query-api.ts - Main API with entity search
+- koi-query-api.ts - Main API with entity search + content dedup
 - bge-mcp-ts/adaptive-features.ts - Fusion algorithms
+- src/core/koi_event_bridge_v2.py - Storage-level dedup
 - scripts/archive/entity_chunk_linker.py - Batch entity linking
 - scripts/backfill_entity_registry.py - Registry population
+- migrations/023_content_hash_dedup_index.sql - Content hash schema
 
 ---
 
