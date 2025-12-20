@@ -78,3 +78,10 @@ config/client_secret_*.json
 prompts/
 docs/planning/
 
+
+# Ignore logs and exports
+logs/
+exports/
+.local-backup/
+*.log.*
+*.gz

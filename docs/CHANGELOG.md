@@ -172,3 +172,50 @@ If you need to rollback to v1.0.0:
 - [ ] Distributed processing with message queues
 - [ ] Real-time WebSocket event streaming
 - [ ] Prometheus metrics and Grafana dashboards
+---
+
+## [2.0.0] - 2025-12-20
+
+### Added - Hybrid Graph-Boosted RAG
+
+**Major Feature: Entity-Aware Knowledge Retrieval**
+
+The KOI Query API now implements a sophisticated Hybrid Graph-Boosted RAG system that combines:
+- **Vector Search**: Semantic similarity using BGE-1024 embeddings
+- **Entity/Graph Search**: Knowledge graph traversal via entity-chunk links
+- **Keyword Search**: Full-text search with PostgreSQL tsvector
+
+**Key Components:**
+
+1. **Entity Registry** (koi_entity_registry)
+   - Canonical entity storage with type information
+   - Semantic deduplication (Tier 1: Exact, Tier 2: Embedding similarity)
+   - 12,985 unique entities, 43,430 mentions, 70.10% dedup rate
+
+2. **Entity-Chunk Links** (koi_entity_chunk_links)
+   - 614,021 entity-memory associations
+   - Enables graph-based document retrieval
+   - Source: PostgreSQL entity extraction pipeline
+
+3. **Weighted Average Fusion** (adaptive-features.ts)
+   - Formula: 0.6*vector + 0.2*entity + 0.2*keyword + 0.15*entity_boost 
+   - Entity boost applied when document appears in both vector and entity results
+
+4. **Source-Diversity Sampling**
+   - Prevents high-volume sources (GitHub) from drowning out high-value sources (Homepage)
+   - Partitions entity results by source type: web, github, gitlab, other
+   - Domain-level diversity for web: regen.network, forum, registry, guides
+   - Top 25 from each non-web source, top 10 from each web domain
+
+**Performance:**
+- Quality: 99.7% (up from 62%)
+- Entity extraction: 3,497 documents processed
+- Zero type collisions in entity registry
+
+### Changed
+- Entity search now uses source-diversity sampling instead of simple LIMIT
+- Fusion algorithm changed from RRF to Weighted Average for better score discrimination
+- Added superseded_at IS NULL filter to all search queries
+
+### Technical Details
+See docs/HYBRID_RAG_ARCHITECTURE.md for complete technical documentation.

@@ -30,26 +30,30 @@ interface QueryLogEntry {
 
 /**
  * Weighted Average Fusion Implementation
- * Combines vector and keyword search using weighted averaging
+ * Combines vector, entity/graph, and keyword search using weighted averaging
  * Provides better score discrimination than RRF for hybrid search
  *
- * Weights: 0.8 vector (semantic similarity) + 0.2 keyword (BM25)
- * This prioritizes semantic understanding while still benefiting from keyword matching
- * Increased vector weight helps biographical/profile pages rank higher
+ * Weights: 0.6 vector + 0.2 entity/graph + 0.2 keyword
+ * Entity/graph results get a boost to surface documents with matching entities
  */
 export function weightedAverageFusion(
   vectorResults: SearchResult[],
-  sparqlResults: SearchResult[],
+  entityResults: SearchResult[],
   keywordResults?: SearchResult[]
 ): SearchResult[] {
-  const VECTOR_WEIGHT = 0.8;
+  const VECTOR_WEIGHT = 0.6;
+  const ENTITY_WEIGHT = 0.2;
   const KEYWORD_WEIGHT = 0.2;
+  const ENTITY_BOOST = 0.15;  // Bonus for entity matches
 
   // Merge results by document ID
   const merged = new Map<string, {
     vectorScore: number;
+    entityScore: number;
     keywordScore: number;
+    hasEntityMatch: boolean;
     result: SearchResult;
+    entitiesMatched?: string[];
   }>();
 
   // Process vector results
@@ -57,9 +61,34 @@ export function weightedAverageFusion(
     const id = result.rid || result.id;
     merged.set(id, {
       vectorScore: result.similarity || result.score || 0,
+      entityScore: 0,
       keywordScore: 0,
+      hasEntityMatch: false,
       result
     });
+  });
+
+  // Process entity/graph results (from koi_entity_chunk_links)
+  entityResults?.forEach(result => {
+    const id = result.rid || result.id;
+    const existing = merged.get(id);
+    const entityScore = result.similarity || result.score || 0;
+
+    if (existing) {
+      existing.entityScore = entityScore;
+      existing.hasEntityMatch = true;
+      existing.entitiesMatched = result.metadata?.entities_matched;
+    } else {
+      // Document only in entity results
+      merged.set(id, {
+        vectorScore: 0,
+        entityScore,
+        keywordScore: 0,
+        hasEntityMatch: true,
+        result,
+        entitiesMatched: result.metadata?.entities_matched
+      });
+    }
   });
 
   // Process keyword results
@@ -71,19 +100,29 @@ export function weightedAverageFusion(
     if (existing) {
       existing.keywordScore = keywordScore;
     } else {
-      // Document only in keyword results, not in vector results
+      // Document only in keyword results
       merged.set(id, {
         vectorScore: 0,
+        entityScore: 0,
         keywordScore,
+        hasEntityMatch: false,
         result
       });
     }
   });
 
-  // Calculate weighted average scores
-  const fusedResults = Array.from(merged.entries())
+  // Calculate weighted average scores with entity boost
+  const allResults = Array.from(merged.entries())
     .map(([id, data]) => {
-      const score = data.vectorScore * VECTOR_WEIGHT + data.keywordScore * KEYWORD_WEIGHT;
+      let score = (data.vectorScore * VECTOR_WEIGHT) +
+                  (data.entityScore * ENTITY_WEIGHT) +
+                  (data.keywordScore * KEYWORD_WEIGHT);
+
+      // Apply entity boost for documents that match query entities
+      if (data.hasEntityMatch) {
+        score += ENTITY_BOOST;
+      }
+
       return {
         ...data.result,
         id,
@@ -92,12 +131,29 @@ export function weightedAverageFusion(
         metadata: {
           ...data.result.metadata,
           vector_score: data.vectorScore,
+          entity_score: data.entityScore,
           keyword_score: data.keywordScore,
+          entity_boost: data.hasEntityMatch ? ENTITY_BOOST : 0,
+          entities_matched: data.entitiesMatched,
           weighted_score: score
         }
       };
-    })
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
+    });
+
+  // Sort all results by score (entity boost already applied to overlapping results)
+  // Vector determines relevance, entity provides boost - no artificial interleaving
+  const fusedResults = allResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  // Log entity fusion stats
+  const entityBoosted = fusedResults.filter(r => r.metadata?.entity_boost > 0).length;
+  const entityOnly = fusedResults.filter(r => r.metadata?.entity_score > 0 && r.metadata?.vector_score === 0).length;
+
+  if (entityBoosted > 0) {
+    console.log(`[Fusion] ${entityBoosted} results have entity boost applied`);
+  }
+  if (entityOnly > 0) {
+    console.log(`[Fusion] ${entityOnly} entity-only results (no vector match) included`);
+  }
 
   return fusedResults;
 }

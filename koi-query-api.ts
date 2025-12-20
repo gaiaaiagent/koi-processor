@@ -16,7 +16,7 @@ import {
   logQuery,
   shouldTriggerExtraction,
   selectDocumentsForExtraction
-} from "./bge-mcp-ts/adaptive-features.js";
+} from "./bge-mcp-ts/adaptive-features.ts";
 
 const app = express();
 const PORT = 8301;
@@ -186,6 +186,154 @@ function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'):
   return ` AND (${tableAlias}.is_private = FALSE OR ${tableAlias}.is_private IS NULL)`;
 }
 
+// Entity-based graph search using koi_entity_chunk_links
+// Detects entities in query and returns memories where those entities appear
+async function performEntitySearch(query: string, topK: number = 20, privacyFilter: string = '') {
+  try {
+    console.log(`[EntitySearch] Starting for query: "${query}"`);
+
+    // Extract potential entity names from query (words and phrases of 2-4 words)
+    const words = query.toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3);
+
+    console.log(`[EntitySearch] Words extracted: ${words.join(', ')}`);
+
+    if (words.length === 0) {
+      console.log('[EntitySearch] No words >= 3 chars, returning empty');
+      return [];
+    }
+
+    // Build patterns to match: individual words and adjacent word pairs/triples
+    const patterns: string[] = [...words];
+    for (let i = 0; i < words.length - 1; i++) {
+      patterns.push(`${words[i]} ${words[i+1]}`);
+      if (i < words.length - 2) {
+        patterns.push(`${words[i]} ${words[i+1]} ${words[i+2]}`);
+      }
+    }
+
+    // Query for entities matching these patterns
+    // Uses source-diversity sampling to prevent any single source from dominating
+    const entityQuery = `
+      WITH matched_entities AS (
+        SELECT DISTINCT entity_name_lower, entity_name, entity_type,
+          LENGTH(entity_name_lower) as entity_length
+        FROM koi_entity_chunk_links
+        WHERE entity_name_lower = ANY($1)
+        LIMIT 50
+      ),
+      entity_memories AS (
+        SELECT
+          l.chunk_rid,
+          l.document_rid,
+          array_agg(DISTINCT l.entity_name) as entities_matched,
+          COUNT(DISTINCT l.entity_name_lower) as entity_count,
+          MAX(me.entity_length) as max_entity_length
+        FROM koi_entity_chunk_links l
+        JOIN matched_entities me ON l.entity_name_lower = me.entity_name_lower
+        GROUP BY l.chunk_rid, l.document_rid
+      ),
+      with_source AS (
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          em.entities_matched,
+          em.entity_count,
+          em.max_entity_length,
+          m.published_at,
+          CASE
+            WHEN m.rid LIKE 'orn:web.page:%' THEN 'web'
+            WHEN m.rid LIKE 'regen.github:%' THEN 'github'
+            WHEN m.rid LIKE 'regen.gitlab:%' THEN 'gitlab'
+            ELSE 'other'
+          END as source_type,
+          CASE
+            WHEN m.rid LIKE 'orn:web.page:regen.network/%' THEN 'main'
+            WHEN m.rid LIKE 'orn:web.page:forum.regen.network/%' THEN 'forum'
+            WHEN m.rid LIKE 'orn:web.page:registry.regen.network/%' THEN 'registry'
+            WHEN m.rid LIKE 'orn:web.page:guides.regen.network/%' THEN 'guides'
+            ELSE NULL
+          END as web_domain
+        FROM entity_memories em
+        JOIN koi_memories m ON m.id::text = em.chunk_rid
+        WHERE m.superseded_at IS NULL
+          AND m.content->>'text' IS NOT NULL
+          ${privacyFilter}
+      ),
+      non_web_ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY source_type ORDER BY max_entity_length DESC, entity_count DESC
+        ) as source_rank
+        FROM with_source WHERE source_type != 'web'
+      ),
+      web_domain_ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY web_domain ORDER BY max_entity_length DESC, entity_count DESC
+        ) as domain_rank
+        FROM with_source WHERE source_type = 'web'
+      ),
+      web_diverse AS (
+        SELECT *, ROW_NUMBER() OVER (ORDER BY domain_rank, web_domain) as source_rank
+        FROM web_domain_ranked WHERE domain_rank <= 10
+      ),
+      combined AS (
+        SELECT rid, content, source, url, entities_matched, entity_count,
+               max_entity_length, published_at
+        FROM non_web_ranked WHERE source_rank <= 25
+        UNION ALL
+        SELECT rid, content, source, url, entities_matched, entity_count,
+               max_entity_length, published_at
+        FROM web_diverse WHERE source_rank <= 50
+      )
+      SELECT * FROM combined
+      ORDER BY max_entity_length DESC
+      LIMIT $2
+    `;
+
+    console.log(`[EntitySearch] Patterns to match: ${patterns.slice(0, 10).join(', ')}`);
+
+    const results = await pool.query(entityQuery, [patterns, topK]);
+
+    console.log(`[EntitySearch] Query returned ${results.rows.length} rows`);
+    if (results.rows.length > 0) {
+      console.log(`[EntitySearch] Found ${results.rows.length} memories for entities: ${patterns.slice(0, 5).join(', ')}...`);
+      console.log(`[EntitySearch] First result RID: ${results.rows[0]?.rid}`);
+    } else {
+      console.log(`[EntitySearch] No matches found for patterns`);
+    }
+
+    // Calculate scores based on entity count (normalized)
+    const maxCount = results.rows.length > 0
+      ? Math.max(...results.rows.map(r => parseInt(r.entity_count)))
+      : 1;
+
+    return results.rows.map(row => ({
+      id: row.rid,
+      content: row.content?.substring(0, 200) + "...",
+      similarity: parseInt(row.entity_count) / maxCount,
+      score: parseInt(row.entity_count) / maxCount,
+      source: 'graph' as const,
+      metadata: {
+        rid: row.rid,
+        source: row.source,
+        url: row.url,
+        entities_matched: row.entities_matched,
+        entity_count: parseInt(row.entity_count),
+        published_at: row.published_at || null
+      },
+      rid: row.rid
+    }));
+
+  } catch (error) {
+    console.error('[EntitySearch] Error:', error);
+    return [];
+  }
+}
+
 // Semantic search using BGE embeddings
 async function performSemanticSearch(query: string, topK: number = 10, filters?: any, privacyFilter: string = '') {
   try {
@@ -226,13 +374,13 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
         WHERE
           m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
           AND (
             m.content->>'text' ILIKE $1
             OR m.content->>'text' ILIKE $2
           )
           ${whereDate}
           ${privacyFilter}
-        ORDER BY RANDOM()
         LIMIT $${params.length + 1}
       `;
       params.push(topK);
@@ -276,50 +424,25 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
       : '';
 
-    // UNION query to search both legacy (koi_embeddings) and new (koi_memory_chunks) tables
     const searchQuery = `
-      WITH combined_results AS (
-        -- Legacy embeddings (koi_embeddings)
-        SELECT
-          m.rid,
-          m.content->>'text' as content,
-          m.metadata->>'source' as source,
-          m.metadata->>'url' as url,
-          1 - (e.dim_1024 <=> $1::vector) as similarity,
-          m.published_at,
-          'legacy' as embedding_source
-        FROM koi_memories m
-        JOIN koi_embeddings e ON e.memory_id = m.id
-        WHERE
-          e.dim_1024 IS NOT NULL
-          AND m.content->>'text' IS NOT NULL
-          AND LENGTH(m.content->>'text') > 50
-          ${andDate}
-          ${privacyFilter}
-        
-        UNION ALL
-        
-        -- New chunked embeddings (koi_memory_chunks) for YouTube, etc.
-        SELECT
-          mc.chunk_rid as rid,
-          mc.content->>'text' as content,
-          parent.metadata->>'source' as source,
-          parent.metadata->>'url' as url,
-          1 - (mc.embedding <=> $1::vector) as similarity,
-          parent.published_at,
-          'chunks' as embedding_source
-        FROM koi_memory_chunks mc
-        JOIN koi_memories parent ON mc.document_rid = parent.rid
-        WHERE
-          mc.embedding IS NOT NULL
-          AND mc.content->>'text' IS NOT NULL
-          AND LENGTH(mc.content->>'text') > 50
-          ${andDate.replace(/m\./g, 'parent.')}
-          ${privacyFilter.replace(/m\./g, 'parent.')}
-      )
-      SELECT rid, content, source, url, similarity, published_at, embedding_source
-      FROM combined_results
-      ORDER BY similarity DESC
+      SELECT
+        m.rid,
+        m.content->>'text' as content,
+        m.metadata->>'source' as source,
+        m.metadata->>'url' as url,
+        e.dim_1024 <=> $1::vector as distance,
+        1 - (e.dim_1024 <=> $1::vector) as similarity,
+        m.published_at
+      FROM koi_memories m
+      JOIN koi_embeddings e ON e.memory_id = m.id
+      WHERE
+        e.dim_1024 IS NOT NULL
+        AND m.content->>'text' IS NOT NULL
+        AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
+        ${andDate}
+        ${privacyFilter}
+      ORDER BY e.dim_1024 <=> $1::vector
       LIMIT $${params.length + 1}
     `;
 
@@ -363,7 +486,7 @@ async function triggerAdaptiveExtraction(
     };
 
     // Call Python adaptive extraction service
-    const response = await fetch('http://localhost:8351/extract', {
+    const response = await fetch('http://localhost:8350/extract', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -434,6 +557,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
           m.content_tsv @@ to_tsquery('english', $1)
           AND m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
           ${privacyFilter}
 
         UNION ALL
@@ -451,6 +575,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
           m.content_tsv @@ to_tsquery('english', $2)
           AND m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
           ${privacyFilter}
           AND NOT EXISTS (
             SELECT 1 FROM koi_memories m2
@@ -537,6 +662,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
       WHERE
         m.content->>'text' ILIKE $1
         AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
         ${andDate}
         ${privacyFilter}
       ORDER BY CASE
@@ -593,17 +719,30 @@ app.post('/api/koi/query', async (req, res) => {
     }
 
     // Perform hybrid search with RRF
-    // Increased limits to capture more diverse results before fusion
-    // Higher keyword limit to ensure important biographical pages (rank ~#11) are included
-    // Increased to 20 to capture team/profile pages that rank just outside top-15
-    const [vectorResults, keywordResults] = await Promise.all([
-      performSemanticSearch(question, 20, filters, privacyFilter),
-      performKeywordSearch(question, 20, filters, privacyFilter)
-    ]);
+    // Includes vector (semantic), entity (graph), and keyword search
+    // Higher limits to capture diverse results before fusion
+    let vectorResults: any[] = [];
+    let entityResults: any[] = [];
+    let keywordResults: any[] = [];
 
-    // Apply Reciprocal Rank Fusion
-    // Pass empty array for SPARQL results (not implemented yet)
-    const fusedResults = reciprocalRankFusion(vectorResults, [], keywordResults);
+    try {
+      [vectorResults, entityResults, keywordResults] = await Promise.all([
+        performSemanticSearch(question, 20, filters, privacyFilter),
+        performEntitySearch(question, 100, privacyFilter).catch(e => {
+          console.error('[EntitySearch] Error:', e);
+          return [];
+        }),
+        performKeywordSearch(question, 20, filters, privacyFilter)
+      ]);
+    } catch (err) {
+      console.error('[Search] Error in parallel search:', err);
+    }
+
+    // Log search results counts
+    console.log(`[Search] Results - Vector: ${vectorResults.length}, Entity: ${entityResults.length}, Keyword: ${keywordResults.length}`);
+
+    // Apply Reciprocal Rank Fusion with entity/graph results
+    const fusedResults = reciprocalRankFusion(vectorResults, entityResults, keywordResults);
     
     // Calculate confidence
     const confidence = calculateConfidence(fusedResults);
@@ -1450,6 +1589,7 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
         WHERE
           m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
           AND e.dim_1024 IS NOT NULL
           AND m.published_at >= $2::timestamptz
           AND m.published_at <= $3::timestamptz
@@ -1479,6 +1619,7 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
         WHERE
           m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
+        AND m.superseded_at IS NULL
           AND m.published_at >= $1::timestamptz
           AND m.published_at <= $2::timestamptz
         ORDER BY m.published_at DESC
@@ -1555,11 +1696,41 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
   }
 });
 
+// Debug ping endpoint
+app.get('/api/koi/ping', (req, res) => {
+  console.log('[Ping] Request received');
+  res.json({ pong: true, version: 3, time: new Date().toISOString() });
+});
+
+// Debug endpoint for entity search testing
+app.get('/api/koi/debug-entity', async (req, res) => {
+  const query = (req.query.q as string) || "What is the Regen Network?";
+  console.log(`[Debug] Testing entity search for: "${query}"`);
+
+  try {
+    const entityResults = await performEntitySearch(query, 10, '');
+    res.json({
+      query,
+      entity_count: entityResults.length,
+      entities: entityResults.slice(0, 5).map((r: any) => ({
+        rid: r.rid?.substring(0, 50),
+        score: r.score,
+        entities_matched: r.metadata?.entities_matched
+      }))
+    });
+  } catch (err: any) {
+    console.error('[Debug] Error:', err);
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
+console.log('[Init] Debug endpoints registered');
 
 app.listen(PORT, () => {
   console.log(`🚀 KOI Query API running on http://localhost:${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/api/koi/health`);
   console.log(`🔍 Query endpoint: POST http://localhost:${PORT}/api/koi/query`);
+  console.log(`🔧 Debug: GET http://localhost:${PORT}/api/koi/ping`);
 });
 
 export default app;
