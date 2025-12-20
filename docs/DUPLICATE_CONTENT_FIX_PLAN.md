@@ -311,14 +311,29 @@ python -m sensors.gitlab_sensor --repo regen-ledger --test
 
 ---
 
-### Phase 3: Sensor-Level Fix (ROOT CAUSE)
+### Phase 3: Sensor-Level Fix (ROOT CAUSE) ✅ COMPLETED
 
 **Purpose:** Stop duplicates at the source
 **Files:**
-- `/opt/projects/koi-sensors/sensors/gitlab_sensor.py`
-- Possibly other sensors with similar issues
+- `/opt/projects/koi-sensors/sensors/gitlab/gitlab_sensor.py`
+- `/opt/projects/koi-sensors/sensors/github/github_sensor.py`
 **Effort:** 1 day
 **Risk:** Medium-High (affects all future indexing)
+**Status:** IMPLEMENTED 2025-12-20
+
+**Root Cause Found:**
+The `relative_path` was calculated using `file_path.parent.parent.parent` which included
+the temp directory name (e.g., `gitlab_sensor_bglo8mef`) in the path. Each sensor run
+created a new temp dir with a random suffix, causing different RIDs for the same file.
+
+**Fix Applied:**
+- Pass `repo_path` to `process_file()` function
+- Calculate `relative_path = file_path.relative_to(repo_path)`
+- Fix git log `cwd` to use `repo_path` instead of parent chain
+
+**RID Change:**
+- Before: `gitlab_regen-public-docs_gitlab_sensor_bglo8mef_regen-public-docs_WhitePaper.tex`
+- After: `gitlab_regen-public-docs_WhitePaper.tex`
 
 #### Step 3.1: Use Canonical RIDs
 
