@@ -288,8 +288,20 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         SELECT rid, content, source, url, entities_matched, entity_count,
                max_entity_length, published_at
         FROM web_diverse WHERE source_rank <= 50
+      ),
+      -- Deduplicate by content hash to remove duplicates from multiple sensor runs
+      deduplicated AS (
+        SELECT *,
+          ROW_NUMBER() OVER (
+            PARTITION BY md5(content)
+            ORDER BY published_at DESC NULLS LAST, entity_count DESC
+          ) as content_rank
+        FROM combined
       )
-      SELECT * FROM combined
+      SELECT rid, content, source, url, entities_matched, entity_count,
+             max_entity_length, published_at
+      FROM deduplicated
+      WHERE content_rank = 1
       ORDER BY max_entity_length DESC
       LIMIT $2
     `;
@@ -425,24 +437,40 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       : '';
 
     const searchQuery = `
-      SELECT
-        m.rid,
-        m.content->>'text' as content,
-        m.metadata->>'source' as source,
-        m.metadata->>'url' as url,
-        e.dim_1024 <=> $1::vector as distance,
-        1 - (e.dim_1024 <=> $1::vector) as similarity,
-        m.published_at
-      FROM koi_memories m
-      JOIN koi_embeddings e ON e.memory_id = m.id
-      WHERE
-        e.dim_1024 IS NOT NULL
-        AND m.content->>'text' IS NOT NULL
-        AND LENGTH(m.content->>'text') > 50
-        AND m.superseded_at IS NULL
-        ${andDate}
-        ${privacyFilter}
-      ORDER BY e.dim_1024 <=> $1::vector
+      WITH vector_results AS (
+        SELECT
+          m.rid,
+          m.content->>'text' as content,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          e.dim_1024 <=> $1::vector as distance,
+          1 - (e.dim_1024 <=> $1::vector) as similarity,
+          m.published_at
+        FROM koi_memories m
+        JOIN koi_embeddings e ON e.memory_id = m.id
+        WHERE
+          e.dim_1024 IS NOT NULL
+          AND m.content->>'text' IS NOT NULL
+          AND LENGTH(m.content->>'text') > 50
+          AND m.superseded_at IS NULL
+          ${andDate}
+          ${privacyFilter}
+        ORDER BY e.dim_1024 <=> $1::vector
+        LIMIT $${params.length + 1} * 3
+      ),
+      -- Deduplicate by content hash to remove duplicates from multiple sensor runs
+      deduplicated AS (
+        SELECT *,
+          ROW_NUMBER() OVER (
+            PARTITION BY md5(content)
+            ORDER BY similarity DESC
+          ) as content_rank
+        FROM vector_results
+      )
+      SELECT rid, content, source, url, distance, similarity, published_at
+      FROM deduplicated
+      WHERE content_rank = 1
+      ORDER BY similarity DESC
       LIMIT $${params.length + 1}
     `;
 
@@ -582,9 +610,20 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
             WHERE m2.rid = m.rid
             AND m2.content_tsv @@ to_tsquery('english', $1)
           )
+      ),
+      -- Deduplicate by content hash to remove duplicates from multiple sensor runs
+      deduplicated AS (
+        SELECT *,
+          ROW_NUMBER() OVER (
+            PARTITION BY md5(content)
+            ORDER BY rank DESC, match_type
+          ) as content_rank
+        FROM combined
+        ${whereCombined}
       )
-      SELECT * FROM combined
-      ${whereCombined}
+      SELECT rid, content, source, url, rank, match_type, published_at
+      FROM deduplicated
+      WHERE content_rank = 1
       ORDER BY rank DESC
       LIMIT $${params.length + 1}
     `;

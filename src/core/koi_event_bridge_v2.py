@@ -540,6 +540,37 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
             # Calculate content hash for deduplication
             content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
 
+            # GLOBAL DEDUP: Check if ANY memory has this exact content (catches cross-RID duplicates)
+            # This fixes the issue where GitLab sensor creates new RIDs per run for unchanged files
+            if USE_ISOLATED_TABLES:
+                global_duplicate = await conn.fetchrow("""
+                    SELECT id, rid, version FROM koi_memories
+                    WHERE content_hash = $1
+                      AND superseded_at IS NULL
+                    LIMIT 1
+                """, content_hash)
+
+                if global_duplicate:
+                    if global_duplicate['rid'] == event.bundle.rid:
+                        # Same RID, same content - skip (no change)
+                        logger.debug(f"Skipping unchanged content for RID: {event.bundle.rid}")
+                    else:
+                        # Different RID, same content - this is a cross-RID duplicate
+                        logger.info(
+                            f"Cross-RID duplicate detected: {event.bundle.rid} "
+                            f"has same content as existing {global_duplicate['rid']} "
+                            f"(hash: {content_hash[:8]}...)"
+                        )
+                    return ProcessingResult(
+                        success=True,
+                        rid=event.bundle.rid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
+                        chunks_created=0,
+                        embeddings_created=0,
+                        version=global_duplicate['version'],
+                        error=f"Duplicate content, matches RID: {global_duplicate['rid']}"
+                    )
+
             # Check if we have this exact content already (deduplication)
             if USE_ISOLATED_TABLES:
                 # For web pages, re-check by URL with the content hash
