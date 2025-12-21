@@ -22,6 +22,7 @@ class DeterministicURIGenerator:
     BASE_URI = "https://regen.network"
 
     TYPE_PREFIXES = {
+        # Core types
         "PERSON": "person",
         "ORGANIZATION": "org",
         "PROJECT": "project",
@@ -34,8 +35,23 @@ class DeterministicURIGenerator:
         "METRIC": "metric",
         "PRODUCT": "product",
         "DOCUMENT": "doc",
-        "STANDARD": "standard",
         "PROTOCOL": "protocol",
+        "EVIDENCE": "evidence",
+        "QUESTION": "question",
+
+        # FIX-005: Domain types
+        "CREDIT_CLASS": "credit-class",
+        "GOVERNANCE_PROPOSAL": "proposal",
+        "VALIDATOR": "validator",
+        "MODULE": "module",
+        "API_MESSAGE": "msg",
+        "KEEPER": "keeper",
+
+        # FIX-005: General types
+        "LICENSE": "license",
+        "STANDARD": "standard",
+        "PROCESS": "process",
+        "MATERIAL": "material",
     }
 
     def __init__(self, base_uri: str = None):

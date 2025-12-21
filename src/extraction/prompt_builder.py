@@ -145,6 +145,70 @@ DO NOT extract these patterns as entities:
   Examples: "Regen Ledger" (project), "Koi Project" (initiative)
 Rule: Abstract idea → CONCEPT. Named implementation → PROJECT or TECHNOLOGY.
 
+## FIX-005: DOMAIN TYPES (Regen/Cosmos)
+
+### CREDIT_CLASS: Regen Network credit classes
+Use CREDIT_CLASS for carbon/eco credit classifications:
+- "C01", "C02", "C03" (credit class IDs)
+- "CarbonPlus Grasslands", "Wilmot Cattle Grazing" (credit class names)
+- "Verified Carbon Standard", "Gold Standard" (certification programs)
+NOT for: Organizations that issue credits (those are ORGANIZATION)
+
+### GOVERNANCE_PROPOSAL: On-chain proposals
+Use GOVERNANCE_PROPOSAL for blockchain governance proposals:
+- "Proposal 47", "Signaling Proposal: Community Pool Spend"
+- "Parameter Change Proposal", "Text Proposal"
+NOT for: General ideas or suggestions (those are CONCEPT)
+
+### VALIDATOR: Blockchain validators
+Use VALIDATOR for blockchain validator operators:
+- "Regen Validator", "Chorus One", "Figment"
+- Validator node operators and their infrastructure
+NOT for: The "validator" role term (blocked as generic)
+
+### MODULE: Cosmos SDK modules
+Use MODULE for Cosmos SDK/blockchain modules:
+- "x/ecocredit", "x/group", "x/data", "x/staking"
+- "EcocreditModule", "GroupModule"
+NOT for: General software modules (those are TECHNOLOGY)
+
+### API_MESSAGE: Protobuf message types
+Use API_MESSAGE for Cosmos SDK message types:
+- "MsgSend", "MsgCreateBatch", "MsgRetire"
+- "MsgVote", "MsgDelegate", "MsgSubmitProposal"
+NOT for: General API endpoints (those are TECHNOLOGY)
+
+### KEEPER: Cosmos SDK keepers
+Use KEEPER for SDK keeper interfaces:
+- "EcocreditKeeper", "GroupKeeper", "BankKeeper"
+NOT for: The "keeper" role term (blocked as generic)
+
+## FIX-005: GENERAL TYPES
+
+### LICENSE: Software/content licenses
+Use LICENSE for licensing terms:
+- "Apache 2.0", "MIT License", "GPL-3.0"
+- "CC BY-SA 4.0", "Creative Commons"
+NOT for: Organizations that create licenses (those are ORGANIZATION)
+
+### STANDARD: Technical standards
+Use STANDARD for specifications and standards:
+- "ISO 14064", "ISO 14067", "GHG Protocol"
+- "Verra VM0042", "VCS Standard"
+NOT for: Organizations that publish standards (those are ORGANIZATION)
+
+### PROCESS: Business/technical processes
+Use PROCESS for named processes:
+- "MRV Process", "Verification Process"
+- "Credit Issuance Workflow"
+NOT for: Actions or verbs (skip those)
+
+### MATERIAL: Physical materials
+Use MATERIAL for physical substances:
+- "Biochar", "Biomass", "Soil Carbon"
+- "Organic Matter", "Compost"
+NOT for: Abstract concepts (those are CONCEPT)
+
 ## Confidence Scoring
 - HIGH (0.85-1.0): Explicit named mention ("Regen Network announced...")
 - MEDIUM (0.70-0.84): Implied/contextual ("the network launched...")

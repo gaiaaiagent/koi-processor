@@ -16,10 +16,12 @@ from typing import Set, Dict, Optional
 # ============================================================================
 # Canonical Entity Types
 # ============================================================================
-# The 12 canonical types used throughout the knowledge graph system.
+# The canonical types used throughout the knowledge graph system.
 # ENTITY is the fallback default, FUNCTION is for code graphs only.
+# FIX-005: Added 10 new types for domain-specific and general entities.
 
 ALL_CANONICAL_TYPES: Set[str] = {
+    # Core types
     "ENTITY",        # Fallback default for unknown types
     "PERSON",        # Named individuals with proper names
     "ORGANIZATION",  # Companies, foundations, networks, institutions
@@ -32,6 +34,20 @@ ALL_CANONICAL_TYPES: Set[str] = {
     "LOCATION",      # Geographic places (countries, cities, regions)
     "EVENT",         # Named events (calls, conferences, workshops)
     "FUNCTION",      # Code functions (code graph only, NOT LLM-allowed)
+
+    # FIX-005: Domain types (Regen/Cosmos)
+    "CREDIT_CLASS",        # Carbon/eco credit classes (C01, CarbonPlus)
+    "GOVERNANCE_PROPOSAL", # On-chain governance proposals
+    "VALIDATOR",           # Blockchain validators
+    "MODULE",              # Cosmos SDK modules (x/ecocredit, x/group)
+    "API_MESSAGE",         # Protobuf message types (MsgSend, MsgCreateBatch)
+    "KEEPER",              # Cosmos SDK keeper interfaces
+
+    # FIX-005: General types
+    "LICENSE",     # Software/content licenses
+    "STANDARD",    # Standards/specifications (ISO, Verra)
+    "PROCESS",     # Business/technical processes
+    "MATERIAL",    # Physical materials/resources
 }
 
 # ============================================================================
@@ -42,6 +58,7 @@ ALL_CANONICAL_TYPES: Set[str] = {
 # - ENTITY: Should never be emitted by LLM; it's a fallback default
 
 LLM_ALLOWED_TYPES: Set[str] = {
+    # Core types
     "PERSON",
     "ORGANIZATION",
     "PROJECT",
@@ -52,6 +69,20 @@ LLM_ALLOWED_TYPES: Set[str] = {
     "QUESTION",
     "LOCATION",
     "EVENT",
+
+    # FIX-005: Domain types
+    "CREDIT_CLASS",
+    "GOVERNANCE_PROPOSAL",
+    "VALIDATOR",
+    "MODULE",
+    "API_MESSAGE",
+    "KEEPER",
+
+    # FIX-005: General types
+    "LICENSE",
+    "STANDARD",
+    "PROCESS",
+    "MATERIAL",
 }
 
 # ============================================================================
@@ -97,8 +128,7 @@ TYPE_ALIASES_TO_CANONICAL: Dict[str, str] = {
     "FRAMEWORK": "CONCEPT",
     "THEORY": "CONCEPT",
     "PRINCIPLE": "CONCEPT",
-    "STANDARD": "CONCEPT",
-    "LICENSE": "CONCEPT",
+    # FIX-005: LICENSE and STANDARD removed - now canonical types
 
     # TECHNOLOGY aliases
     "TECH": "TECHNOLOGY",
@@ -150,9 +180,54 @@ TYPE_ALIASES_TO_CANONICAL: Dict[str, str] = {
 
     # FUNCTION aliases (code graph only)
     "METHOD": "FUNCTION",
-    "PROCEDURE": "FUNCTION",
     "ROUTINE": "FUNCTION",
     "SUBROUTINE": "FUNCTION",
+    # FIX-005: PROCEDURE reassigned to PROCESS
+
+    # ========================================================================
+    # FIX-005: New type aliases
+    # ========================================================================
+
+    # CREDIT_CLASS aliases
+    "CREDITCLASS": "CREDIT_CLASS",
+    "CREDIT": "CREDIT_CLASS",
+    "ECOCREDIT": "CREDIT_CLASS",
+    "ECO_CREDIT": "CREDIT_CLASS",
+
+    # GOVERNANCE_PROPOSAL aliases
+    "GOVERNANCEPROPOSAL": "GOVERNANCE_PROPOSAL",
+    "PROPOSAL": "GOVERNANCE_PROPOSAL",
+    "GOV_PROPOSAL": "GOVERNANCE_PROPOSAL",
+
+    # VALIDATOR aliases
+    "BLOCKVALIDATOR": "VALIDATOR",
+    "BLOCK_VALIDATOR": "VALIDATOR",
+
+    # MODULE aliases
+    "COSMOS_MODULE": "MODULE",
+    "SDK_MODULE": "MODULE",
+
+    # API_MESSAGE aliases
+    "MESSAGE": "API_MESSAGE",
+    "MSG": "API_MESSAGE",
+    "PROTOBUF_MESSAGE": "API_MESSAGE",
+
+    # KEEPER aliases
+    "SDK_KEEPER": "KEEPER",
+
+    # LICENSE aliases
+    "SOFTWARE_LICENSE": "LICENSE",
+
+    # STANDARD aliases
+    "SPECIFICATION": "STANDARD",
+
+    # PROCESS aliases
+    "WORKFLOW": "PROCESS",
+    "PROCEDURE": "PROCESS",
+
+    # MATERIAL aliases
+    "RESOURCE": "MATERIAL",
+    "SUBSTANCE": "MATERIAL",
 }
 
 # ============================================================================
@@ -261,6 +336,7 @@ def get_canonical_description(entity_type: str) -> str:
         Description string
     """
     descriptions = {
+        # Core types
         "ENTITY": "Generic entity (fallback default)",
         "PERSON": "Named individuals with proper names",
         "ORGANIZATION": "Companies, foundations, networks, institutions",
@@ -273,6 +349,20 @@ def get_canonical_description(entity_type: str) -> str:
         "LOCATION": "Geographic places (countries, cities, regions)",
         "EVENT": "Named events (calls, conferences, workshops)",
         "FUNCTION": "Code functions (code graph only)",
+
+        # FIX-005: Domain types
+        "CREDIT_CLASS": "Carbon/eco credit classes and certification types",
+        "GOVERNANCE_PROPOSAL": "On-chain governance proposals",
+        "VALIDATOR": "Blockchain validators and validator operators",
+        "MODULE": "Cosmos SDK modules (x/ecocredit, x/group, etc.)",
+        "API_MESSAGE": "Protobuf/API message types (MsgSend, etc.)",
+        "KEEPER": "Cosmos SDK keeper interfaces",
+
+        # FIX-005: General types
+        "LICENSE": "Software and content licenses",
+        "STANDARD": "Standards and specifications (ISO, Verra, etc.)",
+        "PROCESS": "Business and technical processes",
+        "MATERIAL": "Physical materials and resources",
     }
     return descriptions.get(entity_type.upper(), "Unknown entity type")
 

@@ -40,7 +40,7 @@ Version: 1.2.0 (FIX-004)
 """
 
 import re
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Pattern
 from dataclasses import dataclass, field
 
 
@@ -313,7 +313,7 @@ class EntityQualityFilter:
         re.compile(r'^[/\\]'),
         re.compile(r'\.(md|js|ts|py|go|json|yaml|yml|toml|txt|csv)$', re.IGNORECASE),  # Code file extensions
         # Code patterns
-        re.compile(r'^x/[a-z]+$'),  # Cosmos module paths like x/marketplace
+        # FIX-005: Removed x/[a-z]+ pattern - now allowed for MODULE type
         re.compile(r'^[a-z]+\.[a-z]+\.[a-z\-]+', re.IGNORECASE),  # Package paths
         re.compile(r'^@[a-z]+/'),  # npm-style package refs
         # Technical identifiers
@@ -326,6 +326,31 @@ class EntityQualityFilter:
         # Hash-like strings
         re.compile(r'^[a-f0-9]{32,}$', re.IGNORECASE),  # MD5/SHA hashes
     ]
+
+    # ========================================================================
+    # FIX-005: Domain Identifier Patterns
+    # ========================================================================
+    # Allow legitimate domain identifiers that would otherwise be blocked
+    # as technical patterns. These are checked when entity type matches.
+    DOMAIN_IDENTIFIER_PATTERNS: List[re.Pattern] = [
+        # Cosmos SDK messages (MsgSend, MsgCreateBatch, etc.)
+        re.compile(r'^Msg[A-Z][a-zA-Z]+$'),
+        # Credit class IDs (C01, C02, etc.)
+        re.compile(r'^C\d{2,3}$'),
+        # Module paths (x/ecocredit, x/group)
+        re.compile(r'^x/[a-z]+$'),
+    ]
+
+    # FIX-005: Generic domain type words that should be blocked even when
+    # the LLM assigns a domain type. E.g., "validator" typed as VALIDATOR.
+    GENERIC_DOMAIN_TYPE_WORDS: Dict[str, Set[str]] = {
+        'VALIDATOR': {'validator', 'validators'},
+        'KEEPER': {'keeper', 'keepers'},
+        'MODULE': {'module', 'modules'},
+        'API_MESSAGE': {'message', 'messages', 'msg'},
+        'GOVERNANCE_PROPOSAL': {'proposal', 'proposals'},
+        'CREDIT_CLASS': {'credit', 'credits', 'credit class', 'credit classes'},
+    }
 
     # Patterns and blocklists for known noisy entities
     JIRA_ISSUE_PATTERN = re.compile(r'^[A-Z]+-\d+$', re.IGNORECASE)  # APP-776
@@ -522,6 +547,8 @@ class EntityQualityFilter:
                 # FIX-003: New filter reasons
                 'too_short': 0,
                 'placeholder': 0,
+                # FIX-005: New filter reasons
+                'generic_domain_type': 0,
             }
         }
 
@@ -938,6 +965,88 @@ class EntityQualityFilter:
 
         return False
 
+    # ========================================================================
+    # FIX-005: Domain Identifier Methods
+    # ========================================================================
+
+    def is_allowed_domain_identifier(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-005: Check if name is a legitimate domain identifier.
+
+        Domain identifiers like MsgSend, C01, x/ecocredit should NOT be blocked
+        as technical patterns when they have the correct entity type.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if this is a valid domain identifier that should pass through
+
+        Examples:
+            >>> filter.is_allowed_domain_identifier("MsgSend", "API_MESSAGE")
+            True
+            >>> filter.is_allowed_domain_identifier("C01", "CREDIT_CLASS")
+            True
+            >>> filter.is_allowed_domain_identifier("x/ecocredit", "MODULE")
+            True
+            >>> filter.is_allowed_domain_identifier("MsgSend", "CONCEPT")
+            False  # Wrong type
+        """
+        if not entity_type:
+            return False
+
+        upper_type = entity_type.upper()
+
+        # Only check for relevant domain types
+        if upper_type not in ('API_MESSAGE', 'MODULE', 'CREDIT_CLASS', 'KEEPER'):
+            return False
+
+        stripped = name.strip()
+
+        for pattern in self.DOMAIN_IDENTIFIER_PATTERNS:
+            if pattern.match(stripped):
+                return True
+
+        return False
+
+    def is_generic_domain_type_word(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-005: Check if name is a generic word mis-typed as a domain type.
+
+        Block generic role words like "validator" even if the LLM assigns
+        the VALIDATOR type. These should not be entities.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is generic word for this domain type)
+
+        Examples:
+            >>> filter.is_generic_domain_type_word("validators", "VALIDATOR")
+            True
+            >>> filter.is_generic_domain_type_word("keepers", "KEEPER")
+            True
+            >>> filter.is_generic_domain_type_word("Chorus One", "VALIDATOR")
+            False  # Specific validator name
+            >>> filter.is_generic_domain_type_word("validators", "PERSON")
+            False  # Handled by generic_group check
+        """
+        if not entity_type:
+            return False
+
+        upper_type = entity_type.upper()
+
+        # Check if this type has generic words to block
+        if upper_type not in self.GENERIC_DOMAIN_TYPE_WORDS:
+            return False
+
+        normalized = name.strip().lower()
+
+        return normalized in self.GENERIC_DOMAIN_TYPE_WORDS[upper_type]
+
     def exceeds_length_limits(self, name: str) -> bool:
         """
         Check if name exceeds length limits.
@@ -1060,8 +1169,10 @@ class EntityQualityFilter:
             reasons.append("too_long")
 
         # 11. Technical pattern check
+        # FIX-005: Skip for valid domain identifiers
         if self.is_technical_pattern(name):
-            reasons.append("technical_pattern")
+            if not self.is_allowed_domain_identifier(name, entity_type):
+                reasons.append("technical_pattern")
 
         # ====================================================================
         # FIX-002: New filter checks
@@ -1078,6 +1189,14 @@ class EntityQualityFilter:
         # 14. Generic event words as EVENT
         if self.is_generic_event(name, entity_type):
             reasons.append("generic_event")
+
+        # ====================================================================
+        # FIX-005: Domain type checks
+        # ====================================================================
+
+        # 15. Generic domain type words
+        if self.is_generic_domain_type_word(name, entity_type):
+            reasons.append("generic_domain_type")
 
         is_valid = len(reasons) == 0
         return is_valid, reasons
@@ -1160,8 +1279,10 @@ class EntityQualityFilter:
             return (False, "too_long")
 
         # 11. Technical pattern check
+        # FIX-005: Skip for valid domain identifiers (MsgSend, C01, x/ecocredit)
         if self.is_technical_pattern(name):
-            return (False, "technical_pattern")
+            if not self.is_allowed_domain_identifier(name, entity_type):
+                return (False, "technical_pattern")
 
         # ====================================================================
         # FIX-002: New filter checks
@@ -1178,6 +1299,14 @@ class EntityQualityFilter:
         # 14. Generic event words as EVENT
         if self.is_generic_event(name, entity_type):
             return (False, "generic_event")
+
+        # ====================================================================
+        # FIX-005: Domain type checks
+        # ====================================================================
+
+        # 15. Generic domain type words (e.g., "validator" as VALIDATOR)
+        if self.is_generic_domain_type_word(name, entity_type):
+            return (False, "generic_domain_type")
 
         return (True, "")
 
@@ -1250,6 +1379,8 @@ class EntityQualityFilter:
                 # FIX-003: New filter reasons
                 'too_short': 0,
                 'placeholder': 0,
+                # FIX-005: New filter reasons
+                'generic_domain_type': 0,
             }
         }
 

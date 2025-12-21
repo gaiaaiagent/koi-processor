@@ -52,7 +52,7 @@ class OntologyNormalizerModule(PostProcessingModule):
         'REPOSITORY': 'PROJECT',
         'SOFTWARE': 'PROJECT',
         'PRODUCT': 'PROJECT',
-        'MODULE': 'PROJECT',
+        # FIX-005: Removed 'MODULE': 'PROJECT' - MODULE is now canonical
         'PROTOCOL': 'PROJECT',
 
         # Concept variations
@@ -73,6 +73,64 @@ class OntologyNormalizerModule(PostProcessingModule):
         'MEETING': 'EVENT',
         'CONFERENCE': 'EVENT',
         'WORKSHOP': 'EVENT',
+
+        # ====================================================================
+        # FIX-005: Domain type variations (Regen/Cosmos)
+        # ====================================================================
+
+        # Credit class variations
+        'CREDITCLASS': 'CREDIT_CLASS',
+        'CREDIT_CLASS': 'CREDIT_CLASS',
+        'ECOCREDIT': 'CREDIT_CLASS',
+        'ECO_CREDIT': 'CREDIT_CLASS',
+
+        # Governance proposal variations
+        'GOVERNANCEPROPOSAL': 'GOVERNANCE_PROPOSAL',
+        'GOVERNANCE_PROPOSAL': 'GOVERNANCE_PROPOSAL',
+        'PROPOSAL': 'GOVERNANCE_PROPOSAL',
+        'GOV_PROPOSAL': 'GOVERNANCE_PROPOSAL',
+
+        # Module variations (now canonical, but map variations)
+        'MODULE': 'MODULE',
+        'COSMOS_MODULE': 'MODULE',
+        'SDK_MODULE': 'MODULE',
+
+        # API message variations
+        'MESSAGE': 'API_MESSAGE',
+        'API_MESSAGE': 'API_MESSAGE',
+        'MSG': 'API_MESSAGE',
+        'PROTOBUF_MESSAGE': 'API_MESSAGE',
+
+        # Validator variations
+        'VALIDATOR': 'VALIDATOR',
+        'BLOCKVALIDATOR': 'VALIDATOR',
+        'BLOCK_VALIDATOR': 'VALIDATOR',
+
+        # Keeper variations
+        'KEEPER': 'KEEPER',
+        'SDK_KEEPER': 'KEEPER',
+
+        # ====================================================================
+        # FIX-005: General type variations
+        # ====================================================================
+
+        # License variations
+        'LICENSE': 'LICENSE',
+        'SOFTWARE_LICENSE': 'LICENSE',
+
+        # Standard variations
+        'STANDARD': 'STANDARD',
+        'SPECIFICATION': 'STANDARD',
+
+        # Process variations
+        'PROCESS': 'PROCESS',
+        'WORKFLOW': 'PROCESS',
+        'PROCEDURE': 'PROCESS',
+
+        # Material variations
+        'MATERIAL': 'MATERIAL',
+        'RESOURCE': 'MATERIAL',
+        'SUBSTANCE': 'MATERIAL',
     }
 
     # Default predicate mappings (source -> canonical)

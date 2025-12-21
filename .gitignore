@@ -39,8 +39,9 @@ dist/
 build/
 *.egg-info/
 
-# Test files and temporary
+# Test files and temporary (except tests/ directory)
 test_*.py
+!tests/test_*.py
 *_test.py
 *_fixed.py
 debug_*.py
