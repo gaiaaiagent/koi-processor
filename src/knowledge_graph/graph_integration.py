@@ -10,15 +10,29 @@ Includes quality controls via the post-processing pipeline:
 - OntologyNormalizerModule: Normalizes entity types and predicates
 
 The pipeline framework provides modular, configurable quality control.
+
+FIX-001 Additions:
+- Relationship persistence to koi_relationships table
+- DIRECT_FUSEKI_WRITES_ENABLED guard for transition period
+- normalize_predicate() for consistent predicate formatting
 """
 
 import json
 import logging
+import re
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import os
+
+try:
+    import psycopg2
+    from psycopg2 import IntegrityError
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
+    IntegrityError = Exception  # Fallback for type hints
 
 try:
     from rdflib import Graph, Namespace, URIRef, Literal, RDF, RDFS, OWL, XSD
@@ -43,14 +57,17 @@ except ImportError:
 # Import entity resolver for deduplication
 try:
     from knowledge_graph.entity_resolver import EntityResolver
+    from knowledge_graph.models import ResolvedEntity
     HAS_ENTITY_RESOLVER = True
 except ImportError:
     try:
         from src.knowledge_graph.entity_resolver import EntityResolver
+        from src.knowledge_graph.models import ResolvedEntity
         HAS_ENTITY_RESOLVER = True
     except ImportError:
         print("Warning: EntityResolver not found. Deduplication disabled.")
         HAS_ENTITY_RESOLVER = False
+        ResolvedEntity = None  # Fallback for type hints
 
 # Import pipeline framework (new)
 try:
@@ -93,6 +110,43 @@ except ImportError:
         HAS_PIPELINE = False
 
 
+def normalize_predicate(predicate: str) -> str:
+    """
+    Normalize predicate to lowercase snake_case format.
+
+    Strips URI prefix, converts camelCase to snake_case, removes invalid chars.
+    Must match the CHECK constraint: predicate ~ '^[a-z0-9_]+$'
+
+    Args:
+        predicate: Raw predicate string (may include URI prefix)
+
+    Returns:
+        Normalized predicate (lowercase snake_case, alphanumeric + underscores only)
+
+    Examples:
+        "https://regen.network/ontology#worksFor" -> "works_for"
+        "regen:hasLocation" -> "has_location"
+        "CAUSES_EFFECT" -> "causes_effect"
+    """
+    # Strip URI prefix (handle both # and / as separators)
+    pred = predicate.split('#')[-1].split('/')[-1]
+
+    # Strip namespace prefix like "regen:" or "koi:"
+    if ':' in pred:
+        pred = pred.split(':')[-1]
+
+    # Convert camelCase to snake_case
+    pred = re.sub(r'(?<!^)(?=[A-Z])', '_', pred).lower()
+
+    # Remove invalid characters (keep only alphanumeric and underscore)
+    pred = re.sub(r'[^a-z0-9_]', '_', pred)
+
+    # Collapse multiple underscores and strip leading/trailing
+    pred = re.sub(r'_+', '_', pred).strip('_')
+
+    return pred
+
+
 class KnowledgeGraphIntegrator:
     """
     Integrates extracted entities and relationships into RDF knowledge graph.
@@ -116,6 +170,41 @@ class KnowledgeGraphIntegrator:
         dedup_db_config: Database config for entity_registry (defaults to env vars)
         dedup_threshold: Similarity threshold for semantic matching (default: 0.95)
     """
+
+    # FIX-001: Guard for direct Fuseki writes during transition
+    # Set to False until FIX-001 is fully deployed and validated
+    # When False, relationships are persisted to koi_relationships only (PG)
+    # When True, relationships are also written to Fuseki in real-time
+    DIRECT_FUSEKI_WRITES_ENABLED = False
+
+    # ========================================================================
+    # FIX-003: Predicate-based Type Inference
+    # ========================================================================
+    # Maps normalized predicates to expected entity types for subject/object.
+    # Used when relationship extraction doesn't provide explicit types.
+    # None means "don't infer for this role" (keep whatever type was provided).
+    PREDICATE_TYPE_HINTS: Dict[str, Dict[str, Optional[str]]] = {
+        'works_at': {'subject': 'PERSON', 'object': 'ORGANIZATION'},
+        'founded': {'subject': 'PERSON', 'object': 'ORGANIZATION'},
+        'co_founded': {'subject': 'PERSON', 'object': 'ORGANIZATION'},
+        'created': {'subject': 'PERSON', 'object': 'PROJECT'},
+        'developed': {'subject': 'PERSON', 'object': 'TECHNOLOGY'},
+        'located_in': {'subject': None, 'object': 'LOCATION'},
+        'based_in': {'subject': None, 'object': 'LOCATION'},
+        'part_of': {'subject': None, 'object': 'ORGANIZATION'},
+        'member_of': {'subject': 'PERSON', 'object': 'ORGANIZATION'},
+        'supports': {'subject': None, 'object': 'CONCEPT'},
+        'implements': {'subject': 'TECHNOLOGY', 'object': 'CONCEPT'},
+        'uses': {'subject': None, 'object': 'TECHNOLOGY'},
+        'attended': {'subject': 'PERSON', 'object': 'EVENT'},
+        'spoke_at': {'subject': 'PERSON', 'object': 'EVENT'},
+        'organized': {'subject': 'PERSON', 'object': 'EVENT'},
+        'invested_in': {'subject': 'PERSON', 'object': 'ORGANIZATION'},
+        'collaborates_with': {'subject': None, 'object': None},
+        'partnered_with': {'subject': 'ORGANIZATION', 'object': 'ORGANIZATION'},
+        'authored': {'subject': 'PERSON', 'object': 'PUBLICATION'},
+        'published': {'subject': 'ORGANIZATION', 'object': 'PUBLICATION'},
+    }
 
     def __init__(
         self,
@@ -141,18 +230,22 @@ class KnowledgeGraphIntegrator:
         # Initialize RDF graph
         self.graph = self._initialize_graph()
 
-        # Define namespaces
+        # Define namespaces - FIX-001: Use HTTPS everywhere
         self.REGEN = Namespace("https://regen.network/ontology#")
         self.KOI = Namespace("https://regen.network/koi#")
         self.PROV = Namespace("http://www.w3.org/ns/prov#")
         self.SCHEMA = Namespace("http://schema.org/")
         self.DC = Namespace("http://purl.org/dc/elements/1.1/")
 
-        # Source-specific namespaces
-        self.DISCOURSE = Namespace("https://regen.network/ontology/discourse#")
-        self.TWITTER = Namespace("https://regen.network/ontology/twitter#")
-        self.MEDIUM = Namespace("https://regen.network/ontology/medium#")
-        self.GITHUB = Namespace("https://regen.network/ontology/github#")
+        # Source-specific namespaces - FIX-001: Use HTTPS and koi# base
+        self.DISCOURSE = Namespace("https://regen.network/koi/discourse#")
+        self.TWITTER = Namespace("https://regen.network/koi/twitter#")
+        self.MEDIUM = Namespace("https://regen.network/koi/medium#")
+        self.GITHUB = Namespace("https://regen.network/koi/github#")
+
+        # Initialize PostgreSQL connection for relationship persistence
+        self.pg_conn = None
+        self._init_pg_connection(dedup_db_config)
 
         # Bind namespaces to prefixes
         self._bind_namespaces()
@@ -177,6 +270,12 @@ class KnowledgeGraphIntegrator:
             'dedup_semantic_hits': 0,
             'dedup_new_entities': 0
         }
+
+        # FIX-003: Granular counters for ENTITY avoidance tracking
+        self.predicate_inferred_count = 0   # Types inferred from predicate hints
+        self.existing_lookup_count = 0      # Types resolved via existing entity lookup
+        self.entity_skip_count = 0          # Relationships skipped - no type found
+        self.entity_ambiguous_count = 0     # Relationships skipped - ambiguous type match
 
         if self.enable_quality_controls:
             if self.use_pipeline:
@@ -247,6 +346,38 @@ class KnowledgeGraphIntegrator:
         except Exception as e:
             self.logger.warning(f"Failed to initialize legacy quality controls: {e}")
             self.enable_quality_controls = False
+
+    def _init_pg_connection(self, db_config: Dict[str, Any] = None):
+        """
+        Initialize PostgreSQL connection for relationship persistence.
+
+        Args:
+            db_config: Database connection config (defaults to env vars)
+        """
+        if not HAS_PSYCOPG2:
+            self.logger.warning("psycopg2 not available. Relationship persistence disabled.")
+            return
+
+        try:
+            # Build database config from env vars if not provided
+            if db_config is None:
+                db_config = {
+                    "host": os.getenv("POSTGRES_HOST", "localhost"),
+                    "port": int(os.getenv("POSTGRES_PORT", 5433)),
+                    "database": os.getenv("POSTGRES_DB", "eliza"),
+                    "user": os.getenv("POSTGRES_USER", "postgres"),
+                    "password": os.getenv("POSTGRES_PASSWORD", "postgres")
+                }
+
+            self.pg_conn = psycopg2.connect(**db_config)
+            self.pg_conn.autocommit = False  # Use explicit transactions
+            self.logger.info(
+                f"PostgreSQL connection initialized for relationship persistence "
+                f"({db_config.get('host')}:{db_config.get('port')}/{db_config.get('database')})"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize PostgreSQL connection: {e}")
+            self.pg_conn = None
 
     def _initialize_entity_resolver(
         self,
@@ -341,7 +472,9 @@ class KnowledgeGraphIntegrator:
     def integrate_document(
         self,
         document: Dict[str, Any],
-        extraction_metadata: Dict[str, Any] = None
+        extraction_metadata: Dict[str, Any] = None,
+        doc_rid: str = None,
+        run_id: str = None
     ) -> Dict[str, Any]:
         """
         Integrate a document with extracted metadata into knowledge graph
@@ -349,6 +482,8 @@ class KnowledgeGraphIntegrator:
         Args:
             document: Document with content and metadata
             extraction_metadata: LLM extraction results
+            doc_rid: Source document RID (for relationship tracking)
+            run_id: Extraction batch ID (for relationship tracking)
 
         Returns:
             Integration report with created entities and relationships
@@ -364,8 +499,12 @@ class KnowledgeGraphIntegrator:
         }
 
         try:
+            # Generate run_id if not provided
+            if run_id is None:
+                run_id = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+
             # Create document URI
-            doc_rid = document.get("rid") or self._generate_rid(document)
+            doc_rid = doc_rid or document.get("rid") or self._generate_rid(document)
             doc_uri = self.KOI[doc_rid]
             report["document_uri"] = str(doc_uri)
 
@@ -391,7 +530,7 @@ class KnowledgeGraphIntegrator:
                 # Process extracted relationships
                 relationships = extraction_metadata.get("extracted_relationships", [])
                 for rel in relationships:
-                    rel_triple = self._add_relationship(rel, doc_uri)
+                    rel_triple = self._add_relationship(rel, doc_uri, doc_rid=doc_rid, run_id=run_id)
                     if rel_triple:
                         report["relationships_created"].append(rel_triple)
 
@@ -666,46 +805,150 @@ class KnowledgeGraphIntegrator:
         self.quality_stats['inserted_to_graph'] += 1
         return entity_uri
 
-    def _add_relationship(self, rel: Dict[str, Any], doc_uri: URIRef) -> Optional[Tuple]:
-        """Add relationship to graph, respecting quality controls"""
+    def _add_relationship(
+        self,
+        rel: Dict[str, Any],
+        doc_uri: URIRef,
+        doc_rid: str = None,
+        run_id: str = None
+    ) -> Optional[Tuple]:
+        """
+        Add relationship to graph and persist to koi_relationships.
 
+        FIX-001: Relationships are now persisted to PostgreSQL (koi_relationships)
+        as the primary storage. Fuseki writes are guarded by DIRECT_FUSEKI_WRITES_ENABLED.
+
+        Args:
+            rel: Relationship dict with subject, predicate, object, confidence
+            doc_uri: Document URI for provenance
+            doc_rid: Source document RID for tracking
+            run_id: Extraction batch ID for tracking
+
+        Returns:
+            Tuple of (subject_uri, predicate_uri, object_uri) if successful, None otherwise
+        """
         try:
             subject_name = rel.get("subject")
-            predicate = rel.get("predicate")
+            predicate_raw = rel.get("predicate")
             object_name = rel.get("object")
             confidence = rel.get("confidence")  # May be None
 
-            if not all([subject_name, predicate, object_name]):
+            if not all([subject_name, predicate_raw, object_name]):
                 return None
 
             # Check relationship confidence first (early exit)
             if self.enable_quality_controls and self.confidence_filter:
                 is_valid, reason = self.confidence_filter.filter_relationship(
-                    subject_name, predicate, object_name, confidence
+                    subject_name, predicate_raw, object_name, confidence
                 )
                 if not is_valid:
-                    self.logger.debug(f"Blocked low-confidence relationship: ({subject_name})-[{predicate}]->({object_name}): {reason}")
+                    self.logger.debug(f"Blocked low-confidence relationship: ({subject_name})-[{predicate_raw}]->({object_name}): {reason}")
                     return None
 
-            # Get or create subject and object URIs (may be blocked by quality controls)
-            subject_uri = self._get_or_create_entity_by_name(subject_name)
-            object_uri = self._get_or_create_entity_by_name(object_name)
-
-            # Skip relationship if either entity was blocked
-            if subject_uri is None or object_uri is None:
-                self.logger.debug(f"Skipping relationship: entity blocked by quality controls")
+            # Normalize predicate (must match CHECK constraint: ^[a-z0-9_]+$)
+            predicate = normalize_predicate(predicate_raw)
+            if not predicate:
+                self.logger.debug(f"Empty predicate after normalization: {predicate_raw}")
                 return None
 
-            # Parse predicate
-            pred_uri = self._parse_type_uri(predicate)
+            # ================================================================
+            # FIX-003: Get explicit types first, then try inference
+            # ================================================================
+            subject_type = rel.get("subject_type")  # None if not provided
+            object_type = rel.get("object_type")    # None if not provided
 
-            # Add triple
-            self.graph.add((subject_uri, pred_uri, object_uri))
+            # FIX-003: Try predicate inference if type not provided
+            if not subject_type:
+                subject_type = self._infer_type_from_predicate(predicate, "subject")
+                if subject_type:
+                    self.predicate_inferred_count += 1
 
-            # Add provenance
-            self.graph.add((subject_uri, self.PROV.wasDerivedFrom, doc_uri))
+            if not object_type:
+                object_type = self._infer_type_from_predicate(predicate, "object")
+                if object_type:
+                    self.predicate_inferred_count += 1
 
-            return (str(subject_uri), str(pred_uri), str(object_uri))
+            # FIX-003: If type still None, try to find existing entity by name
+            if subject_type is None:
+                existing = self._find_existing_entity_by_name(subject_name)
+                if existing:
+                    subject_type = existing.entity_type
+                    self.existing_lookup_count += 1
+                else:
+                    # Log and skip - don't create new ENTITY rows
+                    self.logger.debug(f"[ENTITY-SKIP] No type for subject '{subject_name}' in '{predicate}', skipping relationship")
+                    self.entity_skip_count += 1
+                    return None
+
+            if object_type is None:
+                existing = self._find_existing_entity_by_name(object_name)
+                if existing:
+                    object_type = existing.entity_type
+                    self.existing_lookup_count += 1
+                else:
+                    self.logger.debug(f"[ENTITY-SKIP] No type for object '{object_name}' in '{predicate}', skipping relationship")
+                    self.entity_skip_count += 1
+                    return None
+
+            # Resolve entities with entity_id for FK references
+            subject = self._resolve_entity_for_relationship(subject_name, subject_type)
+            object_ = self._resolve_entity_for_relationship(object_name, object_type)
+
+            # Skip relationship if either entity was blocked or couldn't be resolved
+            if subject is None or object_ is None:
+                self.logger.debug(f"Skipping relationship: entity blocked or not resolved")
+                return None
+
+            # Persist to koi_relationships (PostgreSQL)
+            if self.pg_conn and HAS_PSYCOPG2:
+                try:
+                    with self.pg_conn.cursor() as cursor:
+                        cursor.execute("""
+                            INSERT INTO koi_relationships
+                              (subject_entity_id, predicate, object_entity_id, confidence, last_doc_rid, last_run_id)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (subject_entity_id, predicate, object_entity_id) DO UPDATE SET
+                              occurrence_count = koi_relationships.occurrence_count + 1,
+                              last_seen_at = now(),
+                              last_doc_rid = EXCLUDED.last_doc_rid,
+                              last_run_id = EXCLUDED.last_run_id,
+                              confidence = COALESCE(
+                                GREATEST(koi_relationships.confidence, EXCLUDED.confidence),
+                                koi_relationships.confidence,
+                                EXCLUDED.confidence
+                              )
+                        """, (subject.entity_id, predicate, object_.entity_id, confidence, doc_rid, run_id))
+                    self.pg_conn.commit()
+                    self.logger.debug(f"Persisted relationship: {subject.entity_id}-[{predicate}]->{object_.entity_id}")
+                except IntegrityError as e:
+                    # Catches no_self constraint or predicate_format CHECK violation
+                    self.logger.warning(f"Relationship rejected by constraint: {e}")
+                    self.pg_conn.rollback()
+                    return None
+                except Exception as e:
+                    self.logger.warning(f"Failed to persist relationship to PG: {e}")
+                    self.pg_conn.rollback()
+                    # Continue to RDF graph addition if Fuseki writes are enabled
+
+            # Only write to Fuseki/RDF if guard is enabled
+            if self.DIRECT_FUSEKI_WRITES_ENABLED:
+                subject_uri = URIRef(subject.fuseki_uri)
+                object_uri = URIRef(object_.fuseki_uri)
+                pred_uri = self.KOI[predicate]  # Use koi# namespace
+
+                # Add triple
+                self.graph.add((subject_uri, pred_uri, object_uri))
+
+                # Add provenance
+                self.graph.add((subject_uri, self.PROV.wasDerivedFrom, doc_uri))
+
+                return (str(subject_uri), str(pred_uri), str(object_uri))
+            else:
+                self.logger.debug("Direct Fuseki writes disabled - relationship persisted to PG only")
+                # Return tuple with URIs even though not written to graph
+                # This maintains API compatibility
+                pred_uri = self.KOI[predicate]
+                return (subject.fuseki_uri, str(pred_uri), object_.fuseki_uri)
 
         except Exception as e:
             self.logger.warning(f"Failed to add relationship: {e}")
@@ -795,6 +1038,184 @@ class KnowledgeGraphIntegrator:
 
         self.entity_cache[cache_key] = entity_uri
         return entity_uri
+
+    def _resolve_entity_for_relationship(
+        self,
+        name: str,
+        entity_type: str = "ENTITY"
+    ) -> Optional[ResolvedEntity]:
+        """
+        Resolve entity for use in relationship persistence.
+
+        Similar to _get_or_create_entity_by_name but returns ResolvedEntity
+        with entity_id for koi_relationships FK references.
+
+        Args:
+            name: Entity name
+            entity_type: Entity type (defaults to "ENTITY")
+
+        Returns:
+            ResolvedEntity with fuseki_uri and entity_id, or None if blocked
+        """
+        # Apply quality controls to get processed name
+        result = self.process_entity(name, entity_type)
+        if result is None:
+            return None  # Entity was blocked
+
+        processed_name, processed_type = result
+
+        # Use EntityResolver for deduplication if available
+        if self.enable_deduplication and self.entity_resolver:
+            try:
+                dedup_result = self.entity_resolver.get_or_create_entity(
+                    processed_name,
+                    processed_type
+                )
+
+                # Track deduplication stats
+                match_method = dedup_result.get("match_method", "")
+                if match_method == "tier1_exact":
+                    self.quality_stats['dedup_exact_hits'] += 1
+                elif match_method == "tier2_semantic":
+                    self.quality_stats['dedup_semantic_hits'] += 1
+                elif match_method == "tier3_new":
+                    self.quality_stats['dedup_new_entities'] += 1
+
+                entity_id = dedup_result.get("entity_id")
+                if entity_id is None:
+                    self.logger.warning(f"EntityResolver returned None entity_id for '{name}'")
+                    return None
+
+                return ResolvedEntity(
+                    fuseki_uri=dedup_result["uri"],
+                    entity_id=entity_id,
+                    tier=match_method.replace("tier", "tier"),  # e.g., "tier1_exact" -> "tier1"
+                    match_score=dedup_result.get("match_score", 1.0),
+                    entity_text=dedup_result.get("entity_text", processed_name)
+                )
+
+            except Exception as e:
+                self.logger.warning(f"EntityResolver failed for relationship entity: {e}")
+                return None
+
+        # Without EntityResolver, we can't get entity_id for FK relationship
+        self.logger.debug(f"EntityResolver not available, cannot resolve '{name}' for relationship")
+        return None
+
+    # ========================================================================
+    # FIX-003: Type Inference and Entity Lookup Methods
+    # ========================================================================
+
+    def _infer_type_from_predicate(self, predicate: str, role: str) -> Optional[str]:
+        """
+        FIX-003: Infer entity type from predicate and role (subject/object).
+
+        Uses PREDICATE_TYPE_HINTS to guess the type based on the relationship
+        predicate when explicit type is not provided.
+
+        Args:
+            predicate: Normalized predicate string (already normalized via normalize_predicate)
+            role: "subject" or "object"
+
+        Returns:
+            Inferred entity type string, or None if no hint available
+
+        Examples:
+            >>> self._infer_type_from_predicate("works_at", "subject")
+            'PERSON'
+            >>> self._infer_type_from_predicate("works_at", "object")
+            'ORGANIZATION'
+            >>> self._infer_type_from_predicate("unknown_predicate", "subject")
+            None
+        """
+        key = predicate or ""
+        hints = self.PREDICATE_TYPE_HINTS.get(key, {})
+        return hints.get(role)  # Returns None if no hint
+
+    def _find_existing_entity_by_name(self, name: str) -> Optional[Any]:
+        """
+        FIX-003: Look up existing entity by name across all types.
+
+        Returns entity row if found and UNAMBIGUOUS, None otherwise.
+        Used to avoid creating new ENTITY rows when we can resolve to existing typed entities.
+
+        IMPORTANT: If multiple entities match with DIFFERENT types, return None (ambiguous).
+
+        Args:
+            name: Entity name to look up
+
+        Returns:
+            SimpleNamespace with entity_type, entity_id, entity_text, fuseki_uri if found,
+            None if not found or ambiguous
+        """
+        if not self.pg_conn or not HAS_PSYCOPG2:
+            return None
+
+        try:
+            # Get normalized name if entity_resolver is available
+            normalized = None
+            if getattr(self, "entity_resolver", None) is not None and getattr(self.entity_resolver, "uri_gen", None) is not None:
+                normalized = self.entity_resolver.uri_gen.normalize_name(name)
+
+            with self.pg_conn.cursor() as cursor:
+                # Prefer normalized_text (indexed) when available; also avoid anchoring to existing ENTITY rows.
+                if normalized:
+                    cursor.execute("""
+                        SELECT entity_type, MIN(id) AS id, MIN(entity_text) AS entity_text, MIN(fuseki_uri) AS fuseki_uri
+                        FROM entity_registry
+                        WHERE normalized_text = %s AND entity_type != 'ENTITY'
+                        GROUP BY entity_type
+                    """, (normalized,))
+                else:
+                    cursor.execute("""
+                        SELECT entity_type, MIN(id) AS id, MIN(entity_text) AS entity_text, MIN(fuseki_uri) AS fuseki_uri
+                        FROM entity_registry
+                        WHERE LOWER(TRIM(entity_text)) = LOWER(TRIM(%s)) AND entity_type != 'ENTITY'
+                        GROUP BY entity_type
+                    """, (name,))
+
+                rows = cursor.fetchall()
+
+                if not rows:
+                    return None
+
+                # Check for ambiguity: multiple matches with different types
+                types_found = set(row[0] for row in rows)
+                if len(types_found) > 1:
+                    self.logger.debug(f"[ENTITY-AMBIGUOUS] '{name}' matches {len(rows)} entities across types: {types_found}")
+                    self.entity_ambiguous_count += 1
+                    return None  # Don't guess
+
+                # Unambiguous: return first match
+                row = rows[0]  # (entity_type, id, entity_text, fuseki_uri)
+                from types import SimpleNamespace
+                return SimpleNamespace(
+                    entity_type=row[0],
+                    entity_id=row[1],
+                    entity_text=row[2],
+                    fuseki_uri=row[3],
+                )
+        except Exception as e:
+            self.logger.debug(f"Entity lookup failed for '{name}': {e}")
+            return None
+
+    def log_entity_stats(self):
+        """
+        FIX-003: Log entity type resolution metrics for re-extraction analysis.
+
+        Call this once per extraction run (not per document) to log a summary
+        of how many ENTITY creations were avoided through type inference.
+        """
+        total_avoided = self.predicate_inferred_count + self.existing_lookup_count
+        total_skipped = self.entity_skip_count + self.entity_ambiguous_count
+
+        self.logger.info(f"[FIX-003] === Entity Type Resolution Summary ===")
+        self.logger.info(f"[FIX-003] Types inferred from predicate: {self.predicate_inferred_count}")
+        self.logger.info(f"[FIX-003] Types resolved via existing entity: {self.existing_lookup_count}")
+        self.logger.info(f"[FIX-003] Relationships skipped (unknown type): {self.entity_skip_count}")
+        self.logger.info(f"[FIX-003] Relationships skipped (ambiguous match): {self.entity_ambiguous_count}")
+        self.logger.info(f"[FIX-003] Total ENTITY creations avoided: {total_avoided}")
+        self.logger.info(f"[FIX-003] Total relationships skipped: {total_skipped}")
 
     def _sync_entity_to_graph(self, uri: URIRef, name: str, entity_type: str):
         """
@@ -974,6 +1395,12 @@ class KnowledgeGraphIntegrator:
             'dedup_semantic_hits': 0,
             'dedup_new_entities': 0
         }
+        # FIX-003: Reset entity type resolution counters
+        self.predicate_inferred_count = 0
+        self.existing_lookup_count = 0
+        self.entity_skip_count = 0
+        self.entity_ambiguous_count = 0
+
         if self.pipeline:
             self.pipeline.reset()
         if self.entity_filter:

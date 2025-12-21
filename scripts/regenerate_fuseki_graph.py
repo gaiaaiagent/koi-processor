@@ -1,44 +1,83 @@
 #!/usr/bin/env python3
 """
-Regenerate Fuseki Graph from Entity Registry
+Regenerate Fuseki Graph from Entity Registry and koi_relationships
 Created: 2025-12-11
-Purpose: Export entity_registry (PostgreSQL) to RDF and reload into Fuseki
+Updated: 2025-12-21 (FIX-001: Namespace conformance + relationship persistence)
 
 This script:
-1. Backs up existing Fuseki graph
-2. Exports entity_registry to RDF (Turtle format)
-3. Clears Fuseki /koi dataset
+1. Exports entity_registry (PostgreSQL) to RDF (Turtle format)
+2. Exports koi_relationships to RDF triples
+3. Clears target Fuseki dataset
 4. Loads new RDF graph into Fuseki
 5. Validates triple count
+
+FIX-001 Conformance:
+- HTTPS everywhere (no HTTP URIs)
+- Types use koi# namespace with UPPERCASE names (no "Entity" suffix)
+- Predicates use koi# namespace with lowercase snake_case
+- Staging mode with safety latch for production
 
 Requirements:
 - rdflib
 - SPARQLWrapper
 - psycopg2
+- requests
 """
 
 import os
 import sys
-import json
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict
+from typing import Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from rdflib import Graph, Namespace, URIRef, Literal, RDF, RDFS
-from SPARQLWrapper import SPARQLWrapper, POST, DIGEST
+from SPARQLWrapper import SPARQLWrapper, POST
 
-# Namespaces
-KOI = Namespace("http://regen.network/koi#")
-ENTITY = Namespace("http://regen.network/koi/entity/")
-REL = Namespace("http://regen.network/koi/relationship/")
+# ============================================================================
+# ENVIRONMENT CONFIGURATION - Read from environment variables
+# ============================================================================
+STAGING = os.environ.get('KOI_STAGING', 'false').lower() == 'true'
+FUSEKI_PROD_ENDPOINT = os.environ.get('FUSEKI_ENDPOINT', 'http://localhost:3030/koi')
+FUSEKI_STAGING_ENDPOINT = os.environ.get('FUSEKI_STAGING_ENDPOINT', 'http://localhost:3030/koi-staging')
+ENDPOINT = FUSEKI_STAGING_ENDPOINT if STAGING else FUSEKI_PROD_ENDPOINT
+FUSEKI_USER = os.environ.get('FUSEKI_USER', 'admin')
+FUSEKI_PASSWORD = os.environ.get('FUSEKI_PASSWORD', 'admin')
+
+# ============================================================================
+# NAMESPACES - FIX-001 Conformance: HTTPS everywhere
+# ============================================================================
+KOI = Namespace("https://regen.network/koi#")  # Types and predicates
+PROV = Namespace("http://www.w3.org/ns/prov#")
+SCHEMA = Namespace("http://schema.org/")
+
+
+def get_type_uri(entity_type: str) -> URIRef:
+    """
+    Return canonical type URI for entity type.
+
+    FIX-001: All types are UPPERCASE with no "Entity" suffix.
+
+    Args:
+        entity_type: Entity type string (e.g., "person", "ORGANIZATION")
+
+    Returns:
+        Type URI (e.g., koi:PERSON)
+    """
+    return KOI[entity_type.upper()]
 
 
 class FusekiGraphRegenerator:
-    """Regenerate Fuseki graph from PostgreSQL entity_registry."""
+    """Regenerate Fuseki graph from PostgreSQL entity_registry and koi_relationships."""
 
-    def __init__(self):
+    def __init__(self, fuseki_endpoint: str):
+        """
+        Initialize regenerator.
+
+        Args:
+            fuseki_endpoint: Target Fuseki endpoint URL
+        """
         self.db_config = {
             "host": os.getenv("POSTGRES_HOST", "localhost"),
             "port": int(os.getenv("POSTGRES_PORT", 5433)),
@@ -47,17 +86,20 @@ class FusekiGraphRegenerator:
             "password": os.getenv("POSTGRES_PASSWORD", "postgres"),
         }
 
-        self.fuseki_endpoint = "http://localhost:3030/koi"
-        self.fuseki_update_endpoint = f"{self.fuseki_endpoint}/update"
-        self.fuseki_data_endpoint = f"{self.fuseki_endpoint}/data"
+        self.fuseki_endpoint = fuseki_endpoint
+        self.fuseki_update_endpoint = f"{fuseki_endpoint}/update"
+        self.fuseki_data_endpoint = f"{fuseki_endpoint}/data"
+        self.fuseki_user = FUSEKI_USER
+        self.fuseki_password = FUSEKI_PASSWORD
 
         self.graph = Graph()
         self.graph.bind("koi", KOI)
-        self.graph.bind("entity", ENTITY)
-        self.graph.bind("rel", REL)
+        self.graph.bind("prov", PROV)
+        self.graph.bind("schema", SCHEMA)
 
         self.stats = {
             "entities_exported": 0,
+            "relationships_exported": 0,
             "triples_created": 0,
             "fuseki_cleared": False,
             "fuseki_loaded": False,
@@ -71,12 +113,9 @@ class FusekiGraphRegenerator:
         """
         Export entity_registry to RDF graph.
 
-        Creates triples for:
-        - Entity URI
-        - Entity text (rdfs:label)
-        - Entity type (rdf:type)
-        - Occurrence count (koi:occurrenceCount)
-        - First/last seen (koi:firstSeen, koi:lastSeen)
+        FIX-001 Conformance:
+        - Uses existing fuseki_uri from entity_registry (already HTTPS)
+        - Type URIs are UPPERCASE without "Entity" suffix
         """
         print("\n" + "=" * 80)
         print("STEP 1: Export Entity Registry to RDF")
@@ -104,20 +143,21 @@ class FusekiGraphRegenerator:
         print(f"\n📊 Exporting {len(entities)} entities from PostgreSQL...")
 
         for entity in entities:
-            # Create entity URI
+            # Use existing fuseki_uri (already HTTPS per entity_registry schema)
             if entity["fuseki_uri"]:
                 entity_uri = URIRef(entity["fuseki_uri"])
             else:
-                # Fallback: create URI from ID
-                entity_uri = ENTITY[f"entity_{entity['id']}"]
+                # Fallback: log warning and skip
+                print(f"⚠️  Entity {entity['id']} has no fuseki_uri, skipping")
+                continue
 
             # Add triples
             # Label
             self.graph.add((entity_uri, RDFS.label, Literal(entity["entity_text"])))
 
-            # Type
+            # Type - FIX-001: UPPERCASE, no "Entity" suffix
             entity_type = entity["entity_type"]
-            type_uri = KOI[f"{entity_type}Entity"]
+            type_uri = get_type_uri(entity_type)
             self.graph.add((entity_uri, RDF.type, type_uri))
 
             # Occurrence count
@@ -131,16 +171,68 @@ class FusekiGraphRegenerator:
 
             self.stats["entities_exported"] += 1
 
-        self.stats["triples_created"] = len(self.graph)
-
         print(f"✓ Exported {self.stats['entities_exported']} entities")
-        print(f"✓ Created {self.stats['triples_created']} triples")
+
+        return self.graph
+
+    def export_relationships_to_rdf(self) -> Graph:
+        """
+        Export koi_relationships to RDF graph.
+
+        FIX-001 Conformance:
+        - Predicates use koi# namespace (lowercase snake_case)
+        - Subject/object URIs from entity_registry (already HTTPS)
+        """
+        print("\n" + "=" * 80)
+        print("STEP 1.5: Export Relationships to RDF")
+        print("=" * 80)
+
+        conn = self.connect_db()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        cursor.execute("""
+            SELECT
+                s.fuseki_uri AS subject_uri,
+                r.predicate,
+                o.fuseki_uri AS object_uri,
+                r.confidence
+            FROM koi_relationships r
+            JOIN entity_registry s ON r.subject_entity_id = s.id
+            JOIN entity_registry o ON r.object_entity_id = o.id
+        """)
+
+        relationships = cursor.fetchall()
+        conn.close()
+
+        print(f"\n📊 Exporting {len(relationships)} relationships from koi_relationships...")
+
+        for rel in relationships:
+            subject_uri_str = rel['subject_uri']
+            object_uri_str = rel['object_uri']
+            predicate_name = rel['predicate']
+
+            if not subject_uri_str or not object_uri_str:
+                print(f"⚠️  Relationship has null URI, skipping")
+                continue
+
+            subject = URIRef(subject_uri_str)
+            predicate = KOI[predicate_name]  # koi# namespace
+            obj = URIRef(object_uri_str)
+
+            self.graph.add((subject, predicate, obj))
+
+            # Optionally add confidence as reification (skip for now to keep graph simple)
+            self.stats["relationships_exported"] += 1
+
+        print(f"✓ Exported {self.stats['relationships_exported']} relationships")
 
         return self.graph
 
     def save_rdf_to_file(self, output_path: Path):
         """Save RDF graph to Turtle file."""
+        self.stats["triples_created"] = len(self.graph)
         print(f"\n💾 Saving RDF graph to: {output_path}")
+        print(f"   Total triples: {self.stats['triples_created']:,}")
 
         self.graph.serialize(destination=str(output_path), format="turtle")
 
@@ -148,13 +240,16 @@ class FusekiGraphRegenerator:
         print(f"✓ Saved {file_size:.2f} MB")
 
     def clear_fuseki_dataset(self):
-        """Clear existing Fuseki /koi dataset."""
+        """Clear existing Fuseki dataset."""
         print("\n" + "=" * 80)
         print("STEP 2: Clear Existing Fuseki Dataset")
         print("=" * 80)
+        print(f"⚠️  Clearing dataset at: {self.fuseki_endpoint}")
 
         sparql = SPARQLWrapper(self.fuseki_update_endpoint)
         sparql.setMethod(POST)
+        sparql.setHTTPAuth("BASIC")
+        sparql.setCredentials(self.fuseki_user, self.fuseki_password)
 
         # SPARQL UPDATE to delete all triples
         delete_query = "DELETE WHERE { ?s ?p ?o }"
@@ -164,7 +259,7 @@ class FusekiGraphRegenerator:
             sparql.query()
 
             self.stats["fuseki_cleared"] = True
-            print("✓ Fuseki /koi dataset cleared")
+            print("✓ Fuseki dataset cleared")
 
         except Exception as e:
             print(f"✗ Failed to clear Fuseki: {e}")
@@ -188,7 +283,8 @@ class FusekiGraphRegenerator:
             response = requests.post(
                 self.fuseki_data_endpoint,
                 data=rdf_data,
-                headers=headers
+                headers=headers,
+                auth=(self.fuseki_user, self.fuseki_password)
             )
 
             if response.status_code in [200, 201, 204]:
@@ -210,6 +306,8 @@ class FusekiGraphRegenerator:
         print("=" * 80)
 
         sparql = SPARQLWrapper(f"{self.fuseki_endpoint}/sparql")
+        sparql.setHTTPAuth("BASIC")
+        sparql.setCredentials(self.fuseki_user, self.fuseki_password)
 
         count_query = "SELECT (COUNT(*) as ?count) WHERE { ?s ?p ?o }"
 
@@ -226,7 +324,8 @@ class FusekiGraphRegenerator:
             if triple_count == self.stats["triples_created"]:
                 print("✓ Triple counts match!")
             else:
-                print(f"⚠️  Triple count mismatch (diff: {abs(triple_count - self.stats['triples_created'])})")
+                diff = abs(triple_count - self.stats['triples_created'])
+                print(f"⚠️  Triple count mismatch (diff: {diff})")
 
             return triple_count
 
@@ -237,19 +336,23 @@ class FusekiGraphRegenerator:
     def run(self):
         """Main execution flow."""
         print("=" * 80)
-        print("FUSEKI GRAPH REGENERATION")
+        print("FUSEKI GRAPH REGENERATION (FIX-001 Compliant)")
         print("=" * 80)
+        print(f"\n🎯 Target Fuseki endpoint: {self.fuseki_endpoint}")
+        print(f"📍 Mode: {'STAGING' if STAGING else 'PRODUCTION'}")
         print(f"\nStarted: {datetime.now().isoformat()}")
 
-        output_dir = Path("/opt/projects/koi-processor/exports/fuseki_regen_$(date +%Y%m%d)")
-        output_dir = Path(f"/opt/projects/koi-processor/exports/fuseki_regen_{datetime.now().strftime('%Y%m%d')}")
+        output_dir = Path(f"/opt/projects/koi-processor/exports/fuseki_regen_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        rdf_file = output_dir / "entity_registry.ttl"
+        rdf_file = output_dir / "koi_graph.ttl"
 
         try:
-            # Step 1: Export to RDF
+            # Step 1: Export entities to RDF
             self.export_entities_to_rdf()
+
+            # Step 1.5: Export relationships to RDF
+            self.export_relationships_to_rdf()
 
             # Save to file
             self.save_rdf_to_file(rdf_file)
@@ -267,7 +370,8 @@ class FusekiGraphRegenerator:
             print("\n" + "=" * 80)
             print("SUMMARY")
             print("=" * 80)
-            print(f"\n✓ Entities exported: {self.stats['entities_exported']}")
+            print(f"\n✓ Entities exported: {self.stats['entities_exported']:,}")
+            print(f"✓ Relationships exported: {self.stats['relationships_exported']:,}")
             print(f"✓ Triples created: {self.stats['triples_created']:,}")
             print(f"✓ Fuseki cleared: {self.stats['fuseki_cleared']}")
             print(f"✓ Fuseki loaded: {self.stats['fuseki_loaded']}")
@@ -280,11 +384,39 @@ class FusekiGraphRegenerator:
 
         except Exception as e:
             print(f"\n✗ Regeneration failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 
 def main():
-    regenerator = FusekiGraphRegenerator()
+    """Main entry point with safety latch for production."""
+    print("=" * 80)
+    print("KOI FUSEKI GRAPH REGENERATOR")
+    print("=" * 80)
+    print(f"\n🎯 Target Fuseki endpoint: {ENDPOINT}")
+    print(f"📍 Mode: {'STAGING' if STAGING else 'PRODUCTION'}")
+
+    # Safety latch: require --confirm-prod for production target
+    if not STAGING and '--confirm-prod' not in sys.argv:
+        print("\n❌ ERROR: Production target requires --confirm-prod flag")
+        print("   Usage: python regenerate_fuseki_graph.py --confirm-prod")
+        print("\n   Or set KOI_STAGING=true for staging mode:")
+        print("   export KOI_STAGING=true")
+        print("   python regenerate_fuseki_graph.py")
+        sys.exit(1)
+
+    if not STAGING:
+        print("\n⚠️  WARNING: Running against PRODUCTION endpoint!")
+        print("   Press Ctrl+C within 5 seconds to abort...")
+        import time
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n\nAborted by user.")
+            sys.exit(1)
+
+    regenerator = FusekiGraphRegenerator(ENDPOINT)
     success = regenerator.run()
     sys.exit(0 if success else 1)
 

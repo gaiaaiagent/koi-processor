@@ -130,7 +130,7 @@ class EntityResolver:
         Tier 1.5: Canonical mapping lookup using alias registry.
 
         Returns:
-            (fuseki_uri, canonical_text) if found, else None
+            (entity_id, fuseki_uri, canonical_text) if found, else None
         """
         if not self._canonical_mappings:
             return None
@@ -143,7 +143,7 @@ class EntityResolver:
         normalized_canonical = self.uri_gen.normalize_name(canonical_name)
         cursor.execute(
             """
-            SELECT fuseki_uri, entity_text, occurrence_count
+            SELECT id, fuseki_uri, entity_text, occurrence_count
             FROM entity_registry
             WHERE normalized_text = %s AND entity_type = %s
             """,
@@ -153,7 +153,7 @@ class EntityResolver:
         if not match:
             return None
 
-        uri, canonical_text, count = match
+        entity_id, uri, canonical_text, count = match
         cursor.execute(
             """
             UPDATE entity_registry
@@ -165,7 +165,7 @@ class EntityResolver:
         )
         self.stats["tier1_5_canonical_hits"] += 1
         self.logger.debug(f"Tier 1.5 canonical: '{entity_text}' -> '{canonical_text}'")
-        return uri, canonical_text
+        return entity_id, uri, canonical_text
 
     def get_or_create_entity(
         self,
@@ -202,14 +202,14 @@ class EntityResolver:
             # TIER 1: EXACT MATCH (fastest)
             # -------------------------------------------------------------------
             cursor.execute("""
-                SELECT fuseki_uri, entity_text, occurrence_count
+                SELECT id, fuseki_uri, entity_text, occurrence_count
                 FROM entity_registry
                 WHERE normalized_text = %s AND entity_type = %s
             """, (normalized, entity_type_upper))
 
             match = cursor.fetchone()
             if match:
-                uri, canonical_text, count = match
+                entity_id, uri, canonical_text, count = match
 
                 # Update occurrence count
                 cursor.execute("""
@@ -225,6 +225,7 @@ class EntityResolver:
 
                 return {
                     "uri": uri,
+                    "entity_id": entity_id,
                     "matched": True,
                     "match_method": "tier1_exact",
                     "match_score": 1.0,
@@ -236,10 +237,11 @@ class EntityResolver:
             # -------------------------------------------------------------------
             canonical_match = self._tier1_5_canonical_lookup(cursor, entity_text, entity_type_upper)
             if canonical_match:
-                uri, canonical_text = canonical_match
+                entity_id, uri, canonical_text = canonical_match
                 conn.commit()
                 return {
                     "uri": uri,
+                    "entity_id": entity_id,
                     "matched": True,
                     "match_method": "tier1_5_canonical",
                     "match_score": 1.0,
@@ -254,7 +256,7 @@ class EntityResolver:
                     embedding = self._generate_embedding(entity_text)
 
                     cursor.execute("""
-                        SELECT fuseki_uri, entity_text,
+                        SELECT id, fuseki_uri, entity_text,
                                1 - (embedding <=> %s::vector) AS similarity
                         FROM entity_registry
                         WHERE 1 - (embedding <=> %s::vector) > %s
@@ -265,7 +267,7 @@ class EntityResolver:
 
                     match = cursor.fetchone()
                     if match:
-                        uri, canonical_text, score = match
+                        entity_id, uri, canonical_text, score = match
 
                         # Update occurrence count
                         cursor.execute("""
@@ -284,6 +286,7 @@ class EntityResolver:
 
                         return {
                             "uri": uri,
+                            "entity_id": entity_id,
                             "matched": True,
                             "match_method": "tier2_semantic",
                             "match_score": float(score),
@@ -345,6 +348,7 @@ class EntityResolver:
 
                         return {
                             "uri": final_uri,
+                            "entity_id": entity_id,
                             "matched": False,
                             "match_method": "tier3_new",
                             "match_score": 1.0,
@@ -365,6 +369,7 @@ class EntityResolver:
 
                         return {
                             "uri": final_uri,
+                            "entity_id": entity_id,
                             "matched": True,
                             "match_method": "tier1_exact",  # Effectively an exact match
                             "match_score": 1.0,
@@ -377,17 +382,18 @@ class EntityResolver:
                 self.logger.debug(f"IntegrityError, falling back to exact match: {e}")
 
                 cursor.execute("""
-                    SELECT fuseki_uri, entity_text
+                    SELECT id, fuseki_uri, entity_text
                     FROM entity_registry
                     WHERE normalized_text = %s AND entity_type = %s
                 """, (normalized, entity_type_upper))
 
                 fallback_match = cursor.fetchone()
                 if fallback_match:
-                    uri, canonical_text = fallback_match
+                    entity_id, uri, canonical_text = fallback_match
                     self.stats["race_condition_hits"] += 1
                     return {
                         "uri": uri,
+                        "entity_id": entity_id,
                         "matched": True,
                         "match_method": "tier1_exact",
                         "match_score": 1.0,
@@ -397,9 +403,10 @@ class EntityResolver:
                     # Re-raise if truly unexpected error
                     raise
 
-            # Should not reach here
+            # Should not reach here - fallback with entity_id=None
             return {
                 "uri": new_uri,
+                "entity_id": None,
                 "matched": False,
                 "match_method": "tier3_new",
                 "match_score": 1.0,

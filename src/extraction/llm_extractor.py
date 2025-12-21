@@ -1,6 +1,8 @@
 """
 LLM-based semantic extraction service for KOI processor
 Uses Mistral 7B via Ollama for ontology-driven entity and relationship extraction
+
+FIX-002: Uses shared prompt builder and type normalization
 """
 
 import asyncio
@@ -11,6 +13,22 @@ from datetime import datetime, timezone
 import httpx
 from pathlib import Path
 import hashlib
+
+# FIX-002: Import shared prompt builder and type normalization
+try:
+    from extraction.prompt_builder import build_extraction_prompt, get_system_message
+    from core.entity_types import normalize_type, LLM_ALLOWED_TYPES, is_llm_allowed_type
+except ImportError:
+    try:
+        from src.extraction.prompt_builder import build_extraction_prompt, get_system_message
+        from src.core.entity_types import normalize_type, LLM_ALLOWED_TYPES, is_llm_allowed_type
+    except ImportError:
+        # Fallback for standalone testing
+        build_extraction_prompt = None
+        get_system_message = None
+        normalize_type = lambda x: x.upper() if x else "ENTITY"
+        LLM_ALLOWED_TYPES = {"PERSON", "ORGANIZATION", "PROJECT", "CONCEPT", "TECHNOLOGY", "CLAIM", "EVIDENCE", "QUESTION", "LOCATION", "EVENT"}
+        is_llm_allowed_type = lambda x: x.upper() in LLM_ALLOWED_TYPES
 
 # Import ontology utilities
 try:
@@ -130,124 +148,28 @@ class OntologyLLMExtractor:
         source_type: str,
         metadata: Dict[str, Any] = None
     ) -> str:
-        """Build LLM prompt for extraction based on ontology"""
+        """Build LLM prompt for extraction based on ontology.
 
-        # Truncate content for context window
+        FIX-002: Uses shared prompt builder for consistency across extractors.
+        """
+        # FIX-002: Use shared prompt builder if available
+        if build_extraction_prompt is not None:
+            return build_extraction_prompt(
+                content=content,
+                source_type=source_type,
+                metadata=metadata,
+                max_content_length=1500  # Ollama/Mistral has smaller context, use 1500 chars
+            )
+
+        # Fallback: minimal inline prompt (shouldn't be reached in normal operation)
         content_snippet = content[:1500] if len(content) > 1500 else content
-
-        # Ultra-simplified prompt for Mistral 7B
-        prompt = f"""Extract structured data from this {source_type} content.
+        return f"""Extract structured data from this {source_type} content.
 
 CONTENT:
 {content_snippet}
 
-Extract and return JSON with:
-1. Metadata fields with confidence scores (0.0-1.0)
-2. Entities based on Regen ontology (HumanActor/PERSON, ORGANIZATION, PROJECT, CONCEPT, TECHNOLOGY, CLAIM, EVIDENCE, QUESTION)
-3. Relationships between entities
-4. Summary
-
-JSON structure required:
-{{
-  "metadata": {{
-    "title": {{"value": "...", "confidence": 0.9}},
-    "author": {{"value": "...", "confidence": 0.8}},
-    "published_date": {{"value": "ISO date", "confidence": 0.7}},
-    "organization": {{"value": "...", "confidence": 0.6}},
-    "tags": {{"value": ["tag1", "tag2"], "confidence": 0.8}}
-  }},
-  "entities": [
-    {{"type": "PERSON", "name": "...", "confidence": 0.9}},
-    {{"type": "ORGANIZATION", "name": "...", "confidence": 0.9}},
-    {{"type": "PROJECT", "name": "...", "confidence": 0.9}},
-    {{"type": "CONCEPT", "name": "...", "confidence": 0.9}},
-    {{"type": "TECHNOLOGY", "name": "...", "confidence": 0.9}},
-    {{"type": "CLAIM", "name": "...", "confidence": 0.8}},
-    {{"type": "EVIDENCE", "name": "...", "confidence": 0.8}},
-    {{"type": "QUESTION", "name": "...", "confidence": 0.8}}
-  ],
-  "relationships": [
-    {{"subject": "entity1", "predicate": "supports", "object": "entity2"}}
-  ],
-  "summary": "one sentence summary"
-}}
-
-Focus on regenerative finance, ecological, and commons-oriented content.
-Return ONLY valid JSON, no additional text.
-
-## Entity Type Selection Guidelines
-
-CONCEPT vs PROJECT:
-- CONCEPT: Abstract ideas, methodologies, frameworks, theories, movements.
-  Examples: "regenerative agriculture", "proof of stake", "tokenomics", "MRV", "carbon sequestration"
-  NOT: Specific organizations or projects implementing the idea.
-- PROJECT: Concrete initiatives, platforms, software, named programs.
-  Examples: "Regen Ledger" (software), "Koi Project" (initiative), "DeSci Publish" (platform)
-  NOT: General concepts like "blockchain" or "carbon credits"
-- Rule: If abstract → CONCEPT. If named implementation → PROJECT/ORGANIZATION.
-
-PERSON vs GROUP:
-- PERSON: Named individuals with proper names.
-  Examples: "Gregory Landua", "Sarah Bax", "Will Szal"
-- DO NOT EXTRACT as PERSON:
-  - Generic groups: "buyers", "sellers", "partners", "users", "members", "contributors"
-  - Plural collectives: "stakeholders", "participants", "investors", "validators"
-  - Roles without names: "administrators", "developers", "moderators"
-  - Utilities/services: "water utilities", "providers", "suppliers"
-  → Extract as ORGANIZATION or omit entirely.
-
-LOCATION vs PROJECT:
-- Country codes (UK, US, EU, CA, AU) → LOCATION/ORGANIZATION as context; never PROJECT.
-
-LICENSE/STANDARD as CONCEPT:
-- Licenses: "Apache License", "MIT License"
-- Technical standards: "ERC-20", "ERC-721" (as standards, not projects)
-
-## Extraction Quality Rules
-
-DO NOT EXTRACT:
-- Pronouns (we, they, it, our, their)
-- Generic nouns (people, user, member, organization)
-- JIRA IDs (APP-776, ERC-123)
-- Template text ("Testing Instructions", "Acceptance Criteria", "DRY Principles")
-- Placeholders ("Unknown", "Anonymous", "Public Users", "TBD")
-- Technical paths (app.regen.claim, api.regen.network)
-- Pure numbers (2030, 35)
-- URLs or code identifiers
-
-Confidence Scoring:
-- HIGH (0.85-1.0): Explicit named mention ("Regen Network announced...")
-- MEDIUM (0.70-0.84): Implied/contextual ("the network launched...")
-- LOW (<0.70): DO NOT EXTRACT (skip)
-
-## Few-Shot Examples
-
-Example 1: Governance Discussion
-Input: "Gregory Landua and Sarah Bax discussed regenerative agriculture principles at the Regen Network community meeting."
-Extract:
-- "Gregory Landua" (PERSON, 0.95)
-- "Sarah Bax" (PERSON, 0.95)
-- "regenerative agriculture" (CONCEPT, 0.90)
-- "Regen Network" (ORGANIZATION, 0.95)
-Do NOT extract: "community", "meeting"
-
-Example 2: Technical Documentation
-Input: "The Regen Ledger blockchain uses proof of stake consensus. Carbon credits are tokenized as ERC-20 compatible assets."
-Extract:
-- "Regen Ledger" (TECHNOLOGY, 0.95)
-- "proof of stake" (CONCEPT, 0.90)
-- "carbon credits" (CONCEPT, 0.85)
-- "ERC-20" (CONCEPT, 0.80)
-Do NOT extract: "blockchain", "consensus", "assets"
-
-Example 3: Project Template
-Input: "Testing Instructions: Verify APP-776 implements DRY principles. Acceptance Criteria: All buyers can purchase credits."
-Extract:
-- NOTHING (template/boilerplate)
-Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
-"""
-
-        return prompt
+Return JSON with entities (PERSON, ORGANIZATION, PROJECT, CONCEPT, TECHNOLOGY, CLAIM, EVIDENCE, QUESTION, LOCATION, EVENT), relationships, and summary.
+Return ONLY valid JSON."""
 
     async def _call_ollama(self, prompt: str) -> Dict[str, Any]:
         """Call Ollama API for LLM inference"""
@@ -338,7 +260,11 @@ Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
                 return {}
 
     def _parse_extraction(self, extraction: Dict[str, Any], source_type: str) -> Dict[str, Any]:
-        """Parse and validate LLM extraction with confidence scores"""
+        """Parse and validate LLM extraction with confidence scores.
+
+        FIX-002: Normalizes entity types to canonical uppercase,
+        PRESERVES confidence scores (was being dropped), and filters non-LLM-allowed types.
+        """
 
         metadata = {
             "semantic_extraction": extraction,
@@ -360,22 +286,65 @@ Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
                     if "reasoning" in info:
                         metadata.setdefault("llm_metadata_reasoning", {})[field] = info["reasoning"]
 
-        # Extract entities
+        # FIX-002: Extract entities with type normalization and filtering
         entities = extraction.get("entities", [])
         if entities:
-            metadata["extracted_entities"] = [
-                {
-                    "type": e.get("type", "unknown"),
-                    "name": e.get("name", ""),
-                    "properties": e.get("properties", {})
-                }
-                for e in entities
-            ]
+            normalized_entities = []
+            for e in entities:
+                raw_type = e.get("type", "")
+                normalized_type = normalize_type(raw_type)
 
-        # Extract relationships
+                # FIX-002: Drop entities with non-LLM-allowed types
+                if not is_llm_allowed_type(normalized_type):
+                    self.logger.debug(f"[OLLAMA] Dropping entity '{e.get('name', '')}' with non-allowed type '{normalized_type}' (raw: '{raw_type}')")
+                    continue
+
+                # Build entity dict with canonical type
+                entity_dict = {
+                    "name": e.get("name", ""),
+                    "type": normalized_type,  # FIX-002: Canonical uppercase type
+                }
+
+                # FIX-002: PRESERVE confidence (this was the bug - confidence was being dropped)
+                if "confidence" in e:
+                    entity_dict["confidence"] = e["confidence"]
+
+                # Preserve properties/metadata if present
+                if "properties" in e:
+                    entity_dict["properties"] = e["properties"]
+                if "metadata" in e:
+                    entity_dict["metadata"] = e["metadata"]
+                if "content" in e:
+                    entity_dict["content"] = e["content"]
+
+                normalized_entities.append(entity_dict)
+
+            metadata["extracted_entities"] = normalized_entities
+
+        # FIX-002: Extract relationships with optional type normalization
         relationships = extraction.get("relationships", [])
         if relationships:
-            metadata["extracted_relationships"] = relationships
+            normalized_relationships = []
+            for r in relationships:
+                rel_dict = {
+                    "subject": r.get("subject", ""),
+                    "predicate": r.get("predicate", ""),
+                    "object": r.get("object", ""),
+                }
+
+                # FIX-002: Preserve confidence if present
+                if "confidence" in r:
+                    rel_dict["confidence"] = r["confidence"]
+
+                # Normalize subject_type and object_type if present
+                if "subject_type" in r:
+                    rel_dict["subject_type"] = normalize_type(r["subject_type"])
+                if "object_type" in r:
+                    rel_dict["object_type"] = normalize_type(r["object_type"])
+
+                normalized_relationships.append(rel_dict)
+
+            metadata["extracted_relationships"] = normalized_relationships
 
         # Extract discourse elements (including questions now)
         if extraction.get("claims"):

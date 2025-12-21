@@ -62,11 +62,15 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 
 ## Production Environment
 
-**Server**: darren@202.61.196.119:5433
-**Database**: PostgreSQL (eliza)
+**Server**: darren@202.61.196.119
+**Code Path**: /opt/projects/koi-processor
+**Database**: PostgreSQL (eliza) on port 5433 (via Docker: gaia-postgres-1)
+**Fuseki**: Apache Jena Fuseki on port 3030 (via Docker: fuseki-koi)
 **API**: PM2 process hybrid-rag-api on port 8301
+
+**Fuseki Credentials**: admin:admin (for SPARQL updates)
 
 ---
 
-**Last Updated**: 2025-12-20
-**Phase**: Hybrid RAG v2.0.0 Deployed
+**Last Updated**: 2025-12-21
+**Phase**: Hybrid RAG v2.0.0 Deployed, FIX-001 Complete

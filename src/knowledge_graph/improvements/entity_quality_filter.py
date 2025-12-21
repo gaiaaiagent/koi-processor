@@ -9,6 +9,9 @@ Filters out low-quality entities extracted by LLMs, including:
 - Lowercase single-word PERSON entities
 - Generic person patterns (the character, our friends)
 - Sentence-like entities (contains verbs, too long)
+- FIX-002: Git commits/changelog lines when typed as CLAIM/EVIDENCE/QUESTION
+- FIX-002: AI systems mis-typed as PERSON (should be TECHNOLOGY)
+- FIX-002: Generic event words when typed as EVENT
 
 This module is adapted from the YonEarth knowledge graph extraction system
 with Regen-specific additions for forum and community content.
@@ -33,7 +36,7 @@ Usage:
 
 Author: Claude Code (adapted from YonEarth)
 Date: 2025-12-08
-Version: 1.0.0
+Version: 1.2.0 (FIX-004)
 """
 
 import re
@@ -171,6 +174,8 @@ class EntityQualityFilter:
     Implements pattern and template-based checks, including:
     - Stop-word entities (pronouns, generic nouns)
     - Placeholder PERSON entities ("Public Users", "Unknown", "Anonymous")
+    - FIX-003: Expanded placeholder detection for ALL types
+    - FIX-003: Min-length validation (blocks single-char names)
     - JIRA/issue IDs and ERC standards (APP-776, ERC-20)
     - Boilerplate/template phrases ("Testing Instructions", "DRY Principles")
     - Numeric-only entities
@@ -185,6 +190,24 @@ class EntityQualityFilter:
         config: FilterConfig instance with customization options
         stats: Dictionary tracking filter statistics
     """
+
+    # ========================================================================
+    # FIX-003: Min-Length Validation
+    # ========================================================================
+    MIN_NAME_LENGTH = 2  # Block 0-1 char names
+
+    # ========================================================================
+    # FIX-003: Expanded Placeholder Patterns (applies to ALL types)
+    # ========================================================================
+    PLACEHOLDER_PATTERNS: List[re.Pattern] = [
+        re.compile(r'^unknown\s*\d*$', re.IGNORECASE),
+        re.compile(r'^anonymous(\s+user)?$', re.IGNORECASE),
+        re.compile(r'^public\s+users?$', re.IGNORECASE),
+        re.compile(r'^user\s*\d+$', re.IGNORECASE),
+        re.compile(r'^(tbd|todo|n/?a|none)$', re.IGNORECASE),
+        re.compile(r'^placeholder\s*\d*$', re.IGNORECASE),
+        re.compile(r'^(test|dummy|sample)\s*(user|data|entity)?$', re.IGNORECASE),
+    ]
 
     # Default stop words - pronouns and generic nouns
     DEFAULT_STOP_WORDS: Set[str] = {
@@ -308,6 +331,63 @@ class EntityQualityFilter:
     JIRA_ISSUE_PATTERN = re.compile(r'^[A-Z]+-\d+$', re.IGNORECASE)  # APP-776
     ERC_STANDARD_PATTERN = re.compile(r'^ERC-\d+$', re.IGNORECASE)  # ERC-20, ERC-721
 
+    # ========================================================================
+    # FIX-002: Git/Changelog Patterns
+    # ========================================================================
+    # Block these patterns ONLY when entity type is CLAIM, EVIDENCE, or QUESTION
+    GIT_CHANGELOG_PATTERNS: List[re.Pattern] = [
+        # Conventional commits: feat(scope): message, fix: message, etc.
+        re.compile(r'^(feat|fix|chore|docs|style|refactor|test|build|ci|perf)(\([^)]*\))?:', re.IGNORECASE),
+        # Git merge commits
+        re.compile(r'^Merge (pull request|branch|remote)', re.IGNORECASE),
+        # Version strings: v1.2.3, 1.0.0-beta, etc.
+        re.compile(r'^v?\d+\.\d+(\.\d+)?(-[0-9A-Za-z.\-]+)?$', re.IGNORECASE),
+        # Changelog entries: [Added] Feature, [Fixed] Bug, etc.
+        re.compile(r'^\[[\w\s]+\]\s*(Added|Fixed|Changed|Removed|Updated|Deprecated)\b', re.IGNORECASE),
+    ]
+
+    # ========================================================================
+    # FIX-002: AI/Software Blocklist
+    # ========================================================================
+    # Block these names ONLY when entity type is PERSON (they should be TECHNOLOGY)
+    AI_SOFTWARE_BLOCKLIST: Set[str] = {
+        # Major LLMs/chatbots
+        'chatgpt', 'gpt-4', 'gpt-3', 'gpt-4o', 'gpt-3.5', 'gpt4', 'gpt3',
+        'claude', 'claude-3', 'claude-2', 'copilot', 'github copilot',
+        'bard', 'gemini', 'gemini-pro', 'llama', 'llama-2', 'llama-3',
+        'mistral', 'mixtral', 'palm', 'palm-2',
+        # AI companies (when used as the AI itself)
+        'openai', 'anthropic',
+        # Image/media AI
+        'dall-e', 'dalle', 'midjourney', 'stable diffusion', 'stability ai',
+        # Voice assistants
+        'alexa', 'siri', 'cortana', 'google assistant',
+        # Automation tools often mistaken for people
+        'github actions', 'ci bot', 'auto-merge', 'dependabot', 'renovate',
+    }
+
+    # ========================================================================
+    # FIX-002: Generic Event Terms
+    # ========================================================================
+    # Block these ONLY when entity type is EVENT (they need specific titles)
+    # These are generic words that should not be extracted as events
+    GENERIC_EVENT_TERMS: Set[str] = {
+        # Single generic words
+        'meeting', 'call', 'conference', 'webinar', 'workshop',
+        'summit', 'session', 'panel', 'discussion', 'talk',
+        'event', 'gathering', 'meetup', 'hangout', 'sync',
+        'standup', 'stand-up', 'retro', 'retrospective',
+        'demo', 'presentation', 'briefing', 'update',
+    }
+
+    # Patterns for compound generic event names
+    GENERIC_EVENT_PATTERNS: List[re.Pattern] = [
+        # "community call", "weekly meeting", "monthly sync", etc.
+        re.compile(r'^(community|weekly|monthly|daily|bi-weekly|quarterly|annual|team|group|all-hands)\s+(call|meeting|sync|standup|check-in)$', re.IGNORECASE),
+        # "town hall meeting", "office hours", etc.
+        re.compile(r'^(town hall|office hours|open forum|q&a session|ama)(\s+meeting)?$', re.IGNORECASE),
+    ]
+
     # Lowercase comparison for boilerplate/template text that should be blocked
     BOILERPLATE_BLOCKLIST: Set[str] = {
         # Issue / PR templates
@@ -336,28 +416,65 @@ class EntityQualityFilter:
     PLACEHOLDER_PERSONS: Set[str] = {"public users", "unknown", "anonymous"}
 
     # Generic group terms that should not be tagged as PERSON entities
+    # FIX-004: Expanded with singular forms + Cosmos SDK terms
     GENERIC_GROUP_TERMS: Set[str] = {
-        # Economic actors
-        "buyers", "sellers", "traders", "investors", "stakeholders",
-        "partners", "sponsors", "funders", "donors", "backers",
+        # Economic actors (singular + plural)
+        "buyer", "buyers", "seller", "sellers", "trader", "traders",
+        "investor", "investors", "stakeholder", "stakeholders",
+        "partner", "partners", "sponsor", "sponsors",
+        "funder", "funders", "donor", "donors", "backer", "backers",
 
-        # Organizational roles
-        "users", "members", "participants", "contributors", "volunteers",
-        "admins", "administrators", "moderators", "coordinators",
-        "validators", "delegators", "voters", "creators",
+        # Organizational roles (singular + plural)
+        "user", "users", "member", "members", "participant", "participants",
+        "contributor", "contributors", "volunteer", "volunteers",
+        "admin", "admins", "administrator", "administrators",
+        "moderator", "moderators", "coordinator", "coordinators",
+        "validator", "validators", "delegator", "delegators",
+        "voter", "voters", "creator", "creators",
 
-        # Service providers
-        "utilities", "providers", "suppliers", "vendors", "contractors",
-        "developers", "builders", "consultants", "advisors",
+        # Teams/groups (singular + plural)
+        "team", "teams", "group", "groups", "community", "communities",
+        "committee", "committees", "council", "councils",
+        "network", "networks", "coalition", "coalitions",
+        "alliance", "alliances", "consortium", "consortiums",
 
-        # Community groups
-        "community", "communities", "groups", "teams", "organizations",
-        "networks", "alliances", "consortiums", "coalitions",
+        # Service providers (singular + plural)
+        "utility", "utilities", "provider", "providers",
+        "supplier", "suppliers", "vendor", "vendors",
+        "contractor", "contractors", "developer", "developers",
+        "builder", "builders", "consultant", "consultants",
+        "advisor", "advisors", "auditor", "auditors",
+        "verifier", "verifiers", "operator", "operators",
 
-        # Governance/management
-        "board", "committee", "council", "panel", "taskforce",
-        "staff", "employees", "workforce", "personnel",
+        # Governance/management (singular + plural)
+        "board", "boards", "panel", "panels", "taskforce", "taskforces",
+        "staff", "employee", "employees", "workforce", "personnel",
+
+        # Cosmos SDK / blockchain terms (block as PERSON)
+        "keeper", "keepers", "relayer", "relayers",
+        "proposer", "proposers", "depositor", "depositors",
     }
+
+    # ========================================================================
+    # FIX-004: Multi-word Role Patterns
+    # ========================================================================
+    # Regex patterns to catch role phrases that should not be PERSON entities.
+    # These catch multi-word patterns that aren't in GENERIC_GROUP_TERMS.
+    ROLE_PATTERNS: List[re.Pattern] = [
+        # Department + title patterns
+        # Examples: "Partnerships Lead", "Comms Lead", "Governance Director", "Engineering Manager"
+        re.compile(
+            r'^(partnerships?|comms?|communications?|governance|dev|development|engineering|'
+            r'product|project|program|operations|ops|marketing|growth|community|core|'
+            r'research|design|finance|legal|security|data)\s+'
+            r'(lead|manager|director|head|chief|officer)$',
+            re.IGNORECASE,
+        ),
+        # Named role collectives
+        re.compile(r'^(core|community)\s+contributors?$', re.IGNORECASE),
+        # Team/group qualifiers (matches anywhere in string)
+        re.compile(r'\b(team|group|committee|council|task\s*force|working\s*group)\b', re.IGNORECASE),
+    ]
 
     def __init__(self, config: Optional[FilterConfig] = None):
         """
@@ -398,6 +515,13 @@ class EntityQualityFilter:
                 'boilerplate': 0,
                 'placeholder_person': 0,
                 'generic_group': 0,
+                # FIX-002: New filter reasons
+                'git_changelog': 0,
+                'ai_as_person': 0,
+                'generic_event': 0,
+                # FIX-003: New filter reasons
+                'too_short': 0,
+                'placeholder': 0,
             }
         }
 
@@ -416,6 +540,76 @@ class EntityQualityFilter:
         """
         normalized = name.strip().lower()
         return normalized in self._whitelist_lower
+
+    # ========================================================================
+    # FIX-003: Min-Length and Placeholder Methods
+    # ========================================================================
+
+    def is_too_short(self, name: str) -> bool:
+        """
+        FIX-003: Block empty/single-character entity names.
+
+        Args:
+            name: Entity name to check
+
+        Returns:
+            True if name is too short (should be blocked)
+
+        Examples:
+            >>> filter.is_too_short("X")
+            True
+            >>> filter.is_too_short(" ")
+            True
+            >>> filter.is_too_short("US")
+            False
+            >>> filter.is_too_short("AI")
+            False
+        """
+        stripped = name.strip()
+        return len(stripped) < self.MIN_NAME_LENGTH
+
+    def is_placeholder(self, name: str, entity_type: str = None) -> bool:
+        """
+        FIX-003: Check for placeholder patterns (applies to ALL types).
+
+        Expanded from the original is_placeholder_person() to catch
+        placeholder patterns regardless of entity type.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type (optional, not used - applies to all types)
+
+        Returns:
+            True if matches a placeholder pattern (should be blocked)
+
+        Examples:
+            >>> filter.is_placeholder("Unknown")
+            True
+            >>> filter.is_placeholder("Anonymous User")
+            True
+            >>> filter.is_placeholder("User 123")
+            True
+            >>> filter.is_placeholder("N/A")
+            True
+            >>> filter.is_placeholder("TBD")
+            True
+            >>> filter.is_placeholder("placeholder")
+            True
+            >>> filter.is_placeholder("test user")
+            True
+            >>> filter.is_placeholder("Gregory Landua")
+            False
+            >>> filter.is_placeholder("Regen Network")
+            False
+        """
+        stripped = name.strip()
+
+        # Check against placeholder patterns
+        for pattern in self.PLACEHOLDER_PATTERNS:
+            if pattern.match(stripped):
+                return True
+
+        return False
 
     def is_stop_word(self, name: str) -> bool:
         """
@@ -565,33 +759,181 @@ class EntityQualityFilter:
             return False
         return name.strip().lower() in self.PLACEHOLDER_PERSONS
 
+    def matches_role_pattern(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-004: Check if name matches multi-word role patterns.
+
+        Only applies to PERSON/HUMANACTOR/ENTITY types.
+        Catches: "Development Team", "Partnerships Lead", "Governance Committee"
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if matches a role pattern (should be blocked)
+
+        Examples:
+            >>> filter.matches_role_pattern("Partnerships Lead", "PERSON")
+            True
+            >>> filter.matches_role_pattern("Development Team", "PERSON")
+            True
+            >>> filter.matches_role_pattern("Gregory Landua", "PERSON")
+            False
+        """
+        if not entity_type or entity_type.upper() not in ('PERSON', 'HUMANACTOR', 'ENTITY'):
+            return False
+
+        stripped = name.strip()
+
+        # Patterns are for multi-word roles only
+        if len(stripped.split()) < 2:
+            return False
+
+        for pattern in self.ROLE_PATTERNS:
+            if pattern.search(stripped):
+                return True
+
+        return False
+
     def is_generic_group(self, name: str, entity_type: str) -> bool:
         """
         Check for generic group terms that should not be PERSON entities.
 
-        Blocks: "Buyers", "Partners", "water utilities", "carbon credit buyers"
+        Blocks: "Buyers", "Partners", "water utilities", "carbon credit buyers",
+                "Development Team", "Partnerships Lead"
         Allows: Proper person names.
+
+        FIX-004: Now includes regex patterns for multi-word roles.
         """
-        if not entity_type or entity_type.upper() != 'PERSON':
+        if not entity_type or entity_type.upper() not in ('PERSON', 'HUMANACTOR', 'ENTITY'):
             return False
 
         normalized = name.strip().lower()
 
-        # Standalone terms (e.g., "buyers", "partners")
+        # 1. Standalone terms (e.g., "buyers", "buyer", "partners")
         if normalized in self.GENERIC_GROUP_TERMS:
             return True
 
-        # Singular form of plural (e.g., "contributors" -> "contributor")
-        if normalized.endswith("s") and normalized[:-1] in self.GENERIC_GROUP_TERMS:
-            return True
-
-        # Compound terms: check last token ("water utilities", "carbon credit buyers")
+        # 2. Compound terms: check last token ("water utilities", "carbon credit buyers")
         parts = normalized.split()
         if len(parts) >= 2:
             last = parts[-1]
             if last in self.GENERIC_GROUP_TERMS:
                 return True
-            if last.endswith("s") and last[:-1] in self.GENERIC_GROUP_TERMS:
+
+        # 3. FIX-004: Regex patterns for multi-word roles
+        if self.matches_role_pattern(name, entity_type):
+            return True
+
+        return False
+
+    # ========================================================================
+    # FIX-002: New Filter Methods
+    # ========================================================================
+
+    def is_git_changelog_claim(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-002: Check if entity looks like a git commit or changelog entry.
+
+        Only blocks when entity type is CLAIM, EVIDENCE, or QUESTION.
+        Git commits and changelog entries should not be extracted as claims.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is git/changelog AND type is CLAIM/EVIDENCE/QUESTION)
+
+        Examples:
+            >>> filter.is_git_changelog_claim("feat(api): add endpoint", "CLAIM")
+            True
+            >>> filter.is_git_changelog_claim("feat(api): add endpoint", "CONCEPT")
+            False  # Wrong type, don't block
+            >>> filter.is_git_changelog_claim("v1.2.3", "EVIDENCE")
+            True
+        """
+        if not entity_type:
+            return False
+
+        # Only check for CLAIM, EVIDENCE, or QUESTION types
+        upper_type = entity_type.upper()
+        if upper_type not in ('CLAIM', 'EVIDENCE', 'QUESTION'):
+            return False
+
+        stripped = name.strip()
+        for pattern in self.GIT_CHANGELOG_PATTERNS:
+            if pattern.search(stripped):
+                return True
+
+        return False
+
+    def is_ai_mistyped_as_person(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-002: Check if entity is an AI system mis-typed as PERSON.
+
+        AI systems like ChatGPT, Claude, etc. should be typed as TECHNOLOGY,
+        not PERSON. This blocks them only when incorrectly typed as PERSON.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is AI system AND type is PERSON)
+
+        Examples:
+            >>> filter.is_ai_mistyped_as_person("ChatGPT", "PERSON")
+            True
+            >>> filter.is_ai_mistyped_as_person("ChatGPT", "TECHNOLOGY")
+            False  # Correct type, don't block
+            >>> filter.is_ai_mistyped_as_person("Gregory Landua", "PERSON")
+            False  # Not an AI system
+        """
+        if not entity_type or entity_type.upper() != 'PERSON':
+            return False
+
+        normalized = name.strip().lower()
+        return normalized in self.AI_SOFTWARE_BLOCKLIST
+
+    def is_generic_event(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-002: Check if entity is a generic event word.
+
+        Generic event words like "meeting", "call", "community call" should
+        not be extracted as EVENT entities. Only named events with specific
+        titles (e.g., "Regen Gathering 2024", "COP28") should be EVENT.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is generic event AND type is EVENT)
+
+        Examples:
+            >>> filter.is_generic_event("meeting", "EVENT")
+            True
+            >>> filter.is_generic_event("community call", "EVENT")
+            True
+            >>> filter.is_generic_event("Regen Gathering 2024", "EVENT")
+            False  # Specific named event
+            >>> filter.is_generic_event("meeting", "CONCEPT")
+            False  # Wrong type, don't block
+        """
+        if not entity_type or entity_type.upper() != 'EVENT':
+            return False
+
+        normalized = name.strip().lower()
+
+        # Check single-word generic terms
+        if normalized in self.GENERIC_EVENT_TERMS:
+            return True
+
+        # Check compound generic patterns
+        for pattern in self.GENERIC_EVENT_PATTERNS:
+            if pattern.match(normalized):
                 return True
 
         return False
@@ -659,6 +1001,18 @@ class EntityQualityFilter:
 
         reasons = []
 
+        # ====================================================================
+        # FIX-003: Early checks for min-length and placeholder
+        # ====================================================================
+
+        # 0.1 FIX-003: Min-length check (before anything else)
+        if self.is_too_short(name):
+            reasons.append("too_short")
+
+        # 0.2 FIX-003: Placeholder check (applies to ALL types)
+        if self.is_placeholder(name, entity_type):
+            reasons.append("placeholder")
+
         # 1. Stop word check
         if self.is_stop_word(name):
             reasons.append("stop_word")
@@ -709,6 +1063,22 @@ class EntityQualityFilter:
         if self.is_technical_pattern(name):
             reasons.append("technical_pattern")
 
+        # ====================================================================
+        # FIX-002: New filter checks
+        # ====================================================================
+
+        # 12. Git/changelog as CLAIM/EVIDENCE/QUESTION
+        if self.is_git_changelog_claim(name, entity_type):
+            reasons.append("git_changelog")
+
+        # 13. AI systems mis-typed as PERSON
+        if self.is_ai_mistyped_as_person(name, entity_type):
+            reasons.append("ai_as_person")
+
+        # 14. Generic event words as EVENT
+        if self.is_generic_event(name, entity_type):
+            reasons.append("generic_event")
+
         is_valid = len(reasons) == 0
         return is_valid, reasons
 
@@ -730,6 +1100,18 @@ class EntityQualityFilter:
         # Check whitelist first (includes built-in + user config)
         if self.is_whitelisted(name):
             return (True, "")
+
+        # ====================================================================
+        # FIX-003: Early checks for min-length and placeholder
+        # ====================================================================
+
+        # 0.1 FIX-003: Min-length check (before anything else)
+        if self.is_too_short(name):
+            return (False, "too_short")
+
+        # 0.2 FIX-003: Placeholder check (applies to ALL types)
+        if self.is_placeholder(name, entity_type):
+            return (False, "placeholder")
 
         # 1. Stop word check
         if self.is_stop_word(name):
@@ -780,6 +1162,22 @@ class EntityQualityFilter:
         # 11. Technical pattern check
         if self.is_technical_pattern(name):
             return (False, "technical_pattern")
+
+        # ====================================================================
+        # FIX-002: New filter checks
+        # ====================================================================
+
+        # 12. Git/changelog as CLAIM/EVIDENCE/QUESTION
+        if self.is_git_changelog_claim(name, entity_type):
+            return (False, "git_changelog")
+
+        # 13. AI systems mis-typed as PERSON
+        if self.is_ai_mistyped_as_person(name, entity_type):
+            return (False, "ai_as_person")
+
+        # 14. Generic event words as EVENT
+        if self.is_generic_event(name, entity_type):
+            return (False, "generic_event")
 
         return (True, "")
 
@@ -845,6 +1243,13 @@ class EntityQualityFilter:
                 'boilerplate': 0,
                 'placeholder_person': 0,
                 'generic_group': 0,
+                # FIX-002: New filter reasons
+                'git_changelog': 0,
+                'ai_as_person': 0,
+                'generic_event': 0,
+                # FIX-003: New filter reasons
+                'too_short': 0,
+                'placeholder': 0,
             }
         }
 

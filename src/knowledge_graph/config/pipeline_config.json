@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "pipeline": {
     "stop_on_error": false,
     "modules": [
@@ -31,14 +31,14 @@
         }
       },
       {
-        "name": "EntityQualityFilter",
+        "name": "OntologyNormalizer",
         "enabled": true,
         "config": {
-          "max_name_length": 80,
-          "max_word_count": 8,
-          "additional_stop_words": [],
-          "whitelist": []
-        }
+          "normalize_case": true,
+          "type_mappings": {},
+          "predicate_mappings": {}
+        },
+        "_comment": "FIX-003: Moved before ListSplitter so HumanActor->PERSON before split logic"
       },
       {
         "name": "ListSplitter",
@@ -48,22 +48,25 @@
           "max_items": 5,
           "min_item_length": 2,
           "enabled_types": ["PERSON", "ORGANIZATION", "PROJECT"]
-        }
+        },
+        "_comment": "FIX-003: Now sees normalized types (PERSON not HumanActor)"
       },
       {
-        "name": "OntologyNormalizer",
+        "name": "EntityQualityFilter",
         "enabled": true,
         "config": {
-          "normalize_case": true,
-          "type_mappings": {},
-          "predicate_mappings": {}
-        }
+          "max_name_length": 80,
+          "max_word_count": 8,
+          "additional_stop_words": [],
+          "whitelist": []
+        },
+        "_comment": "FIX-003: Runs last to see normalized types and split items"
       }
     ]
   },
   "metadata": {
     "description": "Production post-processing pipeline configuration for Regen KOI",
-    "last_updated": "2025-12-10",
-    "updated_by": "PROMPT_24 quality fixes"
+    "last_updated": "2025-12-21",
+    "updated_by": "FIX-003: Pipeline ordering + ENTITY default fix"
   }
 }

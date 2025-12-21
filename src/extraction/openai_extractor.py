@@ -1,6 +1,8 @@
 """
 OpenAI GPT-4o-mini based semantic extraction service for KOI processor
 Cost-effective extraction using OpenAI API with batch processing support
+
+FIX-002: Uses shared prompt builder and type normalization
 """
 
 import asyncio
@@ -12,6 +14,22 @@ from datetime import datetime, timezone
 import httpx
 from pathlib import Path
 import hashlib
+
+# FIX-002: Import shared prompt builder and type normalization
+try:
+    from extraction.prompt_builder import build_extraction_prompt, get_system_message
+    from core.entity_types import normalize_type, LLM_ALLOWED_TYPES, is_llm_allowed_type
+except ImportError:
+    try:
+        from src.extraction.prompt_builder import build_extraction_prompt, get_system_message
+        from src.core.entity_types import normalize_type, LLM_ALLOWED_TYPES, is_llm_allowed_type
+    except ImportError:
+        # Fallback for standalone testing
+        build_extraction_prompt = None
+        get_system_message = None
+        normalize_type = lambda x: x.upper() if x else "ENTITY"
+        LLM_ALLOWED_TYPES = {"PERSON", "ORGANIZATION", "PROJECT", "CONCEPT", "TECHNOLOGY", "CLAIM", "EVIDENCE", "QUESTION", "LOCATION", "EVENT"}
+        is_llm_allowed_type = lambda x: x.upper() in LLM_ALLOWED_TYPES
 
 # Import ontology utilities
 try:
@@ -141,125 +159,34 @@ class OpenAIExtractor:
         source_type: str,
         metadata: Dict[str, Any] = None
     ) -> str:
-        """Build ontology-based extraction prompt for GPT-4o-mini"""
+        """Build ontology-based extraction prompt for GPT-4o-mini.
 
-        # Truncate content for context window (GPT-4o-mini has 128k context)
+        FIX-002: Uses shared prompt builder for consistency across extractors.
+        """
+        # FIX-002: Use shared prompt builder if available
+        if build_extraction_prompt is not None:
+            return build_extraction_prompt(
+                content=content,
+                source_type=source_type,
+                metadata=metadata,
+                max_content_length=3000  # OpenAI has large context, use 3000 chars
+            )
+
+        # Fallback: original inline prompt (shouldn't be reached in normal operation)
         content_snippet = content[:3000] if len(content) > 3000 else content
-
-        # Ontology-driven prompt optimized for GPT-4o-mini
-        prompt = f"""Extract structured data from this {source_type} content.
+        return f"""Extract structured data from this {source_type} content.
 
 CONTENT:
 {content_snippet}
 
-Extract and return JSON with:
-1. Metadata fields with confidence scores (0.0-1.0)
-2. Entities based on Regen Network ontology (HumanActor, Claim, Evidence, Question)
-3. Relationships between entities
-4. Discourse type classification
-
-JSON structure required:
-{{
-  "metadata": {{
-    "title": {{"value": "...", "confidence": 0.9}},
-    "author": {{"value": "...", "confidence": 0.8}},
-    "published_date": {{"value": "ISO date", "confidence": 0.7}},
-    "organization": {{"value": "...", "confidence": 0.6}},
-    "tags": {{"value": ["tag1", "tag2"], "confidence": 0.8}}
-  }},
-  "entities": [
-    {{"type": "HumanActor", "name": "...", "properties": {{}}}},
-    {{"type": "Claim", "name": "...", "content": "..."}}
-  ],
-  "relationships": [
-    {{"subject": "entity1", "predicate": "supports", "object": "entity2"}}
-  ],
-  "discourse_type": "claim|evidence|question|discussion",
-  "claims": ["claim text"],
-  "evidence": ["evidence text"],
-  "questions": ["question text"],
-  "summary": "one sentence summary"
-}}
-
-Focus on regenerative finance, ecological, and commons-oriented content.
-Return ONLY valid JSON, no additional text.
-
-## Entity Type Selection Guidelines
-
-CONCEPT vs PROJECT:
-- CONCEPT: Abstract ideas, methodologies, frameworks, theories, movements.
-  Examples: "regenerative agriculture", "proof of stake", "tokenomics", "MRV", "carbon sequestration"
-  NOT: Specific organizations or projects implementing the idea.
-- PROJECT: Concrete initiatives, platforms, software, named programs.
-  Examples: "Regen Ledger" (software), "Koi Project" (initiative), "DeSci Publish" (platform)
-  NOT: General concepts like "blockchain" or "carbon credits"
-- Rule: If abstract → CONCEPT. If named implementation → PROJECT/ORGANIZATION.
-
-PERSON vs GROUP:
-- PERSON: Named individuals with proper names.
-  Examples: "Gregory Landua", "Sarah Bax", "Will Szal"
-- DO NOT EXTRACT as PERSON:
-  - Generic groups: "buyers", "sellers", "partners", "users", "members", "contributors"
-  - Plural collectives: "stakeholders", "participants", "investors", "validators"
-  - Roles without names: "administrators", "developers", "moderators"
-  - Utilities/services: "water utilities", "providers", "suppliers"
-  → Extract as ORGANIZATION or omit entirely.
-
-LOCATION vs PROJECT:
-- Country codes (UK, US, EU, CA, AU) → LOCATION/ORGANIZATION as context; never PROJECT.
-
-LICENSE/STANDARD as CONCEPT:
-- Licenses: "Apache License", "MIT License"
-- Technical standards: "ERC-20", "ERC-721" (as standards, not projects)
-
-## Extraction Quality Rules
-
-DO NOT EXTRACT:
-- Pronouns (we, they, it, our, their)
-- Generic nouns (people, user, member, organization)
-- JIRA IDs (APP-776, ERC-123)
-- Template text ("Testing Instructions", "Acceptance Criteria", "DRY Principles")
-- Placeholders ("Unknown", "Anonymous", "Public Users", "TBD")
-- Technical paths (app.regen.claim, api.regen.network)
-- Pure numbers (2030, 35)
-- URLs or code identifiers
-
-Confidence Scoring:
-- HIGH (0.85-1.0): Explicit named mention ("Regen Network announced...")
-- MEDIUM (0.70-0.84): Implied/contextual ("the network launched...")
-- LOW (<0.70): DO NOT EXTRACT (skip)
-
-## Few-Shot Examples
-
-Example 1: Governance Discussion
-Input: "Gregory Landua and Sarah Bax discussed regenerative agriculture principles at the Regen Network community meeting."
-Extract:
-- "Gregory Landua" (PERSON, 0.95)
-- "Sarah Bax" (PERSON, 0.95)
-- "regenerative agriculture" (CONCEPT, 0.90)  # Abstract methodology
-- "Regen Network" (ORGANIZATION, 0.95)
-Do NOT extract: "community", "meeting"
-
-Example 2: Technical Documentation
-Input: "The Regen Ledger blockchain uses proof of stake consensus. Carbon credits are tokenized as ERC-20 compatible assets."
-Extract:
-- "Regen Ledger" (TECHNOLOGY, 0.95)
-- "proof of stake" (CONCEPT, 0.90)
-- "carbon credits" (CONCEPT, 0.85)
-- "ERC-20" (CONCEPT, 0.80)
-Do NOT extract: "blockchain", "consensus", "assets"
-
-Example 3: Project Template
-Input: "Testing Instructions: Verify APP-776 implements DRY principles. Acceptance Criteria: All buyers can purchase credits."
-Extract:
-- NOTHING (template/boilerplate)
-Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
-"""
-
-        return prompt
+Return JSON with entities (PERSON, ORGANIZATION, PROJECT, CONCEPT, TECHNOLOGY, CLAIM, EVIDENCE, QUESTION, LOCATION, EVENT), relationships, and summary.
+Return ONLY valid JSON."""
 
     async def _call_openai(self, prompt: str) -> Dict[str, Any]:
-        """Call OpenAI API for immediate processing"""
+        """Call OpenAI API for immediate processing.
+
+        FIX-002: max_tokens is now configurable via OPENAI_EXTRACT_MAX_TOKENS env var.
+        """
 
         self.logger.info(f"[OPENAI] Starting API call with model {self.model}")
         self.logger.info(f"[OPENAI] Prompt length: {len(prompt)} characters")
@@ -269,12 +196,18 @@ Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
             "Content-Type": "application/json"
         }
 
+        # FIX-002: Make max_tokens configurable to prevent truncation issues
+        max_tokens = int(os.getenv("OPENAI_EXTRACT_MAX_TOKENS", "4096"))
+
+        # FIX-002: Use shared system message if available
+        system_content = get_system_message() if get_system_message else "You are a semantic extraction system that outputs only valid JSON."
+
         request_data = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a semantic extraction system that outputs only valid JSON."
+                    "content": system_content
                 },
                 {
                     "role": "user",
@@ -282,7 +215,7 @@ Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
                 }
             ],
             "temperature": 0.3,
-            "max_tokens": 1000,
+            "max_tokens": max_tokens,
             "response_format": {"type": "json_object"}  # Ensures JSON response
         }
 
@@ -347,7 +280,11 @@ Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
         }
 
     def _parse_extraction(self, extraction: Dict[str, Any], source_type: str) -> Dict[str, Any]:
-        """Parse and validate OpenAI extraction with confidence scores"""
+        """Parse and validate OpenAI extraction with confidence scores.
+
+        FIX-002: Normalizes entity types to canonical uppercase,
+        preserves confidence scores, and drops non-LLM-allowed types.
+        """
 
         metadata = {
             "semantic_extraction": extraction,
@@ -365,13 +302,63 @@ Do NOT extract: "APP-776", "DRY principles", "Acceptance Criteria", "buyers"
                     metadata["llm_extracted_metadata"][field] = info["value"]
                     metadata["llm_metadata_confidence"][field] = info.get("confidence", 0.5)
 
-        # Extract entities
+        # FIX-002: Extract entities with type normalization and filtering
         if "entities" in extraction:
-            metadata["extracted_entities"] = extraction["entities"]
+            normalized_entities = []
+            for e in extraction["entities"]:
+                raw_type = e.get("type", "")
+                normalized_type = normalize_type(raw_type)
 
-        # Extract relationships
+                # FIX-002: Drop entities with non-LLM-allowed types
+                if not is_llm_allowed_type(normalized_type):
+                    self.logger.debug(f"[OPENAI] Dropping entity '{e.get('name', '')}' with non-allowed type '{normalized_type}' (raw: '{raw_type}')")
+                    continue
+
+                # Build entity dict with canonical type and preserved confidence
+                entity_dict = {
+                    "name": e.get("name", ""),
+                    "type": normalized_type,  # FIX-002: Canonical uppercase type
+                }
+
+                # FIX-002: Preserve confidence if present
+                if "confidence" in e:
+                    entity_dict["confidence"] = e["confidence"]
+
+                # Preserve properties/metadata if present
+                if "properties" in e:
+                    entity_dict["properties"] = e["properties"]
+                if "metadata" in e:
+                    entity_dict["metadata"] = e["metadata"]
+                if "content" in e:
+                    entity_dict["content"] = e["content"]
+
+                normalized_entities.append(entity_dict)
+
+            metadata["extracted_entities"] = normalized_entities
+
+        # FIX-002: Extract relationships with optional type normalization
         if "relationships" in extraction:
-            metadata["extracted_relationships"] = extraction["relationships"]
+            normalized_relationships = []
+            for r in extraction["relationships"]:
+                rel_dict = {
+                    "subject": r.get("subject", ""),
+                    "predicate": r.get("predicate", ""),
+                    "object": r.get("object", ""),
+                }
+
+                # Preserve confidence if present
+                if "confidence" in r:
+                    rel_dict["confidence"] = r["confidence"]
+
+                # Normalize subject_type and object_type if present
+                if "subject_type" in r:
+                    rel_dict["subject_type"] = normalize_type(r["subject_type"])
+                if "object_type" in r:
+                    rel_dict["object_type"] = normalize_type(r["object_type"])
+
+                normalized_relationships.append(rel_dict)
+
+            metadata["extracted_relationships"] = normalized_relationships
 
         # Extract discourse elements
         for field in ["claims", "evidence", "questions", "discourse_type", "summary"]:
