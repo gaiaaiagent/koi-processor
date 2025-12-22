@@ -61,6 +61,35 @@ from knowledge_graph.graph_integration import KnowledgeGraphIntegrator, normaliz
 # Checkpoint file path
 CHECKPOINT_FILE = Path(__file__).parent / ".stage6_checkpoint.json"
 
+# Stage 6 corpus filter: natural-language KG only
+# - Include all non-repo sources (discourse/notion/website/youtube/etc.)
+# - Repo sources (GitHub/GitLab): include ONLY documentation files by file_path
+# - Explicitly EXCLUDE file_path IS NULL rows for repo sources (issues/PRs/discussions can be a later pass)
+CORPUS_FILTER_SQL = r"""
+  AND (
+    -- Non-repo sources: include all
+    (source_sensor NOT ILIKE '%github%' AND source_sensor NOT ILIKE '%gitlab%')
+    OR
+    -- Repo sources: docs-only by file_path
+    (
+      (source_sensor ILIKE '%github%' OR source_sensor ILIKE '%gitlab%')
+      AND (metadata ? 'file_path')
+      AND (metadata->>'file_path') IS NOT NULL
+      AND (
+        (metadata->>'file_path') ~* '[.](md|mdx|rst|txt)$'
+        OR (metadata->>'file_path') ~* '(^|/)(readme|license|changelog)([.].*)?$'
+        OR (metadata->>'file_path') ILIKE '%/docs/%'
+      )
+      -- Exclude generated/vendor/build outputs
+      AND (metadata->>'file_path') NOT ILIKE '%.pb.go'
+      AND (metadata->>'file_path') !~* '/(node_modules|vendor|dist|build|generated)/'
+      -- Optional noise reduction: exclude tests/examples paths
+      AND (metadata->>'file_path') !~* '/(test|tests|examples)/'
+      AND (metadata->>'file_path') !~* '_test[.][^/]+$'
+    )
+  )
+"""
+
 
 def infer_source_type(source_sensor: str) -> str:
     """Infer source_type from source_sensor string."""
@@ -334,7 +363,9 @@ async def main(
         use_pipeline=True,
         enable_deduplication=True
     )
-    print(f"[stage6] KnowledgeGraphIntegrator initialized (pipeline modules: {len(kg.pipeline)})")
+    pipeline_modules = getattr(kg.pipeline, "modules", None)
+    pipeline_len = len(pipeline_modules) if pipeline_modules is not None else 0
+    print(f"[stage6] KnowledgeGraphIntegrator initialized (pipeline modules: {pipeline_len})")
 
     if not kg.pipeline or not kg.entity_resolver:
         print("[ERROR] Pipeline or EntityResolver not initialized")
@@ -351,11 +382,12 @@ async def main(
 
     # Get total document count
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT COUNT(*) FROM koi_memories
             WHERE superseded_at IS NULL
               AND content->>'text' IS NOT NULL
               AND LENGTH(content->>'text') > 50
+              {CORPUS_FILTER_SQL}
         """)
         total_docs = cur.fetchone()[0]
 
@@ -381,12 +413,18 @@ async def main(
                 last_id = checkpoint["last_koi_memories_id"]
                 if last_id is None:
                     cur.execute(
-                        """
-                        SELECT id, rid, source_sensor, content->>'text' AS text
+                        f"""
+                        SELECT
+                          id,
+                          rid,
+                          source_sensor,
+                          metadata->>'file_path' AS file_path,
+                          content->>'text' AS text
                         FROM koi_memories
                         WHERE superseded_at IS NULL
                           AND content->>'text' IS NOT NULL
                           AND LENGTH(content->>'text') > 50
+                          {CORPUS_FILTER_SQL}
                         ORDER BY id ASC
                         LIMIT %s
                         """,
@@ -394,13 +432,19 @@ async def main(
                     )
                 else:
                     cur.execute(
-                        """
-                        SELECT id, rid, source_sensor, content->>'text' AS text
+                        f"""
+                        SELECT
+                          id,
+                          rid,
+                          source_sensor,
+                          metadata->>'file_path' AS file_path,
+                          content->>'text' AS text
                         FROM koi_memories
                         WHERE superseded_at IS NULL
                           AND content->>'text' IS NOT NULL
                           AND LENGTH(content->>'text') > 50
                           AND id > %s
+                          {CORPUS_FILTER_SQL}
                         ORDER BY id ASC
                         LIMIT %s
                         """,
@@ -439,7 +483,8 @@ async def main(
                 except Exception as e:
                     checkpoint["error_count"] += 1
                     checkpoint["last_koi_memories_id"] = str(doc["id"])  # Convert UUID to string for JSON
-                    print(f"  [ERROR] doc_id={doc['id']} rid={doc['rid'][:40]}: {e}")
+                    file_path = (doc.get("file_path") or "")[:120]
+                    print(f"  [ERROR] doc_id={doc['id']} rid={doc['rid'][:40]} file_path={file_path}: {e}")
 
                     # Save checkpoint on error
                     if not dry_run:

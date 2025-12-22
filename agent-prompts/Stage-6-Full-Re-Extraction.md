@@ -5,6 +5,12 @@
 FIX-001 through FIX-005 are **DEPLOYED** (regen-prod `601ef9d1`).
 
 Stage 6 is a **clean rebuild** of the knowledge graph from the full KOI corpus.
+Stage 6 corpus for this run is **natural-language only**:
+
+- Include: Discourse + Notion + Website + other non-repo sources
+- Include (repo sources): **GitHub + GitLab docs only** (by `metadata.file_path`)
+- Exclude: all repo code/config chunks, and **exclude repo rows where `file_path` is NULL** (issues/PRs/discussions can be a later incremental pass)
+
 Target architecture:
 
 1. Extract with `GeminiExtractor.extract_metadata()` (FIX-002 prompt + output contract)
@@ -74,7 +80,11 @@ export FUSEKI_STAGING_ENDPOINT="http://localhost:3030/koi-staging"
 
 ## Step 0: Verify Corpus Size
 
-Expected (from planning): ~30,904 docs.
+Expected for docs-only Stage 6: ~11–12k docs (will vary slightly as sensors update).
+
+This count must match the exact filter in:
+- `scripts/reextraction/stage6_canary_gemini.py`
+- `scripts/reextraction/stage6_full_reextract_gemini.py`
 
 ```bash
 ssh darren@202.61.196.119 "PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -p 5433 -U $POSTGRES_USER -d $POSTGRES_DB -c \"
@@ -82,7 +92,55 @@ SELECT COUNT(*) AS docs
 FROM koi_memories
 WHERE superseded_at IS NULL
   AND content->>'text' IS NOT NULL
-  AND LENGTH(content->>'text') > 50;
+  AND LENGTH(content->>'text') > 50
+  AND (
+    (source_sensor NOT ILIKE '%github%' AND source_sensor NOT ILIKE '%gitlab%')
+    OR (
+      (source_sensor ILIKE '%github%' OR source_sensor ILIKE '%gitlab%')
+      AND (metadata ? 'file_path')
+      AND (metadata->>'file_path') IS NOT NULL
+      AND (
+        (metadata->>'file_path') ~* '[.](md|mdx|rst|txt)$'
+        OR (metadata->>'file_path') ~* '(^|/)(readme|license|changelog)([.].*)?$'
+        OR (metadata->>'file_path') ILIKE '%/docs/%'
+      )
+      AND (metadata->>'file_path') NOT ILIKE '%.pb.go'
+      AND (metadata->>'file_path') !~* '/(node_modules|vendor|dist|build|generated)/'
+      AND (metadata->>'file_path') !~* '/(test|tests|examples)/'
+      AND (metadata->>'file_path') !~* '_test[.][^/]+$'
+    )
+  );
+\""
+```
+
+Optional (recommended): verify per-sensor distribution before starting.
+
+```bash
+ssh darren@202.61.196.119 "PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -p 5433 -U $POSTGRES_USER -d $POSTGRES_DB -c \"
+SELECT split_part(source_sensor,'-',1) AS sensor, COUNT(*)
+FROM koi_memories
+WHERE superseded_at IS NULL
+  AND content->>'text' IS NOT NULL
+  AND LENGTH(content->>'text') > 50
+  AND (
+    (source_sensor NOT ILIKE '%github%' AND source_sensor NOT ILIKE '%gitlab%')
+    OR (
+      (source_sensor ILIKE '%github%' OR source_sensor ILIKE '%gitlab%')
+      AND (metadata ? 'file_path')
+      AND (metadata->>'file_path') IS NOT NULL
+      AND (
+        (metadata->>'file_path') ~* '[.](md|mdx|rst|txt)$'
+        OR (metadata->>'file_path') ~* '(^|/)(readme|license|changelog)([.].*)?$'
+        OR (metadata->>'file_path') ILIKE '%/docs/%'
+      )
+      AND (metadata->>'file_path') NOT ILIKE '%.pb.go'
+      AND (metadata->>'file_path') !~* '/(node_modules|vendor|dist|build|generated)/'
+      AND (metadata->>'file_path') !~* '/(test|tests|examples)/'
+      AND (metadata->>'file_path') !~* '_test[.][^/]+$'
+    )
+  )
+GROUP BY 1
+ORDER BY 2 DESC;
 \""
 ```
 
@@ -102,184 +160,57 @@ TRUNCATE TABLE koi_relationships RESTART IDENTITY;
 TRUNCATE TABLE entity_registry RESTART IDENTITY;
 
 -- Optional: keep koi_kg_extractions for audit history by NOT truncating.
--- If you want a clean provenance table too:
--- TRUNCATE TABLE koi_kg_extractions RESTART IDENTITY;
+-- Recommended for a clean Stage 6 rerun without destroying other history:
+DELETE FROM koi_kg_extractions
+WHERE extractor_version = 'stage6-gemini'
+  AND extraction_rid LIKE '%:stage6:%';
 ```
 
-## Step 3: Canary Run (5 docs)
+Also remove any previous checkpoint before starting fresh:
 
-Create `scripts/reextraction/stage6_canary_gemini.py` on the server (or locally, then copy) and run it.
-
-```python
-#!/usr/bin/env python3
-import asyncio
-import os
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-from extraction.gemini_extractor import GeminiExtractor
-from knowledge_graph.graph_integration import KnowledgeGraphIntegrator, normalize_predicate
-
-
-def infer_source_type(source_sensor: str) -> str:
-    s = (source_sensor or "").lower()
-    if "discourse" in s:
-        return "discourse"
-    if "github" in s:
-        return "github"
-    if "gitlab" in s:
-        return "github"
-    if "medium" in s:
-        return "medium"
-    if "twitter" in s:
-        return "twitter"
-    return "website"
-
-
-async def main(limit: int = 5):
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-    extractor = GeminiExtractor()
-    kg = KnowledgeGraphIntegrator(store_type="memory", use_pipeline=True, enable_deduplication=True)
-
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "localhost"),
-        port=int(os.getenv("POSTGRES_PORT", 5433)),
-        database=os.getenv("POSTGRES_DB", "eliza"),
-        user=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-    )
-
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT id, rid, source_sensor, content->>'text' AS text
-            FROM koi_memories
-            WHERE superseded_at IS NULL
-              AND content->>'text' IS NOT NULL
-              AND LENGTH(content->>'text') > 200
-            ORDER BY RANDOM()
-            LIMIT %s
-            """,
-            (limit,),
-        )
-        docs = cur.fetchall()
-
-    ok = 0
-    for doc in docs:
-        source_type = infer_source_type(doc["source_sensor"])
-
-        extraction = await extractor.extract_metadata(
-            doc["text"],
-            source_type,
-            existing_metadata={"rid": doc["rid"]},
-        )
-
-        raw_entities = extraction.get("extracted_entities", [])
-        raw_relationships = extraction.get("extracted_relationships", [])
-
-        # Run pipeline on full doc context (entities + relationships)
-        context = kg.pipeline.process_entities(
-            raw_entities,
-            raw_relationships,
-            metadata={"memory_rid": doc["rid"], "run_id": run_id, "source_type": source_type},
-        )
-
-        # Persist entities once per doc (doc-level dedup already applied by pipeline)
-        for e in context.entities:
-            kg.entity_resolver.get_or_create_entity(
-                e.name,
-                e.type,
-                metadata={"doc_rid": doc["rid"], "run_id": run_id, "source_type": source_type},
-            )
-
-        # Persist relationships via lookup-only to avoid incrementing occurrence_count again
-        with kg.pg_conn.cursor() as pg_cur:
-            for r in context.relationships:
-                subj = kg._find_existing_entity_by_name(r.source)
-                obj = kg._find_existing_entity_by_name(r.target)
-                if not subj or not obj:
-                    continue
-
-                pred = normalize_predicate(r.predicate)
-                if not pred:
-                    continue
-
-                pg_cur.execute(
-                    """
-                    INSERT INTO koi_relationships
-                      (subject_entity_id, predicate, object_entity_id, confidence, last_doc_rid, last_run_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (subject_entity_id, predicate, object_entity_id) DO UPDATE SET
-                      occurrence_count = koi_relationships.occurrence_count + 1,
-                      last_seen_at = now(),
-                      last_doc_rid = EXCLUDED.last_doc_rid,
-                      last_run_id = EXCLUDED.last_run_id,
-                      confidence = COALESCE(
-                        GREATEST(koi_relationships.confidence, EXCLUDED.confidence),
-                        koi_relationships.confidence,
-                        EXCLUDED.confidence
-                      )
-                    """,
-                    (subj.entity_id, pred, obj.entity_id, r.confidence, doc["rid"], run_id),
-                )
-        kg.pg_conn.commit()
-
-        ok += 1
-        print(f"[canary] {doc['rid']} -> raw_e={len(raw_entities)} raw_r={len(raw_relationships)} "
-              f"passed_e={len(context.entities)} passed_r={len(context.relationships)} blocked_e={len(context.blocked_entities)}")
-
-    conn.close()
-    kg.log_entity_stats()
-    print(f"[canary] ok={ok}/{len(docs)} run_id={run_id}")
-
-
-if __name__ == "__main__":
-    limit = int(sys.argv[1]) if len(sys.argv) > 1 else 5
-    asyncio.run(main(limit))
+```bash
+rm -f /opt/projects/koi-processor/scripts/reextraction/.stage6_checkpoint.json
 ```
+
+## Step 3: Canary Run (10 docs)
 
 Run:
 
 ```bash
 cd /opt/projects/koi-processor
-PYTHONPATH=src ./.venv/bin/python scripts/reextraction/stage6_canary_gemini.py 5
+unset OPENAI_API_KEY
+PYTHONPATH=src ./.venv/bin/python scripts/reextraction/stage6_canary_gemini.py 10
 ```
 
 Canary pass criteria:
-- 5/5 docs processed without exceptions
+- 10/10 docs processed without exceptions
 - `SELECT COUNT(*) FROM entity_registry WHERE fuseki_uri LIKE 'http://%';` returns 0
 - `SELECT COUNT(*) FROM koi_relationships;` is > 0
+- Spot-check console output: repo docs should show `file_path` ending in `.md/.mdx/.rst/.txt` (no `.go/.py/.tsx/.json`)
 
 ## Step 4: Full Re-Extraction Script (batch + checkpoint)
 
-Create `scripts/reextraction/stage6_full_reextract_gemini.py` by adapting the canary into:
+Run the existing full extraction script (docs-only corpus filter is built in):
 
-- Stable iteration by `koi_memories.id` (order by id, resume by last id)
-- Batch size default 50 (tune for rate limits)
-- Checkpoint file `scripts/reextraction/.stage6_checkpoint.json` containing:
-  - `run_id`
-  - `last_koi_memories_id`
-  - `processed_count`
-  - `error_count`
+```bash
+cd /opt/projects/koi-processor
+unset OPENAI_API_KEY
+
+# Recommended: run under screen/tmux
+screen -S stage6
+
+PYTHONPATH=src ./.venv/bin/python scripts/reextraction/stage6_full_reextract_gemini.py --batch-size 50 --rate-limit 0.5
+
+# Detach: Ctrl+A, D
+```
+
+Notes:
+- Stable iteration: ordered by `koi_memories.id` (UUID) and checkpointed.
+- Checkpoint file: `scripts/reextraction/.stage6_checkpoint.json`
 - Writes:
-  - `koi_kg_extractions` for each memory (extraction_type=`passA`, extractor_version=`stage6-gemini`)
-  - `entity_registry` via `EntityResolver.get_or_create_entity()` using **pipeline-passed entities only**
-  - `koi_relationships` via lookup+upsert (as shown in canary)
-
-Notes for `koi_kg_extractions` inserts:
-- Use `memory_rid = koi_memories.rid`
-- `extraction_rid` must be unique; include run_id (e.g. `"{memory_rid}:kg:passA:stage6:{run_id}"`)
-- Store `entities` as the pipeline-passed entity dicts
-- Store `relations` as `{subject, predicate, object, confidence}` using pipeline outputs
-- `tokens_consumed`: if present in GeminiExtractor output under `token_usage.total_tokens`, store it; otherwise 0
-- `cost_usd`: store 0 unless you compute cost explicitly
+  - `koi_kg_extractions` (per doc provenance)
+  - `entity_registry` (pipeline-passed entities only)
+  - `koi_relationships` (lookup-only insert to avoid double-counting entity occurrence counts)
 
 ## Step 5: Post-Extraction Verification (PostgreSQL)
 
@@ -339,4 +270,3 @@ PYTHONPATH=src ./.venv/bin/python scripts/regenerate_fuseki_graph.py --confirm-p
 
 1. Restore Postgres from `/home/darren/backups/eliza_pre_stage6_*.sql.gz`
 2. Re-run `scripts/regenerate_fuseki_graph.py --confirm-prod` to rebuild Fuseki from restored PostgreSQL
-

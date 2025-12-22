@@ -62,6 +62,31 @@ def infer_source_type(source_sensor: str) -> str:
         return "twitter"
     return "website"
 
+# Stage 6 corpus filter: natural-language KG only
+# - Include all non-repo sources
+# - Repo sources (GitHub/GitLab): include ONLY documentation files by file_path
+# - Exclude file_path IS NULL rows for repo sources
+CORPUS_FILTER_SQL = r"""
+  AND (
+    (source_sensor NOT ILIKE '%github%' AND source_sensor NOT ILIKE '%gitlab%')
+    OR
+    (
+      (source_sensor ILIKE '%github%' OR source_sensor ILIKE '%gitlab%')
+      AND (metadata ? 'file_path')
+      AND (metadata->>'file_path') IS NOT NULL
+      AND (
+        (metadata->>'file_path') ~* '[.](md|mdx|rst|txt)$'
+        OR (metadata->>'file_path') ~* '(^|/)(readme|license|changelog)([.].*)?$'
+        OR (metadata->>'file_path') ILIKE '%/docs/%'
+      )
+      AND (metadata->>'file_path') NOT ILIKE '%.pb.go'
+      AND (metadata->>'file_path') !~* '/(node_modules|vendor|dist|build|generated)/'
+      AND (metadata->>'file_path') !~* '/(test|tests|examples)/'
+      AND (metadata->>'file_path') !~* '_test[.][^/]+$'
+    )
+  )
+"""
+
 
 async def main(limit: int = 5):
     """Run canary extraction on N random documents."""
@@ -85,7 +110,9 @@ async def main(limit: int = 5):
         use_pipeline=True,
         enable_deduplication=True
     )
-    print(f"[canary] KnowledgeGraphIntegrator initialized (pipeline modules: {len(kg.pipeline)})")
+    pipeline_modules = getattr(kg.pipeline, "modules", None)
+    pipeline_len = len(pipeline_modules) if pipeline_modules is not None else 0
+    print(f"[canary] KnowledgeGraphIntegrator initialized (pipeline modules: {pipeline_len})")
 
     # Verify pipeline is loaded
     if not kg.pipeline:
@@ -110,12 +137,18 @@ async def main(limit: int = 5):
     # Fetch random documents
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """
-            SELECT id, rid, source_sensor, content->>'text' AS text
+            f"""
+            SELECT
+              id,
+              rid,
+              source_sensor,
+              metadata->>'file_path' AS file_path,
+              content->>'text' AS text
             FROM koi_memories
             WHERE superseded_at IS NULL
               AND content->>'text' IS NOT NULL
               AND LENGTH(content->>'text') > 200
+              {CORPUS_FILTER_SQL}
             ORDER BY RANDOM()
             LIMIT %s
             """,
@@ -131,7 +164,8 @@ async def main(limit: int = 5):
     blocked_count = 0
 
     for i, doc in enumerate(docs, 1):
-        print(f"\n[canary] [{i}/{len(docs)}] Processing {doc['rid'][:50]}...")
+        fp = (doc.get("file_path") or "").strip()
+        print(f"\n[canary] [{i}/{len(docs)}] Processing rid={doc['rid'][:50]} file_path={fp[:120]}...")
 
         try:
             source_type = infer_source_type(doc["source_sensor"])
