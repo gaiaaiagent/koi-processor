@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -948,7 +949,7 @@ async def store_embedding(conn: asyncpg.Connection, memory_id: str, embedding: L
         return False
 
 # API Endpoints
-@app.post("/events/process", response_model=ProcessingResult)
+@app.post("/events/process")
 async def process_event(event: KOIEvent):
     """Process a single KOI event with semantic extraction"""
 
@@ -975,7 +976,9 @@ async def process_event(event: KOIEvent):
         )
         logger.info(f"Created bundle from event data with RID: {event.bundle.rid}")
 
-    return await process_koi_event_semantic(event)
+    result = await process_koi_event_semantic(event)
+    status_code = 200 if result.success else 500
+    return JSONResponse(status_code=status_code, content=result.dict())
 
 @app.post("/events/batch")
 async def process_batch(events: List[KOIEvent]):

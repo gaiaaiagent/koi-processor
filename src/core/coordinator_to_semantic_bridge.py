@@ -101,19 +101,19 @@ async def poll_and_forward():
                                 timeout=60.0
                             )
 
-                            if sem_response.status_code == 200:
-                                result = sem_response.json()
-                                success = True
-                                if isinstance(result, dict) and "success" in result:
-                                    success = bool(result.get("success"))
-                                if success:
-                                    logger.info(f"Processed: {result.get('success')} - Chunks: {result.get('chunks_created')}")
-                                    if event_id:
-                                        confirmed_event_ids.append(event_id)
-                                else:
-                                    logger.error(f"Semantic bridge error: {result.get('error') or 'success=false'}")
+                            # Handle both 200 (success) and non-200 (failure) responses
+                            result = sem_response.json()
+                            success = False
+                            if isinstance(result, dict):
+                                success = bool(result.get("success", sem_response.status_code == 200))
+
+                            if success:
+                                logger.info(f"Processed: {result.get('success')} - Chunks: {result.get('chunks_created')}")
+                                if event_id:
+                                    confirmed_event_ids.append(event_id)
                             else:
-                                logger.error(f"Semantic bridge error: {sem_response.status_code}")
+                                error_msg = result.get('error', 'unknown') if isinstance(result, dict) else str(result)
+                                logger.error(f"Semantic bridge error (HTTP {sem_response.status_code}): {error_msg}")
 
                         except Exception as e:
                             logger.error(f"Error forwarding event: {e}")

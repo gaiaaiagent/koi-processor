@@ -205,17 +205,15 @@ async def poll_once(client: httpx.AsyncClient) -> int:
                         if isinstance(eb_response, Exception):
                             eb_error = f"{eb_response}"
                         else:
-                            if eb_response.status_code == 200:
-                                try:
-                                    eb_payload = eb_response.json()
-                                except Exception as e:
-                                    eb_error = f"non-JSON response: {e}"
-                                else:
-                                    eb_success = bool(eb_payload.get("success", False))
-                                    if not eb_success:
-                                        eb_error = eb_payload.get("error") or "success=false"
+                            try:
+                                eb_payload = eb_response.json()
+                            except Exception as e:
+                                eb_error = f"non-JSON response (HTTP {eb_response.status_code}): {e}"
                             else:
-                                eb_error = f"HTTP {eb_response.status_code}"
+                                # Bridges now return 200 on success, 500 on failure
+                                eb_success = bool(eb_payload.get("success", False))
+                                if not eb_success:
+                                    eb_error = eb_payload.get("error") or f"HTTP {eb_response.status_code}: success=false"
                         
                         # Check Code Graph response (allow it to fail silently if not a code file)
                         if isinstance(cg_response, Exception):

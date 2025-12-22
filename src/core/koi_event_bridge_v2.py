@@ -13,6 +13,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
@@ -870,7 +871,8 @@ async def process_event_endpoint(event: KOIEvent):
     else:
         logger.error(f"[KOI Bridge v2] Processing failed: {result.error}")
     
-    return result
+    status_code = 200 if result.success else 500
+    return JSONResponse(status_code=status_code, content=result.dict())
 
 @app.get("/stats")
 async def get_stats():

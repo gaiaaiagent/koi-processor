@@ -138,3 +138,109 @@ async def test_koi_flow_broadcast_poll_forward_confirm(monkeypatch):
         if isinstance(poll_payload, dict) and "payload" in poll_payload:
             poll_payload = poll_payload["payload"]
         assert poll_payload.get("events") == []
+
+
+@pytest.mark.anyio
+async def test_koi_flow_bridge_failure_no_confirm(monkeypatch):
+    """Test that events are not confirmed when bridge returns failure (HTTP 500)."""
+    monkeypatch.setenv("COORDINATOR_URL", "http://coordinator")
+    monkeypatch.setenv("EVENT_BRIDGE_URL", "http://event-bridge")
+    monkeypatch.setenv("EVENT_BRIDGE_ENDPOINT", "/events/process")
+    monkeypatch.setenv("CODE_GRAPH_URL", "http://code-graph")
+    monkeypatch.setenv("CODE_GRAPH_ENDPOINT", "/process-koi-event")
+    monkeypatch.setenv("NODE_ID", "test-forwarder")
+    monkeypatch.setenv("POLL_INTERVAL", "1")
+    monkeypatch.setenv("MAX_CONCURRENT", "5")
+    monkeypatch.delenv("KOI_PRIVATE_KEY_PEM", raising=False)
+    monkeypatch.delenv("KOI_PRIVATE_KEY_PEM_PATH", raising=False)
+    monkeypatch.delenv("KOI_PRIVATE_KEY_PASSWORD", raising=False)
+    monkeypatch.delenv("KOI_ENVELOPE_SIGN", raising=False)
+
+    import importlib
+    import coordinator_to_eventbridge_forwarder as forwarder
+
+    forwarder = importlib.reload(forwarder)
+
+    coordinator = KOICoordinator(node_name="test-coordinator", port=0)
+    coordinator_app = coordinator.app
+
+    # Event bridge that fails with HTTP 500 and success=false
+    event_bridge_app = FastAPI()
+
+    @event_bridge_app.post("/events/process")
+    async def process_event_fail(event: dict):
+        from fastapi.responses import JSONResponse
+        rid = event.get("rid") or event.get("bundle", {}).get("rid", "")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "rid": rid,
+                "cid": "",
+                "chunks_created": 0,
+                "embeddings_created": 0,
+                "error": "Test failure"
+            }
+        )
+
+    code_graph_app = FastAPI()
+
+    @code_graph_app.post("/process-koi-event")
+    async def process_code_graph_event(event: dict):
+        return {"success": True}
+
+    coordinator_transport = httpx.ASGITransport(app=coordinator_app)
+    event_bridge_transport = httpx.ASGITransport(app=event_bridge_app)
+    code_graph_transport = httpx.ASGITransport(app=code_graph_app)
+
+    async def dispatch(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "coordinator":
+            return await coordinator_transport.handle_async_request(request)
+        if host == "event-bridge":
+            return await event_bridge_transport.handle_async_request(request)
+        if host == "code-graph":
+            return await code_graph_transport.handle_async_request(request)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(dispatch)
+
+    contents = {"text": f"fail test {uuid.uuid4().hex}"}
+    content_bytes = json.dumps(contents, sort_keys=True).encode()
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    rid = "rid:test-fail:1"
+
+    manifest = Manifest(
+        rid=rid,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        content_hash=content_hash,
+        size_bytes=len(content_bytes),
+        content_type="application/json",
+        version="1.0",
+        metadata={"source_type": "test"}
+    )
+    bundle = Bundle(rid=rid, manifest=manifest, contents=contents)
+
+    event_payload = {
+        "event_type": "NEW",
+        "rid": rid,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source_node": "test-sensor",
+        "bundle": bundle.to_dict()
+    }
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        # Broadcast event
+        broadcast_response = await client.post(
+            "http://coordinator/events/broadcast",
+            json=event_payload
+        )
+        assert broadcast_response.status_code == 200
+
+        # Poll and forward - should NOT confirm because bridge failed (HTTP 500)
+        confirmed = await forwarder.poll_once(client)
+        assert confirmed == 0  # No events confirmed due to HTTP 500 failure
+
+        # Key assertion: when bridge returns 500 with success=false,
+        # forwarder does NOT call /events/confirm.
+        # (Event lifecycle in coordinator is separate from this test)
