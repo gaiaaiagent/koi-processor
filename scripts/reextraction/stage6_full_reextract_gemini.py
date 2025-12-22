@@ -311,7 +311,7 @@ async def main(
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         checkpoint = {
             "run_id": run_id,
-            "last_koi_memories_id": 0,
+            "last_koi_memories_id": None,  # UUID column - use None for first run
             "processed_count": 0,
             "error_count": 0,
             "total_entities": 0,
@@ -377,19 +377,35 @@ async def main(
                 if limit <= 0:
                     break
 
-                cur.execute(
-                    """
-                    SELECT id, rid, source_sensor, content->>'text' AS text
-                    FROM koi_memories
-                    WHERE superseded_at IS NULL
-                      AND content->>'text' IS NOT NULL
-                      AND LENGTH(content->>'text') > 50
-                      AND id > %s
-                    ORDER BY id ASC
-                    LIMIT %s
-                    """,
-                    (checkpoint["last_koi_memories_id"], limit),
-                )
+                # Handle first run (None) vs resume (UUID)
+                last_id = checkpoint["last_koi_memories_id"]
+                if last_id is None:
+                    cur.execute(
+                        """
+                        SELECT id, rid, source_sensor, content->>'text' AS text
+                        FROM koi_memories
+                        WHERE superseded_at IS NULL
+                          AND content->>'text' IS NOT NULL
+                          AND LENGTH(content->>'text') > 50
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, rid, source_sensor, content->>'text' AS text
+                        FROM koi_memories
+                        WHERE superseded_at IS NULL
+                          AND content->>'text' IS NOT NULL
+                          AND LENGTH(content->>'text') > 50
+                          AND id > %s
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (last_id, limit),
+                    )
                 docs = cur.fetchall()
 
             if not docs:
@@ -402,7 +418,7 @@ async def main(
                 try:
                     stats = await process_document(doc, extractor, kg, run_id, dry_run)
 
-                    checkpoint["last_koi_memories_id"] = doc["id"]
+                    checkpoint["last_koi_memories_id"] = str(doc["id"])  # Convert UUID to string for JSON
                     checkpoint["processed_count"] += 1
                     checkpoint["total_entities"] += stats["entities_persisted"]
                     checkpoint["total_relationships"] += stats["relationships_persisted"]
@@ -422,7 +438,7 @@ async def main(
 
                 except Exception as e:
                     checkpoint["error_count"] += 1
-                    checkpoint["last_koi_memories_id"] = doc["id"]
+                    checkpoint["last_koi_memories_id"] = str(doc["id"])  # Convert UUID to string for JSON
                     print(f"  [ERROR] doc_id={doc['id']} rid={doc['rid'][:40]}: {e}")
 
                     # Save checkpoint on error
