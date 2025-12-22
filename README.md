@@ -40,18 +40,18 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 - ✅ **Weekly Aggregator**: AI-powered weekly digest with on-chain activity tracking
 
 - ✅ **Code Graph Service**: Automatic code entity extraction into Apache AGE graph
-- ✅ **Knowledge Graph Quality Improvement** (Dec 2025): Modular post-processing pipeline with 121 tests, 99.7% quality (up from 62%)
+- ✅ **Knowledge Graph Quality Improvement** (Dec 2025): Modular post-processing pipeline with regression suite and 99.7% quality (up from 62%)
 
 ### 🎯 Knowledge Graph Quality (Dec 2025)
 
-**Status**: ✅ PRODUCTION DEPLOYMENT v1.1 | Quality: 99.7% | Tests: 121 passing | Dedup: 70.10%
+**Status**: ✅ PRODUCTION DEPLOYMENT v1.1 | Quality: 99.7% | Tests: KG regression suite passing | Dedup: 70.10%
 
 Comprehensive three-phase quality improvement project completed successfully:
 
 **Phase 1-2: Quality Filters & Pipeline** ✅
 - **62% → 99.7% quality** improvement
-- **Modular Pipeline Framework**: 5 operational modules (ConfidenceFilter, EntityQualityFilter, CanonicalResolver, ListSplitter, OntologyNormalizer)
-- **121 Passing Tests**: Comprehensive test coverage
+- **Modular Pipeline Framework**: 6 operational modules (ConfidenceFilter, DocumentLevelDeduplicator, CanonicalResolver, OntologyNormalizer, ListSplitter, EntityQualityFilter)
+- **Regression Suite**: Targeted tests for KG stability
 - **Production Deployment**: Zero errors, < 1% performance overhead
 
 **Phase 3: Cross-Document Deduplication** ✅ COMPLETE
@@ -59,7 +59,7 @@ Comprehensive three-phase quality improvement project completed successfully:
   - Tier 1 (Exact): B-Tree index match (~microseconds) - 58.0% hit rate
   - Tier 2 (Semantic): pgvector HNSW + OpenAI embeddings (~milliseconds) - 10.6% hit rate
   - Tier 3 (New): Insert new entities - 31.4% new entities
-- **Production Stats** (as of 2025-12-11):
+- **Production Stats** (as of 2025-12-11, pre-Stage 6 re-extraction):
   - **12,985 unique entities** from 43,430 raw entity mentions
   - **70.10% deduplication rate** (target: 65-75%)
   - **64,925 RDF triples** (Fuseki knowledge graph deployed)
@@ -71,7 +71,25 @@ Comprehensive three-phase quality improvement project completed successfully:
   - Template text: 444 → 0 (100% eliminated)
   - Chunk repetition: 95% reduction
   - Type consolidation: 678 entities merged
-- **Code Quality**: A+ grade (expert reviewed), 35 passing tests
+- **Code Quality**: A+ grade (expert reviewed)
+
+### Stage 6 Re-Extraction + Code Bridge (Dec 2025)
+
+**Stage 6** rebuilds the semantic KG from a **docs-only corpus** (Notion + Discourse + Website + GitHub/GitLab markdown), using **Gemini** extraction and PostgreSQL as the authoritative store. Fuseki is rebuilt from PostgreSQL after completion.
+
+**Code Bridge** enables joinable semantics and code structure:
+- `koi_code_artifacts`: canonical code entities (exported from code graph provenance)
+- `koi_doc_code_links`: doc → code links (MENTIONS edges preserved)
+- `entity_registry.metadata.code_uri`: entity-level code links (post-Stage 6)
+- AGE stub sync for single-query access to semantic anchors
+
+Key scripts:
+- `scripts/reextraction/stage6_canary_gemini.py`
+- `scripts/reextraction/stage6_full_reextract_gemini.py`
+- `scripts/code_bridge/export_code_artifacts.py`
+- `scripts/code_bridge/link_docs_to_code.py`
+- `scripts/code_bridge/link_entities_to_code.py`
+- `scripts/code_bridge/sync_stubs_to_age.py`
 
 **Quick Start**:
 ```python
@@ -124,10 +142,11 @@ koi-processor/
 ├── scripts/               # Operational scripts
 │   ├── setup.sh          # One-command setup
 │   ├── run_migrations.sh # Database migrations
-│   └── run_daily_curator.py
+│   ├── run_daily_curator.py
+│   └── code_bridge/      # Code/semantic bridge scripts
 ├── migrations/            # Database migrations
 ├── docs/                  # Documentation
-├── tests/                 # Test suite (121 passing)
+├── tests/                 # Test suite (use targeted KG regression subset)
 ├── prompts/               # Project planning & documentation
 │   ├── PROMPT_1-23_*.md  # Active prompts
 │   └── archive/          # Superseded prompts

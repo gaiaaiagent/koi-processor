@@ -1,8 +1,8 @@
 # Project Context for Claude
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
-**Current Phase**: Phase 3 COMPLETE - Hybrid RAG Deployed
-**Status**: ALL SYSTEMS OPERATIONAL
+**Current Phase**: Stage 6 Full Re-Extraction (docs-only corpus)
+**Status**: Stage 6 running (screen: stage6)
 **Your Role**: AI coding assistant helping with knowledge graph quality
 
 ---
@@ -18,9 +18,39 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 
 ---
 
-## Current State (2025-12-20)
+## Stage 6 Re-Extraction (Docs-Only)
+
+**Corpus definition (docs-only):**
+- Include: Discourse + Notion + Website + other non-repo sources
+- Include (repo sources): GitHub + GitLab docs only via `metadata.file_path`
+  - `.md`, `.mdx`, `.rst`, `.txt`, `README*`, `LICENSE*`, `CHANGELOG*`, `/docs/`
+- Exclude: repo rows with `file_path IS NULL` + generated/vendor/test/example paths
+
+**Run command (server):**
+```bash
+cd /opt/projects/koi-processor
+set -a; source .env; set +a
+unset OPENAI_API_KEY
+PYTHONPATH=src ./.venv/bin/python scripts/reextraction/stage6_full_reextract_gemini.py --batch-size 50 --rate-limit 0.5
+```
+
+**Monitoring:**
+- Screen: `stage6`
+- Checkpoint: `scripts/reextraction/.stage6_checkpoint.json`
+- Log: `/home/darren/stage6_full_run.log` (buffered; use screen for live output)
+
+**Post-run steps:**
+1. Post-extraction verification (entity counts, type distribution, HTTP URIs = 0)
+2. Rebuild Fuseki (staging → production)
+3. Entity-level code linking (`link_entities_to_code.py`)
+4. Stub sync to AGE (`sync_stubs_to_age.py`)
+
+---
+
+## Current State (2025-12-22)
 
 ### Completed Features
+Note: Counts below are pre-Stage 6 re-extraction; Stage 6 resets entity_registry/koi_relationships.
 
 **Entity System:**
 - Entity Registry: 12,985 unique entities, 70.10% dedup rate
@@ -42,11 +72,28 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 - Sensor-level: Canonical RIDs (no temp dir names)
 
 **Quality Pipeline:**
-- 5 modules: ConfidenceFilter, CanonicalResolver, EntityQualityFilter, ListSplitter, OntologyNormalizer
-- 121 tests passing
+- 6 modules: ConfidenceFilter, DocumentLevelDeduplicator, CanonicalResolver, OntologyNormalizer, ListSplitter, EntityQualityFilter
+- Targeted KG regression suite passing
 - Zero type collisions
 
 ---
+
+## Code Bridge (Docs ↔ Code Graph)
+
+**Tables:**
+- `koi_code_artifacts` (canonical code entities)
+- `koi_doc_code_links` (doc → code links, preserves MENTIONS)
+
+**Scripts:**
+- `scripts/code_bridge/export_code_artifacts.py` (populate artifacts)
+- `scripts/code_bridge/link_docs_to_code.py` (doc-level linking)
+- `scripts/code_bridge/link_entities_to_code.py` (entity-level linking)
+- `scripts/code_bridge/sync_stubs_to_age.py` (stub sync + MENTIONS edges)
+
+**AGE stubs:**
+- `Stub:*` nodes with `sync_run_id` and mark/sweep cleanup
+- `MENTIONS` edges from docs to code artifacts
+- `CODE_REF` edges from linked semantic entities to code artifacts
 
 ## Key Files
 
@@ -72,5 +119,5 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 
 ---
 
-**Last Updated**: 2025-12-21
-**Phase**: Hybrid RAG v2.0.0 Deployed, FIX-001 Complete
+**Last Updated**: 2025-12-22
+**Phase**: Stage 6 docs-only re-extraction in progress
