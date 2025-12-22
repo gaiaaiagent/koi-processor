@@ -83,6 +83,34 @@ Behavior:
 - Links **file paths** only when a full org/repo path is present *and* maps to a single artifact.
 - Uses the same docs-only corpus filter as Stage 6.
 
+## Entity-Level Linking (Semantic → Code)
+
+After Stage 6, link semantic entities (MODULE / KEEPER / API_MESSAGE) to code artifacts:
+
+```bash
+cd /opt/projects/koi-processor
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_entities_to_code.py --dry-run
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_entities_to_code.py --types MODULE,KEEPER,API_MESSAGE
+```
+
+This writes `metadata.code_uri` + `link_confidence` + `link_method` into `entity_registry`.
+
+## Stub Sync (AGE ← Postgres)
+
+Stub nodes and edges are synchronized into AGE for single-query performance:
+
+```bash
+cd /opt/projects/koi-processor
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/sync_stubs_to_age.py --dry-run
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/sync_stubs_to_age.py
+```
+
+Stub edges:
+- `(:Stub:Doc)-[:MENTIONS]->(:Stub:CodeArtifact)`
+- `(:Stub:*)-[:CODE_REF]->(:Stub:CodeArtifact)`
+
+The sync is **mark/sweep** using `sync_run_id`.
+
 ## Query Federation Pattern
 
 1) Semantic KG answers the “what/why” and yields `code_uri` values (directly on entities or via `koi_doc_code_links`).
