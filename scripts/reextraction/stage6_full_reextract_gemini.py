@@ -68,20 +68,20 @@ CHECKPOINT_FILE = Path(__file__).parent / ".stage6_checkpoint.json"
 CORPUS_FILTER_SQL = r"""
   AND (
     -- Non-repo sources: include all
-    (source_sensor NOT ILIKE '%github%' AND source_sensor NOT ILIKE '%gitlab%')
+    (source_sensor NOT ILIKE '%%github%%' AND source_sensor NOT ILIKE '%%gitlab%%')
     OR
     -- Repo sources: docs-only by file_path
     (
-      (source_sensor ILIKE '%github%' OR source_sensor ILIKE '%gitlab%')
+      (source_sensor ILIKE '%%github%%' OR source_sensor ILIKE '%%gitlab%%')
       AND (metadata ? 'file_path')
       AND (metadata->>'file_path') IS NOT NULL
       AND (
         (metadata->>'file_path') ~* '[.](md|mdx|rst|txt)$'
         OR (metadata->>'file_path') ~* '(^|/)(readme|license|changelog)([.].*)?$'
-        OR (metadata->>'file_path') ILIKE '%/docs/%'
+        OR (metadata->>'file_path') ILIKE '%%/docs/%%'
       )
       -- Exclude generated/vendor/build outputs
-      AND (metadata->>'file_path') NOT ILIKE '%.pb.go'
+      AND (metadata->>'file_path') NOT ILIKE '%%.pb.go'
       AND (metadata->>'file_path') !~* '/(node_modules|vendor|dist|build|generated)/'
       -- Optional noise reduction: exclude tests/examples paths
       AND (metadata->>'file_path') !~* '/(test|tests|examples)/'

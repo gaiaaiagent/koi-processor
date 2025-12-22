@@ -47,18 +47,18 @@ from psycopg2.extras import RealDictCursor, Json
 # - Exclude file_path IS NULL rows for repo sources
 CORPUS_FILTER_SQL = r"""
   AND (
-    (source_sensor NOT ILIKE '%github%' AND source_sensor NOT ILIKE '%gitlab%')
+    (source_sensor NOT ILIKE '%%github%%' AND source_sensor NOT ILIKE '%%gitlab%%')
     OR
     (
-      (source_sensor ILIKE '%github%' OR source_sensor ILIKE '%gitlab%')
+      (source_sensor ILIKE '%%github%%' OR source_sensor ILIKE '%%gitlab%%')
       AND (metadata ? 'file_path')
       AND (metadata->>'file_path') IS NOT NULL
       AND (
         (metadata->>'file_path') ~* '[.](md|mdx|rst|txt)$'
         OR (metadata->>'file_path') ~* '(^|/)(readme|license|changelog)([.].*)?$'
-        OR (metadata->>'file_path') ILIKE '%/docs/%'
+        OR (metadata->>'file_path') ILIKE '%%/docs/%%'
       )
-      AND (metadata->>'file_path') NOT ILIKE '%.pb.go'
+      AND (metadata->>'file_path') NOT ILIKE '%%.pb.go'
       AND (metadata->>'file_path') !~* '/(node_modules|vendor|dist|build|generated)/'
       AND (metadata->>'file_path') !~* '/(test|tests|examples)/'
       AND (metadata->>'file_path') !~* '_test[.][^/]+$'
@@ -423,4 +423,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
