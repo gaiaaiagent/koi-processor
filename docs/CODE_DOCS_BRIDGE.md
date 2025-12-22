@@ -68,6 +68,21 @@ Recommended minimal linker behavior (future job):
 - Insert into `koi_doc_code_links`.
 - Optionally write `entity_registry.metadata.code_uri` for FIX-005 types (MODULE/API_MESSAGE/KEEPER) when a confident match is found.
 
+### Initial linker implementation
+
+Script (regex-based, high-precision):
+
+```bash
+cd /opt/projects/koi-processor
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_docs_to_code.py --dry-run
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_docs_to_code.py
+```
+
+Behavior:
+- Links **symbol mentions** when the symbol is globally unique (or uniquely resolvable by repo context).
+- Links **file paths** only when a full org/repo path is present *and* maps to a single artifact.
+- Uses the same docs-only corpus filter as Stage 6.
+
 ## Query Federation Pattern
 
 1) Semantic KG answers the “what/why” and yields `code_uri` values (directly on entities or via `koi_doc_code_links`).
@@ -79,4 +94,3 @@ Recommended minimal linker behavior (future job):
 
 - Stage 6 semantic re-extraction can remain **docs-only** while still linking into the code graph through this bridge.
 - Keep the bridge table schema stable; enrich it incrementally (AGE ids, commit-aware versioning) when needed.
-
