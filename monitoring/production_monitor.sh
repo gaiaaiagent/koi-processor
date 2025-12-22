@@ -3,9 +3,24 @@
 # Runs health checks and sends alerts for service failures
 
 # Configuration
-ALERT_EMAIL=""  # Set your email for alerts
-SLACK_WEBHOOK=""  # Set Slack webhook URL for alerts
+ALERT_EMAIL="${ALERT_EMAIL:-${KOI_ALERT_EMAIL:-}}"
+SLACK_WEBHOOK="${SLACK_WEBHOOK:-}"
 LOG_FILE="/opt/projects/koi-processor/logs/monitoring.log"
+
+# Load optional alert config
+if [ -z "$ALERT_EMAIL" ] && [ -f /opt/projects/koi-processor/.alert-config ]; then
+    source /opt/projects/koi-processor/.alert-config
+fi
+
+# Mailer availability
+HAS_MSMTP=false
+if command -v msmtp &> /dev/null && { [ -f /etc/msmtprc ] || [ -f ~/.msmtprc ]; }; then
+    HAS_MSMTP=true
+fi
+HAS_MAIL=false
+if command -v mail &> /dev/null; then
+    HAS_MAIL=true
+fi
 
 # Service endpoints
 COORDINATOR_URL="http://localhost:8005"
@@ -40,7 +55,19 @@ send_alert() {
     
     # Send email alert if configured
     if [ -n "$ALERT_EMAIL" ]; then
-        echo "$message" | mail -s "KOI Pipeline Alert: $service [$severity]" "$ALERT_EMAIL"
+        if [ "$HAS_MSMTP" = true ]; then
+            cat << EOF | msmtp "$ALERT_EMAIL"
+Subject: [KOI ALERT] $service [$severity]
+From: zaldarren@gmail.com
+To: $ALERT_EMAIL
+
+$message
+EOF
+        elif [ "$HAS_MAIL" = true ]; then
+            echo "$message" | mail -s "KOI Pipeline Alert: $service [$severity]" "$ALERT_EMAIL"
+        else
+            log_message "ALERT: No mailer configured for $service alert"
+        fi
     fi
     
     # Send Slack alert if configured

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run KOI Pipeline Monitoring every 5 minutes
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+AccuracySec=1m
+Unit=koi-pipeline-monitor.service
+
+[Install]
+WantedBy=timers.target

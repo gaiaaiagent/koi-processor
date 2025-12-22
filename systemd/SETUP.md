@@ -16,6 +16,8 @@ As of now, the services are running as regular processes:
 # Copy service files to systemd directory
 sudo cp systemd/koi-bge.service /etc/systemd/system/
 sudo cp systemd/koi-bridge.service /etc/systemd/system/
+sudo cp systemd/koi-pipeline-monitor.service /etc/systemd/system/
+sudo cp systemd/koi-pipeline-monitor.timer /etc/systemd/system/
 ```
 
 ### 2. Create Log Directory
@@ -39,10 +41,12 @@ sudo systemctl daemon-reload
 
 # Enable services to start on boot
 sudo systemctl enable koi-bge koi-bridge
+sudo systemctl enable koi-pipeline-monitor.timer
 
 # Start services
 sudo systemctl start koi-bge
 sudo systemctl start koi-bridge
+sudo systemctl start koi-pipeline-monitor.timer
 ```
 
 ### 5. Verify Services
@@ -54,6 +58,7 @@ sudo systemctl status koi-bridge
 # Check logs
 sudo journalctl -u koi-bge -f
 sudo journalctl -u koi-bridge -f
+sudo journalctl -u koi-pipeline-monitor -f
 ```
 
 ## Monitoring
@@ -61,16 +66,19 @@ sudo journalctl -u koi-bridge -f
 ### Manual Health Check
 ```bash
 # Run monitoring script
-bash scripts/monitor_services.sh
+bash monitoring/production_monitor.sh
 ```
 
-### Automated Monitoring (Cron)
+### Automated Monitoring (systemd timer)
 ```bash
-# Add to crontab
-crontab -e
+# Optional alert config
+echo 'KOI_ALERT_EMAIL=you@example.com' | sudo tee /opt/projects/koi-processor/.alert-config
 
-# Add this line to check every 5 minutes
-*/5 * * * * /opt/projects/koi-processor/scripts/monitor_services.sh >> /var/log/koi/monitor.log 2>&1
+# Check timer status
+sudo systemctl status koi-pipeline-monitor.timer
+
+# Run on demand
+sudo systemctl start koi-pipeline-monitor.service
 ```
 
 ### Service Management Commands

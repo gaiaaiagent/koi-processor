@@ -1,0 +1,14 @@
+[Unit]
+Description=KOI Pipeline Monitoring (Health Checks)
+After=network.target
+
+[Service]
+Type=oneshot
+User=darren
+Group=gaia-devs
+WorkingDirectory=/opt/projects/koi-processor
+EnvironmentFile=-/opt/projects/koi-processor/.alert-config
+ExecStart=/opt/projects/koi-processor/monitoring/production_monitor.sh
+
+[Install]
+WantedBy=multi-user.target
