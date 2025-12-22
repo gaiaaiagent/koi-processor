@@ -90,7 +90,8 @@ After Stage 6, link semantic entities (MODULE / KEEPER / API_MESSAGE) to code ar
 ```bash
 cd /opt/projects/koi-processor
 PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_entities_to_code.py --dry-run
-PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_entities_to_code.py --types MODULE,KEEPER,API_MESSAGE
+PYTHONPATH=src ./.venv/bin/python scripts/code_bridge/link_entities_to_code.py --types MODULE,KEEPER,API_MESSAGE \
+  --alias-file data/code_bridge_module_aliases.json
 ```
 
 This writes `metadata.code_uri` + `link_confidence` + `link_method` into `entity_registry`.
