@@ -23,7 +23,7 @@ if command -v mail &> /dev/null; then
 fi
 
 # Service endpoints
-COORDINATOR_URL="http://localhost:8005"
+COORDINATOR_URL="http://localhost:8005/health"
 EVENT_BRIDGE_URL="http://localhost:8100"
 BGE_SERVER_URL="http://localhost:8090/health"
 MCP_SERVER_URL="http://localhost:8200"
@@ -194,7 +194,7 @@ main() {
     
     # Check processes
     echo -e "\n⚙️ Processes:"
-    check_process "Coordinator" "coordinator_fixed.py"
+check_process "Coordinator" "run_coordinator.py"
     check_process "Event Bridge" "koi_event_bridge_v2.py"
     check_process "BGE Server" "bge_server.py"
     check_process "MCP Server" "koi_knowledge_mcp_server.py"
