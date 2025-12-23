@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 Integration test for KOI flow: broadcast -> poll -> forward -> confirm.
+
+P0 Alignment: Tests extended to verify backward compatibility with dual-hash support.
+Reference: koi-research/docs/KOI_PROTOCOL_ALIGNMENT_REFERENCE.md
 """
 
 import hashlib
@@ -21,6 +24,7 @@ sys.path.insert(0, str(SCRIPTS_PATH))
 
 from koi_protocol.coordinator.koi_coordinator import KOICoordinator
 from koi_protocol.core.bundle_system import Bundle, Manifest
+from koi_protocol.core.rid_system import GenericRID
 
 
 @pytest.fixture
@@ -91,20 +95,16 @@ async def test_koi_flow_broadcast_poll_forward_confirm(monkeypatch):
     transport = httpx.MockTransport(dispatch)
 
     contents = {"text": f"hello koi {uuid.uuid4().hex}"}
-    content_bytes = json.dumps(contents, sort_keys=True).encode()
-    content_hash = hashlib.sha256(content_bytes).hexdigest()
-    rid = "rid:test-flow:1"
+    rid_obj = GenericRID("rid", "test-flow:1")
+    rid = rid_obj.to_string()
 
-    manifest = Manifest(
-        rid=rid,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        content_hash=content_hash,
-        size_bytes=len(content_bytes),
+    # Use Bundle.generate() for proper dual-hash generation
+    bundle = Bundle.generate(
+        rid=rid_obj,
+        contents=contents,
         content_type="application/json",
-        version="1.0",
         metadata={"source_type": "test"}
     )
-    bundle = Bundle(rid=rid, manifest=manifest, contents=contents)
 
     event_payload = {
         "event_type": "NEW",
@@ -206,20 +206,16 @@ async def test_koi_flow_bridge_failure_no_confirm(monkeypatch):
     transport = httpx.MockTransport(dispatch)
 
     contents = {"text": f"fail test {uuid.uuid4().hex}"}
-    content_bytes = json.dumps(contents, sort_keys=True).encode()
-    content_hash = hashlib.sha256(content_bytes).hexdigest()
-    rid = "rid:test-fail:1"
+    rid_obj = GenericRID("rid", "test-fail:1")
+    rid = rid_obj.to_string()
 
-    manifest = Manifest(
-        rid=rid,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        content_hash=content_hash,
-        size_bytes=len(content_bytes),
+    # Use Bundle.generate() for proper dual-hash generation
+    bundle = Bundle.generate(
+        rid=rid_obj,
+        contents=contents,
         content_type="application/json",
-        version="1.0",
         metadata={"source_type": "test"}
     )
-    bundle = Bundle(rid=rid, manifest=manifest, contents=contents)
 
     event_payload = {
         "event_type": "NEW",
@@ -244,3 +240,136 @@ async def test_koi_flow_bridge_failure_no_confirm(monkeypatch):
         # Key assertion: when bridge returns 500 with success=false,
         # forwarder does NOT call /events/confirm.
         # (Event lifecycle in coordinator is separate from this test)
+
+
+# =============================================================================
+# P0 Alignment: Dual-Hash Backward Compatibility Tests
+# =============================================================================
+
+class TestP0DualHashBackwardCompatibility:
+    """
+    Tests for P0 alignment backward compatibility.
+
+    Critical constraint: Preserve existing internal /events/* behavior.
+    The clients in Appendix F must continue working during the transition.
+    """
+
+    def test_manifest_generate_produces_dual_hashes(self):
+        """Manifest.generate() should produce both sha256_hash and legacy_content_hash."""
+        contents = {"text": "test content", "value": 1.0}
+        rid = GenericRID("test", "dual-hash")
+
+        manifest = Manifest.generate(rid, contents)
+
+        # Both hash fields should exist
+        assert hasattr(manifest, 'sha256_hash')
+        assert hasattr(manifest, 'legacy_content_hash')
+        assert len(manifest.sha256_hash) == 64
+        assert len(manifest.legacy_content_hash) == 64
+
+    def test_manifest_content_hash_property_returns_sha256(self):
+        """content_hash property should return sha256_hash for backward compat."""
+        contents = {"key": "value"}
+        rid = GenericRID("test", "compat")
+
+        manifest = Manifest.generate(rid, contents)
+
+        # content_hash should equal sha256_hash
+        assert manifest.content_hash == manifest.sha256_hash
+
+    def test_manifest_from_dict_with_legacy_format(self):
+        """Manifests with only content_hash (legacy) should still work."""
+        # Old-style manifest dict with only content_hash
+        legacy_dict = {
+            "rid": "test:legacy",
+            "timestamp": "2024-12-22T10:00:00Z",
+            "content_hash": "a" * 64,
+            "size_bytes": 100,
+            "content_type": "application/json",
+            "version": "1.0",
+            "metadata": {}
+        }
+
+        manifest = Manifest.from_dict(legacy_dict)
+
+        # Should work without sha256_hash in input
+        assert manifest.sha256_hash == legacy_dict["content_hash"]
+        assert manifest.content_hash == legacy_dict["content_hash"]
+
+    def test_bundle_from_dict_with_legacy_manifest(self):
+        """Bundle.from_dict should work with legacy manifest format."""
+        legacy_bundle = {
+            "rid": "test:legacy-bundle",
+            "manifest": {
+                "rid": "test:legacy-bundle",
+                "timestamp": "2024-12-22T10:00:00Z",
+                "content_hash": "b" * 64,
+                "size_bytes": 50,
+                "content_type": "application/json",
+                "version": "1.0",
+                "metadata": {}
+            },
+            "contents": {"test": "data"}
+        }
+
+        bundle = Bundle.from_dict(legacy_bundle)
+
+        assert bundle.rid == legacy_bundle["rid"]
+        assert bundle.manifest.content_hash == legacy_bundle["manifest"]["content_hash"]
+
+    def test_bundle_to_dict_includes_dual_hashes(self):
+        """bundle.to_dict() should include both hash fields."""
+        contents = {"key": "value"}
+        rid = GenericRID("test", "dict")
+
+        bundle = Bundle.generate(rid, contents)
+        bundle_dict = bundle.to_dict()
+
+        manifest_dict = bundle_dict["manifest"]
+        assert "sha256_hash" in manifest_dict
+        assert "legacy_content_hash" in manifest_dict
+        assert "content_hash" in manifest_dict  # For backward compat
+
+    def test_hashes_differ_for_float_content(self):
+        """For content with floats, legacy and sha256 hashes should differ (JCS 1.0 -> 1)."""
+        # This is the critical case that caused 8.79% mismatch in the spike
+        contents = {"value": 1.0}
+        rid = GenericRID("test", "float")
+
+        manifest = Manifest.generate(rid, contents)
+
+        # JCS normalizes 1.0 to 1, so hashes should differ
+        assert manifest.sha256_hash != manifest.legacy_content_hash, \
+            "Hashes should differ for content with float values (JCS normalizes 1.0 to 1)"
+
+    def test_bundle_verify_integrity_with_dual_hash(self):
+        """Bundle.verify_integrity() should work with dual-hash manifests."""
+        contents = {"key": "value", "nested": {"a": 1}}
+        rid = GenericRID("test", "verify")
+
+        bundle = Bundle.generate(rid, contents)
+
+        # Both verification methods should pass
+        assert bundle.verify_integrity() is True
+        assert bundle.verify_legacy_integrity() is True
+
+    def test_rid_parsing_orn_format(self):
+        """ORN format RIDs should parse correctly (P0 requirement)."""
+        from koi_protocol.core.rid_system import RID
+
+        # ORN with multiple colons (namespace:reference format)
+        rid_string = "orn:slack.message:T123/C456/1234.5678"
+        rid = RID.parse(rid_string)
+
+        assert rid is not None
+        assert rid.to_string() == rid_string
+
+    def test_rid_parsing_uri_with_port(self):
+        """URIs with ports should parse correctly (P0 requirement)."""
+        from koi_protocol.core.rid_system import RID
+
+        rid_string = "https://example.com:8080/path"
+        rid = RID.parse(rid_string)
+
+        assert rid is not None
+        assert rid.to_string() == rid_string
