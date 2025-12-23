@@ -1,0 +1,44 @@
+# Stage 6 post-extraction verification (Fuseki SPARQL)
+# Run against staging first, then production after rebuild.
+
+# 1) Total entities (distinct subjects with rdf:type)
+SELECT (COUNT(DISTINCT ?s) AS ?count) WHERE {
+  ?s a ?type .
+}
+
+# 2) Type distribution for KOI namespace
+SELECT ?type (COUNT(?s) AS ?count) WHERE {
+  ?s a ?type .
+  FILTER(CONTAINS(STR(?type), "https://regen.network/koi#"))
+} GROUP BY ?type ORDER BY DESC(?count)
+
+# 3) No HTTP URIs anywhere
+SELECT (COUNT(*) AS ?count) WHERE {
+  ?s ?p ?o .
+  FILTER(
+    CONTAINS(STR(?s), "http://regen.network/") ||
+    CONTAINS(STR(?p), "http://regen.network/") ||
+    (ISIRI(?o) && CONTAINS(STR(?o), "http://regen.network/"))
+  )
+}
+
+# 4) No ontology# types or predicates
+SELECT DISTINCT ?type WHERE {
+  ?s a ?type .
+  FILTER(CONTAINS(STR(?type), "ontology#"))
+} LIMIT 25
+
+SELECT DISTINCT ?p WHERE {
+  ?s ?p ?o .
+  FILTER(CONTAINS(STR(?p), "ontology#"))
+} LIMIT 25
+
+# 5) Only UPPERCASE types in KOI namespace
+SELECT DISTINCT ?type WHERE {
+  ?s a ?type .
+  FILTER(CONTAINS(STR(?type), "https://regen.network/koi#"))
+  FILTER(STR(?type) != UCASE(STR(?type)))
+} LIMIT 25
+
+# 6) No self-referential triples
+SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?s }

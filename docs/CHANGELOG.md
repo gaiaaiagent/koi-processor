@@ -5,6 +5,44 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2025-12-23
+
+### Added
+- **Stage 6 Full Re-Extraction** - Complete docs-only corpus re-extraction using Gemini Flash
+  - 12,002 documents processed
+  - 88,322 entities extracted
+  - 17,329 relationships extracted
+  - 30,041 unique entities in entity_registry
+- **FIX-007 Predicate Consolidation** - Reduced predicate sprawl from 3,303 to 1,501 distinct predicates (-54.6%)
+- **Code↔Docs Bridge** - Full integration between documentation and code artifacts
+  - 16,820 code artifacts exported
+  - 6,453 doc→code links created
+  - 241 entity→code links (API_MESSAGE, MODULE types)
+- **AGE Graph Sync** - Apache AGE integration for graph database
+  - 5,464 stub nodes (Person, Organization, CodeArtifact, Doc)
+  - 6,463 edges (MENTIONS, CODE_REF)
+- **PostgreSQL-based Fuseki Rebuild** - New rebuild pipeline from authoritative PostgreSQL data
+- **Quality Gates** - Automated verification for production deployments
+  - No http://regen.network/ URIs
+  - No ontology# types/predicates
+  - No self-referential triples
+
+### Fixed
+- **Predicate Format Violations** - All predicates now conform to `^[a-z0-9_]+$` pattern
+- **HTTP URI Issues** - Eliminated all http:// URIs in favor of https://
+- **Self-Referential Relationships** - Removed relationships where subject = object
+- **AGE Sync Compatibility** - Fixed multi-label MERGE syntax and batch execution issues
+
+### Changed
+- **Extraction Model** - Switched from GPT-4.1-mini to Gemini Flash (99.4% vs 98.4% pass rate)
+- **PostgreSQL as Authoritative Store** - Fuseki now rebuilt from PostgreSQL rather than dual-write
+- **Entity Deduplication** - Improved from 70% to higher dedup rates with semantic matching
+
+### Deployment
+- **Production Fuseki**: 165,619 triples deployed to /koi endpoint
+- **Staging Fuseki**: 165,619 triples deployed to /koi-staging endpoint
+- **All quality gates passing**
+
 ## [2.3.0] - 2025-09-28
 
 ### Added

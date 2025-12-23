@@ -1,8 +1,7 @@
 # Project Context for Claude
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
-**Current Phase**: Stage 6 Full Re-Extraction (docs-only corpus)
-**Status**: Stage 6 running (screen: stage6)
+**Status**: ✅ COMPLETE - Production Deployed (2025-12-23)
 **Your Role**: AI coding assistant helping with knowledge graph quality
 
 ---
@@ -18,92 +17,79 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 
 ---
 
-## Stage 6 Re-Extraction (Docs-Only)
+## Current State (2025-12-23)
 
-**Corpus definition (docs-only):**
-- Include: Discourse + Notion + Website + other non-repo sources
-- Include (repo sources): GitHub + GitLab docs only via `metadata.file_path`
-  - `.md`, `.mdx`, `.rst`, `.txt`, `README*`, `LICENSE*`, `CHANGELOG*`, `/docs/`
-- Exclude: repo rows with `file_path IS NULL` + generated/vendor/test/example paths
+### Stage 6 Re-Extraction - COMPLETE
 
-**Run command (server):**
-```bash
-cd /opt/projects/koi-processor
-set -a; source .env; set +a
-unset OPENAI_API_KEY
-PYTHONPATH=src ./.venv/bin/python scripts/reextraction/stage6_full_reextract_gemini.py --batch-size 50 --rate-limit 0.5
-```
+| Metric | Value |
+|--------|-------|
+| Documents processed | 12,002 |
+| Entities extracted | 88,322 |
+| Relationships | 17,329 |
+| Unique entities (entity_registry) | 30,041 |
+| Unique relationships | 15,414 |
 
-**Monitoring:**
-- Screen: `stage6`
-- Checkpoint: `scripts/reextraction/.stage6_checkpoint.json`
-- Log: `/home/darren/stage6_full_run.log` (buffered; use screen for live output)
+### FIX-007 Predicate Consolidation - COMPLETE
 
-**Post-run steps:**
-1. Post-extraction verification (entity counts, type distribution, HTTP URIs = 0)
-2. Rebuild Fuseki (staging → production)
-3. Entity-level code linking (`link_entities_to_code.py`)
-4. Stub sync to AGE (`sync_stubs_to_age.py`)
+| Metric | Before | After |
+|--------|--------|-------|
+| Distinct predicates | 3,303 | 1,501 |
+| Relationships | 15,757 | 15,414 |
 
----
+### Production Deployment - COMPLETE
 
-## Current State (2025-12-22)
+| Endpoint | Triples | Status |
+|----------|---------|--------|
+| /koi (production) | 165,619 | ✅ Deployed |
+| /koi-staging | 165,619 | ✅ Deployed |
 
-### Completed Features
-Note: Counts below are pre-Stage 6 re-extraction; Stage 6 resets entity_registry/koi_relationships.
+### Code↔Docs Bridge - COMPLETE
 
-**Entity System:**
-- Entity Registry: 12,985 unique entities, 70.10% dedup rate
-- Entity-Chunk Links: 614,021 associations
-- Semantic deduplication (Tier 1 exact + Tier 2 embedding)
+| Component | Count |
+|-----------|-------|
+| Code artifacts | 16,820 |
+| Doc→code links | 6,453 |
+| Entity→code links | 241 |
+| AGE stub nodes | 5,464 |
+| AGE edges | 6,463 |
 
-**Hybrid RAG:**
-- Vector search (BGE-1024 embeddings)
-- Entity/Graph search (koi_entity_chunk_links)
-- Keyword search (PostgreSQL tsvector)
-- Weighted Average Fusion (0.6V + 0.2E + 0.2K + 0.15 boost)
-- Source-Diversity Sampling (prevents GitHub from dominating)
-- 3-Layer Content Dedup: Query (md5), Storage (SHA-256), Sensor (canonical RIDs)
+### Quality Gates (All Passing)
 
-**Content Deduplication:**
-- Active memories: 31,265 unique documents
-- Query-level: md5(content) partitioning in SQL CTEs
-- Storage-level: content_hash column with global check
-- Sensor-level: Canonical RIDs (no temp dir names)
-
-**Quality Pipeline:**
-- 6 modules: ConfidenceFilter, DocumentLevelDeduplicator, CanonicalResolver, OntologyNormalizer, ListSplitter, EntityQualityFilter
-- Targeted KG regression suite passing
-- Zero type collisions
+| Gate | Check | Result |
+|------|-------|--------|
+| A | No http://regen.network/ | ✅ 0 |
+| B1 | No ontology# types | ✅ 0 |
+| B2 | No ontology# predicates | ✅ 0 |
+| C | No self-ref triples | ✅ 0 |
 
 ---
 
-## Code Bridge (Docs ↔ Code Graph)
+## Key Scripts
 
-**Tables:**
-- `koi_code_artifacts` (canonical code entities)
-- `koi_doc_code_links` (doc → code links, preserves MENTIONS)
+### Re-Extraction
+- `scripts/reextraction/stage6_full_reextract_gemini.py` - Stage 6 extraction (Gemini)
+- `scripts/reextraction/stage6_reprocess_missing.py` - Reprocess failed docs
 
-**Scripts:**
-- `scripts/code_bridge/export_code_artifacts.py` (populate artifacts)
-- `scripts/code_bridge/link_docs_to_code.py` (doc-level linking)
-- `scripts/code_bridge/link_entities_to_code.py` (entity-level linking)
-- `scripts/code_bridge/sync_stubs_to_age.py` (stub sync + MENTIONS edges)
+### Post-Processing
+- `scripts/fix007_consolidate_predicates_postgres.py` - Predicate consolidation
+- `scripts/regenerate_fuseki_graph.py` - Fuseki rebuild from PostgreSQL
 
-**AGE stubs:**
-- `Stub:*` nodes with `sync_run_id` and mark/sweep cleanup
-- `MENTIONS` edges from docs to code artifacts
-- `CODE_REF` edges from linked semantic entities to code artifacts
+### Code Bridge
+- `scripts/code_bridge/export_code_artifacts.py` - Populate code artifacts
+- `scripts/code_bridge/link_docs_to_code.py` - Doc-level linking
+- `scripts/code_bridge/link_entities_to_code.py` - Entity-level linking
+- `scripts/code_bridge/sync_stubs_to_age.py` - AGE stub sync
 
-## Key Files
+---
 
-### Production API
-- koi-query-api.ts - Main query API with Hybrid RAG
-- bge-mcp-ts/adaptive-features.ts - Fusion algorithms
+## Quality Pipeline
 
-### Documentation
-- docs/HYBRID_RAG_ARCHITECTURE.md - Technical architecture
-- docs/CHANGELOG.md - Version history
+6 modules: ConfidenceFilter, DocumentLevelDeduplicator, CanonicalResolver, OntologyNormalizer, ListSplitter, EntityQualityFilter
+
+**Entity Deduplication:**
+- Tier 1: Exact match (B-Tree, microseconds)
+- Tier 2: Semantic match (HNSW vector, milliseconds)
+- Tier 3: Create new (deterministic URI)
 
 ---
 
@@ -111,13 +97,35 @@ Note: Counts below are pre-Stage 6 re-extraction; Stage 6 resets entity_registry
 
 **Server**: darren@202.61.196.119
 **Code Path**: /opt/projects/koi-processor
-**Database**: PostgreSQL (eliza) on port 5433 (via Docker: gaia-postgres-1)
-**Fuseki**: Apache Jena Fuseki on port 3030 (via Docker: fuseki-koi)
-**API**: PM2 process hybrid-rag-api on port 8301
+**Database**: PostgreSQL (eliza) on port 5433 (Docker: gaia-postgres-1)
+**Fuseki**: Apache Jena Fuseki on port 3030 (Docker: fuseki-koi)
+**Graph URL**: https://regen.gaiaai.xyz/graph
 
-**Fuseki Credentials**: admin:admin (for SPARQL updates)
+**Environment setup:**
+```bash
+cd /opt/projects/koi-processor
+set -a; source .env; set +a
+```
 
 ---
 
-**Last Updated**: 2025-12-22
-**Phase**: Stage 6 docs-only re-extraction in progress
+## Documentation
+
+- `docs/HYBRID_RAG_ARCHITECTURE.md` - Technical architecture
+- `docs/CODE_DOCS_BRIDGE.md` - Code↔Docs bridge documentation
+- `docs/CHANGELOG.md` - Version history
+- `/Users/darrenzal/projects/RegenAI/knowledge-graph-review-2025-12.md` - Master tracking doc
+
+---
+
+## Future Work (Optional)
+
+1. Further predicate reduction (1,501 → ~100-200)
+2. ~10 snake_case entities cleanup
+3. FIX-006 (entity dedup tuning)
+4. FIX-008 (dual-write strategy review)
+
+---
+
+**Last Updated**: 2025-12-23
+**Phase**: Complete - All major milestones achieved

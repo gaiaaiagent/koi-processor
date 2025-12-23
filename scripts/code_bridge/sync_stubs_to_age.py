@@ -64,13 +64,13 @@ def cypher_value(value: Any) -> str:
 
 
 def batch_execute(cur, graph: str, statements: List[str], batch_size: int = 200):
-    for i in range(0, len(statements), batch_size):
-        chunk = statements[i:i + batch_size]
-        if not chunk:
+    # Run each statement individually to avoid variable conflicts in AGE
+    for stmt in statements:
+        if not stmt:
             continue
         query = f"""
         SELECT * FROM cypher('{graph}', $$
-            {' '.join(chunk)}
+            {stmt}
         $$) AS (result agtype);
         """
         cur.execute(query)
@@ -104,18 +104,19 @@ def main() -> int:
     # -----------------------
     # Build CodeArtifact stubs
     # -----------------------
-    cur.execute(
-        """
-        SELECT DISTINCT code_uri, kind, repo_key, file_path, symbol, language, commit_sha
-        FROM koi_code_artifacts
-        WHERE code_uri IN (
-            SELECT DISTINCT code_uri FROM koi_doc_code_links
-            UNION
-            SELECT DISTINCT metadata->>'code_uri' FROM entity_registry WHERE metadata ? 'code_uri'
+    with conn.cursor(cursor_factory=RealDictCursor) as ccur:
+        ccur.execute(
+            """
+            SELECT DISTINCT code_uri, kind, repo_key, file_path, symbol, language, commit_sha
+            FROM koi_code_artifacts
+            WHERE code_uri IN (
+                SELECT DISTINCT code_uri FROM koi_doc_code_links
+                UNION
+                SELECT DISTINCT metadata->>'code_uri' FROM entity_registry WHERE metadata ? 'code_uri'
+            )
+            """
         )
-        """
-    )
-    code_artifacts = cur.fetchall()
+        code_artifacts = ccur.fetchall()
 
     code_statements = []
     for row in code_artifacts:
@@ -132,7 +133,7 @@ def main() -> int:
         }
         prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
         code_statements.append(
-            f"MERGE (c:Stub:CodeArtifact {{code_uri: {cypher_value(row['code_uri'])}}}) "
+            f"MERGE (c:CodeArtifact {{code_uri: {cypher_value(row['code_uri'])}}}) "
             f"SET c += {{{prop_str}}}"
         )
 
@@ -161,7 +162,7 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             entity_statements.append(
-                f"MERGE (n:Stub:Person {{entity_id: {row['id']}}}) SET n += {{{prop_str}}}"
+                f"MERGE (p:Person {{entity_id: {row['id']}}}) SET p += {{{prop_str}}}"
             )
 
         ecur.execute(
@@ -184,7 +185,7 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             entity_statements.append(
-                f"MERGE (n:Stub:Organization {{entity_id: {row['id']}}}) SET n += {{{prop_str}}}"
+                f"MERGE (o:Organization {{entity_id: {row['id']}}}) SET o += {{{prop_str}}}"
             )
 
         ecur.execute(
@@ -206,7 +207,7 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             entity_statements.append(
-                f"MERGE (n:Stub:Proposal {{entity_id: {row['id']}}}) SET n += {{{prop_str}}}"
+                f"MERGE (pr:Proposal {{entity_id: {row['id']}}}) SET pr += {{{prop_str}}}"
             )
 
         ecur.execute(
@@ -230,7 +231,7 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             entity_statements.append(
-                f"MERGE (n:Stub:Concept {{entity_id: {row['id']}}}) SET n += {{{prop_str}}}"
+                f"MERGE (cn:Concept {{entity_id: {row['id']}}}) SET cn += {{{prop_str}}}"
             )
 
         ecur.execute(
@@ -254,7 +255,7 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             entity_statements.append(
-                f"MERGE (n:Stub:Module {{entity_id: {row['id']}}}) SET n += {{{prop_str}}}"
+                f"MERGE (m:Module {{entity_id: {row['id']}}}) SET m += {{{prop_str}}}"
             )
 
     # -----------------------
@@ -283,7 +284,7 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             doc_statements.append(
-                f"MERGE (d:Stub:Doc {{rid: {cypher_value(row['memory_rid'])}}}) SET d += {{{prop_str}}}"
+                f"MERGE (d:Doc {{rid: {cypher_value(row['memory_rid'])}}}) SET d += {{{prop_str}}}"
             )
 
         dcur.execute(
@@ -305,8 +306,8 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             mention_statements.append(
-                f"MERGE (d:Stub:Doc {{rid: {cypher_value(row['memory_rid'])}}}) "
-                f"MERGE (c:Stub:CodeArtifact {{code_uri: {cypher_value(row['code_uri'])}}}) "
+                f"MERGE (d:Doc {{rid: {cypher_value(row['memory_rid'])}}}) "
+                f"MERGE (c:CodeArtifact {{code_uri: {cypher_value(row['code_uri'])}}}) "
                 f"MERGE (d)-[r:MENTIONS]->(c) SET r += {{{prop_str}}}"
             )
 
@@ -335,8 +336,8 @@ def main() -> int:
             }
             prop_str = ", ".join([f"{k}: {cypher_value(v)}" for k, v in props.items()])
             code_ref_statements.append(
-                f"MATCH (e:Stub {{entity_id: {row['id']}}}) "
-                f"MERGE (c:Stub:CodeArtifact {{code_uri: {cypher_value(code_uri)}}}) "
+                f"MATCH (e {{entity_id: {row['id']}, stub_node: true}}) "
+                f"MERGE (c:CodeArtifact {{code_uri: {cypher_value(code_uri)}}}) "
                 f"MERGE (e)-[r:CODE_REF]->(c) SET r += {{{prop_str}}}"
             )
 
@@ -367,8 +368,8 @@ def main() -> int:
         cur.execute(
             f"""
             SELECT * FROM cypher('{graph}', $$
-                MATCH (n:Stub)
-                WHERE n.sync_run_id <> '{run_id}'
+                MATCH (n)
+                WHERE n.stub_node = true AND n.sync_run_id <> '{run_id}'
                 DETACH DELETE n
             $$) AS (result agtype);
             """
