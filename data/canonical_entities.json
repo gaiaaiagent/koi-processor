@@ -1,7 +1,7 @@
 {
-  "version": "2.0.0",
-  "last_updated": "2025-12-10",
-  "description": "Canonical entity registry for Regen KOI knowledge graph deduplication - Expanded Week 1",
+  "version": "2.1.0",
+  "last_updated": "2025-12-23",
+  "description": "Canonical entity registry for Regen KOI knowledge graph deduplication - FIX-006 Enhanced",
   "entities": {
     "organizations": {
       "regen-network": {
@@ -16,13 +16,15 @@
           "Regen Network Inc",
           "regen.network",
           "RegenNetwork",
-          "RND"
+          "Regen_Network",
+          "regen-network",
+          "regen_network"
         ],
         "canonical_uri": "https://regen.network",
         "entity_type": "ORGANIZATION",
         "confidence": 1.0,
         "occurrences": 911,
-        "notes": "Primary organization behind Regen Ledger and Registry"
+        "notes": "Primary organization behind Regen Ledger and Registry (FIX-006 expanded)"
       },
       "regen-registry": {
         "canonical_name": "Regen Registry",
@@ -45,12 +47,17 @@
           "Foundation",
           "The Foundation",
           "Regen Foundation Inc",
-          "the Foundation"
+          "the Foundation",
+          "regenfoundation",
+          "RegenFdn",
+          "regen.foundation",
+          "Regen_Foundation",
+          "regen-foundation"
         ],
         "entity_type": "ORGANIZATION",
         "confidence": 1.0,
         "occurrences": 144,
-        "notes": "Non-profit foundation supporting Regen Network"
+        "notes": "Non-profit foundation supporting Regen Network (FIX-006 expanded)"
       },
       "ecometric": {
         "canonical_name": "Ecometric",
@@ -221,14 +228,25 @@
         "occurrences": 15
       },
       "rnd-inc": {
-        "canonical_name": "RND inc",
+        "canonical_name": "RND Inc",
         "aliases": [
-          "RND Inc",
-          "RND INC"
+          "RND inc",
+          "RND INC",
+          "RND",
+          "RND, Inc",
+          "RND, Inc.",
+          "RND Inc.",
+          "Regen Network Development",
+          "Regen Network Development Inc",
+          "Regen Network Development, Inc",
+          "rnd inc",
+          "rnd-inc",
+          "RND_Inc"
         ],
         "entity_type": "ORGANIZATION",
         "confidence": 1.0,
-        "occurrences": 15
+        "occurrences": 15,
+        "notes": "Regen Network Development corporate entity (FIX-006 expanded)"
       },
       "seatrees": {
         "canonical_name": "Seatrees",
@@ -746,22 +764,33 @@
         "canonical_name": "Gregory Landua",
         "aliases": [
           "@gregory_landua",
+          "@gregory-landua",
+          "@GregoryLandua",
           "G. Landua",
           "glandua",
+          "g_landua",
           "Greg",
           "Greg Landua",
           "greg landua",
+          "greg-landua",
           "Gregory",
           "Gregory Landau",
           "Gregory Regen",
+          "Gregory_Regen",
+          "Gregory | RND",
           "Gregory | RND INC",
           "Gregory0",
           "Gregory_RND",
-          "Landua"
+          "Gregory Land",
+          "Gregory L",
+          "Landua",
+          "GregLandua",
+          "gregoryland",
+          "gregory_landua"
         ],
         "entity_type": "PERSON",
         "confidence": 1.0,
-        "notes": "Co-founder of Regen Network"
+        "notes": "Co-founder of Regen Network (FIX-006 expanded)"
       },
       "christian-shearer": {
         "canonical_name": "Christian Shearer",
@@ -810,10 +839,19 @@
         "canonical_name": "Will Szal",
         "aliases": [
           "Will Szal",
-          "will szal"
+          "will szal",
+          "@willszal",
+          "@will_szal",
+          "willszal",
+          "will_szal",
+          "will-szal",
+          "WillSzal",
+          "W. Szal",
+          "Szal"
         ],
         "entity_type": "PERSON",
-        "confidence": 1.0
+        "confidence": 1.0,
+        "notes": "FIX-006 expanded"
       },
       "dave-fortson": {
         "canonical_name": "Dave Fortson",

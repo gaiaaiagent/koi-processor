@@ -122,8 +122,9 @@ set -a; source .env; set +a
 
 1. Further predicate reduction (1,501 → ~100-200)
 2. ~10 snake_case entities cleanup
-3. FIX-006 (entity dedup tuning)
+3. ✅ FIX-006 (entity dedup) - DEPLOYED 2025-12-23
 4. FIX-008 (dual-write strategy review)
+5. Apply safe entity merges (tier1_normalized + tier1_5_canonical = 365 proposals)
 
 ---
 

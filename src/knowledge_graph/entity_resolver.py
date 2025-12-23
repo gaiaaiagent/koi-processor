@@ -1,8 +1,14 @@
-"""Entity resolver with three-tier waterfall lookup."""
+"""Entity resolver with multi-tier waterfall lookup.
+
+FIX-006 Enhancements:
+- Per-type semantic thresholds (PERSON: 0.92, ORG: 0.95, etc.)
+- Tier 1.x fuzzy string matching using rapidfuzz
+- Improved normalization via shared entity_normalizer module
+"""
 
 import logging
 import json
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 import os
 
 try:
@@ -18,19 +24,55 @@ try:
 except ImportError:
     HAS_OPENAI = False
 
+try:
+    from rapidfuzz import fuzz
+    from rapidfuzz.distance import JaroWinkler
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    HAS_RAPIDFUZZ = False
+
 from .uri_generator import DeterministicURIGenerator
+from .entity_normalizer import normalize_entity_name, normalize_for_canonical_lookup, is_single_token_name
+
+
+# FIX-006: Per-type semantic similarity thresholds
+DEFAULT_TYPE_THRESHOLDS = {
+    "PERSON": 0.92,         # Lower to catch name variations
+    "ORGANIZATION": 0.95,   # Higher to avoid false merges
+    "CONCEPT": 0.90,        # Lower for semantic similarity
+    "CLAIM": 0.98,          # Very high - claims should be nearly identical
+    "PROJECT": 0.93,
+    "TECHNOLOGY": 0.93,
+    "LOCATION": 0.95,
+    "EVENT": 0.94,
+    "DEFAULT": 0.95,
+}
+
+# FIX-006: Per-type fuzzy string matching thresholds
+DEFAULT_FUZZY_THRESHOLDS = {
+    "PERSON": 0.93,         # Jaro-Winkler threshold for names (raised from 0.88 to reduce false positives)
+    "ORGANIZATION": 0.85,   # Token-based ratio for orgs
+    "PROJECT": 0.85,
+    "TECHNOLOGY": 0.85,
+    "DEFAULT": 0.85,
+}
 
 
 class EntityResolver:
     """
-    Three-tier entity lookup and deduplication.
+    Multi-tier entity lookup and deduplication.
 
-    Tier 1: Exact Match (Postgres B-Tree, microseconds)
-    Tier 2: Semantic Match (pgvector HNSW, milliseconds)
-    Tier 3: Create New (deterministic URI)
+    FIX-006 Enhanced tiers:
+    - Tier 1: Exact Match (Postgres B-Tree, microseconds)
+    - Tier 1.5: Canonical Mapping (alias registry lookup)
+    - Tier 1.x: Fuzzy String Match (rapidfuzz, type-specific algorithms)
+    - Tier 2: Semantic Match (pgvector HNSW, per-type thresholds)
+    - Tier 3: Create New (deterministic URI)
 
     Why this works:
     - Tier 1 handles exact duplicates (fast path)
+    - Tier 1.5 handles known aliases from canonical_entities.json
+    - Tier 1.x handles string variations (Gregory_Regen -> gregory regen)
     - Tier 2 handles semantic variations ("IBM" = "International Business Machines")
     - Tier 3 ensures new entities get unique, reproducible URIs
 
@@ -41,8 +83,11 @@ class EntityResolver:
         self,
         db_config: Dict[str, Any],
         openai_api_key: str = None,
-        fuzzy_threshold: float = 0.88,
-        embedding_model: str = "text-embedding-ada-002"
+        fuzzy_threshold: float = None,  # Deprecated, use type_thresholds
+        embedding_model: str = "text-embedding-ada-002",
+        type_thresholds: Dict[str, float] = None,
+        fuzzy_string_thresholds: Dict[str, float] = None,
+        enable_fuzzy_tier: bool = True,
     ):
         """
         Initialize entity resolver.
@@ -50,17 +95,42 @@ class EntityResolver:
         Args:
             db_config: Postgres connection config {host, port, database, user, password}
             openai_api_key: OpenAI API key for embeddings
-            fuzzy_threshold: Cosine similarity threshold (0.95 conservative, tune based on results)
+            fuzzy_threshold: DEPRECATED - use type_thresholds instead
             embedding_model: OpenAI embedding model
+            type_thresholds: Per-type semantic similarity thresholds (FIX-006)
+            fuzzy_string_thresholds: Per-type fuzzy string thresholds (FIX-006)
+            enable_fuzzy_tier: Enable Tier 1.x fuzzy string matching (default: True)
         """
         if not HAS_PSYCOPG2:
             raise ImportError("psycopg2 is required for EntityResolver. Install with: pip install psycopg2-binary")
 
         self.db_config = db_config
         self.uri_gen = DeterministicURIGenerator()
-        self.fuzzy_threshold = fuzzy_threshold
         self.logger = logging.getLogger(__name__)
         self._canonical_mappings = self._load_canonical_mappings()
+
+        # FIX-006: Per-type semantic thresholds
+        self.type_thresholds = {**DEFAULT_TYPE_THRESHOLDS}
+        if type_thresholds:
+            self.type_thresholds.update(type_thresholds)
+
+        # FIX-006: Per-type fuzzy string thresholds
+        self.fuzzy_string_thresholds = {**DEFAULT_FUZZY_THRESHOLDS}
+        if fuzzy_string_thresholds:
+            self.fuzzy_string_thresholds.update(fuzzy_string_thresholds)
+
+        # Backward compatibility: if old fuzzy_threshold is passed, use it as DEFAULT
+        if fuzzy_threshold is not None:
+            self.type_thresholds["DEFAULT"] = fuzzy_threshold
+            self.logger.warning(
+                f"fuzzy_threshold parameter is deprecated. Use type_thresholds instead. "
+                f"Setting DEFAULT threshold to {fuzzy_threshold}"
+            )
+
+        # FIX-006: Enable/disable fuzzy string tier
+        self.enable_fuzzy_tier = enable_fuzzy_tier and HAS_RAPIDFUZZ
+        if enable_fuzzy_tier and not HAS_RAPIDFUZZ:
+            self.logger.warning("rapidfuzz not installed. Tier 1.x fuzzy matching disabled. Install with: pip install rapidfuzz")
 
         # OpenAI client for embeddings
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -76,22 +146,26 @@ class EntityResolver:
         self.stats = {
             "tier1_exact_hits": 0,
             "tier1_5_canonical_hits": 0,
+            "tier1x_fuzzy_hits": 0,  # FIX-006: New tier
             "tier2_semantic_hits": 0,
             "tier3_new_entities": 0,
             "race_condition_hits": 0,
             "embedding_errors": 0,
+            "single_token_skips": 0,  # FIX-006: Track single-token safety skips
         }
 
     def _get_connection(self):
         """Get a database connection."""
         return psycopg2.connect(**self.db_config)
 
-    def _load_canonical_mappings(self) -> Dict[str, str]:
+    def _load_canonical_mappings(self) -> Dict[Tuple[str, str], str]:
         """
         Load canonical entity mappings from data/canonical_entities.json.
 
+        FIX-006: Uses normalize_for_canonical_lookup for consistent normalization.
+
         Returns:
-            Dict mapping (alias_lower, entity_type) -> canonical_name
+            Dict mapping (normalized_alias, entity_type) -> canonical_name
         """
         try:
             from pathlib import Path
@@ -104,7 +178,7 @@ class EntityResolver:
             with open(canonical_path, "r") as f:
                 data = json.load(f)
 
-            lookup: Dict[str, str] = {}
+            lookup: Dict[Tuple[str, str], str] = {}
             for section, entities in data.get("entities", {}).items():
                 for _, entry in entities.items():
                     canonical_name = entry.get("canonical_name")
@@ -113,11 +187,18 @@ class EntityResolver:
                     if not canonical_name or not entity_type:
                         continue
 
-                    # Map canonical name
-                    lookup[(canonical_name.lower(), entity_type.upper())] = canonical_name
-                    # Map aliases
+                    entity_type_upper = entity_type.upper()
+
+                    # Map canonical name (with FIX-006 normalization)
+                    normalized_canonical = normalize_for_canonical_lookup(canonical_name, entity_type_upper)
+                    lookup[(normalized_canonical, entity_type_upper)] = canonical_name
+
+                    # Map aliases (with FIX-006 normalization)
                     for alias in aliases:
-                        lookup[(alias.lower(), entity_type.upper())] = canonical_name
+                        normalized_alias = normalize_for_canonical_lookup(alias, entity_type_upper)
+                        # Don't overwrite existing mappings (first mapping wins)
+                        if (normalized_alias, entity_type_upper) not in lookup:
+                            lookup[(normalized_alias, entity_type_upper)] = canonical_name
 
             self.logger.info(f"Loaded {len(lookup)} canonical mappings for Tier 1.5 resolution")
             return lookup
@@ -129,6 +210,8 @@ class EntityResolver:
         """
         Tier 1.5: Canonical mapping lookup using alias registry.
 
+        FIX-006: Uses normalize_for_canonical_lookup for consistent matching.
+
         Returns:
             (entity_id, fuseki_uri, canonical_text) if found, else None
         """
@@ -136,7 +219,10 @@ class EntityResolver:
             return None
 
         entity_type_upper = entity_type.upper()
-        canonical_name = self._canonical_mappings.get((entity_text.strip().lower(), entity_type_upper))
+
+        # FIX-006: Use consistent normalization for lookup
+        normalized_lookup_key = normalize_for_canonical_lookup(entity_text, entity_type_upper)
+        canonical_name = self._canonical_mappings.get((normalized_lookup_key, entity_type_upper))
         if not canonical_name:
             return None
 
@@ -166,6 +252,130 @@ class EntityResolver:
         self.stats["tier1_5_canonical_hits"] += 1
         self.logger.debug(f"Tier 1.5 canonical: '{entity_text}' -> '{canonical_text}'")
         return entity_id, uri, canonical_text
+
+    def _threshold_for_type(self, entity_type: str) -> float:
+        """
+        FIX-006: Get semantic similarity threshold for entity type.
+
+        Args:
+            entity_type: Entity type (PERSON, ORGANIZATION, etc.)
+
+        Returns:
+            Threshold value for Tier 2 matching
+        """
+        return self.type_thresholds.get(
+            entity_type.upper(),
+            self.type_thresholds.get("DEFAULT", 0.95)
+        )
+
+    def _fuzzy_threshold_for_type(self, entity_type: str) -> float:
+        """
+        FIX-006: Get fuzzy string threshold for entity type.
+
+        Args:
+            entity_type: Entity type (PERSON, ORGANIZATION, etc.)
+
+        Returns:
+            Threshold value for Tier 1.x matching
+        """
+        return self.fuzzy_string_thresholds.get(
+            entity_type.upper(),
+            self.fuzzy_string_thresholds.get("DEFAULT", 0.85)
+        )
+
+    def _tier1x_fuzzy_lookup(self, cursor, entity_text: str, entity_type: str) -> Optional[Tuple[int, str, str, float]]:
+        """
+        FIX-006 Tier 1.x: Fuzzy string matching using rapidfuzz.
+
+        Uses type-specific algorithms:
+        - PERSON: Jaro-Winkler similarity (good for names with typos/variations)
+        - ORGANIZATION: Token-based ratio (order-insensitive for "Regen Network" vs "Network Regen")
+
+        Performance: Only checks same-type candidates with length within 50% of query.
+
+        Args:
+            cursor: Database cursor
+            entity_text: Entity name to match
+            entity_type: Entity type
+
+        Returns:
+            (entity_id, fuseki_uri, canonical_text, score) if found, else None
+        """
+        if not self.enable_fuzzy_tier or not HAS_RAPIDFUZZ:
+            return None
+
+        entity_type_upper = entity_type.upper()
+        normalized_query = normalize_entity_name(entity_text, entity_type_upper)
+
+        # Safety: Skip single-token PERSON names (too risky for auto-merge)
+        if entity_type_upper == "PERSON" and is_single_token_name(normalized_query):
+            # Only allow if explicitly in canonical registry
+            if (normalized_query, entity_type_upper) not in self._canonical_mappings:
+                self.stats["single_token_skips"] += 1
+                self.logger.debug(f"Tier 1.x skip: single-token PERSON '{entity_text}' not in canonical registry")
+                return None
+
+        threshold = self._fuzzy_threshold_for_type(entity_type_upper)
+        query_len = len(normalized_query)
+
+        # Prefilter: same type, length within 50% of query (cheap DB filter)
+        min_len = max(1, int(query_len * 0.5))
+        max_len = int(query_len * 1.5) + 5  # +5 for short names
+
+        cursor.execute(
+            """
+            SELECT id, fuseki_uri, entity_text, normalized_text
+            FROM entity_registry
+            WHERE entity_type = %s
+              AND LENGTH(normalized_text) BETWEEN %s AND %s
+            ORDER BY occurrence_count DESC
+            LIMIT 100
+            """,
+            (entity_type_upper, min_len, max_len),
+        )
+        candidates = cursor.fetchall()
+
+        if not candidates:
+            return None
+
+        best_match = None
+        best_score = 0.0
+
+        for entity_id, uri, canonical_text, normalized_text in candidates:
+            # Apply type-specific similarity algorithm
+            if entity_type_upper == "PERSON":
+                # Jaro-Winkler is good for name variations
+                score = JaroWinkler.normalized_similarity(normalized_query, normalized_text)
+            else:
+                # Token-based ratio is order-insensitive (good for orgs/projects)
+                score = fuzz.token_sort_ratio(normalized_query, normalized_text) / 100.0
+
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = (entity_id, uri, canonical_text, score)
+
+        if best_match:
+            entity_id, uri, canonical_text, score = best_match
+
+            # Update occurrence count
+            cursor.execute(
+                """
+                UPDATE entity_registry
+                SET occurrence_count = occurrence_count + 1,
+                    last_seen_at = NOW()
+                WHERE fuseki_uri = %s
+                """,
+                (uri,),
+            )
+
+            self.stats["tier1x_fuzzy_hits"] += 1
+            self.logger.debug(
+                f"Tier 1.x fuzzy: '{entity_text}' -> '{canonical_text}' "
+                f"(score: {score:.3f}, threshold: {threshold})"
+            )
+            return best_match
+
+        return None
 
     def get_or_create_entity(
         self,
@@ -249,8 +459,26 @@ class EntityResolver:
                 }
 
             # -------------------------------------------------------------------
-            # TIER 2: SEMANTIC MATCH (smart)
+            # FIX-006 TIER 1.x: FUZZY STRING MATCH (rapidfuzz)
             # -------------------------------------------------------------------
+            fuzzy_match = self._tier1x_fuzzy_lookup(cursor, entity_text, entity_type_upper)
+            if fuzzy_match:
+                entity_id, uri, canonical_text, score = fuzzy_match
+                conn.commit()
+                return {
+                    "uri": uri,
+                    "entity_id": entity_id,
+                    "matched": True,
+                    "match_method": "tier1x_fuzzy",
+                    "match_score": float(score),
+                    "entity_text": canonical_text
+                }
+
+            # -------------------------------------------------------------------
+            # TIER 2: SEMANTIC MATCH (smart) - FIX-006: per-type thresholds
+            # -------------------------------------------------------------------
+            semantic_threshold = self._threshold_for_type(entity_type_upper)
+
             if self.openai_client:
                 try:
                     embedding = self._generate_embedding(entity_text)
@@ -263,7 +491,7 @@ class EntityResolver:
                           AND entity_type = %s
                         ORDER BY similarity DESC
                         LIMIT 1
-                    """, (embedding, embedding, self.fuzzy_threshold, entity_type_upper))
+                    """, (embedding, embedding, semantic_threshold, entity_type_upper))
 
                     match = cursor.fetchone()
                     if match:
@@ -453,6 +681,7 @@ class EntityResolver:
         total = (
             self.stats["tier1_exact_hits"] +
             self.stats["tier1_5_canonical_hits"] +
+            self.stats.get("tier1x_fuzzy_hits", 0) +  # FIX-006
             self.stats["tier2_semantic_hits"] +
             self.stats["tier3_new_entities"]
         )
@@ -463,8 +692,11 @@ class EntityResolver:
                 "total_lookups": 0,
                 "tier1_hit_rate": 0.0,
                 "tier1_5_hit_rate": 0.0,
+                "tier1x_hit_rate": 0.0,  # FIX-006
                 "tier2_hit_rate": 0.0,
                 "tier3_new_rate": 0.0,
+                "type_thresholds": self.type_thresholds,  # FIX-006
+                "fuzzy_string_thresholds": self.fuzzy_string_thresholds,  # FIX-006
             }
 
         return {
@@ -472,8 +704,11 @@ class EntityResolver:
             "total_lookups": total,
             "tier1_hit_rate": round(self.stats["tier1_exact_hits"] / total, 4),
             "tier1_5_hit_rate": round(self.stats["tier1_5_canonical_hits"] / total, 4),
+            "tier1x_hit_rate": round(self.stats.get("tier1x_fuzzy_hits", 0) / total, 4),  # FIX-006
             "tier2_hit_rate": round(self.stats["tier2_semantic_hits"] / total, 4),
             "tier3_new_rate": round(self.stats["tier3_new_entities"] / total, 4),
+            "type_thresholds": self.type_thresholds,  # FIX-006
+            "fuzzy_string_thresholds": self.fuzzy_string_thresholds,  # FIX-006
         }
 
     def reset_stats(self):

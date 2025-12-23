@@ -215,7 +215,10 @@ class KnowledgeGraphIntegrator:
         pipeline_config_path: Optional[str] = None,
         enable_deduplication: bool = True,
         dedup_db_config: Dict[str, Any] = None,
-        dedup_threshold: float = 0.95
+        dedup_threshold: float = None,  # DEPRECATED - use dedup_type_thresholds
+        dedup_type_thresholds: Dict[str, float] = None,  # FIX-006: per-type thresholds
+        dedup_fuzzy_thresholds: Dict[str, float] = None,  # FIX-006: per-type fuzzy thresholds
+        enable_fuzzy_tier: bool = True,  # FIX-006: enable Tier 1.x
     ):
         self.logger = logging.getLogger(__name__)
         self.store_type = store_type
@@ -223,6 +226,12 @@ class KnowledgeGraphIntegrator:
         self.enable_quality_controls = enable_quality_controls
         self.use_pipeline = use_pipeline and HAS_PIPELINE
         self.enable_deduplication = enable_deduplication and HAS_ENTITY_RESOLVER
+
+        # FIX-006: Store deduplication config for entity resolver
+        self._dedup_type_thresholds = dedup_type_thresholds
+        self._dedup_fuzzy_thresholds = dedup_fuzzy_thresholds
+        self._enable_fuzzy_tier = enable_fuzzy_tier
+        self._dedup_threshold_legacy = dedup_threshold  # For backward compat
 
         if not HAS_RDFLIB:
             raise ImportError("rdflib is required for knowledge graph integration")
@@ -268,6 +277,7 @@ class KnowledgeGraphIntegrator:
             'pipeline_processed': 0,
             'dedup_exact_hits': 0,
             'dedup_semantic_hits': 0,
+            'dedup_fuzzy_hits': 0,  # FIX-006: New tier
             'dedup_new_entities': 0
         }
 
@@ -285,7 +295,7 @@ class KnowledgeGraphIntegrator:
 
         # Initialize entity deduplication
         if self.enable_deduplication:
-            self._initialize_entity_resolver(dedup_db_config, dedup_threshold)
+            self._initialize_entity_resolver(dedup_db_config)
 
     def _initialize_pipeline(self, config_path: Optional[str] = None):
         """Initialize the post-processing pipeline."""
@@ -382,14 +392,14 @@ class KnowledgeGraphIntegrator:
     def _initialize_entity_resolver(
         self,
         db_config: Dict[str, Any] = None,
-        threshold: float = 0.95
     ):
         """
         Initialize entity resolver for pgvector-based deduplication.
 
+        FIX-006: Now supports per-type thresholds and fuzzy string tier.
+
         Args:
             db_config: Database connection config (defaults to env vars)
-            threshold: Similarity threshold for semantic matching
         """
         if not HAS_ENTITY_RESOLVER:
             self.logger.warning("EntityResolver not available. Deduplication disabled.")
@@ -407,13 +417,22 @@ class KnowledgeGraphIntegrator:
                     "password": os.getenv("POSTGRES_PASSWORD", "postgres")
                 }
 
+            # FIX-006: Pass per-type thresholds and fuzzy tier config
             self.entity_resolver = EntityResolver(
                 db_config=db_config,
-                fuzzy_threshold=threshold
+                fuzzy_threshold=self._dedup_threshold_legacy,  # Backward compat
+                type_thresholds=self._dedup_type_thresholds,
+                fuzzy_string_thresholds=self._dedup_fuzzy_thresholds,
+                enable_fuzzy_tier=self._enable_fuzzy_tier,
             )
+
+            # Log the thresholds being used
+            threshold_info = self.entity_resolver.type_thresholds
             self.logger.info(
-                f"EntityResolver initialized (threshold: {threshold}, "
-                f"db: {db_config.get('host')}:{db_config.get('port')}/{db_config.get('database')})"
+                f"EntityResolver initialized with FIX-006 per-type thresholds: "
+                f"PERSON={threshold_info.get('PERSON')}, ORG={threshold_info.get('ORGANIZATION')}, "
+                f"fuzzy_tier={'enabled' if self._enable_fuzzy_tier else 'disabled'}, "
+                f"db: {db_config.get('host')}:{db_config.get('port')}/{db_config.get('database')}"
             )
         except Exception as e:
             self.logger.warning(f"Failed to initialize EntityResolver: {e}")
@@ -1072,10 +1091,14 @@ class KnowledgeGraphIntegrator:
                     processed_type
                 )
 
-                # Track deduplication stats
+                # Track deduplication stats (FIX-006: includes fuzzy tier)
                 match_method = dedup_result.get("match_method", "")
                 if match_method == "tier1_exact":
                     self.quality_stats['dedup_exact_hits'] += 1
+                elif match_method == "tier1_5_canonical":
+                    self.quality_stats['dedup_exact_hits'] += 1  # Count with exact
+                elif match_method == "tier1x_fuzzy":  # FIX-006
+                    self.quality_stats['dedup_fuzzy_hits'] += 1
                 elif match_method == "tier2_semantic":
                     self.quality_stats['dedup_semantic_hits'] += 1
                 elif match_method == "tier3_new":
@@ -1366,16 +1389,18 @@ class KnowledgeGraphIntegrator:
         if self.confidence_filter:
             stats['confidence_breakdown'] = self.confidence_filter.get_stats()
 
-        # Include deduplication stats
+        # Include deduplication stats (FIX-006: includes fuzzy tier)
         stats['deduplication_enabled'] = self.enable_deduplication
         if self.enable_deduplication and self.entity_resolver:
             dedup_total = (
                 stats.get('dedup_exact_hits', 0) +
+                stats.get('dedup_fuzzy_hits', 0) +  # FIX-006
                 stats.get('dedup_semantic_hits', 0) +
                 stats.get('dedup_new_entities', 0)
             )
             if dedup_total > 0:
                 stats['dedup_exact_rate'] = round(stats.get('dedup_exact_hits', 0) / dedup_total * 100, 2)
+                stats['dedup_fuzzy_rate'] = round(stats.get('dedup_fuzzy_hits', 0) / dedup_total * 100, 2)  # FIX-006
                 stats['dedup_semantic_rate'] = round(stats.get('dedup_semantic_hits', 0) / dedup_total * 100, 2)
                 stats['dedup_new_rate'] = round(stats.get('dedup_new_entities', 0) / dedup_total * 100, 2)
             stats['entity_resolver_stats'] = self.entity_resolver.get_stats()
@@ -1392,6 +1417,7 @@ class KnowledgeGraphIntegrator:
             'inserted_to_graph': 0,
             'pipeline_processed': 0,
             'dedup_exact_hits': 0,
+            'dedup_fuzzy_hits': 0,  # FIX-006
             'dedup_semantic_hits': 0,
             'dedup_new_entities': 0
         }

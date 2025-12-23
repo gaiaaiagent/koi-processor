@@ -4,6 +4,9 @@ Canonical Resolver Module for Regen KOI
 Resolves entity aliases to their canonical forms using a registry.
 Helps deduplicate entities in the knowledge graph.
 
+FIX-006: Uses shared entity_normalizer for consistent normalization across
+all deduplication components.
+
 Usage:
     from src.knowledge_graph.improvements import CanonicalResolver
 
@@ -19,12 +22,22 @@ Usage:
 
 Author: Claude Code
 Date: 2025-12-08
+Updated: 2025-12-23 (FIX-006)
 """
 
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
+
+# FIX-006: Import shared normalization
+try:
+    from ..entity_normalizer import normalize_for_canonical_lookup
+except ImportError:
+    # Fallback if import fails (e.g., running standalone)
+    def normalize_for_canonical_lookup(name: str, entity_type: Optional[str] = None) -> str:
+        """Fallback normalization if entity_normalizer not available."""
+        return name.strip().lower()
 
 
 @dataclass
@@ -79,7 +92,11 @@ class CanonicalResolver:
         self.stats = ResolverStats()
 
     def _build_lookup_table(self):
-        """Build the reverse lookup table from aliases to canonical names."""
+        """
+        Build the reverse lookup table from aliases to canonical names.
+
+        FIX-006: Uses normalize_for_canonical_lookup for consistent normalization.
+        """
 
         for category, entities in self.registry.get('entities', {}).items():
             for entity_id, entity_data in entities.items():
@@ -87,17 +104,17 @@ class CanonicalResolver:
                 entity_type = entity_data.get('entity_type', 'ENTITY')
                 confidence = entity_data.get('confidence', 1.0)
 
-                # Add canonical name itself
-                canonical_key = canonical.lower()
+                # FIX-006: Use shared normalization for canonical name
+                canonical_key = normalize_for_canonical_lookup(canonical, entity_type)
                 if canonical_key not in self.alias_to_canonical:
                     self.alias_to_canonical[canonical_key] = (canonical, entity_type, confidence)
 
-                # Add all aliases
+                # FIX-006: Use shared normalization for all aliases
                 for alias in entity_data.get('aliases', []):
-                    alias_lower = alias.lower()
+                    alias_normalized = normalize_for_canonical_lookup(alias, entity_type)
                     # Only add if not already mapped (first mapping wins)
-                    if alias_lower not in self.alias_to_canonical:
-                        self.alias_to_canonical[alias_lower] = (canonical, entity_type, confidence)
+                    if alias_normalized not in self.alias_to_canonical:
+                        self.alias_to_canonical[alias_normalized] = (canonical, entity_type, confidence)
 
     def resolve(
         self,
@@ -107,6 +124,8 @@ class CanonicalResolver:
     ) -> Tuple[str, bool]:
         """
         Resolve entity name to canonical form.
+
+        FIX-006: Uses normalize_for_canonical_lookup for consistent matching.
 
         Args:
             entity_name: The entity name to resolve
@@ -120,7 +139,8 @@ class CanonicalResolver:
         """
         self.stats.total_lookups += 1
 
-        lookup_key = entity_name.strip().lower()
+        # FIX-006: Use shared normalization for lookup
+        lookup_key = normalize_for_canonical_lookup(entity_name, entity_type)
 
         if lookup_key in self.alias_to_canonical:
             canonical, canonical_type, confidence = self.alias_to_canonical[lookup_key]
@@ -161,35 +181,41 @@ class CanonicalResolver:
 
         return False
 
-    def get_canonical_type(self, entity_name: str) -> Optional[str]:
+    def get_canonical_type(self, entity_name: str, entity_type: Optional[str] = None) -> Optional[str]:
         """
         Get canonical entity type for a name.
 
+        FIX-006: Uses normalize_for_canonical_lookup for consistent matching.
+
         Args:
             entity_name: The entity name to look up
+            entity_type: Optional type hint for normalization
 
         Returns:
             Canonical entity type if found, None otherwise
         """
-        lookup_key = entity_name.strip().lower()
+        lookup_key = normalize_for_canonical_lookup(entity_name, entity_type)
 
         if lookup_key in self.alias_to_canonical:
-            _, entity_type, _ = self.alias_to_canonical[lookup_key]
-            return entity_type
+            _, entity_type_result, _ = self.alias_to_canonical[lookup_key]
+            return entity_type_result
 
         return None
 
-    def get_confidence(self, entity_name: str) -> float:
+    def get_confidence(self, entity_name: str, entity_type: Optional[str] = None) -> float:
         """
         Get confidence score for a canonical mapping.
 
+        FIX-006: Uses normalize_for_canonical_lookup for consistent matching.
+
         Args:
             entity_name: The entity name to look up
+            entity_type: Optional type hint for normalization
 
         Returns:
             Confidence score (0.0-1.0), 0.0 if not found
         """
-        lookup_key = entity_name.strip().lower()
+        lookup_key = normalize_for_canonical_lookup(entity_name, entity_type)
 
         if lookup_key in self.alias_to_canonical:
             _, _, confidence = self.alias_to_canonical[lookup_key]
@@ -197,17 +223,20 @@ class CanonicalResolver:
 
         return 0.0
 
-    def is_known_entity(self, entity_name: str) -> bool:
+    def is_known_entity(self, entity_name: str, entity_type: Optional[str] = None) -> bool:
         """
         Check if an entity name is in the canonical registry.
 
+        FIX-006: Uses normalize_for_canonical_lookup for consistent matching.
+
         Args:
             entity_name: The entity name to check
+            entity_type: Optional type hint for normalization
 
         Returns:
             True if entity is known (canonical or alias)
         """
-        lookup_key = entity_name.strip().lower()
+        lookup_key = normalize_for_canonical_lookup(entity_name, entity_type)
         return lookup_key in self.alias_to_canonical
 
     def get_all_aliases(self, canonical_name: str) -> List[str]:

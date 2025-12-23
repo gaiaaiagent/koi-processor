@@ -1,8 +1,18 @@
-"""Deterministic, content-addressable URI generation for entities."""
+"""Deterministic, content-addressable URI generation for entities.
+
+FIX-006: Uses shared entity_normalizer for consistent normalization.
+"""
 
 import hashlib
 import re
 from typing import Dict, Tuple, Optional
+
+# FIX-006: Import shared normalization
+try:
+    from .entity_normalizer import normalize_entity_name
+    HAS_SHARED_NORMALIZER = True
+except ImportError:
+    HAS_SHARED_NORMALIZER = False
 
 
 class DeterministicURIGenerator:
@@ -63,18 +73,23 @@ class DeterministicURIGenerator:
         """
         self.base_uri = base_uri or self.BASE_URI
 
-    def normalize_name(self, name: str) -> str:
+    def normalize_name(self, name: str, entity_type: str = None) -> str:
         """
         Normalize entity name for consistent hashing.
+
+        FIX-006: Now delegates to shared entity_normalizer for consistency
+        across all deduplication components.
 
         Normalization rules:
         - Lowercase
         - Remove extra whitespace
         - Remove common articles (the, a, an)
         - Trim trailing punctuation
+        - FIX-006 additions: strip @, convert _/- to spaces, strip "| SUFFIX"
 
         Args:
             name: Original entity name
+            entity_type: Optional entity type for type-specific normalization
 
         Returns:
             Normalized name
@@ -82,8 +97,15 @@ class DeterministicURIGenerator:
         Examples:
             "The Regen Network" -> "regen network"
             "REGEN NETWORK  " -> "regen network"
-            "Gregory Landua, CEO" -> "gregory landua, ceo"
+            "Gregory_Regen" -> "gregory regen"
+            "@willszal" -> "willszal"
+            "Gregory | RND" -> "gregory"
         """
+        # FIX-006: Use shared normalizer if available
+        if HAS_SHARED_NORMALIZER:
+            return normalize_entity_name(name, entity_type)
+
+        # Fallback to original implementation for backward compatibility
         # Lowercase
         normalized = name.lower()
 
@@ -116,8 +138,8 @@ class DeterministicURIGenerator:
             generate_uri("Gregory Landua", "PERSON")
             -> https://regen.network/person/e5f6g7h8i9j0k1l2
         """
-        # Normalize name
-        normalized = self.normalize_name(name)
+        # FIX-006: Pass entity_type to normalize_name for type-specific normalization
+        normalized = self.normalize_name(name, entity_type)
 
         # Normalize type
         entity_type_upper = entity_type.upper()
