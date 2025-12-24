@@ -5,6 +5,34 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2025-12-24
+
+### Added
+- **Graph Expansion PoC (Log-Only)** - 1-hop relationship traversal analysis
+  - `get1HopNeighbors()` function finds related entities via `koi_relationships`
+  - Quality filters: confidence >= 0.5, occurrence_count >= 2
+  - Logs potential recall gains without affecting search ranking
+  - Enable with `DEBUG_GRAPH_EXPANSION=true`
+
+### Changed
+- **Normalized Text Index** - Entity lookup now uses `normalized_text` B-Tree index
+  - Was: `LOWER(entity_text)` (computed per query)
+  - Now: `normalized_text` (indexed column)
+  - Includes `entity_type` in results for debugging
+- **Multi-Token Seed Filter** - Expansion seeds filtered to >= 2 words OR >= 8 chars
+  - Prevents single-token names ("gregory") from exploding to 1000+ docs
+  - Reduces noise in graph expansion analysis
+- **High-Degree Entity Guard** - Skips expensive COUNT when neighbors > 10
+  - Avoids slow queries on high-connectivity entities
+- **Removed `entity_uris` Propagation** - Cleaned up unused field from entity search CTEs
+  - Was aggregating URIs but never using them (switched to name-based lookup)
+
+### Fixed
+- **PM2 Process Conflict** - Identified and resolved dual-user PM2 issue
+  - Two `hybrid-rag-api` processes (darren + shawn) competing for port 8301
+  - Shawn's old process was intercepting all requests
+  - Resolution: Stop shawn's process, let darren's take over
+
 ## [3.1.0] - 2025-12-24
 
 ### Fixed
@@ -33,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Strict-First Query Ordering** - AND matches now prioritized over OR matches
 - **Lexeme-Aware OR Filtering** - Replaced substring filter with prefix tsquery
 - **Debug Logging Gated** - All per-request logs now behind `DEBUG_*` env flags
-  - `DEBUG_AUTH`, `DEBUG_EXTRACTION`, `DEBUG_FUSION`, `DEBUG_KEYWORD_SEARCH`
+  - `DEBUG_AUTH`, `DEBUG_EXTRACTION`, `DEBUG_FUSION`, `DEBUG_KEYWORD_SEARCH`, `DEBUG_GRAPH_EXPANSION`
 - **Documentation Updated** - Fixed migration references (012→025) in:
   - `docs/KOI_PIPELINE_COMPLETE.md`
   - `docs/ADAPTIVE_KNOWLEDGE_MCP_IMPLEMENTATION.md`

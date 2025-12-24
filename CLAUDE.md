@@ -142,18 +142,24 @@ set -a; source .env; set +a
 
 **How it works**:
 1. Extract matched entity names from entity search results
-2. Look up entities in entity_registry by name
-3. Find 1-hop neighbors via koi_relationships (confidence >= 0.5, occurrence_count >= 2)
-4. Count how many new docs the neighbors would add
-5. Log the analysis (no ranking change)
+2. Filter to multi-token names (>= 2 words OR >= 8 chars) to reduce noise
+3. Look up entities in entity_registry using `normalized_text` index
+4. Find 1-hop neighbors via koi_relationships (confidence >= 0.5, occurrence_count >= 2)
+5. Count how many new docs the neighbors would add (skipped if > 10 neighbors)
+6. Log the analysis (no ranking change)
 
 **Key Function**: `get1HopNeighbors()` in `koi-query-api.ts`
+
+**Filters/Guards**:
+- Multi-token filter: Only entities with space or >= 8 chars used as seeds
+- High-degree guard: Skips COUNT when neighbors > 10
+- Quality thresholds: confidence >= 0.5, occurrence_count >= 2
 
 **Sample Output**:
 ```
 [GraphExpansion] Query: "Gregory Landua"
-[GraphExpansion] Matched 3 entities: gregory, gregory landua, landua
-[GraphExpansion] Expanded to 5: Regen Network, RND PBC
+[GraphExpansion] Matched 1 entities: gregory landua
+[GraphExpansion] Expanded to 5: Regen Network (ORGANIZATION), RND PBC (ORGANIZATION)
 [GraphExpansion] Predicates: represents, associated_with, mentions, attended
 [GraphExpansion] Would add 1667/1682 new docs (60 direct)
 ```
