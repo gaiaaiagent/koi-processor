@@ -2,7 +2,7 @@
 
 **Started:** 2025-12-24
 **Last Updated:** 2025-12-23
-**Status:** Type Conflict Sprint - Week 1 Complete
+**Status:** Type Conflict Sprint - Week 2 In Progress
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -136,6 +136,48 @@ Top 5:
 
 ---
 
+## Type Conflict Sprint (Week 2)
+
+**Report:** [type_conflict_pairs_2026_01.md](reports/type_conflict_pairs_2026_01.md)
+
+### Type Conflict Pair Analysis
+
+Analyzed 2,749 type conflicts grouped by type-pair:
+
+| Rank | Type Pair | Conflicting Labels | Total Occurrences | Classification |
+|------|-----------|-------------------|-------------------|----------------|
+| 1 | CONCEPT↔TECHNOLOGY | 719 | 6,903 | Polysemy |
+| 2 | CONCEPT↔PROCESS | 599 | 4,166 | Polysemy |
+| 3 | PROJECT↔TECHNOLOGY | 446 | 6,872 | Polysemy |
+| 4 | CONCEPT↔PROJECT | 287 | 2,979 | Polysemy |
+| 5 | ORGANIZATION↔PROJECT | 266 | 3,203 | Polysemy |
+
+**Key Finding:** Top 5 conflict pairs account for **2,317 labels (84%)** of all type conflicts. These are predominantly **legitimate polysemy** - entities that genuinely have multiple valid types in different contexts.
+
+### Why This Matters
+
+| Impact Area | Problem | Example |
+|-------------|---------|---------|
+| **GraphRAG** | Wrong-type entities pollute retrieval | "ethereum LOCATION" returns wrong results |
+| **Queryability** | SPARQL by type is incomplete | Searching TECHNOLOGY misses LOCATION variants |
+| **Entity Linking** | Can't merge correctly | Same entity, different types → duplicate nodes |
+
+### Actionable Conflicts: LOCATION↔Blockchain
+
+The **LOCATION↔TECHNOLOGY** pair (22 labels, 494 occ) contains blockchain names incorrectly typed as LOCATION:
+
+| Entity | LOCATION Occ | Should Be | Action |
+|--------|--------------|-----------|--------|
+| polygon | 17 | TECHNOLOGY/PROJECT | **FIX-011** |
+| base | 14 | TECHNOLOGY/PROJECT | Review (ambiguous) |
+| ethereum | 4 | TECHNOLOGY/PROJECT | **FIX-011** |
+| solana | 3 | TECHNOLOGY/PROJECT | **FIX-011** |
+| arbitrum | 2 | TECHNOLOGY/PROJECT | **FIX-011** |
+
+**Impact of FIX-011:** ~26+ wrong-type occurrences prevented in future extractions.
+
+---
+
 ## Review Sprint Plan
 
 ### Automated Audits
@@ -201,7 +243,8 @@ Format: `E4XX` where XX is sequential.
 |--------|-------------|----------|------------|--------|
 | FIX-009 | E325 FirstName-OrgName artifact filter | High | Medium | **Complete** |
 | FIX-010 | Block single-occurrence wrong-type noise | Medium | Simple | Proposed |
-| FIX-011 | Block LOCATION for blockchain names | Medium | Simple | Proposed |
+| FIX-011 | Block LOCATION for blockchain names | Medium | Simple | **Complete** |
+| FIX-012 | Governance ORGANIZATION cleanup | Low | Simple | Proposed |
 
 ### FIX-009: E325 FirstName-OrgName Artifact Filter
 
@@ -219,6 +262,26 @@ Format: `E4XX` where XX is sequential.
 - Blocks: `Will-Regen Foundation`, `Chris-Chainflow`, `Curtis-Meme_Network`
 - Allows: `Mary-Jane`, `Jean-Pierre`, `Smith-Jones` (legitimate hyphenated names)
 - Only applies to PERSON type
+
+### FIX-011: Block LOCATION for Blockchain Names
+
+**File:** `src/knowledge_graph/improvements/entity_quality_filter.py`
+
+**Changes:**
+- Added `BLOCKCHAIN_NAMES` set with ~70 blockchain/network names (L1s, L2s, Cosmos chains)
+- Added `is_blockchain_as_location()` method
+- Integrated into filter chain (check #17)
+- Added `blockchain_as_location` reason to stats
+
+**Tests:** `src/knowledge_graph/improvements/tests/test_entity_quality_filter.py::TestFIX011BlockchainAsLocation` (59 tests)
+
+**Behavior:**
+- Blocks: `ethereum`, `polygon`, `solana`, `arbitrum`, `base`, etc. when typed as LOCATION
+- Allows: Same names when typed as TECHNOLOGY, PROJECT, ORGANIZATION
+- Allows: Legitimate locations like `Boulder`, `Colorado`, `Amazon` (the river)
+- Also blocks compound names: `ethereum mainnet`, `polygon network`, etc.
+
+**Impact:** ~26+ wrong-type occurrences prevented in future extractions.
 
 ---
 
@@ -246,6 +309,44 @@ Format: `E4XX` where XX is sequential.
 
 **Unit Tests:** 199/199 passing
 
+### FIX-011 Canary (2025-12-23)
+
+**Blockchain Names as LOCATION Detection:**
+| Input | Type | Expected | Actual | Status |
+|-------|------|----------|--------|--------|
+| Ethereum | LOCATION | BLOCKED | BLOCKED (blockchain_as_location) | **PASS** |
+| Polygon | LOCATION | BLOCKED | BLOCKED (blockchain_as_location) | **PASS** |
+| Solana | LOCATION | BLOCKED | BLOCKED (blockchain_as_location) | **PASS** |
+| Arbitrum | LOCATION | BLOCKED | BLOCKED (blockchain_as_location) | **PASS** |
+| Base | LOCATION | BLOCKED | BLOCKED (blockchain_as_location) | **PASS** |
+| ethereum mainnet | LOCATION | BLOCKED | BLOCKED (blockchain_as_location) | **PASS** |
+
+**Correct Types (No Regression):**
+| Input | Type | Expected | Actual | Status |
+|-------|------|----------|--------|--------|
+| Ethereum | TECHNOLOGY | PASS | PASS | **PASS** |
+| Polygon | PROJECT | PASS | PASS | **PASS** |
+| Solana | ORGANIZATION | PASS | PASS | **PASS** |
+
+**Legitimate Locations (No Regression):**
+| Input | Type | Expected | Actual | Status |
+|-------|------|----------|--------|--------|
+| Boulder | LOCATION | PASS | PASS | **PASS** |
+| Colorado | LOCATION | PASS | PASS | **PASS** |
+| Amazon | LOCATION | PASS | PASS | **PASS** |
+
+**Unit Tests:** 258/258 passing (59 new tests for FIX-011)
+
+**Post-Deployment Verification Query:**
+```sql
+-- Verify no new blockchain-as-LOCATION entities are created
+SELECT entity_text, entity_type, occurrence_count
+FROM entity_registry
+WHERE entity_type = 'LOCATION'
+  AND LOWER(normalized_text) IN ('ethereum', 'polygon', 'solana', 'arbitrum', 'base', 'optimism')
+ORDER BY occurrence_count DESC;
+```
+
 ---
 
 ## Full Re-Extraction Decision
@@ -270,6 +371,8 @@ Format: `E4XX` where XX is sequential.
 | Fix Implementation | Complete | FIX-009 in EntityQualityFilter (26 tests) |
 | Canary Validation | Complete | All artifacts blocked, no regression |
 | Full Re-Extraction | Not Needed | Fix prevents future artifacts |
+| **Week 2: Type Pair Analysis** | Complete | [Report](reports/type_conflict_pairs_2026_01.md) - dominant pairs identified |
+| **Week 2: FIX-011** | In Progress | Block LOCATION for blockchain names |
 
 ---
 
@@ -278,6 +381,7 @@ Format: `E4XX` where XX is sequential.
 - [Day-1 Audit Report](reports/kg_audit_2026_01_day1.md)
 - [2025-12 Regression Verification](reports/kg_regression_verification_2025_12_postfix006.md)
 - [Type Conflicts Top 2026-01](reports/type_conflicts_top_2026_01.md)
+- [Type Conflict Pairs 2026-01](reports/type_conflict_pairs_2026_01.md) - Week 2 pair analysis
 
 ---
 

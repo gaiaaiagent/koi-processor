@@ -797,5 +797,152 @@ class TestE325FirstNameOrgNameArtifact:
         assert "firstname_orgname_artifact" in reasons
 
 
+class TestFIX011BlockchainAsLocation:
+    """Tests for FIX-011: Block blockchain names as LOCATION."""
+
+    def setup_method(self):
+        self.filter = EntityQualityFilter()
+
+    # Known blockchain names that should be blocked when typed as LOCATION
+    @pytest.mark.parametrize("name", [
+        "Ethereum",
+        "ethereum",
+        "Polygon",
+        "polygon",
+        "Solana",
+        "solana",
+        "Arbitrum",
+        "arbitrum",
+        "Optimism",
+        "optimism",
+        "Base",
+        "base",
+        "Bitcoin",
+        "Cardano",
+        "Avalanche",
+        "Cosmos",
+        "Near",
+        "Fantom",
+    ])
+    def test_blocks_blockchain_as_location(self, name):
+        """Blockchain names should be blocked when typed as LOCATION."""
+        assert self.filter.is_blockchain_as_location(name, "LOCATION") is True
+        passes, reason = self.filter.filter_entity({"name": name, "type": "LOCATION"})
+        assert passes is False
+        assert reason == "blockchain_as_location"
+
+    # Blockchain names with correct type should NOT be blocked
+    @pytest.mark.parametrize("entity_type", [
+        "TECHNOLOGY", "PROJECT", "ORGANIZATION", "CONCEPT"
+    ])
+    def test_allows_blockchain_with_correct_type(self, entity_type):
+        """Blockchain names with correct type should pass this filter."""
+        assert self.filter.is_blockchain_as_location("Ethereum", entity_type) is False
+
+    # Legitimate locations should pass
+    @pytest.mark.parametrize("name", [
+        "Boulder",
+        "Colorado",
+        "New York",
+        "San Francisco",
+        "Berlin",
+        "London",
+        "Global South",
+        "Europe",
+        "United States",
+        "Amazon",  # River/rainforest - legitimate location
+    ])
+    def test_allows_legitimate_locations(self, name):
+        """Legitimate location names should pass."""
+        assert self.filter.is_blockchain_as_location(name, "LOCATION") is False
+        # These may still fail other filters, but not blockchain_as_location
+        passes, reason = self.filter.filter_entity({"name": name, "type": "LOCATION"})
+        if not passes:
+            assert reason != "blockchain_as_location"
+
+    # L2 chains and scaling solutions
+    @pytest.mark.parametrize("name", [
+        "zkSync",
+        "StarkNet",
+        "Loopring",
+        "Metis",
+        "Mantle",
+        "Linea",
+        "Scroll",
+    ])
+    def test_blocks_l2_chains_as_location(self, name):
+        """L2 chains should be blocked when typed as LOCATION."""
+        assert self.filter.is_blockchain_as_location(name, "LOCATION") is True
+
+    # Cosmos ecosystem chains
+    @pytest.mark.parametrize("name", [
+        "Osmosis",
+        "Juno",
+        "Evmos",
+        "Injective",
+        "Kava",
+        "Akash",
+        "Secret",
+        "Terra",
+    ])
+    def test_blocks_cosmos_chains_as_location(self, name):
+        """Cosmos ecosystem chains should be blocked when typed as LOCATION."""
+        assert self.filter.is_blockchain_as_location(name, "LOCATION") is True
+
+    # Network terms
+    @pytest.mark.parametrize("name", [
+        "mainnet",
+        "testnet",
+        "devnet",
+        "Mainnet",
+        "Testnet",
+    ])
+    def test_blocks_network_terms_as_location(self, name):
+        """Network terms should be blocked when typed as LOCATION."""
+        assert self.filter.is_blockchain_as_location(name, "LOCATION") is True
+
+    # Compound names with blockchain prefix/suffix
+    @pytest.mark.parametrize("name", [
+        "ethereum mainnet",
+        "polygon network",
+        "solana testnet",
+        "arbitrum one",
+    ])
+    def test_blocks_compound_blockchain_names(self, name):
+        """Compound names with blockchain prefix should be blocked."""
+        assert self.filter.is_blockchain_as_location(name, "LOCATION") is True
+
+    def test_full_filter_with_blockchain_as_location(self):
+        """Complete filter should block blockchain as LOCATION."""
+        entity = {"name": "Polygon", "type": "LOCATION"}
+        passes, reason = self.filter.filter_entity(entity)
+        assert passes is False
+        assert reason == "blockchain_as_location"
+
+    def test_filter_with_reasons_includes_blockchain_as_location(self):
+        """filter_with_reasons should include blockchain_as_location reason."""
+        is_valid, reasons = self.filter.filter_with_reasons("Ethereum", "LOCATION")
+        assert is_valid is False
+        assert "blockchain_as_location" in reasons
+
+    def test_batch_filter_respects_blockchain_check(self):
+        """Batch filtering should respect blockchain as LOCATION check."""
+        entities = [
+            {"name": "Boulder", "type": "LOCATION"},  # Should pass
+            {"name": "Ethereum", "type": "LOCATION"},  # Should fail
+            {"name": "Ethereum", "type": "TECHNOLOGY"},  # Should pass
+            {"name": "Polygon", "type": "LOCATION"},  # Should fail
+        ]
+
+        passed = self.filter.filter_batch(entities)
+
+        assert len(passed) == 2
+        passed_names = [(e["name"], e["type"]) for e in passed]
+        assert ("Boulder", "LOCATION") in passed_names
+        assert ("Ethereum", "TECHNOLOGY") in passed_names
+        assert ("Ethereum", "LOCATION") not in passed_names
+        assert ("Polygon", "LOCATION") not in passed_names
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

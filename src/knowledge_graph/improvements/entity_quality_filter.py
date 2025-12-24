@@ -12,6 +12,7 @@ Filters out low-quality entities extracted by LLMs, including:
 - FIX-002: Git commits/changelog lines when typed as CLAIM/EVIDENCE/QUESTION
 - FIX-002: AI systems mis-typed as PERSON (should be TECHNOLOGY)
 - FIX-002: Generic event words when typed as EVENT
+- FIX-011: Blockchain names mis-typed as LOCATION
 
 This module is adapted from the YonEarth knowledge graph extraction system
 with Regen-specific additions for forum and community content.
@@ -36,7 +37,7 @@ Usage:
 
 Author: Claude Code (adapted from YonEarth)
 Date: 2025-12-08
-Version: 1.2.0 (FIX-004)
+Version: 1.3.0 (FIX-011)
 """
 
 import re
@@ -435,6 +436,43 @@ class EntityQualityFilter:
         re.IGNORECASE
     )
 
+    # ========================================================================
+    # FIX-011: Blockchain Names Blocklist for LOCATION Type
+    # ========================================================================
+    # Block LOCATION type for known blockchain/network names that are
+    # incorrectly extracted as locations. These should be TECHNOLOGY or PROJECT.
+    #
+    # Examples from production data:
+    # - "ethereum" as LOCATION (4 occ) - should be TECHNOLOGY
+    # - "polygon" as LOCATION (17 occ) - should be TECHNOLOGY (L2 chain)
+    # - "solana" as LOCATION (3 occ) - should be TECHNOLOGY
+    # - "arbitrum" as LOCATION (2 occ) - should be TECHNOLOGY (L2)
+    # ========================================================================
+    BLOCKCHAIN_NAMES: Set[str] = {
+        # Major L1 blockchains
+        'ethereum', 'bitcoin', 'solana', 'cardano', 'polkadot', 'avalanche',
+        'tezos', 'algorand', 'near', 'fantom', 'cosmos', 'hedera',
+        'flow', 'elrond', 'harmony', 'celo', 'eos', 'tron', 'stellar',
+        'iota', 'vechain', 'neo', 'waves', 'zilliqa', 'icon', 'qtum',
+        'ontology', 'ravencoin', 'dash', 'zcash', 'monero', 'litecoin',
+
+        # L2 chains and scaling solutions
+        'polygon', 'arbitrum', 'optimism', 'base', 'zksync', 'starknet',
+        'immutable', 'loopring', 'metis', 'boba', 'mantle', 'linea',
+        'scroll', 'mode', 'blast', 'manta', 'taiko', 'zkevm',
+
+        # Cosmos ecosystem chains
+        'osmosis', 'juno', 'evmos', 'injective', 'kava', 'akash',
+        'secret', 'terra', 'thorchain', 'agoric', 'stride', 'neutron',
+        'celestia', 'dymension', 'sei',
+
+        # Regen-specific
+        'regen', 'regen network',
+
+        # Network terms that are often confused with locations
+        'mainnet', 'testnet', 'devnet',
+    }
+
     # Lowercase comparison for boilerplate/template text that should be blocked
     BOILERPLATE_BLOCKLIST: Set[str] = {
         # Issue / PR templates
@@ -573,6 +611,8 @@ class EntityQualityFilter:
                 'generic_domain_type': 0,
                 # E325: FirstName-OrgName artifact
                 'firstname_orgname_artifact': 0,
+                # FIX-011: Blockchain as LOCATION
+                'blockchain_as_location': 0,
             }
         }
 
@@ -1048,6 +1088,53 @@ class EntityQualityFilter:
         return False
 
     # ========================================================================
+    # FIX-011: Blockchain as LOCATION Detection
+    # ========================================================================
+
+    def is_blockchain_as_location(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-011: Check if entity is a blockchain name mis-typed as LOCATION.
+
+        Blockchain names like "ethereum", "polygon", "solana" are sometimes
+        extracted as LOCATION by LLMs when they appear in geographic-like contexts.
+        These should always be TECHNOLOGY or PROJECT, never LOCATION.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is blockchain name AND type is LOCATION)
+
+        Examples:
+            >>> filter.is_blockchain_as_location("Ethereum", "LOCATION")
+            True
+            >>> filter.is_blockchain_as_location("Ethereum", "TECHNOLOGY")
+            False  # Correct type, don't block
+            >>> filter.is_blockchain_as_location("Boulder", "LOCATION")
+            False  # Legitimate location
+            >>> filter.is_blockchain_as_location("Polygon", "LOCATION")
+            True  # L2 chain, not location
+            >>> filter.is_blockchain_as_location("Base", "LOCATION")
+            True  # Coinbase L2, not location
+        """
+        if not entity_type or entity_type.upper() != 'LOCATION':
+            return False
+
+        normalized = name.strip().lower()
+
+        # Direct match against blockchain names
+        if normalized in self.BLOCKCHAIN_NAMES:
+            return True
+
+        # Also check if it starts with a known blockchain name (e.g., "ethereum mainnet")
+        for blockchain in self.BLOCKCHAIN_NAMES:
+            if normalized.startswith(blockchain + ' ') or normalized.endswith(' ' + blockchain):
+                return True
+
+        return False
+
+    # ========================================================================
     # FIX-005: Domain Identifier Methods
     # ========================================================================
 
@@ -1288,6 +1375,14 @@ class EntityQualityFilter:
         if self.is_firstname_orgname_artifact(name, entity_type):
             reasons.append("firstname_orgname_artifact")
 
+        # ====================================================================
+        # FIX-011: Blockchain as LOCATION
+        # ====================================================================
+
+        # 17. Blockchain names mis-typed as LOCATION
+        if self.is_blockchain_as_location(name, entity_type):
+            reasons.append("blockchain_as_location")
+
         is_valid = len(reasons) == 0
         return is_valid, reasons
 
@@ -1406,6 +1501,14 @@ class EntityQualityFilter:
         if self.is_firstname_orgname_artifact(name, entity_type):
             return (False, "firstname_orgname_artifact")
 
+        # ====================================================================
+        # FIX-011: Blockchain as LOCATION
+        # ====================================================================
+
+        # 17. Blockchain names mis-typed as LOCATION
+        if self.is_blockchain_as_location(name, entity_type):
+            return (False, "blockchain_as_location")
+
         return (True, "")
 
     def filter_batch(self, entities: List[Dict]) -> List[Dict]:
@@ -1481,6 +1584,8 @@ class EntityQualityFilter:
                 'generic_domain_type': 0,
                 # E325: FirstName-OrgName artifact
                 'firstname_orgname_artifact': 0,
+                # FIX-011: Blockchain as LOCATION
+                'blockchain_as_location': 0,
             }
         }
 
