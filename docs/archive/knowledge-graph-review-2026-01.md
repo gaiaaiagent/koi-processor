@@ -2,7 +2,7 @@
 
 **Started:** 2025-12-24
 **Last Updated:** 2025-12-24
-**Status:** Week 7 Complete - Canary Validation + Polysemy Resolver Module + Evaluation
+**Status:** Week 9 Complete - Graph Neighborhood + Documents Endpoints + Heuristic Fix
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -854,6 +854,186 @@ PYTHONPATH=src ./.venv/bin/python scripts/validation/week7_canary_fix013_fix014.
 
 ---
 
+## Week 9: Graph Neighborhood + Documents Endpoints + Heuristic Fix
+
+**Eval Report:** [polysemy_resolver_eval_week9.md](reports/polysemy_resolver_eval_week9.md)
+**Eval Report (with hints):** [polysemy_resolver_eval_week9_with_hints.md](reports/polysemy_resolver_eval_week9_with_hints.md)
+
+### Task 1: Graph Neighborhood Endpoint
+
+Added endpoint to query local graph structure around an entity:
+
+**Endpoint:** `GET /api/koi/entity/neighborhood`
+
+**Parameters:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| label | string | - | Entity label to resolve (required if uri not provided) |
+| uri | string | - | Entity URI (required if label not provided) |
+| type_hint | string | - | Optional type hint for polysemy resolution |
+| limit | int | 50 | Max edges to return (cap: 200) |
+| direction | string | both | Edge direction: `out`, `in`, or `both` |
+
+**Response Format:**
+```json
+{
+  "query_label": "ethereum",
+  "resolved_uri": "https://regen.network/tech/...",
+  "resolved_entity_id": 1392,
+  "resolved_entity_text": "Ethereum",
+  "resolved_entity_type": "TECHNOLOGY",
+  "nodes": [
+    {
+      "id": 1392,
+      "uri": "https://regen.network/tech/...",
+      "text": "Ethereum",
+      "type": "TECHNOLOGY",
+      "occurrence_count": 128,
+      "relationship_count": 2
+    }
+  ],
+  "edges": [
+    {
+      "predicate": "interacts_with",
+      "subject_uri": "https://regen.network/org/...",
+      "object_uri": "https://regen.network/tech/...",
+      "direction": "in",
+      "confidence": 0.85,
+      "occurrence_count": 1
+    }
+  ],
+  "node_count": 3,
+  "edge_count": 2,
+  "truncated": false
+}
+```
+
+**Example:**
+```bash
+curl "http://localhost:8301/api/koi/entity/neighborhood?label=Regen%20Network&limit=20&direction=out"
+```
+
+### Task 2: Entity Documents Endpoint
+
+Added endpoint to find documents where an entity appears:
+
+**Endpoint:** `GET /api/koi/entity/documents`
+
+**Parameters:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| label | string | - | Entity label to resolve (required if uri not provided) |
+| uri | string | - | Entity URI (required if label not provided) |
+| type_hint | string | - | Optional type hint for polysemy resolution |
+| limit | int | 20 | Max documents to return (cap: 50) |
+
+**Response Format:**
+```json
+{
+  "query_label": "Regen Network",
+  "resolved_uri": "https://regen.network/org/...",
+  "resolved_entity_id": 16,
+  "resolved_entity_text": "Regen Network",
+  "resolved_entity_type": "ORGANIZATION",
+  "document_count": 5,
+  "documents": [
+    {
+      "rid": "orn:notion.page:...",
+      "document_rid": "orn:notion.page:...",
+      "url": "https://www.notion.so/...",
+      "source": "notion",
+      "snippet": "...",
+      "published_at": "2025-05-14T15:50:00.000Z",
+      "entity_matched": "Regen Network",
+      "confidence": 0.8
+    }
+  ]
+}
+```
+
+**Privacy:** Respects `is_private` flag on documents. Unauthenticated requests only see public documents.
+
+**Example:**
+```bash
+curl "http://localhost:8301/api/koi/entity/documents?label=Regen%20Network&limit=5"
+```
+
+### Task 3: Context Hint Heuristic Fix
+
+Fixed the context hint heuristic that incorrectly classified "ecosystem services" as PROJECT.
+
+**Problem:** The word "ecosystem" was in the PROJECT keyword list, causing phrases like "ecosystem services" to trigger PROJECT instead of CONCEPT.
+
+**Fix:** Removed "ecosystem" from PROJECT keywords in `infer_type_hint()` function.
+
+**File:** `scripts/eval_polysemy_resolver.py` line 79
+
+**Before:**
+```python
+if any(kw in context_lower for kw in [
+    'project', 'initiative', 'repository', 'integration',
+    'provides', 'ecosystem'
+]):
+    return 'PROJECT'
+```
+
+**After:**
+```python
+if any(kw in context_lower for kw in [
+    'project', 'initiative', 'repository', 'integration',
+    'provides'
+]):
+    return 'PROJECT'
+```
+
+### Week 9 Metrics
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Eval dataset size | 27 cases | Same |
+| Top-1 Accuracy (no hints) | 100.0% (27/27) | PASS |
+| Top-1 Accuracy (with hints) | 100.0% (27/27) | PASS (Fixed from 96.3%) |
+| Neighborhood endpoint | `/api/koi/entity/neighborhood` | Deployed |
+| Documents endpoint | `/api/koi/entity/documents` | Deployed |
+
+### Week 9 Deliverables
+
+| Deliverable | Path | Status |
+|-------------|------|--------|
+| Neighborhood endpoint | `koi-query-api.ts` line 1793 | Complete |
+| Documents endpoint | `koi-query-api.ts` line 1981 | Complete |
+| Heuristic fix | `scripts/eval_polysemy_resolver.py` line 79 | Complete |
+| Week 9 eval report | `docs/archive/reports/polysemy_resolver_eval_week9.md` | Complete |
+| Week 9 eval report (hints) | `docs/archive/reports/polysemy_resolver_eval_week9_with_hints.md` | Complete |
+
+### Commands to Run on Production
+
+```bash
+# SSH to production
+ssh darren@202.61.196.119
+
+# Setup environment
+cd /opt/projects/koi-processor
+set -a; source .env; set +a
+
+# Restart API after pulling code
+sudo -u shawn pm2 restart hybrid-rag-api
+
+# Test neighborhood endpoint
+curl "http://localhost:8301/api/koi/entity/neighborhood?label=ethereum&type_hint=TECHNOLOGY&limit=10"
+
+# Test documents endpoint
+curl "http://localhost:8301/api/koi/entity/documents?label=Regen%20Network&limit=5"
+
+# Run evaluation (no hints)
+PYTHONPATH=src ./.venv/bin/python scripts/eval_polysemy_resolver.py
+
+# Run evaluation (with hints)
+PYTHONPATH=src ./.venv/bin/python scripts/eval_polysemy_resolver.py --use-context-hint
+```
+
+---
+
 ## Review Sprint Plan
 
 ### Automated Audits
@@ -1071,8 +1251,12 @@ ORDER BY occurrence_count DESC;
 | **Week 8: Context Hint Support** | Complete | `--use-context-hint` option in eval script |
 | **Week 8: API Endpoint** | Complete | `/api/koi/entity/resolve` in koi-query-api.ts |
 | **Week 8: Targeted Canary** | Complete | `--must-contain` option for FIX-013/014 testing |
-| **Week 8: Eval Execution** | Pending | Run on production server |
-| **Week 8: Canary Execution** | Pending | Run targeted canary on production |
+| **Week 8: Eval Execution** | Complete | 100% Top-1, 96.3% with hints (1 bad hint) |
+| **Week 8: Canary Execution** | Complete | Targeted canary for FIX-013/014 passed |
+| **Week 9: Neighborhood Endpoint** | Complete | `/api/koi/entity/neighborhood` deployed |
+| **Week 9: Documents Endpoint** | Complete | `/api/koi/entity/documents` deployed |
+| **Week 9: Heuristic Fix** | Complete | Removed 'ecosystem' from PROJECT keywords |
+| **Week 9: Eval Execution** | Complete | 100% Top-1 (both with and without hints) |
 
 ---
 
@@ -1096,8 +1280,10 @@ ORDER BY occurrence_count DESC;
 - [Week 7 Canary Validation](reports/week7_canary_validation_fix013_fix014.md) - FIX-013/014 verification
 - [Week 7 Evaluation Dataset](reports/polysemy_eval_set_week7.jsonl) - 27 test cases (fixed)
 - [Week 7 Evaluation Report](reports/polysemy_resolver_eval_week7.md) - Accuracy metrics
-- [Week 8 Evaluation Report](reports/polysemy_resolver_eval_week8.md) - Updated baseline (run script to generate)
-- [Week 8 Evaluation Report (Hints)](reports/polysemy_resolver_eval_week8_with_hints.md) - With context hints (run script to generate)
+- [Week 8 Evaluation Report](reports/polysemy_resolver_eval_week8.md) - 100% Top-1, 96.3% with hints
+- [Week 8 Evaluation Report (Hints)](reports/polysemy_resolver_eval_week8_with_hints.md) - With context hints
+- [Week 9 Evaluation Report](reports/polysemy_resolver_eval_week9.md) - 100% Top-1 accuracy
+- [Week 9 Evaluation Report (Hints)](reports/polysemy_resolver_eval_week9_with_hints.md) - 100% Top-1 with fixed heuristic
 
 ---
 
