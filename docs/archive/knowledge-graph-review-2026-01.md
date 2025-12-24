@@ -1,13 +1,14 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-23
-**Status:** Type Conflict Sprint - Week 2 In Progress
+**Last Updated:** 2025-12-24
+**Status:** Week 3 Complete - Wrong-Type Cleanup Applied
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
 
 **Day-1 Audit Report:** [kg_audit_2026_01_day1.md](reports/kg_audit_2026_01_day1.md)
+**Post-Week 3 Audit Report:** [kg_audit_2026_01_post_week3.md](reports/kg_audit_2026_01_post_week3.md)
 
 ---
 
@@ -178,6 +179,64 @@ The **LOCATION↔TECHNOLOGY** pair (22 labels, 494 occ) contains blockchain name
 
 ---
 
+## Type Conflict Sprint (Week 3)
+
+**Report:** [fix010_fix012_cleanup_2026_01.md](reports/fix010_fix012_cleanup_2026_01.md)
+
+### One-Time Cleanup Applied
+
+Applied safe cleanup of existing wrong-type entities in production. All targets verified to have **zero references** before deletion.
+
+#### FIX-010: Single-Occurrence Wrong-Type Noise (6 rows deleted)
+
+| Entity | Wrong Type | Correct Type(s) Retained |
+|--------|------------|-------------------------|
+| Koi Project | TECHNOLOGY (3 occ) | PROJECT (178) |
+| Twitter | PROJECT (1 occ) | TECHNOLOGY (164), ORGANIZATION (15) |
+| MCP server | CONCEPT (1 occ) | TECHNOLOGY (134) |
+| TypeScript | CONCEPT (1 occ) | TECHNOLOGY (127) |
+| Regen Tokenomics AI Assistant | PROJECT (1 occ) | TECHNOLOGY (163) |
+| Python | PROJECT (1 occ) | TECHNOLOGY (171) |
+
+#### FIX-011: Blockchain-as-LOCATION Cleanup (5 rows deleted)
+
+| Entity | Wrong Type | Correct Type(s) Retained |
+|--------|------------|-------------------------|
+| Base | LOCATION (14 occ) | TECHNOLOGY (68), PROJECT (24), ORGANIZATION (2) |
+| Polygon | LOCATION (17 occ) | TECHNOLOGY (51), PROJECT (11), ORGANIZATION (2) |
+| Solana | LOCATION (3 occ) | TECHNOLOGY (59), PROJECT (22), ORGANIZATION (9) |
+| Ethereum | LOCATION (4 occ) | TECHNOLOGY (128), PROJECT (17), ORGANIZATION (9) |
+| Arbitrum | LOCATION (2 occ) | TECHNOLOGY (9), PROJECT (3) |
+
+#### FIX-012: Governance-as-ORGANIZATION Cleanup (1 row deleted)
+
+| Entity | Wrong Type | Correct Type Retained |
+|--------|------------|----------------------|
+| Governance | ORGANIZATION (2 occ) | CONCEPT (274) |
+
+### Week 3 Metrics Summary
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| entity_registry rows | 29,667 | 29,655 | -12 |
+| Fuseki triples | 165,619 | 163,639 | -1,980 |
+| Quality Gates | 4/4 PASS | 4/4 PASS | — |
+
+### Key Insight: Polysemy Dominates Remaining Conflicts
+
+The remaining ~2,737 type conflicts are predominantly **legitimate polysemy** - entities that genuinely have multiple valid types in different contexts:
+
+- **CONCEPT↔TECHNOLOGY** (719 labels): "blockchain", "AI", "knowledge graph"
+- **PROJECT↔TECHNOLOGY** (446 labels): "koi-processor", "regen-koi-mcp"
+- **ORGANIZATION↔PROJECT** (266 labels): "Regen Commons", "Aerodrome"
+
+**Future work:** These require disambiguation strategy at query/UI level, not data cleanup. Approaches include:
+1. Context-aware entity resolution during retrieval
+2. Type priority ranking based on query intent
+3. Multi-type entity representation in GraphRAG
+
+---
+
 ## Review Sprint Plan
 
 ### Automated Audits
@@ -242,9 +301,9 @@ Format: `E4XX` where XX is sequential.
 | Fix ID | Description | Priority | Complexity | Status |
 |--------|-------------|----------|------------|--------|
 | FIX-009 | E325 FirstName-OrgName artifact filter | High | Medium | **Complete** |
-| FIX-010 | Block single-occurrence wrong-type noise | Medium | Simple | Proposed |
-| FIX-011 | Block LOCATION for blockchain names | Medium | Simple | **Complete** |
-| FIX-012 | Governance ORGANIZATION cleanup | Low | Simple | Proposed |
+| FIX-010 | Block single-occurrence wrong-type noise | Medium | Simple | **Complete + Cleanup Applied** |
+| FIX-011 | Block LOCATION for blockchain names | Medium | Simple | **Complete + Cleanup Applied** |
+| FIX-012 | Governance ORGANIZATION cleanup | Low | Simple | **Complete + Cleanup Applied** |
 
 ### FIX-009: E325 FirstName-OrgName Artifact Filter
 
@@ -372,7 +431,9 @@ ORDER BY occurrence_count DESC;
 | Canary Validation | Complete | All artifacts blocked, no regression |
 | Full Re-Extraction | Not Needed | Fix prevents future artifacts |
 | **Week 2: Type Pair Analysis** | Complete | [Report](reports/type_conflict_pairs_2026_01.md) - dominant pairs identified |
-| **Week 2: FIX-011** | In Progress | Block LOCATION for blockchain names |
+| **Week 2: FIX-011 Prevention** | Complete | Block LOCATION for blockchain names (59 tests) |
+| **Week 3: FIX-010/011/012 Cleanup** | Complete | [Report](reports/fix010_fix012_cleanup_2026_01.md) - 12 wrong-type rows removed |
+| **Week 3: Baseline Update** | Complete | [Report](reports/kg_audit_2026_01_post_week3.md) - 29,655 entities |
 
 ---
 
@@ -382,50 +443,28 @@ ORDER BY occurrence_count DESC;
 - [2025-12 Regression Verification](reports/kg_regression_verification_2025_12_postfix006.md)
 - [Type Conflicts Top 2026-01](reports/type_conflicts_top_2026_01.md)
 - [Type Conflict Pairs 2026-01](reports/type_conflict_pairs_2026_01.md) - Week 2 pair analysis
+- [FIX-010/011/012 Cleanup Report](reports/fix010_fix012_cleanup_2026_01.md) - Week 3 cleanup
+- [Post-Week 3 Audit Report](reports/kg_audit_2026_01_post_week3.md) - Updated baseline
 
 ---
 
-## Next Fix Batch (Proposed)
+## Next Fix Batch (Completed in Week 3)
 
-Based on type conflict analysis, the next 2-3 fixes to tackle:
+All proposed fixes have been applied. See [Week 3 cleanup report](reports/fix010_fix012_cleanup_2026_01.md).
 
-### FIX-010: Block Single-Occurrence Wrong-Type Noise
+| Fix ID | Description | Rows Removed | Status |
+|--------|-------------|--------------|--------|
+| FIX-010 | Single-occurrence wrong-type noise | 6 | **Complete** |
+| FIX-011 | Blockchain-as-LOCATION cleanup | 5 | **Complete** |
+| FIX-012 | Governance ORGANIZATION cleanup | 1 | **Complete** |
 
-**Priority:** Medium | **Complexity:** Simple
+**Total:** 12 wrong-type entity rows removed from production.
 
-Remove single-occurrence type variants that are extraction noise:
-- `python` as PROJECT (1 occ) → keep only TECHNOLOGY (171)
-- `typescript` as CONCEPT (1 occ) → keep only TECHNOLOGY (127)
-- `twitter` as PROJECT (1 occ) → keep TECHNOLOGY (164) + ORGANIZATION (15)
-- `regen tokenomics ai assistant` as PROJECT (1 occ) → keep only TECHNOLOGY (163)
-- `koi project` as TECHNOLOGY (3 occ) → keep only PROJECT (178)
+### Remaining Work (Future Cycles)
 
-**Approach:** SQL delete of specific entity_registry rows by ID, then regenerate Fuseki.
-
-**Impact:** ~6 wrong-type rows removed, cleaner type distribution.
-
-### FIX-011: Block LOCATION for Blockchain Names
-
-**Priority:** Medium | **Complexity:** Simple
-
-Block LOCATION type for known blockchain/network names:
-- `ethereum` as LOCATION (4 occ)
-- `solana` as LOCATION (varies)
-- `polygon` as LOCATION (varies)
-
-**Approach:** Add to EntityQualityFilter a check that blocks LOCATION type for entities matching a blockchain name list.
-
-**Impact:** ~10-15 wrong-type occurrences prevented in future extractions.
-
-### FIX-012: Governance ORGANIZATION Cleanup (Optional)
-
-**Priority:** Low | **Complexity:** Simple
-
-`governance` typed as ORGANIZATION (2 occ) is noise - governance is a CONCEPT.
-
-**Approach:** SQL delete of the 2 ORGANIZATION rows.
-
-**Impact:** Minor cleanup.
+1. **Polysemy disambiguation** - Query/UI level strategies for multi-type entities
+2. **Targeted wrong-type prevention** - Additional EntityQualityFilter rules as discovered
+3. **Single-token PERSON ambiguity** - Canonical registry protection in place, full resolution optional
 
 ---
 
