@@ -1682,6 +1682,426 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
   }
 });
 
+// Internal helper: resolve entity by label or URI
+// Returns { entity_id, uri, entity_text, entity_type } or null
+async function resolveEntityInternal(
+  label: string | null,
+  uri: string | null,
+  typeHint: string | null
+): Promise<{
+  entity_id: number;
+  uri: string;
+  entity_text: string;
+  entity_type: string;
+  occurrence_count: number;
+} | null> {
+  if (uri) {
+    // Direct URI lookup
+    const result = await pool.query(
+      `SELECT id, fuseki_uri, entity_text, entity_type, occurrence_count
+       FROM entity_registry
+       WHERE fuseki_uri = $1`,
+      [uri]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      entity_id: row.id,
+      uri: row.fuseki_uri,
+      entity_text: row.entity_text,
+      entity_type: row.entity_type,
+      occurrence_count: parseInt(row.occurrence_count),
+    };
+  }
+
+  if (!label) return null;
+
+  // Use the same logic as /api/koi/entity/resolve
+  const query = `
+    WITH entity_matches AS (
+      SELECT
+        id,
+        entity_text,
+        entity_type,
+        normalized_text,
+        occurrence_count,
+        fuseki_uri
+      FROM entity_registry
+      WHERE LOWER(TRIM(normalized_text)) = LOWER(TRIM($1))
+    ),
+    rel_counts AS (
+      SELECT
+        e.id,
+        COALESCE(subj.subj_count, 0) + COALESCE(obj.obj_count, 0) as relationship_count
+      FROM entity_matches e
+      LEFT JOIN (
+        SELECT subject_entity_id, COUNT(*) as subj_count
+        FROM koi_relationships
+        GROUP BY subject_entity_id
+      ) subj ON e.id = subj.subject_entity_id
+      LEFT JOIN (
+        SELECT object_entity_id, COUNT(*) as obj_count
+        FROM koi_relationships
+        GROUP BY object_entity_id
+      ) obj ON e.id = obj.object_entity_id
+    )
+    SELECT
+      e.id,
+      e.entity_text,
+      e.entity_type,
+      e.normalized_text,
+      e.occurrence_count,
+      e.fuseki_uri,
+      r.relationship_count
+    FROM entity_matches e
+    JOIN rel_counts r ON e.id = r.id
+    ORDER BY e.occurrence_count DESC, r.relationship_count DESC
+  `;
+
+  const result = await pool.query(query, [label]);
+  if (result.rows.length === 0) return null;
+
+  // Score and find winner (same logic as /api/koi/entity/resolve)
+  const variants = result.rows.map(v => {
+    const occScore = parseInt(v.occurrence_count) * 1000;
+    const relScore = parseInt(v.relationship_count) * 100;
+    const typePriority = DEFAULT_TYPE_PRIORITY[v.entity_type] || 0;
+    const typeScore = typePriority * 10;
+
+    let totalScore = occScore + relScore + typeScore;
+
+    // Boost if matches type hint
+    if (typeHint && v.entity_type.toUpperCase() === typeHint.toUpperCase()) {
+      totalScore += 50000;
+    }
+
+    return { ...v, score: totalScore };
+  });
+
+  variants.sort((a, b) => b.score - a.score);
+  const winner = variants[0];
+
+  return {
+    entity_id: winner.id,
+    uri: winner.fuseki_uri,
+    entity_text: winner.entity_text,
+    entity_type: winner.entity_type,
+    occurrence_count: parseInt(winner.occurrence_count),
+  };
+}
+
+// Graph neighborhood endpoint - query local graph structure
+// GET /api/koi/entity/neighborhood?label=...&uri=...&type_hint=...&limit=50&direction=both
+app.get('/api/koi/entity/neighborhood', async (req, res) => {
+  try {
+    const label = (req.query.label as string || '').trim() || null;
+    const uri = (req.query.uri as string || '').trim() || null;
+    const typeHint = (req.query.type_hint as string || '').trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 200);
+    const direction = (req.query.direction as string || 'both').toLowerCase();
+
+    if (!label && !uri) {
+      return res.status(400).json({ error: 'Either label or uri parameter is required' });
+    }
+
+    if (!['out', 'in', 'both'].includes(direction)) {
+      return res.status(400).json({ error: 'direction must be one of: out, in, both' });
+    }
+
+    // Resolve entity
+    const resolved = await resolveEntityInternal(label, uri, typeHint);
+
+    if (!resolved) {
+      return res.json({
+        query_label: label,
+        query_uri: uri,
+        type_hint: typeHint,
+        resolved_uri: null,
+        resolved_entity_id: null,
+        nodes: [],
+        edges: [],
+        truncated: false,
+        error: 'Entity not found'
+      });
+    }
+
+    // Build direction clause
+    let directionClause = '';
+    if (direction === 'out') {
+      directionClause = 'AND r.subject_entity_id = $1';
+    } else if (direction === 'in') {
+      directionClause = 'AND r.object_entity_id = $1';
+    } else {
+      directionClause = 'AND (r.subject_entity_id = $1 OR r.object_entity_id = $1)';
+    }
+
+    // Query relationships with entity info
+    const relQuery = `
+      WITH edges AS (
+        SELECT
+          r.id as rel_id,
+          r.predicate,
+          r.confidence,
+          r.occurrence_count as rel_occurrence_count,
+          r.subject_entity_id,
+          r.object_entity_id,
+          CASE
+            WHEN r.subject_entity_id = $1 THEN 'out'
+            ELSE 'in'
+          END as direction
+        FROM koi_relationships r
+        WHERE 1=1 ${directionClause}
+        ORDER BY r.occurrence_count DESC, r.confidence DESC NULLS LAST
+        LIMIT $2
+      ),
+      all_entity_ids AS (
+        SELECT DISTINCT subject_entity_id as entity_id FROM edges
+        UNION
+        SELECT DISTINCT object_entity_id as entity_id FROM edges
+      ),
+      nodes AS (
+        SELECT
+          e.id,
+          e.fuseki_uri as uri,
+          e.entity_text as text,
+          e.entity_type as type,
+          e.occurrence_count,
+          COALESCE(subj.subj_count, 0) + COALESCE(obj.obj_count, 0) as relationship_count
+        FROM entity_registry e
+        JOIN all_entity_ids a ON e.id = a.entity_id
+        LEFT JOIN (
+          SELECT subject_entity_id, COUNT(*) as subj_count
+          FROM koi_relationships
+          GROUP BY subject_entity_id
+        ) subj ON e.id = subj.subject_entity_id
+        LEFT JOIN (
+          SELECT object_entity_id, COUNT(*) as obj_count
+          FROM koi_relationships
+          GROUP BY object_entity_id
+        ) obj ON e.id = obj.object_entity_id
+      )
+      SELECT
+        'edge' as result_type,
+        ed.rel_id,
+        ed.predicate,
+        ed.confidence,
+        ed.rel_occurrence_count,
+        ed.direction,
+        subj.uri as subject_uri,
+        obj.uri as object_uri,
+        NULL as node_id,
+        NULL as node_uri,
+        NULL as node_text,
+        NULL as node_type,
+        NULL as node_occurrence_count,
+        NULL as node_relationship_count
+      FROM edges ed
+      JOIN entity_registry subj ON ed.subject_entity_id = subj.id
+      JOIN entity_registry obj ON ed.object_entity_id = obj.id
+
+      UNION ALL
+
+      SELECT
+        'node' as result_type,
+        NULL as rel_id,
+        NULL as predicate,
+        NULL as confidence,
+        NULL as rel_occurrence_count,
+        NULL as direction,
+        NULL as subject_uri,
+        NULL as object_uri,
+        n.id as node_id,
+        n.uri as node_uri,
+        n.text as node_text,
+        n.type as node_type,
+        n.occurrence_count as node_occurrence_count,
+        n.relationship_count as node_relationship_count
+      FROM nodes n
+    `;
+
+    const results = await pool.query(relQuery, [resolved.entity_id, limit]);
+
+    // Separate nodes and edges
+    const nodes: any[] = [];
+    const edges: any[] = [];
+    const nodeSet = new Set<number>();
+
+    for (const row of results.rows) {
+      if (row.result_type === 'node') {
+        if (!nodeSet.has(row.node_id)) {
+          nodeSet.add(row.node_id);
+          nodes.push({
+            id: row.node_id,
+            uri: row.node_uri,
+            text: row.node_text,
+            type: row.node_type,
+            occurrence_count: parseInt(row.node_occurrence_count),
+            relationship_count: parseInt(row.node_relationship_count),
+          });
+        }
+      } else if (row.result_type === 'edge') {
+        edges.push({
+          predicate: row.predicate,
+          subject_uri: row.subject_uri,
+          object_uri: row.object_uri,
+          direction: row.direction,
+          confidence: row.confidence,
+          occurrence_count: parseInt(row.rel_occurrence_count),
+        });
+      }
+    }
+
+    // Check if results were truncated
+    const truncated = edges.length >= limit;
+
+    res.json({
+      query_label: label,
+      query_uri: uri,
+      type_hint: typeHint,
+      resolved_uri: resolved.uri,
+      resolved_entity_id: resolved.entity_id,
+      resolved_entity_text: resolved.entity_text,
+      resolved_entity_type: resolved.entity_type,
+      nodes: nodes,
+      edges: edges,
+      node_count: nodes.length,
+      edge_count: edges.length,
+      truncated: truncated,
+    });
+
+  } catch (error) {
+    console.error('Neighborhood query error:', error);
+    res.status(500).json({
+      error: 'Neighborhood query failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Entity documents endpoint - find documents where an entity appears
+// GET /api/koi/entity/documents?label=...&uri=...&type_hint=...&limit=20
+app.get('/api/koi/entity/documents', async (req, res) => {
+  try {
+    const label = (req.query.label as string || '').trim() || null;
+    const uri = (req.query.uri as string || '').trim() || null;
+    const typeHint = (req.query.type_hint as string || '').trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 20, 1), 50);
+
+    if (!label && !uri) {
+      return res.status(400).json({ error: 'Either label or uri parameter is required' });
+    }
+
+    // Extract session token and validate for privacy filter
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const authenticatedEmail = await validateSessionToken(sessionToken);
+    const isAuthenticated = !!authenticatedEmail;
+    const privacyFilter = buildPrivacyFilter(isAuthenticated);
+
+    // Resolve entity
+    const resolved = await resolveEntityInternal(label, uri, typeHint);
+
+    if (!resolved) {
+      return res.json({
+        query_label: label,
+        query_uri: uri,
+        type_hint: typeHint,
+        resolved_uri: null,
+        resolved_entity_id: null,
+        documents: [],
+        error: 'Entity not found'
+      });
+    }
+
+    // Query documents via koi_entity_chunk_links
+    // Use normalized_text to find links (links store entity_name_lower)
+    const docQuery = `
+      WITH entity_chunks AS (
+        SELECT DISTINCT
+          l.document_rid,
+          l.chunk_rid,
+          l.entity_name,
+          l.confidence as link_confidence
+        FROM koi_entity_chunk_links l
+        WHERE l.entity_uri = $1
+           OR LOWER(TRIM(l.entity_name)) = LOWER(TRIM($2))
+        LIMIT $3 * 3
+      ),
+      docs_with_content AS (
+        SELECT
+          ec.document_rid,
+          ec.chunk_rid,
+          ec.entity_name,
+          ec.link_confidence,
+          m.content->>'text' as snippet,
+          m.metadata->>'source' as source,
+          m.metadata->>'url' as url,
+          m.published_at,
+          m.rid
+        FROM entity_chunks ec
+        JOIN koi_memories m ON m.id::text = ec.chunk_rid OR m.rid = ec.chunk_rid
+        WHERE m.superseded_at IS NULL
+          AND m.content->>'text' IS NOT NULL
+          ${privacyFilter}
+      ),
+      deduplicated AS (
+        SELECT *,
+          ROW_NUMBER() OVER (
+            PARTITION BY md5(snippet)
+            ORDER BY published_at DESC NULLS LAST
+          ) as content_rank
+        FROM docs_with_content
+      )
+      SELECT
+        rid,
+        document_rid,
+        url,
+        source,
+        SUBSTRING(snippet, 1, 500) as snippet,
+        published_at,
+        entity_name,
+        link_confidence
+      FROM deduplicated
+      WHERE content_rank = 1
+      ORDER BY published_at DESC NULLS LAST, link_confidence DESC NULLS LAST
+      LIMIT $3
+    `;
+
+    const normalizedLabel = label || resolved.entity_text;
+    const results = await pool.query(docQuery, [resolved.uri, normalizedLabel, limit]);
+
+    const documents = results.rows.map(row => ({
+      rid: row.rid,
+      document_rid: row.document_rid,
+      url: row.url,
+      source: row.source,
+      snippet: row.snippet,
+      published_at: row.published_at,
+      entity_matched: row.entity_name,
+      confidence: row.link_confidence,
+    }));
+
+    res.json({
+      query_label: label,
+      query_uri: uri,
+      type_hint: typeHint,
+      resolved_uri: resolved.uri,
+      resolved_entity_id: resolved.entity_id,
+      resolved_entity_text: resolved.entity_text,
+      resolved_entity_type: resolved.entity_type,
+      document_count: documents.length,
+      documents: documents,
+    });
+
+  } catch (error) {
+    console.error('Entity documents query error:', error);
+    res.status(500).json({
+      error: 'Entity documents query failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 // Health check
 app.get('/api/koi/health', async (req, res) => {
   try {

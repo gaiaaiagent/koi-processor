@@ -74,9 +74,11 @@ def infer_type_hint(context: str) -> Optional[str]:
         return 'ORGANIZATION'
 
     # PROJECT signals
+    # Note: 'ecosystem' removed - it's more commonly part of concept phrases
+    # like "ecosystem services" rather than indicating a PROJECT
     if any(kw in context_lower for kw in [
         'project', 'initiative', 'repository', 'integration',
-        'provides', 'ecosystem'
+        'provides'
     ]):
         return 'PROJECT'
 
@@ -289,9 +291,9 @@ def generate_markdown_report(result: EvalResult, cases: List[EvalCase], output_p
 
     # Title depends on whether hints were used
     if result.use_context_hints:
-        title = "# Polysemy Resolver Evaluation Report - Week 8 (With Context Hints)"
+        title = "# Polysemy Resolver Evaluation Report - Week 9 (With Context Hints)"
     else:
-        title = "# Polysemy Resolver Evaluation Report - Week 8"
+        title = "# Polysemy Resolver Evaluation Report - Week 9"
 
     lines = [
         title,
@@ -468,9 +470,9 @@ def main():
     if args.output:
         output_file = args.output
     elif args.use_context_hint:
-        output_file = "docs/archive/reports/polysemy_resolver_eval_week8_with_hints.md"
+        output_file = "docs/archive/reports/polysemy_resolver_eval_week9_with_hints.md"
     else:
-        output_file = "docs/archive/reports/polysemy_resolver_eval_week8.md"
+        output_file = "docs/archive/reports/polysemy_resolver_eval_week9.md"
 
     # Load dataset
     dataset_path = Path(__file__).parent.parent / args.dataset
