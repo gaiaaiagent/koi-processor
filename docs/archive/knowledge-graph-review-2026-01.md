@@ -2,7 +2,7 @@
 
 **Started:** 2025-12-24
 **Last Updated:** 2025-12-24
-**Status:** Week 9 Complete - Graph Neighborhood + Documents Endpoints + Heuristic Fix
+**Status:** Week 10 In Progress - MCP Tools Deployed + Graph Audit Sprint
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1034,6 +1034,128 @@ PYTHONPATH=src ./.venv/bin/python scripts/eval_polysemy_resolver.py --use-contex
 
 ---
 
+## Week 10: MCP Tools Deployment + Graph Audit Sprint
+
+**MCP Tools Deployed:** 2025-12-24
+**Status:** Tools live on production, audit sprint ready
+
+### MCP Tools Now Available
+
+Three new MCP tools deployed to `regen-koi-mcp` for entity resolution and graph exploration:
+
+| Tool | Endpoint | Description |
+|------|----------|-------------|
+| `resolve_entity` | `/api/koi/entity/resolve` | Resolve ambiguous labels to canonical entities with confidence scores |
+| `get_entity_neighborhood` | `/api/koi/entity/neighborhood` | Get graph relationships and connected entities |
+| `get_entity_documents` | `/api/koi/entity/documents` | Get documents associated with an entity (privacy-aware) |
+
+**Nginx routing fix:** Added `/api/koi/entity/` and `/api/koi/stats` proxies to GAIA nginx config (commit `74e85b11a`).
+
+### Week 10 Sprint Plan: Graph Quality Audit via MCP Tools
+
+**Objective:** Use the new MCP tools to audit graph correctness on high-value queries, identify issues, and log findings.
+
+#### Phase 1: Curated Entity Audit (5 high-value labels)
+
+Test each label with all three tools and verify correctness:
+
+| Label | Expected Type | Audit Checks |
+|-------|---------------|--------------|
+| `regen network` | ORGANIZATION | Correct type? Proper relationships? Documents include forum/notion? |
+| `ethereum` | TECHNOLOGY | Type resolved? Neighborhood shows blockchain relationships? |
+| `regen commons` | ORGANIZATION/PROJECT | Polysemy handled? Both types accessible? |
+| `notion` | TECHNOLOGY | Platform type dominant? Not misclassified? |
+| `koi` | PROJECT | Correct type? Technology variant secondary? |
+
+**Commands:**
+```bash
+# Using MCP tools via Claude Code:
+resolve_entity label="regen network"
+get_entity_neighborhood label="regen network" limit=20
+get_entity_documents label="regen network" limit=10
+
+# Or via curl:
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=regen%20network"
+curl "https://regen.gaiaai.xyz/api/koi/entity/neighborhood?label=regen%20network&limit=20"
+curl "https://regen.gaiaai.xyz/api/koi/entity/documents?label=regen%20network&limit=10"
+```
+
+#### Phase 2: Relationship Quality Audit
+
+Check neighborhood edges for semantic correctness:
+
+| Predicate | Expected Pattern | Check |
+|-----------|-----------------|-------|
+| `mentions` | doc → entity | Verify subject is document-like |
+| `interacts_with` | entity ↔ entity | Verify bidirectional makes sense |
+| `related_to` | entity ↔ entity | Generic but valid |
+| `uses` | entity → technology | Verify technology is object |
+
+**Sample Query:**
+```bash
+curl "https://regen.gaiaai.xyz/api/koi/entity/neighborhood?label=koi&direction=both&limit=50"
+# Check: predicates make sense, no obviously wrong connections
+```
+
+#### Phase 3: Document Coverage Audit
+
+Verify documents endpoint respects privacy and returns expected sources:
+
+| Entity | Expected Sources | Privacy Check |
+|--------|-----------------|---------------|
+| `regen network` | notion, github, discourse, medium | Unauthenticated: no private notion |
+| `ethereum` | github, discourse, medium | Public only |
+| `koi` | github, notion (public), discourse | Auth required for private notion |
+
+**Auth Test:**
+```bash
+# Without auth - should return public docs only
+curl "https://regen.gaiaai.xyz/api/koi/entity/documents?label=koi&limit=20"
+
+# With auth (from authenticated MCP session) - should include private
+get_entity_documents label="koi" limit=20
+```
+
+#### Phase 4: Issue Logging
+
+For each issue discovered, log with format:
+
+| Field | Description |
+|-------|-------------|
+| ID | E4XX (next sequential) |
+| Entity | Label and type |
+| Tool | Which MCP tool exposed the issue |
+| Finding | What's wrong |
+| Severity | Low/Medium/High |
+| Root Cause | Extraction? Dedup? Predicate? |
+
+### Week 10 Deliverables
+
+| Deliverable | Status |
+|-------------|--------|
+| MCP tools deployed | ✅ Complete (2025-12-24) |
+| Nginx routing fix | ✅ Complete (`/api/koi/entity/`, `/api/koi/stats`) |
+| Smoke test passing | ✅ 7/7 tests pass |
+| Curated entity audit | Pending |
+| Relationship audit | Pending |
+| Document coverage audit | Pending |
+| Issue log updated | Pending |
+
+### Commands to Start Audit
+
+```bash
+# Local smoke test (already passing)
+cd /Users/darrenzal/projects/RegenAI/regen-koi-mcp
+npx tsx scripts/test-entity-tools.ts
+
+# Production verification
+curl -s "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=notion" | jq '.candidates[0]'
+curl -s "https://regen.gaiaai.xyz/api/koi/entity/neighborhood?label=ethereum&type_hint=TECHNOLOGY&limit=5" | jq '.edge_count'
+curl -s "https://regen.gaiaai.xyz/api/koi/entity/documents?label=regen%20network&limit=5" | jq '.document_count'
+```
+
+---
+
 ## Review Sprint Plan
 
 ### Automated Audits
@@ -1257,6 +1379,9 @@ ORDER BY occurrence_count DESC;
 | **Week 9: Documents Endpoint** | Complete | `/api/koi/entity/documents` deployed |
 | **Week 9: Heuristic Fix** | Complete | Removed 'ecosystem' from PROJECT keywords |
 | **Week 9: Eval Execution** | Complete | 100% Top-1 (both with and without hints) |
+| **Week 10: MCP Tools Deployment** | Complete | `resolve_entity`, `get_entity_neighborhood`, `get_entity_documents` |
+| **Week 10: Nginx Routing Fix** | Complete | Added `/api/koi/entity/` and `/api/koi/stats` proxies |
+| **Week 10: Graph Audit Sprint** | In Progress | Curated entity audit, relationship audit, document coverage |
 
 ---
 
