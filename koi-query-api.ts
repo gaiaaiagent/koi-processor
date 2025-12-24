@@ -229,7 +229,7 @@ async function get1HopNeighbors(
     ORDER BY confidence DESC
     LIMIT $3
   `;
-  const result = await pool.query(query, [matchedEntityUris, maxPerEntity, totalLimit]);
+  const result = await pool.query(query, [matchedEntityNames, maxPerEntity, totalLimit]);
   return result.rows;
 }
 
