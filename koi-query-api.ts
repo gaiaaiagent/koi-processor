@@ -1513,6 +1513,175 @@ app.get('/api/koi/auth/status', async (req, res) => {
   }
 });
 
+// Default type priority (higher = more preferred) - matches Python polysemy_resolver.py
+const DEFAULT_TYPE_PRIORITY: Record<string, number> = {
+  'TECHNOLOGY': 100,
+  'PROJECT': 90,
+  'ORGANIZATION': 80,
+  'CONCEPT': 70,
+  'STANDARD': 60,
+  'PERSON': 50,
+  'PROCESS': 40,
+  'MATERIAL': 35,
+  'MODULE': 30,
+  'LOCATION': 25,
+  'EVENT': 20,
+  'VALIDATOR': 15,
+  'CREDIT_CLASS': 10,
+  'GOVERNANCE_PROPOSAL': 5,
+  'EVIDENCE': 4,
+  'CLAIM': 3,
+  'QUESTION': 2,
+  'API_MESSAGE': 1,
+  'LICENSE': 0,
+  'KEEPER': 0,
+};
+
+// Polysemy-aware entity resolution endpoint
+// GET /api/koi/entity/resolve?label=...&type_hint=...&limit=5
+app.get('/api/koi/entity/resolve', async (req, res) => {
+  try {
+    const label = (req.query.label as string || '').trim();
+    const typeHint = (req.query.type_hint as string || '').trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 5, 1), 20);
+
+    if (!label) {
+      return res.status(400).json({ error: 'label parameter is required' });
+    }
+
+    // Query for entity variants matching the label
+    const query = `
+      WITH entity_matches AS (
+        SELECT
+          id,
+          entity_text,
+          entity_type,
+          normalized_text,
+          occurrence_count,
+          fuseki_uri
+        FROM entity_registry
+        WHERE LOWER(TRIM(normalized_text)) = LOWER(TRIM($1))
+      ),
+      rel_counts AS (
+        SELECT
+          e.id,
+          COALESCE(subj.subj_count, 0) + COALESCE(obj.obj_count, 0) as relationship_count
+        FROM entity_matches e
+        LEFT JOIN (
+          SELECT subject_entity_id, COUNT(*) as subj_count
+          FROM koi_relationships
+          GROUP BY subject_entity_id
+        ) subj ON e.id = subj.subject_entity_id
+        LEFT JOIN (
+          SELECT object_entity_id, COUNT(*) as obj_count
+          FROM koi_relationships
+          GROUP BY object_entity_id
+        ) obj ON e.id = obj.object_entity_id
+      )
+      SELECT
+        e.id,
+        e.entity_text,
+        e.entity_type,
+        e.normalized_text,
+        e.occurrence_count,
+        e.fuseki_uri,
+        r.relationship_count
+      FROM entity_matches e
+      JOIN rel_counts r ON e.id = r.id
+      ORDER BY e.occurrence_count DESC, r.relationship_count DESC
+    `;
+
+    const result = await pool.query(query, [label]);
+    const variants = result.rows;
+
+    if (variants.length === 0) {
+      return res.json({
+        query_label: label,
+        type_hint: typeHint,
+        variant_count: 0,
+        winner: null,
+        alternatives: [],
+        is_polysemy: false,
+        resolution_method: 'no_match'
+      });
+    }
+
+    // Compute scores for all variants
+    const scoredVariants = variants.map(v => {
+      const occScore = parseInt(v.occurrence_count) * 1000;
+      const relScore = parseInt(v.relationship_count) * 100;
+      const typePriority = DEFAULT_TYPE_PRIORITY[v.entity_type] || 0;
+      const typeScore = typePriority * 10;
+
+      let totalScore = occScore + relScore + typeScore;
+      const reasons: string[] = [
+        `occ=${v.occurrence_count}`,
+        `rels=${v.relationship_count}`,
+        `type_pri=${typePriority}`
+      ];
+
+      // Boost if matches type hint
+      if (typeHint && v.entity_type.toUpperCase() === typeHint) {
+        totalScore += 50000;
+        reasons.push('type_hint_match=+50k');
+      }
+
+      return {
+        uri: v.fuseki_uri,
+        entity_text: v.entity_text,
+        entity_type: v.entity_type,
+        occurrence_count: parseInt(v.occurrence_count),
+        relationship_count: parseInt(v.relationship_count),
+        score: totalScore,
+        score_breakdown: reasons.join(', ')
+      };
+    });
+
+    // Sort by score descending
+    scoredVariants.sort((a, b) => b.score - a.score);
+
+    // Determine winner and alternatives
+    const winner = scoredVariants[0];
+    const alternatives = scoredVariants.slice(1, limit);
+
+    // Determine if polysemy exists
+    const uniqueTypes = new Set(scoredVariants.map(v => v.entity_type));
+    const isPolysemy = uniqueTypes.size > 1;
+
+    // Determine resolution method
+    let resolutionMethod = 'highest_combined_score';
+    if (typeHint && winner.entity_type.toUpperCase() === typeHint) {
+      resolutionMethod = 'type_hint_match';
+    } else {
+      const totalOcc = scoredVariants.reduce((sum, v) => sum + v.occurrence_count, 0);
+      const totalRels = scoredVariants.reduce((sum, v) => sum + v.relationship_count, 0);
+
+      if (winner.occurrence_count > totalOcc * 0.5) {
+        resolutionMethod = 'dominant_occurrence';
+      } else if (winner.relationship_count > totalRels * 0.5) {
+        resolutionMethod = 'dominant_connectivity';
+      }
+    }
+
+    res.json({
+      query_label: label,
+      type_hint: typeHint,
+      variant_count: scoredVariants.length,
+      winner: winner,
+      alternatives: alternatives,
+      is_polysemy: isPolysemy,
+      resolution_method: resolutionMethod
+    });
+
+  } catch (error) {
+    console.error('Entity resolve error:', error);
+    res.status(500).json({
+      error: 'Entity resolution failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 // Health check
 app.get('/api/koi/health', async (req, res) => {
   try {

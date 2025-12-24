@@ -75,6 +75,10 @@ class CanaryResult:
     quality_gates_passed: bool = False
     overall_passed: bool = False
 
+    # Targeting info
+    must_contain_patterns: List[str] = field(default_factory=list)
+    selection_mode: str = "random"
+
     # Notes
     notes: List[str] = field(default_factory=list)
 
@@ -209,17 +213,27 @@ def check_fix014_violations(entities: List[Dict]) -> List[Dict]:
     return false_negatives
 
 
-async def main(persist: bool = False, limit: int = 10):
-    """Run canary validation on N random documents."""
+async def main(persist: bool = False, limit: int = 10, must_contain: List[str] = None):
+    """Run canary validation on N random documents.
+
+    Args:
+        persist: If True, persist entities to database
+        limit: Number of documents to process
+        must_contain: Optional list of patterns - only select docs containing these
+    """
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     mode = "persist" if persist else "dry_run"
 
     print(f"{'=' * 70}")
-    print(f"WEEK 7 CANARY VALIDATION - FIX-013/014")
+    print(f"WEEK 7/8 CANARY VALIDATION - FIX-013/014")
     print(f"{'=' * 70}")
     print(f"Run ID: {run_id}")
     print(f"Mode: {mode.upper()}")
     print(f"Documents: {limit}")
+    if must_contain:
+        print(f"Must Contain: {', '.join(must_contain)}")
+    else:
+        print(f"Selection: RANDOM")
     print()
 
     if persist:
@@ -248,6 +262,8 @@ async def main(persist: bool = False, limit: int = 10):
         entity_type_violations=0,
         humanactor_violations=0,
         self_referential_blocked=0,
+        must_contain_patterns=must_contain or [],
+        selection_mode="targeted" if must_contain else "random",
     )
 
     # Initialize extractor
@@ -278,26 +294,63 @@ async def main(persist: bool = False, limit: int = 10):
     )
     print(f"[canary] Connected to PostgreSQL (dry_run={not persist})")
 
-    # Fetch random documents
+    # Build must_contain filter if patterns are provided
+    must_contain_filter = ""
+    query_params = [limit]
+    if must_contain:
+        # Build ILIKE conditions for each pattern
+        patterns = []
+        for i, pattern in enumerate(must_contain, start=2):
+            patterns.append(f"content->>'text' ILIKE ${i}")
+            query_params.append(f"%{pattern}%")
+        must_contain_filter = " AND (" + " OR ".join(patterns) + ")"
+        # Prepend limit param
+        query_params = [limit] + [f"%{p}%" for p in must_contain]
+
+    # Fetch documents (random or targeted)
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            f"""
-            SELECT
-              id,
-              rid,
-              source_sensor,
-              metadata->>'file_path' AS file_path,
-              content->>'text' AS text
-            FROM koi_memories
-            WHERE superseded_at IS NULL
-              AND content->>'text' IS NOT NULL
-              AND LENGTH(content->>'text') > 200
-              {CORPUS_FILTER_SQL}
-            ORDER BY RANDOM()
-            LIMIT %s
-            """,
-            (limit,),
-        )
+        if must_contain:
+            # Targeted selection - prioritize docs containing the patterns
+            pattern_filters = " OR ".join([f"content->>'text' ILIKE %s" for _ in must_contain])
+            cur.execute(
+                f"""
+                SELECT
+                  id,
+                  rid,
+                  source_sensor,
+                  metadata->>'file_path' AS file_path,
+                  content->>'text' AS text
+                FROM koi_memories
+                WHERE superseded_at IS NULL
+                  AND content->>'text' IS NOT NULL
+                  AND LENGTH(content->>'text') > 200
+                  {CORPUS_FILTER_SQL}
+                  AND ({pattern_filters})
+                ORDER BY RANDOM()
+                LIMIT %s
+                """,
+                [f"%{p}%" for p in must_contain] + [limit],
+            )
+        else:
+            # Random selection
+            cur.execute(
+                f"""
+                SELECT
+                  id,
+                  rid,
+                  source_sensor,
+                  metadata->>'file_path' AS file_path,
+                  content->>'text' AS text
+                FROM koi_memories
+                WHERE superseded_at IS NULL
+                  AND content->>'text' IS NOT NULL
+                  AND LENGTH(content->>'text') > 200
+                  {CORPUS_FILTER_SQL}
+                ORDER BY RANDOM()
+                LIMIT %s
+                """,
+                (limit,),
+            )
         docs = cur.fetchall()
 
     print(f"[canary] Fetched {len(docs)} documents")
@@ -504,11 +557,18 @@ OVERALL STATUS: {'CANARY PASSED' if result.overall_passed else 'CANARY FAILED'}
 def generate_report(result: CanaryResult, output_path: Path):
     """Generate markdown report."""
     lines = [
-        "# Week 7 Canary Validation Report - FIX-013/014",
+        "# Week 7/8 Canary Validation Report - FIX-013/014",
         "",
         f"**Generated:** {result.timestamp}",
         f"**Run ID:** {result.run_id}",
         f"**Mode:** {result.mode.upper()} (no production writes)" if result.mode == "dry_run" else f"**Mode:** {result.mode.upper()}",
+        f"**Selection:** {result.selection_mode.upper()}",
+    ]
+
+    if result.must_contain_patterns:
+        lines.append(f"**Must Contain:** {', '.join(result.must_contain_patterns)}")
+
+    lines.extend([
         f"**Status:** {'PASS' if result.overall_passed else 'FAIL'}",
         "",
         "---",
@@ -533,7 +593,7 @@ def generate_report(result: CanaryResult, output_path: Path):
         f"- Entities blocked by FIX-013: **{result.fix013_code_module_as_process_blocked}**",
         f"- False negatives (slipped through): **{len(result.fix013_false_negatives)}**",
         "",
-    ]
+    ])
 
     if result.fix013_code_module_examples:
         lines.extend([
@@ -640,11 +700,17 @@ def generate_report(result: CanaryResult, output_path: Path):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Week 7 Canary Validation - FIX-013/014")
+    parser = argparse.ArgumentParser(description="Week 7/8 Canary Validation - FIX-013/014")
     parser.add_argument("--persist", action="store_true",
                        help="Actually persist entities to database (default: dry-run)")
     parser.add_argument("--limit", type=int, default=10,
                        help="Number of documents to process (default: 10)")
+    parser.add_argument("--must-contain", type=str, action="append", dest="must_contain",
+                       help="Select docs containing this pattern (can be repeated)")
     args = parser.parse_args()
 
-    asyncio.run(main(persist=args.persist, limit=args.limit))
+    asyncio.run(main(
+        persist=args.persist,
+        limit=args.limit,
+        must_contain=args.must_contain
+    ))

@@ -46,6 +46,68 @@ from knowledge_graph.polysemy_resolver import (
 )
 
 
+def infer_type_hint(context: str) -> Optional[str]:
+    """
+    Infer type hint from context text using keyword heuristics.
+
+    Args:
+        context: The context string describing entity usage
+
+    Returns:
+        Inferred type hint or None if no clear signal
+    """
+    context_lower = context.lower()
+
+    # TECHNOLOGY signals
+    if any(kw in context_lower for kw in [
+        'platform', 'software', 'tool', 'api', 'protocol', 'deployed',
+        'layer 2', 'l2', 'blockchain', 'chain', 'mainnet', 'network',
+        'sdk', 'library', 'framework', 'format', 'stored on', 'query'
+    ]):
+        return 'TECHNOLOGY'
+
+    # ORGANIZATION signals
+    if any(kw in context_lower for kw in [
+        'company', 'founded', 'organization', 'team', 'community',
+        'join our', 'group'
+    ]):
+        return 'ORGANIZATION'
+
+    # PROJECT signals
+    if any(kw in context_lower for kw in [
+        'project', 'initiative', 'repository', 'integration',
+        'provides', 'ecosystem'
+    ]):
+        return 'PROJECT'
+
+    # CONCEPT signals
+    if any(kw in context_lower for kw in [
+        'concept', 'definition', 'measuring', 'valuing', 'practices',
+        'methodology', 'loss', 'services'
+    ]):
+        return 'CONCEPT'
+
+    # PROCESS signals
+    if any(kw in context_lower for kw in [
+        'process', 'required', 'verification', 'validation'
+    ]):
+        return 'PROCESS'
+
+    # PERSON signals
+    if any(kw in context_lower for kw in [
+        'founded by', 'leads', 'person', 'author'
+    ]):
+        return 'PERSON'
+
+    # STANDARD signals
+    if any(kw in context_lower for kw in [
+        'standard', 'specification', 'modeled in'
+    ]):
+        return 'STANDARD'
+
+    return None
+
+
 @dataclass
 class EvalCase:
     """Single evaluation case."""
@@ -60,6 +122,10 @@ class EvalCase:
     top3_types: List[str] = field(default_factory=list)
     resolution_method: Optional[str] = None
     is_polysemy: bool = False
+
+    # Type hint info
+    type_hint_used: Optional[str] = None
+    type_hint_inferred: Optional[str] = None
 
     # Metrics
     top1_correct: bool = False
@@ -89,6 +155,11 @@ class EvalResult:
     # Polysemy stats
     polysemy_cases: int
 
+    # Type hint stats
+    use_context_hints: bool = False
+    hints_inferred: int = 0
+    hints_matched: int = 0  # Cases where hint matched winner type
+
 
 def load_eval_dataset(path: str) -> List[EvalCase]:
     """Load evaluation dataset from JSONL file."""
@@ -117,8 +188,17 @@ def load_eval_dataset(path: str) -> List[EvalCase]:
     return cases
 
 
-def run_evaluation(cases: List[EvalCase], conn) -> EvalResult:
-    """Run evaluation on all cases."""
+def run_evaluation(cases: List[EvalCase], conn, use_context_hints: bool = False) -> EvalResult:
+    """Run evaluation on all cases.
+
+    Args:
+        cases: List of evaluation cases
+        conn: Database connection
+        use_context_hints: If True, infer type hints from context and use them
+
+    Returns:
+        EvalResult with aggregated metrics
+    """
     found_cases = 0
     not_found_cases = 0
     top1_correct = 0
@@ -127,9 +207,20 @@ def run_evaluation(cases: List[EvalCase], conn) -> EvalResult:
     not_found = []
     resolution_methods = {}
     polysemy_cases = 0
+    hints_inferred = 0
+    hints_matched = 0
 
     for case in cases:
-        result = resolve_entity(case.label, conn=conn)
+        # Optionally infer type hint from context
+        type_hint = None
+        if use_context_hints:
+            type_hint = infer_type_hint(case.context)
+            case.type_hint_inferred = type_hint
+            if type_hint:
+                hints_inferred += 1
+                case.type_hint_used = type_hint
+
+        result = resolve_entity(case.label, type_hint=type_hint, conn=conn)
 
         if result.winner is None:
             not_found_cases += 1
@@ -163,6 +254,11 @@ def run_evaluation(cases: List[EvalCase], conn) -> EvalResult:
         else:
             failures.append(case)
 
+        # Track if type hint matched winner
+        if use_context_hints and case.type_hint_used:
+            if case.type_hint_used.upper() == result.winner.entity_type.upper():
+                hints_matched += 1
+
         # Check top-3 accuracy
         top3_upper = set(t.upper() for t in top3)
         if case.expected_types & top3_upper:
@@ -181,6 +277,9 @@ def run_evaluation(cases: List[EvalCase], conn) -> EvalResult:
         not_found=not_found,
         resolution_methods=resolution_methods,
         polysemy_cases=polysemy_cases,
+        use_context_hints=use_context_hints,
+        hints_inferred=hints_inferred,
+        hints_matched=hints_matched,
     )
 
 
@@ -188,11 +287,18 @@ def generate_markdown_report(result: EvalResult, cases: List[EvalCase], output_p
     """Generate markdown report of evaluation results."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Title depends on whether hints were used
+    if result.use_context_hints:
+        title = "# Polysemy Resolver Evaluation Report - Week 8 (With Context Hints)"
+    else:
+        title = "# Polysemy Resolver Evaluation Report - Week 8"
+
     lines = [
-        "# Polysemy Resolver Evaluation Report - Week 7",
+        title,
         "",
         f"**Generated:** {now}",
         f"**Dataset:** {len(cases)} cases",
+        f"**Context Hints:** {'Enabled' if result.use_context_hints else 'Disabled'}",
         "",
         "---",
         "",
@@ -204,6 +310,16 @@ def generate_markdown_report(result: EvalResult, cases: List[EvalCase], output_p
         f"| Found in DB | {result.found_cases} ({100*result.found_cases/result.total_cases:.1f}%) |",
         f"| Not Found | {result.not_found_cases} |",
         f"| Polysemy Cases | {result.polysemy_cases} |",
+    ]
+
+    # Add hint stats if enabled
+    if result.use_context_hints:
+        lines.extend([
+            f"| Hints Inferred | {result.hints_inferred} |",
+            f"| Hints Matched Winner | {result.hints_matched} |",
+        ])
+
+    lines.extend([
         "",
         "---",
         "",
@@ -214,7 +330,7 @@ def generate_markdown_report(result: EvalResult, cases: List[EvalCase], output_p
         f"| Top-1 Type Accuracy | {result.top1_correct} | {result.found_cases} | **{100*result.top1_accuracy:.1f}%** |",
         f"| Top-3 Coverage | {result.top3_correct} | {result.found_cases} | **{100*result.top3_accuracy:.1f}%** |",
         "",
-    ]
+    ])
 
     # Pass/Fail determination
     if result.top1_accuracy >= 0.8:
@@ -277,9 +393,15 @@ def generate_markdown_report(result: EvalResult, cases: List[EvalCase], output_p
         "",
         "## All Results",
         "",
-        "| Label | Found | Winner | Top-1 | Top-3 | Polysemy | Notes |",
-        "|-------|-------|--------|-------|-------|----------|-------|",
     ])
+
+    # Include Hint column if hints were used
+    if result.use_context_hints:
+        lines.append("| Label | Found | Hint | Winner | Top-1 | Top-3 | Polysemy | Notes |")
+        lines.append("|-------|-------|------|--------|-------|-------|----------|-------|")
+    else:
+        lines.append("| Label | Found | Winner | Top-1 | Top-3 | Polysemy | Notes |")
+        lines.append("|-------|-------|--------|-------|-------|----------|-------|")
 
     for case in cases:
         found = "Yes" if case.found else "No"
@@ -288,8 +410,12 @@ def generate_markdown_report(result: EvalResult, cases: List[EvalCase], output_p
         top3 = "✓" if case.top3_correct else ("✗" if case.found else "-")
         polysemy = "Yes" if case.is_polysemy else "No"
         notes = case.notes[:40] + "..." if len(case.notes) > 40 else case.notes
+        hint = case.type_hint_used or "-"
 
-        lines.append(f"| {case.label} | {found} | {winner} | {top1} | {top3} | {polysemy} | {notes} |")
+        if result.use_context_hints:
+            lines.append(f"| {case.label} | {found} | {hint} | {winner} | {top1} | {top3} | {polysemy} | {notes} |")
+        else:
+            lines.append(f"| {case.label} | {found} | {winner} | {top1} | {top3} | {polysemy} | {notes} |")
 
     lines.extend([
         "",
@@ -328,10 +454,23 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default="docs/archive/reports/polysemy_resolver_eval_week7.md",
-        help="Output path for evaluation report"
+        default=None,
+        help="Output path for evaluation report (auto-generated if not specified)"
+    )
+    parser.add_argument(
+        "--use-context-hint",
+        action="store_true",
+        help="Infer type hints from context and use them for resolution"
     )
     args = parser.parse_args()
+
+    # Determine output path based on whether hints are used
+    if args.output:
+        output_file = args.output
+    elif args.use_context_hint:
+        output_file = "docs/archive/reports/polysemy_resolver_eval_week8_with_hints.md"
+    else:
+        output_file = "docs/archive/reports/polysemy_resolver_eval_week8.md"
 
     # Load dataset
     dataset_path = Path(__file__).parent.parent / args.dataset
@@ -347,6 +486,11 @@ def main():
     cases = load_eval_dataset(str(dataset_path))
     print(f"Loaded {len(cases)} evaluation cases")
 
+    if args.use_context_hint:
+        print("Context hints: ENABLED")
+    else:
+        print("Context hints: DISABLED")
+
     # Connect to database
     db_config = get_default_db_config()
     print(f"Connecting to database: {db_config['host']}:{db_config['port']}/{db_config['database']}")
@@ -359,7 +503,7 @@ def main():
 
     # Run evaluation
     print("Running evaluation...")
-    result = run_evaluation(cases, conn)
+    result = run_evaluation(cases, conn, use_context_hints=args.use_context_hint)
 
     conn.close()
 
@@ -367,6 +511,8 @@ def main():
     print()
     print("=" * 60)
     print("EVALUATION RESULTS")
+    if args.use_context_hint:
+        print("(With Context Hints)")
     print("=" * 60)
     print(f"Total Cases: {result.total_cases}")
     print(f"Found in DB: {result.found_cases}")
@@ -376,11 +522,17 @@ def main():
     print(f"Top-3 Coverage: {result.top3_correct}/{result.found_cases} ({100*result.top3_accuracy:.1f}%)")
     print()
 
+    if args.use_context_hint:
+        print(f"Hints Inferred: {result.hints_inferred}")
+        print(f"Hints Matched Winner: {result.hints_matched}")
+        print()
+
     if result.failures:
         print("Failures:")
         for case in result.failures[:5]:
             expected = ", ".join(sorted(case.expected_types))
-            print(f"  - {case.label}: expected {expected}, got {case.winner_type}")
+            hint_info = f" (hint: {case.type_hint_used})" if case.type_hint_used else ""
+            print(f"  - {case.label}: expected {expected}, got {case.winner_type}{hint_info}")
         if len(result.failures) > 5:
             print(f"  ... and {len(result.failures) - 5} more")
 
@@ -390,7 +542,7 @@ def main():
         print(f"  - {method}: {count}")
 
     # Generate report
-    output_path = Path(__file__).parent.parent / args.output
+    output_path = Path(__file__).parent.parent / output_file
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     generate_markdown_report(result, cases, str(output_path))

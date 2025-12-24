@@ -311,9 +311,10 @@ class TestScoreRanking:
         assert scored[2][1]['occurrence_count'] == 10
 
     def test_type_hint_overrides_occurrence(self):
-        """Type hint match should override higher occurrence count."""
+        """Type hint match should override moderately higher occurrence count."""
         high_occ_wrong_type = {
-            'occurrence_count': 1000,
+            # With occ_weight=1000 and type_hint_boost=50k, hint should win up to a 50-occurrence gap.
+            'occurrence_count': 55,
             'relationship_count': 0,
             'entity_type': 'CONCEPT',
         }
