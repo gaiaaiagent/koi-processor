@@ -89,6 +89,8 @@ Key consolidations verified:
 
 Same-type duplicate clusters remaining: **0**
 
+**Definition:** "Same-type duplicate" means multiple rows in `entity_registry` where `(LOWER(TRIM(entity_text)), entity_type)` is identical. This is *not* enforced by a unique constraint—the query below detects existing duplicates that could have been created before deduplication:
+
 ```sql
 SELECT COUNT(*) FROM (
   SELECT LOWER(TRIM(entity_text)), entity_type, COUNT(*)

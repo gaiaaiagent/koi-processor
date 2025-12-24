@@ -3805,12 +3805,12 @@ F12-F17 are additional root causes identified during review (not present in the 
 
 **Total Duplicate Entities Removed:** 374 (30,041 → 29,667)
 
-**Breakdown:** ~51 (Pass 1, partial due to rollback bug) + 323 (Pass 2) = ~374 total merges
+**Breakdown:** 51 (Pass 1) + 323 (Pass 2) = 374 total merges
 
-| Pass | Script | Method | Applied | Blocked |
-|------|--------|--------|---------|---------|
-| 1 | apply_safe_merges.py | tier1_normalized + tier1_5_canonical | ~51 | Rollback bug |
-| 2 | apply_dedup_merges.py | tier1_normalized + tier1_5_canonical | 323 | 0 |
+| Pass | Script | Method | Applied | Notes |
+|------|--------|--------|---------|-------|
+| 1 | apply_safe_merges.py | tier1_normalized + tier1_5_canonical | 51 | Rollback bug caused reruns; final merge count = 51 |
+| 2 | apply_dedup_merges.py | tier1_normalized + tier1_5_canonical | 323 | All recorded in dedup_merge_plan (applied=true) |
 
 **Bug Fixes Applied During Pass 2:**
 1. SQL CTE reference error - `merge_fields_sql("w", "l")` → `merge_fields_sql("w", "c")`

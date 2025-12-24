@@ -7,6 +7,8 @@
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
 
+**Day-1 Audit Report:** [kg_audit_2026_01_day1.md](reports/kg_audit_2026_01_day1.md)
+
 ---
 
 ## Day-1 Baseline (2025-12-24)
