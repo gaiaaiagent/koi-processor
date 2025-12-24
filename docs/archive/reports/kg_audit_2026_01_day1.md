@@ -1,0 +1,175 @@
+# Knowledge Graph Audit Report - Cycle 2026-01
+
+**Generated:** 2025-12-24 01:01:02
+**Database:** eliza
+
+---
+
+## Summary Metrics
+
+| Metric | Value |
+| --- | --- |
+| Entities (entity_registry) | 29,667 |
+| Relationships (koi_relationships) | 15,364 |
+| Distinct Predicates | 1,499 |
+
+## Quality Gates
+
+| Gate | Check | Count | Status |
+| --- | --- | --- | --- |
+| A | No http:// URIs | 0 | **PASS** |
+| B | No generic ENTITY type | 0 | **PASS** |
+| C | No self-referential | 0 | **PASS** |
+| D | No HumanActor type | 0 | **PASS** |
+
+## Entity Type Distribution
+
+| Type | Count |
+| --- | --- |
+| CONCEPT | 13,892 |
+| TECHNOLOGY | 4,903 |
+| PROCESS | 2,245 |
+| PROJECT | 1,807 |
+| ORGANIZATION | 1,673 |
+| PERSON | 952 |
+| CLAIM | 598 |
+| API_MESSAGE | 513 |
+| STANDARD | 501 |
+| GOVERNANCE_PROPOSAL | 487 |
+| LOCATION | 420 |
+| MATERIAL | 265 |
+| EVIDENCE | 261 |
+| EVENT | 243 |
+| QUESTION | 235 |
+| VALIDATOR | 214 |
+| CREDIT_CLASS | 176 |
+| MODULE | 136 |
+| LICENSE | 115 |
+| KEEPER | 31 |
+
+## Top 25 Entities by Occurrence
+
+| Entity | Type | Occurrences |
+| --- | --- | --- |
+| Regen Network | ORGANIZATION | 3,702 |
+| Regen Ledger | TECHNOLOGY | 1,593 |
+| Regen Registry | ORGANIZATION | 699 |
+| Gregory Landua | PERSON | 684 |
+| Regen Foundation | ORGANIZATION | 610 |
+| Tokenomics | CONCEPT | 385 |
+| Ecocredit Module | PROJECT | 377 |
+| $Regen | PROJECT | 314 |
+| Notion | TECHNOLOGY | 308 |
+| Celo | ORGANIZATION | 301 |
+| Ecological Credit | CONCEPT | 285 |
+| GitHub | ORGANIZATION | 281 |
+| postgresql | TECHNOLOGY | 280 |
+| Liquidity | CONCEPT | 278 |
+| Governance | CONCEPT | 274 |
+| Max | PERSON | 265 |
+| James | PERSON | 239 |
+| Telegram | TECHNOLOGY | 212 |
+| Regen Marketplace | TECHNOLOGY | 212 |
+| youtube | TECHNOLOGY | 208 |
+| Cosmos SDK | PROJECT | 201 |
+| Mark | PERSON | 197 |
+| Christian Shearer | PERSON | 195 |
+| Osmosis | ORGANIZATION | 193 |
+| Discord | TECHNOLOGY | 193 |
+
+## Top 25 Predicates by Frequency
+
+| Predicate | Count |
+| --- | --- |
+| supports | 1,730 |
+| uses | 1,069 |
+| associated_with | 859 |
+| relates_to | 694 |
+| mentions | 529 |
+| operates | 510 |
+| participates_in | 443 |
+| includes | 391 |
+| manages | 381 |
+| implements | 368 |
+| part_of | 332 |
+| enables | 324 |
+| contains | 285 |
+| interacts_with | 275 |
+| provides | 239 |
+| proposes | 214 |
+| requires | 209 |
+| located_in | 207 |
+| creates | 207 |
+| defines | 180 |
+| affects | 172 |
+| works_with | 156 |
+| is_a | 146 |
+| addresses | 120 |
+| represents | 118 |
+
+## Top 25 Type Conflicts (Cross-Type Collisions)
+
+Entities with the same normalized name but different types:
+
+| Name | Type Count | Total Occurrences | Types |
+| --- | --- | --- | --- |
+| notion | 3 | 336 | TECHNOLOGY(308), ORGANIZATION(27), PROJECT(1) |
+| regen commons | 3 | 317 | ORGANIZATION(151), PROJECT(147), CONCEPT(19) |
+| governance | 2 | 276 | CONCEPT(274), ORGANIZATION(2) |
+| koi | 5 | 236 | PROJECT(166), TECHNOLOGY(65), CONCEPT(2), PERSON(2), STANDARD(1) |
+| aerodrome | 3 | 234 | TECHNOLOGY(100), PROJECT(98), ORGANIZATION(36) |
+| sparql | 3 | 224 | TECHNOLOGY(186), CONCEPT(29), STANDARD(9) |
+| telegram | 2 | 219 | TECHNOLOGY(212), ORGANIZATION(7) |
+| youtube | 2 | 212 | TECHNOLOGY(208), ORGANIZATION(4) |
+| discord | 2 | 208 | TECHNOLOGY(193), ORGANIZATION(15) |
+| agent-based modeling | 4 | 184 | CONCEPT(178), TECHNOLOGY(4), PROCESS(1), PROJECT(1) |
+| hydrax | 3 | 183 | TECHNOLOGY(83), PROJECT(81), ORGANIZATION(19) |
+| koi project | 2 | 181 | PROJECT(178), TECHNOLOGY(3) |
+| twitter | 3 | 180 | TECHNOLOGY(164), ORGANIZATION(15), PROJECT(1) |
+| blockchain | 2 | 177 | TECHNOLOGY(148), CONCEPT(29) |
+| python | 2 | 172 | TECHNOLOGY(171), PROJECT(1) |
+| regen tokenomics | 3 | 166 | CONCEPT(117), PROJECT(43), ORGANIZATION(6) |
+| regen tokenomics ai assistant | 2 | 164 | TECHNOLOGY(163), PROJECT(1) |
+| koi-processor | 2 | 161 | PROJECT(107), TECHNOLOGY(54) |
+| ethereum | 4 | 158 | TECHNOLOGY(128), PROJECT(17), ORGANIZATION(9), LOCATION(4) |
+| regen-koi-mcp | 2 | 151 | PROJECT(91), TECHNOLOGY(60) |
+| exchequer.fi | 3 | 148 | PROJECT(92), ORGANIZATION(45), TECHNOLOGY(11) |
+| ai | 2 | 144 | TECHNOLOGY(141), CONCEPT(3) |
+| discourse | 3 | 139 | TECHNOLOGY(125), ORGANIZATION(12), CONCEPT(2) |
+| mcp server | 2 | 135 | TECHNOLOGY(134), CONCEPT(1) |
+| knowledge graph | 2 | 133 | CONCEPT(117), TECHNOLOGY(16) |
+
+## Remaining Duplicate Clusters (Same Type)
+
+**No same-type duplicate clusters remaining.**
+
+## Single-Token PERSON Entities (Ambiguity Tracking)
+
+First names that may refer to multiple people:
+
+| Name | Occurrences |
+| --- | --- |
+| Max | 265 |
+| James | 239 |
+| Mark | 197 |
+| Will | 138 |
+| Brandon | 115 |
+| Julia | 53 |
+| Sarah | 47 |
+| Becca | 43 |
+| Scott | 43 |
+| Paul | 33 |
+| Giulio | 33 |
+| Monty | 33 |
+| Chris | 26 |
+| Jeancarlo | 23 |
+| Marie | 22 |
+| Sam | 21 |
+| Joel | 21 |
+| Brian | 21 |
+| David | 20 |
+| Robert | 20 |
+
+---
+
+*Report generated by `scripts/kg_audit_report.py`*

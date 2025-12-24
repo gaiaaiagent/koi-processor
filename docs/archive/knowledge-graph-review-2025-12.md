@@ -3805,6 +3805,8 @@ F12-F17 are additional root causes identified during review (not present in the 
 
 **Total Duplicate Entities Removed:** 374 (30,041 → 29,667)
 
+**Breakdown:** ~51 (Pass 1, partial due to rollback bug) + 323 (Pass 2) = ~374 total merges
+
 | Pass | Script | Method | Applied | Blocked |
 |------|--------|--------|---------|---------|
 | 1 | apply_safe_merges.py | tier1_normalized + tier1_5_canonical | ~51 | Rollback bug |
