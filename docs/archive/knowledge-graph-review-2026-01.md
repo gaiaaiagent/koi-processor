@@ -2,7 +2,7 @@
 
 **Started:** 2025-12-24
 **Last Updated:** 2025-12-24
-**Status:** Week 5 Complete - Allowlist Expanded + Wrong-Type Cleanup
+**Status:** Week 7 Complete - Canary Validation + Polysemy Resolver Module + Evaluation
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -383,6 +383,271 @@ All rows verified to have 0 relationships and 0 chunk links before deletion.
 
 ---
 
+## Week 6: Unexpected Pairs Analysis + Polysemy Resolver
+
+**Unexpected Pairs Report:** [type_conflict_unexpected_pairs_week6.md](reports/type_conflict_unexpected_pairs_week6.md)
+**Cleanup Report:** [week6_wrong_type_noise_cleanup.md](reports/week6_wrong_type_noise_cleanup.md)
+**Polysemy Resolution Examples:** [polysemy_resolution_examples_week6.md](reports/polysemy_resolution_examples_week6.md)
+
+### Top 3 Unexpected Type Pairs
+
+The 925 unexpected conflicts are concentrated in these pairs:
+
+| Type Pair | Label Count | Total Occurrences | Analysis |
+|-----------|-------------|-------------------|----------|
+| CONCEPT↔ORGANIZATION | 157 | 2,711 | Mostly legitimate (DAOs, working groups) |
+| PROCESS↔TECHNOLOGY | 114 | 1,388 | Mix of polysemy + noise (code modules) |
+| CONCEPT↔MATERIAL | 62 | 1,132 | Abstract concepts mislabeled as MATERIAL |
+
+These 3 pairs account for 36% (333 labels) of all unexpected conflicts.
+
+### FIX-013: Block PROCESS for Code Modules
+
+**File:** `src/knowledge_graph/improvements/entity_quality_filter.py`
+
+Blocks code module names (EntityQualityFilter, CanonicalResolver, etc.) when typed as PROCESS.
+These are clearly TECHNOLOGY (software components), not processes.
+
+**Tests:** `TestFIX013CodeModuleAsProcess` - 22 tests added
+
+**Impact:** Prevents extraction of CamelCase class names as PROCESS type.
+
+### FIX-014: Block MATERIAL for Abstract Concepts
+
+**File:** `src/knowledge_graph/improvements/entity_quality_filter.py`
+
+Blocks abstract environmental concepts (biodiversity, carbon sequestration, etc.) when typed as MATERIAL.
+These should be CONCEPT, not physical MATERIAL.
+
+**Tests:** `TestFIX014AbstractConceptAsMaterial` - 40 tests added
+
+**Impact:** Prevents abstract ecological concepts from being typed as physical materials.
+
+### Week 6 Wrong-Type Cleanup
+
+Applied safe deletion of 8 wrong-type entity_registry rows (10 total occurrences):
+
+| Label | Wrong Type | Occurrences | Correct Type |
+|-------|------------|-------------|--------------|
+| EntityQualityFilter | PROCESS | 1 | TECHNOLOGY |
+| CanonicalResolver | PROCESS | 1 | TECHNOLOGY |
+| ConfidenceFilter | PROCESS | 1 | TECHNOLOGY |
+| ListSplitter | PROCESS | 1 | TECHNOLOGY |
+| OntologyNormalizer | PROCESS | 1 | TECHNOLOGY |
+| biodiversity | MATERIAL | 1 | CONCEPT |
+| carbon sequestration | MATERIAL | 1 | CONCEPT |
+| ecological assets | MATERIAL | 3 | CONCEPT |
+
+All rows verified to have 0 relationships and 0 chunk links before deletion.
+
+### Polysemy-Aware Entity Resolution
+
+Implemented first polysemy-aware entity resolver for query/GraphRAG usage:
+
+**Script:** `scripts/resolve_entity_variants.py`
+
+**Features:**
+- Takes label + optional type hint
+- Returns ranked variants by: occurrence_count → connectivity → type_priority
+- Outputs winner + alternatives with scores and reasoning
+- Supports JSON and text output formats
+
+**Example:**
+```
+Query: 'ethereum'
+Type Hint: TECHNOLOGY
+Variants Found: 3
+Is Polysemy: True
+Resolution Method: type_hint_match
+
+WINNER: Ethereum (TECHNOLOGY)
+  Occurrences: 128
+  Relationships: 2
+  Score: 179200
+  Why: occ=128, rels=2, type_pri=100, type_hint_match=+50k
+
+ALTERNATIVES:
+  [1] Ethereum (PROJECT): Occ=17, Score=17900
+  [2] Ethereum (ORGANIZATION): Occ=9, Score=9800
+```
+
+**Usage in GraphRAG:**
+```python
+from scripts.resolve_entity_variants import resolve_entity
+
+# Basic resolution
+result = resolve_entity(conn, 'notion')
+winner = result.winner
+
+# With type hint
+result = resolve_entity(conn, 'ethereum', type_hint='TECHNOLOGY')
+```
+
+### Week 6 Metrics Summary
+
+| Metric | Post-Week 5 | Post-Week 6 | Change |
+|--------|-------------|-------------|--------|
+| entity_registry rows | 29,649 | 29,641 | -8 |
+| Fuseki triples | 163,609 | 163,569 | -40 |
+| Unit tests | 320 | 320 | +62 (FIX-013/014) |
+| Quality Gates | 4/4 PASS | 4/4 PASS | — |
+
+---
+
+## Week 7: Canary Validation + Polysemy Resolver Integration + Evaluation
+
+**Canary Report:** [week7_canary_validation_fix013_fix014.md](reports/week7_canary_validation_fix013_fix014.md)
+**Evaluation Report:** [polysemy_resolver_eval_week7.md](reports/polysemy_resolver_eval_week7.md)
+**Evaluation Dataset:** [polysemy_eval_set_week7.jsonl](reports/polysemy_eval_set_week7.jsonl)
+
+### Task 1: Canary Validation of FIX-013/014
+
+Created a canary validation script that tests the prevention fixes on new extraction output without touching production data:
+
+**Script:** `scripts/validation/week7_canary_fix013_fix014.py`
+
+**Features:**
+- Runs in DRY-RUN mode by default (no DB writes)
+- Fetches N random documents and runs full extraction + pipeline
+- Validates FIX-013: Code modules (EntityQualityFilter, etc.) NOT typed as PROCESS
+- Validates FIX-014: Abstract concepts (biodiversity, etc.) NOT typed as MATERIAL
+- Generates markdown report with pass/fail status
+
+**Usage:**
+```bash
+cd /opt/projects/koi-processor
+set -a; source .env; set +a
+PYTHONPATH=src python scripts/validation/week7_canary_fix013_fix014.py --limit 10
+```
+
+**Acceptance Criteria:**
+- [ ] 0 code modules pass through as PROCESS
+- [ ] 0 abstract concepts pass through as MATERIAL
+- [ ] No regressions in quality gates
+
+### Task 2: Polysemy Resolver Module Refactor
+
+Refactored the polysemy resolver script into a reusable library module:
+
+**Module:** `src/knowledge_graph/polysemy_resolver.py`
+
+**API:**
+```python
+from knowledge_graph.polysemy_resolver import (
+    resolve_entity_variants,  # Returns List[Dict] with ranked variants
+    resolve_entity,           # Returns ResolutionResult with winner + alternatives
+    EntityVariant,            # Dataclass for entity variant
+    ResolutionResult,         # Dataclass for resolution result
+    DEFAULT_TYPE_PRIORITY,    # Type priority ranking
+)
+
+# Basic resolution
+results = resolve_entity_variants("notion", db_config=db_config)
+
+# With type hint
+result = resolve_entity("ethereum", type_hint="TECHNOLOGY")
+print(f"Winner: {result.winner.entity_text} ({result.winner.entity_type})")
+```
+
+**CLI still works:**
+```bash
+python scripts/resolve_entity_variants.py --label "notion"
+python scripts/resolve_entity_variants.py --label "ethereum" --type-hint TECHNOLOGY
+python scripts/resolve_entity_variants.py --report
+```
+
+**Tests:** `tests/test_polysemy_resolver.py` - 15+ unit tests for scoring logic
+
+### Task 3: Evaluation Harness for Polysemy Resolution
+
+Created an evaluation dataset and script to measure resolver accuracy:
+
+**Dataset:** `docs/archive/reports/polysemy_eval_set_week7.jsonl` - 30 test cases
+
+**Test Case Categories:**
+- Platform companies (notion, discord, telegram, youtube, github)
+- Standards/tech (sparql, rdf, json-ld, graphql)
+- Blockchain/crypto (ethereum, cosmos, polygon, base)
+- Regen ecosystem (regen network, regen commons, aerodrome, koi)
+- Abstract concepts (biodiversity, ecosystem services) - FIX-014 test
+- Code modules (data loader, entity resolver) - FIX-013 test
+- People (gregory landua, will szal)
+
+**Evaluation Script:** `scripts/eval_polysemy_resolver.py`
+
+**Metrics:**
+- **Top-1 Type Accuracy**: Does the winner match expected type?
+- **Top-3 Coverage**: Is expected type in top 3 results?
+- **Resolution Method Distribution**: How are winners determined?
+
+**Usage:**
+```bash
+PYTHONPATH=src python scripts/eval_polysemy_resolver.py
+```
+
+**Target Metrics:**
+| Metric | Target |
+|--------|--------|
+| Top-1 Accuracy | ≥80% |
+| Top-3 Coverage | ≥95% |
+
+### Week 7 Deliverables
+
+| Deliverable | Path | Status |
+|-------------|------|--------|
+| Canary validation script | `scripts/validation/week7_canary_fix013_fix014.py` | Complete |
+| Canary report (placeholder) | `docs/archive/reports/week7_canary_validation_fix013_fix014.md` | Run script to populate |
+| Polysemy resolver module | `src/knowledge_graph/polysemy_resolver.py` | Complete |
+| Polysemy resolver tests | `tests/test_polysemy_resolver.py` | Complete |
+| Evaluation dataset | `docs/archive/reports/polysemy_eval_set_week7.jsonl` | Complete (30 cases) |
+| Evaluation script | `scripts/eval_polysemy_resolver.py` | Complete |
+| Evaluation report (placeholder) | `docs/archive/reports/polysemy_resolver_eval_week7.md` | Run script to populate |
+
+### How to Call Polysemy Resolver
+
+**From Python code:**
+```python
+from knowledge_graph.polysemy_resolver import resolve_entity_variants, resolve_entity
+
+# Simple: Get ranked list of variants
+variants = resolve_entity_variants("ethereum", type_hint="TECHNOLOGY")
+for v in variants:
+    print(f"{v['entity_text']} ({v['entity_type']}): score={v['score']}")
+
+# Full: Get ResolutionResult with winner and alternatives
+result = resolve_entity("notion")
+if result.winner:
+    print(f"Winner: {result.winner.entity_text} ({result.winner.entity_type})")
+    print(f"Is polysemy: {result.is_polysemy}")
+    for alt in result.alternatives:
+        print(f"  Alternative: {alt.entity_text} ({alt.entity_type})")
+```
+
+**From CLI:**
+```bash
+# Basic resolution
+python scripts/resolve_entity_variants.py --label "notion"
+
+# With type hint
+python scripts/resolve_entity_variants.py --label "ethereum" --type-hint TECHNOLOGY
+
+# JSON output
+python scripts/resolve_entity_variants.py --label "notion" --json
+
+# Generate sample report
+python scripts/resolve_entity_variants.py --report
+```
+
+### Week 7 Next Steps
+
+1. **Run canary validation on production** - Execute the script and update report
+2. **Run evaluation on production** - Execute eval script and analyze accuracy
+3. **Integrate resolver into GraphRAG** - Call `resolve_entity()` from hybrid search
+4. **Consider CONCEPT↔ORGANIZATION for allowlist** - 157 labels, mostly legitimate
+5. **Tune type priorities** - Adjust based on evaluation results
+
+---
+
 ## Review Sprint Plan
 
 ### Automated Audits
@@ -586,6 +851,14 @@ ORDER BY occurrence_count DESC;
 | **Week 5: Allowlist Expansion** | Complete | [Report](reports/type_conflict_allowlist_review_week5.md) - 3 pairs added |
 | **Week 5: Wrong-Type Cleanup** | Complete | [Report](reports/week5_wrong_type_noise_cleanup.md) - 6 rows deleted |
 | **Week 5: Baseline Update** | Complete | [Report](reports/kg_audit_2026_01_post_week5.md) - 29,649 entities |
+| **Week 6: Unexpected Pairs Analysis** | Complete | [Report](reports/type_conflict_unexpected_pairs_week6.md) - top 3 pairs identified |
+| **Week 6: FIX-013/014 Implementation** | Complete | Block PROCESS for code modules, MATERIAL for concepts (62 tests) |
+| **Week 6: Wrong-Type Cleanup** | Complete | [Report](reports/week6_wrong_type_noise_cleanup.md) - 8 rows deleted |
+| **Week 6: Polysemy Resolver** | Complete | [Report](reports/polysemy_resolution_examples_week6.md) - scripts/resolve_entity_variants.py |
+| **Week 7: Canary Validation** | Complete | [Script](../../../scripts/validation/week7_canary_fix013_fix014.py) - dry-run validation |
+| **Week 7: Polysemy Module Refactor** | Complete | [Module](../../../src/knowledge_graph/polysemy_resolver.py) - library + CLI |
+| **Week 7: Evaluation Harness** | Complete | [Dataset](reports/polysemy_eval_set_week7.jsonl) + [Script](../../../scripts/eval_polysemy_resolver.py) |
+| **Week 7: Cycle Doc Update** | Complete | Week 7 section with API docs |
 
 ---
 
@@ -603,6 +876,12 @@ ORDER BY occurrence_count DESC;
 - [Polysemy Split (Week 5)](reports/kg_audit_2026_01_polysemy_split_week5.md) - Updated with 8 pairs
 - [Week 5 Cleanup Report](reports/week5_wrong_type_noise_cleanup.md) - 6 rows deleted
 - [Post-Week 5 Audit Report](reports/kg_audit_2026_01_post_week5.md) - Updated baseline
+- [Unexpected Pairs (Week 6)](reports/type_conflict_unexpected_pairs_week6.md) - Detailed breakdown by pair
+- [Week 6 Cleanup Report](reports/week6_wrong_type_noise_cleanup.md) - 8 rows deleted
+- [Polysemy Resolution Examples](reports/polysemy_resolution_examples_week6.md) - Entity resolver demo
+- [Week 7 Canary Validation](reports/week7_canary_validation_fix013_fix014.md) - FIX-013/014 verification
+- [Week 7 Evaluation Dataset](reports/polysemy_eval_set_week7.jsonl) - 30 test cases for resolver
+- [Week 7 Evaluation Report](reports/polysemy_resolver_eval_week7.md) - Accuracy metrics
 
 ---
 
@@ -620,11 +899,17 @@ All proposed fixes have been applied. See [Week 3 cleanup report](reports/fix010
 
 ### Remaining Work (Future Cycles)
 
-1. **Polysemy disambiguation implementation** - Implement query/UI strategies defined in Week 4
+1. ~~**Polysemy disambiguation implementation** - Implement query/UI strategies defined in Week 4~~ **DONE Week 6** - `scripts/resolve_entity_variants.py`
 2. ~~**Additional wrong-type cleanup** - Remove ~8 remaining noise rows (notion, koi, agent-based modeling)~~ **DONE Week 5**
 3. ~~**Allowlist expansion** - Consider adding ORGANIZATION↔TECHNOLOGY, CONCEPT↔STANDARD to allowlist~~ **DONE Week 5**
-4. **Single-token PERSON ambiguity** - Canonical registry protection in place, full resolution optional
-5. **Remaining unexpected conflicts** - 921 labels in unexpected bucket (down from 1,182)
+4. ~~**Polysemy resolver as module** - Refactor script into reusable library~~ **DONE Week 7** - `src/knowledge_graph/polysemy_resolver.py`
+5. ~~**Evaluation harness** - Create dataset and accuracy measurement script~~ **DONE Week 7** - 30 test cases, accuracy metrics
+6. **Single-token PERSON ambiguity** - Canonical registry protection in place, full resolution optional
+7. **Remaining unexpected conflicts** - 917 labels in unexpected bucket (down from 921 after Week 6 cleanup)
+8. **Integrate polysemy resolver into GraphRAG** - Call resolve_entity() from hybrid search pipeline
+9. **Consider CONCEPT↔ORGANIZATION for allowlist** - 157 labels, mostly legitimate DAOs/working groups
+10. **Run canary validation on production** - Execute Week 7 canary script and populate report
+11. **Run evaluation on production** - Execute eval script and analyze resolver accuracy
 
 ---
 

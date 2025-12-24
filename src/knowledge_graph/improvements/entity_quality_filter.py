@@ -13,6 +13,8 @@ Filters out low-quality entities extracted by LLMs, including:
 - FIX-002: AI systems mis-typed as PERSON (should be TECHNOLOGY)
 - FIX-002: Generic event words when typed as EVENT
 - FIX-011: Blockchain names mis-typed as LOCATION
+- FIX-013: Pipeline/code module names mis-typed as PROCESS (Week 6)
+- FIX-014: Abstract environmental concepts mis-typed as MATERIAL (Week 6)
 
 This module is adapted from the YonEarth knowledge graph extraction system
 with Regen-specific additions for forum and community content.
@@ -37,7 +39,7 @@ Usage:
 
 Author: Claude Code (adapted from YonEarth)
 Date: 2025-12-08
-Version: 1.3.0 (FIX-011)
+Version: 1.4.0 (FIX-013, FIX-014 - Week 6)
 """
 
 import re
@@ -473,6 +475,87 @@ class EntityQualityFilter:
         'mainnet', 'testnet', 'devnet',
     }
 
+    # ========================================================================
+    # FIX-013: Code Module Names Blocklist for PROCESS Type
+    # ========================================================================
+    # Block PROCESS type for known code module/class names that are clearly
+    # TECHNOLOGY (software components), not processes.
+    #
+    # Examples from production data (Week 6 report):
+    # - "entityqualityfilter" as PROCESS (1 occ) - should be TECHNOLOGY
+    # - "canonicalresolver" as PROCESS (1 occ) - should be TECHNOLOGY
+    # - "confidencefilter" as PROCESS (1 occ) - should be TECHNOLOGY
+    # ========================================================================
+    CODE_MODULE_NAMES: Set[str] = {
+        # KOI pipeline components
+        'entityqualityfilter', 'entity quality filter',
+        'canonicalresolver', 'canonical resolver',
+        'confidencefilter', 'confidence filter',
+        'documentleveldeduplicator', 'document level deduplicator',
+        'ontologynormalizer', 'ontology normalizer',
+        'listsplitter', 'list splitter',
+
+        # Common software module patterns
+        'dataloader', 'data loader',
+        'configparser', 'config parser',
+        'jsonparser', 'json parser',
+        'xmlparser', 'xml parser',
+        'requesthandler', 'request handler',
+        'responsehandler', 'response handler',
+        'eventlistener', 'event listener',
+        'messagequeue', 'message queue',
+        'taskqueue', 'task queue',
+        'jobrunner', 'job runner',
+        'taskrunner', 'task runner',
+    }
+
+    # Pattern to catch CamelCase class names as PROCESS
+    CODE_MODULE_PATTERN = re.compile(
+        r'^[A-Z][a-z]+(?:[A-Z][a-z]+)+$'  # CamelCase: EntityQualityFilter, DataLoader
+    )
+
+    # ========================================================================
+    # FIX-014: Abstract Concept Names Blocklist for MATERIAL Type
+    # ========================================================================
+    # Block MATERIAL type for abstract environmental/ecological concepts.
+    # MATERIAL should be physical substances, not abstract concepts.
+    #
+    # Examples from production data (Week 6 report):
+    # - "biodiversity" as MATERIAL (1 occ) - should be CONCEPT
+    # - "carbon sequestration" as MATERIAL (1 occ) - should be CONCEPT
+    # - "ecological assets" as MATERIAL (3 occ) - should be CONCEPT
+    # ========================================================================
+    ABSTRACT_CONCEPT_AS_MATERIAL: Set[str] = {
+        # Ecological concepts (not physical materials)
+        'biodiversity', 'ecosystem', 'ecosystems', 'ecology',
+        'carbon sequestration', 'carbon capture', 'carbon offset', 'carbon offsetting',
+        'sequestration', 'capture', 'mitigation',
+        'sustainability', 'sustainable development',
+        'regeneration', 'regenerative', 'restoration',
+        'conservation', 'preservation', 'protection',
+        'resilience', 'adaptation', 'climate adaptation',
+        'ecosystem services', 'ecological services', 'nature-based solutions',
+
+        # Economic/financial concepts (not materials)
+        'ecological assets', 'natural assets', 'natural capital',
+        'ecosystem assets', 'environmental assets',
+        'carbon credits', 'carbon credit', 'offset credits',
+        'biodiversity credits', 'biodiversity credit',
+        'nature credits', 'nature credit',
+        'environmental credits', 'environmental credit',
+
+        # Process/methodology concepts
+        'verification', 'validation', 'monitoring',
+        'measurement', 'reporting', 'assessment',
+        'accounting', 'quantification',
+        'impact', 'outcomes', 'benefits', 'co-benefits',
+
+        # Governance/institutional concepts
+        'governance', 'stewardship', 'custody',
+        'ownership', 'rights', 'tenure',
+        'commons', 'public goods',
+    }
+
     # Lowercase comparison for boilerplate/template text that should be blocked
     BOILERPLATE_BLOCKLIST: Set[str] = {
         # Issue / PR templates
@@ -613,6 +696,10 @@ class EntityQualityFilter:
                 'firstname_orgname_artifact': 0,
                 # FIX-011: Blockchain as LOCATION
                 'blockchain_as_location': 0,
+                # FIX-013: Code module as PROCESS
+                'code_module_as_process': 0,
+                # FIX-014: Abstract concept as MATERIAL
+                'abstract_concept_as_material': 0,
             }
         }
 
@@ -1135,6 +1222,93 @@ class EntityQualityFilter:
         return False
 
     # ========================================================================
+    # FIX-013: Code Module as PROCESS Detection
+    # ========================================================================
+
+    def is_code_module_as_process(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-013: Check if entity is a code module name mis-typed as PROCESS.
+
+        Code modules like EntityQualityFilter, CanonicalResolver are software
+        components (TECHNOLOGY), not processes. This blocks them when incorrectly
+        typed as PROCESS.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is code module AND type is PROCESS)
+
+        Examples:
+            >>> filter.is_code_module_as_process("EntityQualityFilter", "PROCESS")
+            True
+            >>> filter.is_code_module_as_process("EntityQualityFilter", "TECHNOLOGY")
+            False  # Correct type, don't block
+            >>> filter.is_code_module_as_process("CanonicalResolver", "PROCESS")
+            True
+            >>> filter.is_code_module_as_process("verification", "PROCESS")
+            False  # Legitimate process name
+        """
+        if not entity_type or entity_type.upper() != 'PROCESS':
+            return False
+
+        normalized = name.strip().lower()
+
+        # Direct match against known code module names
+        if normalized in self.CODE_MODULE_NAMES:
+            return True
+
+        # Check CamelCase pattern (e.g., DataLoader, ConfigParser)
+        stripped = name.strip()
+        if self.CODE_MODULE_PATTERN.match(stripped):
+            return True
+
+        return False
+
+    # ========================================================================
+    # FIX-014: Abstract Concept as MATERIAL Detection
+    # ========================================================================
+
+    def is_abstract_concept_as_material(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-014: Check if entity is an abstract concept mis-typed as MATERIAL.
+
+        Abstract environmental/ecological concepts like biodiversity, carbon
+        sequestration should be CONCEPT, not MATERIAL. MATERIAL should be
+        reserved for physical substances.
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is abstract concept AND type is MATERIAL)
+
+        Examples:
+            >>> filter.is_abstract_concept_as_material("biodiversity", "MATERIAL")
+            True
+            >>> filter.is_abstract_concept_as_material("biodiversity", "CONCEPT")
+            False  # Correct type, don't block
+            >>> filter.is_abstract_concept_as_material("carbon sequestration", "MATERIAL")
+            True
+            >>> filter.is_abstract_concept_as_material("wood", "MATERIAL")
+            False  # Legitimate physical material
+            >>> filter.is_abstract_concept_as_material("steel", "MATERIAL")
+            False  # Legitimate physical material
+        """
+        if not entity_type or entity_type.upper() != 'MATERIAL':
+            return False
+
+        normalized = name.strip().lower()
+
+        # Direct match against known abstract concepts
+        if normalized in self.ABSTRACT_CONCEPT_AS_MATERIAL:
+            return True
+
+        return False
+
+    # ========================================================================
     # FIX-005: Domain Identifier Methods
     # ========================================================================
 
@@ -1383,6 +1557,22 @@ class EntityQualityFilter:
         if self.is_blockchain_as_location(name, entity_type):
             reasons.append("blockchain_as_location")
 
+        # ====================================================================
+        # FIX-013: Code module as PROCESS (Week 6)
+        # ====================================================================
+
+        # 18. Code module names mis-typed as PROCESS
+        if self.is_code_module_as_process(name, entity_type):
+            reasons.append("code_module_as_process")
+
+        # ====================================================================
+        # FIX-014: Abstract concept as MATERIAL (Week 6)
+        # ====================================================================
+
+        # 19. Abstract concepts mis-typed as MATERIAL
+        if self.is_abstract_concept_as_material(name, entity_type):
+            reasons.append("abstract_concept_as_material")
+
         is_valid = len(reasons) == 0
         return is_valid, reasons
 
@@ -1509,6 +1699,22 @@ class EntityQualityFilter:
         if self.is_blockchain_as_location(name, entity_type):
             return (False, "blockchain_as_location")
 
+        # ====================================================================
+        # FIX-013: Code module as PROCESS (Week 6)
+        # ====================================================================
+
+        # 18. Code module names mis-typed as PROCESS
+        if self.is_code_module_as_process(name, entity_type):
+            return (False, "code_module_as_process")
+
+        # ====================================================================
+        # FIX-014: Abstract concept as MATERIAL (Week 6)
+        # ====================================================================
+
+        # 19. Abstract concepts mis-typed as MATERIAL
+        if self.is_abstract_concept_as_material(name, entity_type):
+            return (False, "abstract_concept_as_material")
+
         return (True, "")
 
     def filter_batch(self, entities: List[Dict]) -> List[Dict]:
@@ -1586,6 +1792,10 @@ class EntityQualityFilter:
                 'firstname_orgname_artifact': 0,
                 # FIX-011: Blockchain as LOCATION
                 'blockchain_as_location': 0,
+                # FIX-013: Code module as PROCESS
+                'code_module_as_process': 0,
+                # FIX-014: Abstract concept as MATERIAL
+                'abstract_concept_as_material': 0,
             }
         }
 

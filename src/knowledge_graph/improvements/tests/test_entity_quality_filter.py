@@ -944,5 +944,197 @@ class TestFIX011BlockchainAsLocation:
         assert ("Polygon", "LOCATION") not in passed_names
 
 
+class TestFIX013CodeModuleAsProcess:
+    """
+    Tests for FIX-013: Code module names mis-typed as PROCESS.
+
+    Code modules like EntityQualityFilter, CanonicalResolver are software
+    components (TECHNOLOGY), not processes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_filter(self):
+        """Create fresh filter for each test."""
+        self.filter = EntityQualityFilter()
+
+    # Known code module names should be blocked as PROCESS
+    @pytest.mark.parametrize("name", [
+        "EntityQualityFilter",
+        "entityqualityfilter",
+        "CanonicalResolver",
+        "canonicalresolver",
+        "ConfidenceFilter",
+        "confidencefilter",
+        "DocumentLevelDeduplicator",
+        "OntologyNormalizer",
+        "ListSplitter",
+        "DataLoader",
+        "ConfigParser",
+        "RequestHandler",
+    ])
+    def test_blocks_code_modules_as_process(self, name):
+        """Code module names should be blocked when typed as PROCESS."""
+        assert self.filter.is_code_module_as_process(name, "PROCESS") is True
+
+    # CamelCase class names should be blocked as PROCESS
+    @pytest.mark.parametrize("name", [
+        "DataProcessor",
+        "FileHandler",
+        "EventDispatcher",
+        "MessageBroker",
+        "TaskScheduler",
+    ])
+    def test_blocks_camelcase_classes_as_process(self, name):
+        """CamelCase class names should be blocked when typed as PROCESS."""
+        assert self.filter.is_code_module_as_process(name, "PROCESS") is True
+
+    # Same names should pass with correct TECHNOLOGY type
+    @pytest.mark.parametrize("name", [
+        "EntityQualityFilter",
+        "CanonicalResolver",
+        "DataLoader",
+    ])
+    def test_allows_code_modules_as_technology(self, name):
+        """Code modules should pass when correctly typed as TECHNOLOGY."""
+        assert self.filter.is_code_module_as_process(name, "TECHNOLOGY") is False
+
+    # Legitimate process names should pass
+    @pytest.mark.parametrize("name", [
+        "verification",
+        "validation",
+        "data ingestion",
+        "entity extraction",
+        "knowledge discovery",
+        "carbon sequestration",
+        "manufacturing",
+    ])
+    def test_allows_legitimate_processes(self, name):
+        """Legitimate process names should pass."""
+        assert self.filter.is_code_module_as_process(name, "PROCESS") is False
+
+    def test_full_filter_with_code_module_as_process(self):
+        """Complete filter should block code module as PROCESS."""
+        entity = {"name": "EntityQualityFilter", "type": "PROCESS"}
+        passes, reason = self.filter.filter_entity(entity)
+        assert passes is False
+        assert reason == "code_module_as_process"
+
+    def test_filter_with_reasons_includes_code_module_as_process(self):
+        """filter_with_reasons should include code_module_as_process reason."""
+        is_valid, reasons = self.filter.filter_with_reasons("CanonicalResolver", "PROCESS")
+        assert is_valid is False
+        assert "code_module_as_process" in reasons
+
+
+class TestFIX014AbstractConceptAsMaterial:
+    """
+    Tests for FIX-014: Abstract concepts mis-typed as MATERIAL.
+
+    Abstract environmental/ecological concepts like biodiversity, carbon
+    sequestration should be CONCEPT, not MATERIAL.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_filter(self):
+        """Create fresh filter for each test."""
+        self.filter = EntityQualityFilter()
+
+    # Abstract ecological concepts should be blocked as MATERIAL
+    @pytest.mark.parametrize("name", [
+        "biodiversity",
+        "ecosystem",
+        "ecology",
+        "sustainability",
+        "regeneration",
+        "conservation",
+        "resilience",
+    ])
+    def test_blocks_ecological_concepts_as_material(self, name):
+        """Ecological concepts should be blocked when typed as MATERIAL."""
+        assert self.filter.is_abstract_concept_as_material(name, "MATERIAL") is True
+
+    # Carbon-related concepts should be blocked as MATERIAL
+    @pytest.mark.parametrize("name", [
+        "carbon sequestration",
+        "carbon capture",
+        "carbon offset",
+        "sequestration",
+    ])
+    def test_blocks_carbon_concepts_as_material(self, name):
+        """Carbon-related concepts should be blocked as MATERIAL."""
+        assert self.filter.is_abstract_concept_as_material(name, "MATERIAL") is True
+
+    # Economic/credit concepts should be blocked as MATERIAL
+    @pytest.mark.parametrize("name", [
+        "ecological assets",
+        "natural capital",
+        "carbon credits",
+        "biodiversity credits",
+        "ecosystem services",
+    ])
+    def test_blocks_economic_concepts_as_material(self, name):
+        """Economic/credit concepts should be blocked as MATERIAL."""
+        assert self.filter.is_abstract_concept_as_material(name, "MATERIAL") is True
+
+    # Same names should pass with correct CONCEPT type
+    @pytest.mark.parametrize("name", [
+        "biodiversity",
+        "carbon sequestration",
+        "ecological assets",
+        "sustainability",
+    ])
+    def test_allows_abstract_concepts_as_concept(self, name):
+        """Abstract concepts should pass when correctly typed as CONCEPT."""
+        assert self.filter.is_abstract_concept_as_material(name, "CONCEPT") is False
+
+    # Physical materials should pass
+    @pytest.mark.parametrize("name", [
+        "wood",
+        "steel",
+        "concrete",
+        "soil",
+        "water",
+        "biochar",
+        "compost",
+        "fertilizer",
+        "plastic",
+        "glass",
+    ])
+    def test_allows_physical_materials(self, name):
+        """Physical materials should pass as MATERIAL."""
+        assert self.filter.is_abstract_concept_as_material(name, "MATERIAL") is False
+
+    def test_full_filter_with_abstract_concept_as_material(self):
+        """Complete filter should block abstract concept as MATERIAL."""
+        entity = {"name": "biodiversity", "type": "MATERIAL"}
+        passes, reason = self.filter.filter_entity(entity)
+        assert passes is False
+        assert reason == "abstract_concept_as_material"
+
+    def test_filter_with_reasons_includes_abstract_concept_as_material(self):
+        """filter_with_reasons should include abstract_concept_as_material reason."""
+        is_valid, reasons = self.filter.filter_with_reasons("carbon sequestration", "MATERIAL")
+        assert is_valid is False
+        assert "abstract_concept_as_material" in reasons
+
+    def test_batch_filter_respects_abstract_concept_check(self):
+        """Batch filtering should respect abstract concept as MATERIAL check."""
+        entities = [
+            {"name": "wood", "type": "MATERIAL"},  # Should pass
+            {"name": "biodiversity", "type": "MATERIAL"},  # Should fail
+            {"name": "biodiversity", "type": "CONCEPT"},  # Should pass
+            {"name": "carbon sequestration", "type": "MATERIAL"},  # Should fail
+        ]
+
+        passed = self.filter.filter_batch(entities)
+
+        assert len(passed) == 2
+        passed_names = [(e["name"], e["type"]) for e in passed]
+        assert ("wood", "MATERIAL") in passed_names
+        assert ("biodiversity", "CONCEPT") in passed_names
+        assert ("biodiversity", "MATERIAL") not in passed_names
+        assert ("carbon sequestration", "MATERIAL") not in passed_names
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
