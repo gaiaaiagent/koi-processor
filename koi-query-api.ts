@@ -186,6 +186,52 @@ function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'):
   return ` AND (${tableAlias}.is_private = FALSE OR ${tableAlias}.is_private IS NULL)`;
 }
 
+// Get 1-hop neighbors from koi_relationships for graph expansion
+// Returns neighbor entities connected to the matched entity URIs
+async function get1HopNeighbors(
+  matchedEntityUris: string[],  // fuseki_uri from entity_registry
+  maxPerEntity: number = 5,
+  totalLimit: number = 15
+): Promise<{ neighbor_uri: string; neighbor_name: string; via_predicate: string; confidence: number }[]> {
+  if (matchedEntityUris.length === 0) return [];
+
+  const query = `
+    WITH matched AS (
+      SELECT id, fuseki_uri, entity_text
+      FROM entity_registry
+      WHERE fuseki_uri = ANY($1)
+    ),
+    neighbors_ranked AS (
+      SELECT
+        er.fuseki_uri as neighbor_uri,
+        er.entity_text as neighbor_name,
+        r.predicate as via_predicate,
+        COALESCE(r.confidence, 0) as confidence,
+        r.occurrence_count,
+        ROW_NUMBER() OVER (
+          PARTITION BY m.id
+          ORDER BY r.occurrence_count DESC, COALESCE(r.confidence, 0) DESC
+        ) as rank_per_source
+      FROM koi_relationships r
+      JOIN matched m ON (r.subject_entity_id = m.id OR r.object_entity_id = m.id)
+      JOIN entity_registry er ON (
+        CASE WHEN r.subject_entity_id = m.id
+             THEN r.object_entity_id
+             ELSE r.subject_entity_id END = er.id
+      )
+      WHERE COALESCE(r.confidence, 0) >= 0.5
+        AND r.occurrence_count >= 2
+    )
+    SELECT DISTINCT neighbor_uri, neighbor_name, via_predicate, confidence
+    FROM neighbors_ranked
+    WHERE rank_per_source <= $2
+    ORDER BY confidence DESC
+    LIMIT $3
+  `;
+  const result = await pool.query(query, [matchedEntityUris, maxPerEntity, totalLimit]);
+  return result.rows;
+}
+
 // Entity-based graph search using koi_entity_chunk_links
 // Detects entities in query and returns memories where those entities appear
 async function performEntitySearch(query: string, topK: number = 20, privacyFilter: string = '') {
@@ -224,6 +270,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           l.chunk_rid,
           l.document_rid,
           array_agg(DISTINCT l.entity_name) as entities_matched,
+          array_agg(DISTINCT l.entity_uri) FILTER (WHERE l.entity_uri IS NOT NULL) AS entity_uris,
           COUNT(DISTINCT l.entity_name_lower) as entity_count,
           MAX(me.entity_length) as max_entity_length
         FROM koi_entity_chunk_links l
@@ -237,6 +284,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           m.metadata->>'source' as source,
           m.metadata->>'url' as url,
           em.entities_matched,
+          em.entity_uris,
           em.entity_count,
           em.max_entity_length,
           m.published_at,
@@ -276,11 +324,11 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         FROM web_domain_ranked WHERE domain_rank <= 10
       ),
       combined AS (
-        SELECT rid, content, source, url, entities_matched, entity_count,
+        SELECT rid, content, source, url, entities_matched, entity_uris, entity_count,
                max_entity_length, published_at
         FROM non_web_ranked WHERE source_rank <= 25
         UNION ALL
-        SELECT rid, content, source, url, entities_matched, entity_count,
+        SELECT rid, content, source, url, entities_matched, entity_uris, entity_count,
                max_entity_length, published_at
         FROM web_diverse WHERE source_rank <= 50
       ),
@@ -293,7 +341,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           ) as content_rank
         FROM combined
       )
-      SELECT rid, content, source, url, entities_matched, entity_count,
+      SELECT rid, content, source, url, entities_matched, entity_uris, entity_count,
              max_entity_length, published_at
       FROM deduplicated
       WHERE content_rank = 1
@@ -307,6 +355,56 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
     const maxCount = results.rows.length > 0
       ? Math.max(...results.rows.map(r => parseInt(r.entity_count)))
       : 1;
+
+    // Log-only expansion analysis - only runs when DEBUG_GRAPH_EXPANSION is set (zero overhead otherwise)
+    if (process.env.DEBUG_GRAPH_EXPANSION) {
+      // Extract matched entity URIs from results, cap at 50
+      const matchedEntityUris = [...new Set(
+        results.rows.flatMap(r => r.entity_uris || [])
+      )].slice(0, 50);
+
+      if (matchedEntityUris.length > 0) {
+        const neighbors = await get1HopNeighbors(matchedEntityUris, 5, 15);
+
+        if (neighbors.length > 0) {
+          // Get RIDs already in direct results for comparison (cap at 100)
+          const directRids = results.rows.map(r => r.rid).slice(0, 100);
+
+          // Optimized query: counts + small sample, pass directRids to filter in SQL
+          const expansionQuery = `
+            WITH expansion_docs AS (
+              SELECT DISTINCT m.rid
+              FROM koi_entity_chunk_links ecl
+              JOIN koi_memories m ON m.id::text = ecl.chunk_rid
+              WHERE ecl.entity_uri = ANY($1)
+                AND m.superseded_at IS NULL
+                AND m.content->>'text' IS NOT NULL
+                ${privacyFilter}
+            )
+            SELECT
+              COUNT(*) AS total_count,
+              COUNT(*) FILTER (WHERE NOT (rid = ANY($2))) AS new_count,
+              (SELECT array_agg(rid) FROM (SELECT rid FROM expansion_docs LIMIT 5) s) AS sample_rids
+            FROM expansion_docs
+          `;
+          const expansionResult = await pool.query(expansionQuery, [
+            neighbors.map(n => n.neighbor_uri),
+            directRids
+          ]);
+
+          const { total_count, new_count, sample_rids } = expansionResult.rows[0] || {};
+
+          console.log(`[GraphExpansion] Query: "${query}"`);
+          console.log(`[GraphExpansion] Matched ${matchedEntityUris.length} entities`);
+          console.log(`[GraphExpansion] Expanded to ${neighbors.length}: ${neighbors.slice(0, 3).map(n => n.neighbor_name).join(', ')}`);
+          console.log(`[GraphExpansion] Predicates: ${[...new Set(neighbors.map(n => n.via_predicate))].join(', ')}`);
+          console.log(`[GraphExpansion] Would add ${new_count || 0}/${total_count || 0} new docs (${directRids.length} direct)`);
+          if (sample_rids?.length) {
+            console.log(`[GraphExpansion] Sample RIDs: ${sample_rids.slice(0, 3).join(', ')}`);
+          }
+        }
+      }
+    }
 
     return results.rows.map(row => ({
       id: row.rid,
@@ -322,7 +420,8 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         entity_count: parseInt(row.entity_count),
         published_at: row.published_at || null
       },
-      rid: row.rid
+      rid: row.rid,
+      entity_uris: row.entity_uris || []
     }));
 
   } catch (error) {
