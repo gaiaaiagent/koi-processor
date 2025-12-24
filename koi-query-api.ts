@@ -190,18 +190,13 @@ function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'):
 // Detects entities in query and returns memories where those entities appear
 async function performEntitySearch(query: string, topK: number = 20, privacyFilter: string = '') {
   try {
-    console.log(`[EntitySearch] Starting for query: "${query}"`);
-
     // Extract potential entity names from query (words and phrases of 2-4 words)
     const words = query.toLowerCase()
       .replace(/[^\w\s]/g, ' ')
       .split(/\s+/)
       .filter(w => w.length >= 3);
 
-    console.log(`[EntitySearch] Words extracted: ${words.join(', ')}`);
-
     if (words.length === 0) {
-      console.log('[EntitySearch] No words >= 3 chars, returning empty');
       return [];
     }
 
@@ -306,17 +301,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
       LIMIT $2
     `;
 
-    console.log(`[EntitySearch] Patterns to match: ${patterns.slice(0, 10).join(', ')}`);
-
     const results = await pool.query(entityQuery, [patterns, topK]);
-
-    console.log(`[EntitySearch] Query returned ${results.rows.length} rows`);
-    if (results.rows.length > 0) {
-      console.log(`[EntitySearch] Found ${results.rows.length} memories for entities: ${patterns.slice(0, 5).join(', ')}...`);
-      console.log(`[EntitySearch] First result RID: ${results.rows[0]?.rid}`);
-    } else {
-      console.log(`[EntitySearch] No matches found for patterns`);
-    }
 
     // Calculate scores based on entity count (normalized)
     const maxCount = results.rows.length > 0
@@ -551,13 +536,11 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
     // For names like "greg landua", we want to match "Gregory Landua" too
     const andQuery = words.join(' & ');
     const orQuery = words.join(' | ');
+    const prefixAndQuery = words.map(w => `${w}:*`).join(' & ');
 
-    // Use prefix matching with :* for partial name matches
-    const prefixQuery = words.map(w => `${w}:*`).join(' | ');
-
-    // Try AND first, then fall back to OR with prefix matching
+    // Try AND first, then fall back to OR for broader matching
     const dateClauses: string[] = [];
-    const params: any[] = [andQuery, orQuery];
+    const params: any[] = [andQuery, orQuery, prefixAndQuery];
     if (filters?.date_range?.start) {
       dateClauses.push(`published_at >= $${params.length + 1}::timestamptz`);
       params.push(filters.date_range.start);
@@ -574,7 +557,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
       WITH combined AS (
         SELECT
           m.rid,
-          m.content->>'text' as content,
+          COALESCE(m.content->>'text', m.content->>'title') as content,
           m.metadata->>'source' as source,
           m.metadata->>'url' as url,
           ts_rank_cd(m.content_tsv, to_tsquery('english', $1)) as rank,
@@ -583,16 +566,18 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
         FROM koi_memories m
         WHERE
           m.content_tsv @@ to_tsquery('english', $1)
-          AND m.content->>'text' IS NOT NULL
-          AND LENGTH(m.content->>'text') > 50
-        AND m.superseded_at IS NULL
+          AND (
+            (m.content->>'text' IS NOT NULL AND LENGTH(m.content->>'text') > 50)
+            OR (m.content->>'title' IS NOT NULL AND LENGTH(m.content->>'title') > 5)
+          )
+          AND m.superseded_at IS NULL
           ${privacyFilter}
 
         UNION ALL
 
         SELECT
           m.rid,
-          m.content->>'text' as content,
+          COALESCE(m.content->>'text', m.content->>'title') as content,
           m.metadata->>'source' as source,
           m.metadata->>'url' as url,
           ts_rank_cd(m.content_tsv, to_tsquery('english', $2)) as rank,
@@ -601,9 +586,12 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
         FROM koi_memories m
         WHERE
           m.content_tsv @@ to_tsquery('english', $2)
-          AND m.content->>'text' IS NOT NULL
-          AND LENGTH(m.content->>'text') > 50
-        AND m.superseded_at IS NULL
+          AND m.content_tsv @@ to_tsquery('english', $3)
+          AND (
+            (m.content->>'text' IS NOT NULL AND LENGTH(m.content->>'text') > 50)
+            OR (m.content->>'title' IS NOT NULL AND LENGTH(m.content->>'title') > 5)
+          )
+          AND m.superseded_at IS NULL
           ${privacyFilter}
           AND NOT EXISTS (
             SELECT 1 FROM koi_memories m2
@@ -624,7 +612,9 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
       SELECT rid, content, source, url, rank, match_type, published_at
       FROM deduplicated
       WHERE content_rank = 1
-      ORDER BY rank DESC
+      ORDER BY
+        CASE WHEN match_type = 'strict' THEN 0 ELSE 1 END,  -- strict first
+        rank DESC
       LIMIT $${params.length + 1}
     `;
 
@@ -633,12 +623,19 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
     params.push(Math.max(topK * 3, 50));
     const results = await pool.query(searchQuery, params);
 
-    // Find max rank for normalization
-    const maxRank = results.rows.length > 0
-      ? Math.max(...results.rows.map(r => parseFloat(r.rank)))
+    const rows = results.rows;
+
+    // Recompute maxRank after filtering to avoid score compression from filtered-out high-rank results
+    const maxRank = rows.length > 0
+      ? Math.max(...rows.map(r => parseFloat(r.rank)))
       : 1;
 
-    return results.rows.slice(0, topK).map(row => {
+    if (process.env.DEBUG_KEYWORD_SEARCH) {
+      const strictCount = rows.filter(r => r.match_type === 'strict').length;
+      console.log(`[Keyword Search] Query: "${query}", Found: ${rows.length}, Strict: ${strictCount}, Max rank: ${maxRank.toFixed(3)}`);
+    }
+
+    return rows.slice(0, topK).map(row => {
       const rawRank = parseFloat(row.rank);
 
       // Logarithmic scaling for better score discrimination
@@ -655,7 +652,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
 
       return {
         id: row.rid,
-        content: row.content.substring(0, 200) + "...",
+        content: (row.content?.substring(0, 200) || '') + (row.content?.length > 200 ? "..." : ""),
         similarity: finalScore,
         score: finalScore,
         source: 'keyword' as const,
@@ -673,7 +670,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
       };
     });
   } catch (error) {
-    console.error('[Keyword Search] Error:', error);
+    console.error('[Keyword Search] FTS FAILED, falling back to ILIKE:', error);
     // Fallback to ILIKE if FTS fails
     const dateClauses: string[] = [];
     const params: any[] = [`%${query}%`, `%${query}%`];
@@ -692,21 +689,24 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
     const fallbackQuery = `
       SELECT
         m.rid,
-        m.content->>'text' as content,
+        COALESCE(m.content->>'text', m.content->>'title') as content,
         m.metadata->>'source' as source,
         m.metadata->>'url' as url,
         0.5 as rank,
         m.published_at
       FROM koi_memories m
       WHERE
-        m.content->>'text' ILIKE $1
-        AND LENGTH(m.content->>'text') > 50
+        COALESCE(m.content->>'text', m.content->>'title') ILIKE $1
+        AND (
+          (m.content->>'text' IS NOT NULL AND LENGTH(m.content->>'text') > 50)
+          OR (m.content->>'title' IS NOT NULL AND LENGTH(m.content->>'title') > 5)
+        )
         AND m.superseded_at IS NULL
         ${andDate}
         ${privacyFilter}
       ORDER BY CASE
-        WHEN m.content->>'text' ILIKE $2 THEN 3  -- Exact phrase match
-        WHEN m.content->>'text' ILIKE $1 THEN 2  -- Contains all words
+        WHEN COALESCE(m.content->>'text', m.content->>'title') ILIKE $2 THEN 3  -- Exact phrase match
+        WHEN COALESCE(m.content->>'text', m.content->>'title') ILIKE $1 THEN 2  -- Contains all words
         ELSE 1
       END DESC
       LIMIT $${params.length + 1}
@@ -717,7 +717,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
 
     return results.rows.map(row => ({
       id: row.rid,
-      content: row.content.substring(0, 200) + "...",
+      content: (row.content?.substring(0, 200) || '') + (row.content?.length > 200 ? "..." : ""),
       similarity: parseFloat(row.rank),
       score: parseFloat(row.rank),
       source: 'keyword' as const,
@@ -751,10 +751,12 @@ app.post('/api/koi/query', async (req, res) => {
     const isAuthenticated = !!authenticatedEmail;
     const privacyFilter = buildPrivacyFilter(isAuthenticated);
 
-    // Log auth status for debugging (use X-User-Email for logging if no token, but it doesn't grant access)
-    const logEmail = authenticatedEmail || req.headers['x-user-email'] as string | undefined;
-    if (logEmail || sessionToken) {
-      console.log(`[Query] User: ${logEmail || 'unknown'}, Authenticated: ${isAuthenticated}${sessionToken ? ' (session token provided)' : ''}`);
+    // Log auth status for debugging (gated to avoid log volume/PII)
+    if (process.env.DEBUG_AUTH) {
+      const logEmail = authenticatedEmail || req.headers['x-user-email'] as string | undefined;
+      if (logEmail || sessionToken) {
+        console.log(`[Query] User: ${logEmail || 'unknown'}, Authenticated: ${isAuthenticated}${sessionToken ? ' (session token provided)' : ''}`);
+      }
     }
 
     // Perform hybrid search with RRF
@@ -777,8 +779,10 @@ app.post('/api/koi/query', async (req, res) => {
       console.error('[Search] Error in parallel search:', err);
     }
 
-    // Log search results counts
-    console.log(`[Search] Results - Vector: ${vectorResults.length}, Entity: ${entityResults.length}, Keyword: ${keywordResults.length}`);
+    // Log search results counts (gated to avoid log volume)
+    if (process.env.DEBUG_FUSION) {
+      console.log(`[Search] Results - Vector: ${vectorResults.length}, Entity: ${entityResults.length}, Keyword: ${keywordResults.length}`);
+    }
 
     // Apply Reciprocal Rank Fusion with entity/graph results
     const fusedResults = reciprocalRankFusion(vectorResults, entityResults, keywordResults);
@@ -797,9 +801,13 @@ app.post('/api/koi/query', async (req, res) => {
       
       // Trigger Python adaptive extraction
       try {
-        console.log(`🔧 Triggering adaptive extraction for query: "${question}" (confidence: ${confidence.toFixed(3)})`);
+        if (process.env.DEBUG_EXTRACTION) {
+          console.log(`🔧 Triggering adaptive extraction for query: "${question}" (confidence: ${confidence.toFixed(3)})`);
+        }
         extractionResult = await triggerAdaptiveExtraction(question, fusedResults, user_id, agent_id);
-        console.log(`✅ Extraction completed with ${extractionResult?.extracted_facts?.length || 0} facts extracted`);
+        if (process.env.DEBUG_EXTRACTION) {
+          console.log(`✅ Extraction completed with ${extractionResult?.extracted_facts?.length || 0} facts extracted`);
+        }
       } catch (error) {
         console.error('❌ Adaptive extraction failed:', error);
         // Continue without failing the main query

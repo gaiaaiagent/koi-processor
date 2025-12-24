@@ -5,6 +5,40 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2025-12-24
+
+### Fixed
+- **Hybrid Search Keyword Scoring** - Fixed `keyword_score: 0` in search results
+  - Root cause: RID mismatch between entity chunks (`UUID#chunk14`) and keyword base docs (`UUID`)
+  - Added `normalizeRidForFusion()` to strip chunk suffix before fusion merge
+  - Keyword scores now properly contribute (0.59, 0.31, 0.30 instead of 0)
+
+### Added
+- **Full-Text Search Migration** - `migrations/025_add_content_tsv_fts.sql`
+  - `content_tsv` tsvector column with weighted title (A) + text (B)
+  - Trigger for auto-update on INSERT/UPDATE
+  - GIN index for fast FTS queries
+- **FTS Backfill Script** - `scripts/backfill-fts.sql`
+  - Batch processing (5K rows) to avoid locks
+  - CONCURRENTLY index creation
+  - Verification queries
+- **Unit Tests** - `bge-mcp-ts/tests/adaptive-features.test.ts`
+  - RID normalization tests
+  - Fusion merge tests
+- **Integration Tests** - `tests/test_keyword_search_fts.py`
+  - FTS trigger validation
+  - Prefix vs strict matching
+
+### Changed
+- **Strict-First Query Ordering** - AND matches now prioritized over OR matches
+- **Lexeme-Aware OR Filtering** - Replaced substring filter with prefix tsquery
+- **Debug Logging Gated** - All per-request logs now behind `DEBUG_*` env flags
+  - `DEBUG_AUTH`, `DEBUG_EXTRACTION`, `DEBUG_FUSION`, `DEBUG_KEYWORD_SEARCH`
+- **Documentation Updated** - Fixed migration references (012→025) in:
+  - `docs/KOI_PIPELINE_COMPLETE.md`
+  - `docs/ADAPTIVE_KNOWLEDGE_MCP_IMPLEMENTATION.md`
+  - `docs/ADAPTIVE_KNOWLEDGE_IMPLEMENTATION_STATUS.md`
+
 ## [3.0.0] - 2025-12-23
 
 ### Added

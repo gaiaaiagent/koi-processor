@@ -1162,7 +1162,7 @@ The system starts simple with existing infrastructure and progressively adds int
 **Motivation:** Semantic search (BGE embeddings) alone was insufficient for entity names and exact phrase matching. We needed keyword-based search to complement vector similarity.
 
 **Implementation:**
-1. **Database Migration** (`migrations/012_add_bm25_fts.sql`):
+1. **Database Migration** (`migrations/025_add_content_tsv_fts.sql`):
    - Added `content_tsv` tsvector column to `koi_memories`
    - Created GIN index: `koi_memories_content_tsv_idx`
    - Trigger function auto-updates tsvector on INSERT/UPDATE

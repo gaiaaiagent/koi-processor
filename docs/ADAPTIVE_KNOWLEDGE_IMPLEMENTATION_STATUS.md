@@ -231,7 +231,7 @@ Implemented full-text search (FTS) using PostgreSQL's BM25-like ranking to impro
 - Fallback to ILIKE if FTS fails
 - 100% integration with existing RRF pipeline
 
-**Migration:** `/opt/projects/koi-processor/migrations/012_add_bm25_fts.sql`
+**Migration:** `/opt/projects/koi-processor/migrations/025_add_content_tsv_fts.sql`
 
 ---
 

@@ -5,6 +5,16 @@
 
 import { Pool } from "pg";
 
+/**
+ * Normalize rid by stripping chunk suffix for fusion merging
+ * Keyword search returns base docs (UUID), entity search returns chunks (UUID#chunk14)
+ * This ensures they merge correctly in fusion
+ */
+export function normalizeRidForFusion(rid: string): string {
+  // Strip #chunk\d+ or #chunkN suffix
+  return rid.replace(/#chunk\d+$/, '');
+}
+
 // Interfaces
 interface SearchResult {
   id: string;
@@ -57,9 +67,11 @@ export function weightedAverageFusion(
   }>();
 
   // Process vector results
+  // Use normalized rid (strip chunk suffix) for merge key so base docs and chunks combine
   vectorResults.forEach(result => {
-    const id = result.rid || result.id;
-    merged.set(id, {
+    const rawId = result.rid || result.id;
+    const mergeKey = normalizeRidForFusion(rawId);
+    merged.set(mergeKey, {
       vectorScore: result.similarity || result.score || 0,
       entityScore: 0,
       keywordScore: 0,
@@ -69,9 +81,11 @@ export function weightedAverageFusion(
   });
 
   // Process entity/graph results (from koi_entity_chunk_links)
+  // Entity search returns chunks (UUID#chunk14), normalize to match base docs
   entityResults?.forEach(result => {
-    const id = result.rid || result.id;
-    const existing = merged.get(id);
+    const rawId = result.rid || result.id;
+    const mergeKey = normalizeRidForFusion(rawId);
+    const existing = merged.get(mergeKey);
     const entityScore = result.similarity || result.score || 0;
 
     if (existing) {
@@ -80,7 +94,7 @@ export function weightedAverageFusion(
       existing.entitiesMatched = result.metadata?.entities_matched;
     } else {
       // Document only in entity results
-      merged.set(id, {
+      merged.set(mergeKey, {
         vectorScore: 0,
         entityScore,
         keywordScore: 0,
@@ -92,16 +106,20 @@ export function weightedAverageFusion(
   });
 
   // Process keyword results
+  // Keyword search may return base docs or chunks, normalize for consistent merging
+  let keywordMergeCount = 0;
   keywordResults?.forEach(result => {
-    const id = result.rid || result.id;
-    const existing = merged.get(id);
+    const rawId = result.rid || result.id;
+    const mergeKey = normalizeRidForFusion(rawId);
+    const existing = merged.get(mergeKey);
     const keywordScore = result.similarity || result.score || 0;
 
     if (existing) {
       existing.keywordScore = keywordScore;
+      keywordMergeCount++;
     } else {
       // Document only in keyword results
-      merged.set(id, {
+      merged.set(mergeKey, {
         vectorScore: 0,
         entityScore: 0,
         keywordScore,
@@ -110,6 +128,22 @@ export function weightedAverageFusion(
       });
     }
   });
+
+  // Log keyword merge stats (gated to avoid PII/log volume in production)
+  if (process.env.DEBUG_FUSION) {
+    console.log(`[Fusion] Keyword results: ${keywordResults?.length || 0}, merged with existing: ${keywordMergeCount}`);
+
+    // Log sample merge keys for debugging (if few merges relative to inputs)
+    if (keywordResults && keywordResults.length > 3 && keywordMergeCount < keywordResults.length / 2) {
+      const sampleKeyword = keywordResults.slice(0, 3).map(r => {
+        const raw = r.rid || r.id;
+        return { raw: raw.substring(0, 60), normalized: normalizeRidForFusion(raw).substring(0, 60) };
+      });
+      const existingKeys = Array.from(merged.keys()).slice(0, 5).map(k => k.substring(0, 60));
+      console.log(`[Fusion] Sample keyword keys:`, JSON.stringify(sampleKeyword));
+      console.log(`[Fusion] Sample existing keys:`, JSON.stringify(existingKeys));
+    }
+  }
 
   // Calculate weighted average scores with entity boost
   const allResults = Array.from(merged.entries())
@@ -130,6 +164,7 @@ export function weightedAverageFusion(
         source: 'hybrid' as const,
         metadata: {
           ...data.result.metadata,
+          base_rid: id,  // Normalized RID (chunk suffix stripped) used for merging
           vector_score: data.vectorScore,
           entity_score: data.entityScore,
           keyword_score: data.keywordScore,
@@ -144,15 +179,25 @@ export function weightedAverageFusion(
   // Vector determines relevance, entity provides boost - no artificial interleaving
   const fusedResults = allResults.sort((a, b) => (b.score || 0) - (a.score || 0));
 
-  // Log entity fusion stats
+  // Log fusion stats for debugging
   const entityBoosted = fusedResults.filter(r => r.metadata?.entity_boost > 0).length;
   const entityOnly = fusedResults.filter(r => r.metadata?.entity_score > 0 && r.metadata?.vector_score === 0).length;
+  const keywordMatched = fusedResults.filter(r => r.metadata?.keyword_score > 0).length;
 
-  if (entityBoosted > 0) {
+  if (process.env.DEBUG_FUSION) {
+    console.log(`[Fusion] Input: ${vectorResults.length} vector, ${entityResults?.length || 0} entity, ${keywordResults?.length || 0} keyword`);
+    console.log(`[Fusion] Merged into ${fusedResults.length} unique documents (after rid normalization)`);
+    console.log(`[Fusion] ${keywordMatched} results have keyword_score > 0`);
     console.log(`[Fusion] ${entityBoosted} results have entity boost applied`);
-  }
-  if (entityOnly > 0) {
-    console.log(`[Fusion] ${entityOnly} entity-only results (no vector match) included`);
+    if (fusedResults.length > 0) {
+      const sample = fusedResults.slice(0, 3).map(r => ({
+        rid: r.id.substring(0, 50),
+        vector: r.metadata?.vector_score?.toFixed(3),
+        entity: r.metadata?.entity_score?.toFixed(3),
+        keyword: r.metadata?.keyword_score?.toFixed(3)
+      }));
+      console.log('[Fusion] Top 3 sample:', JSON.stringify(sample));
+    }
   }
 
   return fusedResults;

@@ -415,7 +415,7 @@ The KOI pipeline is now **production-ready** with:
 **Context:** Semantic search alone was insufficient for entity names and exact keyword matching. Implemented PostgreSQL full-text search (FTS) with BM25-like ranking to complement BGE vector search.
 
 **Implementation:**
-- **Migration:** `migrations/012_add_bm25_fts.sql`
+- **Migration:** `migrations/025_add_content_tsv_fts.sql`
   - `content_tsv` tsvector column with GIN index
   - Auto-update trigger on INSERT/UPDATE  
   - Weighted search (content=A, title=B, description=C)
@@ -550,7 +550,7 @@ curl -X POST http://localhost:8301/api/koi/query \
 ### Files Modified
 
 **New Files:**
-1. `migrations/012_add_bm25_fts.sql` - FTS schema
+1. `migrations/025_add_content_tsv_fts.sql` - FTS schema
 2. `/tmp/add_bm25_search.sql` - Migration script
 3. `/tmp/bm25_search_function.ts` - Search implementation
 

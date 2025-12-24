@@ -118,6 +118,22 @@ set -a; source .env; set +a
 
 ---
 
+## Hybrid Search (2025-12-24)
+
+**Status**: ✅ Fixed - keyword_score now working
+
+**Root Cause**: RID mismatch in fusion - entity chunks (`UUID#chunk14`) didn't merge with keyword base docs (`UUID`)
+
+**Key Files**:
+- `koi-query-api.ts` - Keyword search with strict-first ordering
+- `bge-mcp-ts/adaptive-features.ts` - Fusion with RID normalization
+- `migrations/025_add_content_tsv_fts.sql` - FTS schema
+- `scripts/backfill-fts.sql` - Backfill script
+
+**Debug Flags**: `DEBUG_AUTH`, `DEBUG_EXTRACTION`, `DEBUG_FUSION`, `DEBUG_KEYWORD_SEARCH`
+
+---
+
 ## Future Work (Optional)
 
 1. Further predicate reduction (1,501 → ~100-200)
@@ -128,5 +144,5 @@ set -a; source .env; set +a
 
 ---
 
-**Last Updated**: 2025-12-23
+**Last Updated**: 2025-12-24
 **Phase**: Complete - All major milestones achieved

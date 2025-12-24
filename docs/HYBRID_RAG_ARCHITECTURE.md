@@ -46,7 +46,35 @@ Maps entities to document chunks:
 - B-Tree index for fast entity matching
 - Enables graph-based document retrieval
 
-### 3. Weighted Average Fusion (adaptive-features.ts)
+### 3. Full-Text Search (PostgreSQL tsvector)
+
+**Migration:** `migrations/025_add_content_tsv_fts.sql`
+- `content_tsv` tsvector column with weighted fields
+- Weight A: title (highest priority)
+- Weight B: text body
+- GIN index for fast full-text queries
+- Trigger auto-updates tsvector on INSERT/UPDATE
+
+**Query Strategy (koi-query-api.ts):**
+- Strict AND query: `to_tsquery('english', 'claims & engine')`
+- Relaxed OR query: `to_tsquery('english', 'claims | engine')`
+- Strict results prioritized via `ORDER BY match_type, rank DESC`
+- Lexeme-aware prefix matching filters OR results
+
+**Backfill:** `scripts/backfill-fts.sql` (batch 5K rows, CONCURRENTLY index)
+
+### 4. RID Normalization for Fusion
+
+**Problem:** Entity search returns chunks (`UUID#chunk14`), keyword search returns base docs (`UUID`). Without normalization, they don't merge in fusion.
+
+**Solution:** `normalizeRidForFusion()` strips `#chunk\d+` suffix before merging:
+```typescript
+function normalizeRidForFusion(rid: string): string {
+  return rid.replace(/#chunk\d+$/, '');
+}
+```
+
+### 5. Weighted Average Fusion (adaptive-features.ts)
 
 Fusion weights:
 - VECTOR_WEIGHT = 0.6 (semantic relevance)
@@ -56,7 +84,7 @@ Fusion weights:
 
 Formula: score = (vectorScore * 0.6) + (entityScore * 0.2) + (keywordScore * 0.2) + entityBoost
 
-### 4. Source-Diversity Sampling
+### 6. Source-Diversity Sampling
 
 Prevents any single source from dominating entity search results:
 
@@ -108,13 +136,17 @@ the best answers. The 0.15 boost rewards this overlap.
 
 ## Files Reference
 
-- koi-query-api.ts - Main API with entity search + content dedup
-- bge-mcp-ts/adaptive-features.ts - Fusion algorithms
+- koi-query-api.ts - Main API with entity search, keyword search, content dedup
+- bge-mcp-ts/adaptive-features.ts - Fusion algorithms, RID normalization
+- bge-mcp-ts/tests/adaptive-features.test.ts - Unit tests for fusion
 - src/core/koi_event_bridge_v2.py - Storage-level dedup
 - scripts/archive/entity_chunk_linker.py - Batch entity linking
 - scripts/backfill_entity_registry.py - Registry population
+- scripts/backfill-fts.sql - FTS backfill script
 - migrations/023_content_hash_dedup_index.sql - Content hash schema
+- migrations/025_add_content_tsv_fts.sql - Full-text search schema
+- tests/test_keyword_search_fts.py - FTS integration tests
 
 ---
 
-*Last Updated: 2025-12-20*
+*Last Updated: 2025-12-24*
