@@ -187,19 +187,20 @@ function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'):
 }
 
 // Get 1-hop neighbors from koi_relationships for graph expansion
-// Returns neighbor entities connected to the matched entity URIs
+// Returns neighbor entities connected to the matched entity names
 async function get1HopNeighbors(
-  matchedEntityUris: string[],  // fuseki_uri from entity_registry
+  matchedEntityNames: string[],  // entity names to look up (case-insensitive)
   maxPerEntity: number = 5,
   totalLimit: number = 15
 ): Promise<{ neighbor_uri: string; neighbor_name: string; via_predicate: string; confidence: number }[]> {
-  if (matchedEntityUris.length === 0) return [];
+  if (matchedEntityNames.length === 0) return [];
 
   const query = `
     WITH matched AS (
-      SELECT id, fuseki_uri, entity_text
+      SELECT DISTINCT ON (LOWER(entity_text)) id, fuseki_uri, entity_text
       FROM entity_registry
-      WHERE fuseki_uri = ANY($1)
+      WHERE LOWER(entity_text) = ANY($1)
+      ORDER BY LOWER(entity_text), occurrence_count DESC
     ),
     neighbors_ranked AS (
       SELECT
@@ -358,25 +359,25 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
 
     // Log-only expansion analysis - only runs when DEBUG_GRAPH_EXPANSION is set (zero overhead otherwise)
     if (process.env.DEBUG_GRAPH_EXPANSION) {
-      // Extract matched entity URIs from results, cap at 50
-      const matchedEntityUris = [...new Set(
-        results.rows.flatMap(r => r.entity_uris || [])
+      // Extract matched entity names from results (lowercased for lookup), cap at 50
+      const matchedEntityNames = [...new Set(
+        results.rows.flatMap(r => (r.entities_matched || []).map((e: string) => e.toLowerCase()))
       )].slice(0, 50);
 
-      if (matchedEntityUris.length > 0) {
-        const neighbors = await get1HopNeighbors(matchedEntityUris, 5, 15);
+      if (matchedEntityNames.length > 0) {
+        const neighbors = await get1HopNeighbors(matchedEntityNames, 5, 15);
 
         if (neighbors.length > 0) {
           // Get RIDs already in direct results for comparison (cap at 100)
           const directRids = results.rows.map(r => r.rid).slice(0, 100);
 
-          // Optimized query: counts + small sample, pass directRids to filter in SQL
+          // Optimized query: counts + small sample, lookup by entity name (lowercased)
           const expansionQuery = `
             WITH expansion_docs AS (
               SELECT DISTINCT m.rid
               FROM koi_entity_chunk_links ecl
               JOIN koi_memories m ON m.id::text = ecl.chunk_rid
-              WHERE ecl.entity_uri = ANY($1)
+              WHERE ecl.entity_name_lower = ANY($1)
                 AND m.superseded_at IS NULL
                 AND m.content->>'text' IS NOT NULL
                 ${privacyFilter}
@@ -388,14 +389,14 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
             FROM expansion_docs
           `;
           const expansionResult = await pool.query(expansionQuery, [
-            neighbors.map(n => n.neighbor_uri),
+            neighbors.map(n => n.neighbor_name.toLowerCase()),
             directRids
           ]);
 
           const { total_count, new_count, sample_rids } = expansionResult.rows[0] || {};
 
           console.log(`[GraphExpansion] Query: "${query}"`);
-          console.log(`[GraphExpansion] Matched ${matchedEntityUris.length} entities`);
+          console.log(`[GraphExpansion] Matched ${matchedEntityNames.length} entities: ${matchedEntityNames.slice(0, 3).join(', ')}`);
           console.log(`[GraphExpansion] Expanded to ${neighbors.length}: ${neighbors.slice(0, 3).map(n => n.neighbor_name).join(', ')}`);
           console.log(`[GraphExpansion] Predicates: ${[...new Set(neighbors.map(n => n.via_predicate))].join(', ')}`);
           console.log(`[GraphExpansion] Would add ${new_count || 0}/${total_count || 0} new docs (${directRids.length} direct)`);
