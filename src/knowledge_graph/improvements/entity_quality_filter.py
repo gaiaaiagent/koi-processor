@@ -413,6 +413,28 @@ class EntityQualityFilter:
         re.compile(r'^(town hall|office hours|open forum|q&a session|ama)(\s+meeting)?$', re.IGNORECASE),
     ]
 
+    # ========================================================================
+    # E325: FirstName-OrgName Artifact Pattern
+    # ========================================================================
+    # Block PERSON entities where a first name is incorrectly merged with an
+    # organization name via hyphen (e.g., "Will-Regen Foundation" from text
+    # like "Will said Regen Foundation...").
+    #
+    # Pattern: FirstName-OrgSuffix where OrgSuffix matches organization patterns.
+    # Does NOT block legitimate hyphenated surnames (e.g., "Mary-Jane", "Smith-Jones").
+    # ========================================================================
+    FIRSTNAME_ORGNAME_PATTERN = re.compile(
+        r'^[A-Z][a-z]+[-_]'  # Capitalized first name + hyphen/underscore
+        r'(?:'
+        r'[A-Z].*(?:Foundation|Network|DAO|Protocol|Labs?|Inc|LLC|Corp|Group|Team|Fund|Council|Committee|Association|Institute|Society|Organization|Org|Company|Co)'
+        r'|'
+        r'[A-Z][a-z]*flow'  # Matches -Chainflow, -Dataflow, etc.
+        r'|'
+        r'[A-Z][a-z]*[_-]?Network'  # Matches Meme_Network, etc.
+        r')$',
+        re.IGNORECASE
+    )
+
     # Lowercase comparison for boilerplate/template text that should be blocked
     BOILERPLATE_BLOCKLIST: Set[str] = {
         # Issue / PR templates
@@ -549,6 +571,8 @@ class EntityQualityFilter:
                 'placeholder': 0,
                 # FIX-005: New filter reasons
                 'generic_domain_type': 0,
+                # E325: FirstName-OrgName artifact
+                'firstname_orgname_artifact': 0,
             }
         }
 
@@ -966,6 +990,64 @@ class EntityQualityFilter:
         return False
 
     # ========================================================================
+    # E325: FirstName-OrgName Artifact Detection
+    # ========================================================================
+
+    def is_firstname_orgname_artifact(self, name: str, entity_type: str) -> bool:
+        """
+        E325: Check if entity is a FirstName-OrgName extraction artifact.
+
+        LLM extraction sometimes merges a first name with an organization name
+        when they appear adjacent in text (e.g., "Will said Regen Foundation..."
+        becomes "Will-Regen Foundation" as a PERSON entity).
+
+        This blocks patterns like:
+        - Will-Regen Foundation
+        - Chris-Chainflow
+        - Curtis-Meme_Network
+
+        Does NOT block legitimate names:
+        - Mary-Jane (hyphenated first name)
+        - Smith-Jones (hyphenated surname)
+        - Jean-Pierre (French name)
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is FirstName-OrgName AND type is PERSON)
+
+        Examples:
+            >>> filter.is_firstname_orgname_artifact("Will-Regen Foundation", "PERSON")
+            True
+            >>> filter.is_firstname_orgname_artifact("Chris-Chainflow", "PERSON")
+            True
+            >>> filter.is_firstname_orgname_artifact("Curtis-Meme_Network", "PERSON")
+            True
+            >>> filter.is_firstname_orgname_artifact("Mary-Jane", "PERSON")
+            False  # Legitimate hyphenated first name
+            >>> filter.is_firstname_orgname_artifact("Will-Regen Foundation", "ORGANIZATION")
+            False  # Wrong type, don't block
+            >>> filter.is_firstname_orgname_artifact("Gregory Landua", "PERSON")
+            False  # Normal name
+        """
+        if not entity_type or entity_type.upper() != 'PERSON':
+            return False
+
+        stripped = name.strip()
+
+        # Must contain hyphen or underscore
+        if '-' not in stripped and '_' not in stripped:
+            return False
+
+        # Match against the FirstName-OrgName pattern
+        if self.FIRSTNAME_ORGNAME_PATTERN.match(stripped):
+            return True
+
+        return False
+
+    # ========================================================================
     # FIX-005: Domain Identifier Methods
     # ========================================================================
 
@@ -1198,6 +1280,14 @@ class EntityQualityFilter:
         if self.is_generic_domain_type_word(name, entity_type):
             reasons.append("generic_domain_type")
 
+        # ====================================================================
+        # E325: FirstName-OrgName artifact detection
+        # ====================================================================
+
+        # 16. FirstName-OrgName artifacts (e.g., "Will-Regen Foundation")
+        if self.is_firstname_orgname_artifact(name, entity_type):
+            reasons.append("firstname_orgname_artifact")
+
         is_valid = len(reasons) == 0
         return is_valid, reasons
 
@@ -1308,6 +1398,14 @@ class EntityQualityFilter:
         if self.is_generic_domain_type_word(name, entity_type):
             return (False, "generic_domain_type")
 
+        # ====================================================================
+        # E325: FirstName-OrgName artifact detection
+        # ====================================================================
+
+        # 16. FirstName-OrgName artifacts (e.g., "Will-Regen Foundation")
+        if self.is_firstname_orgname_artifact(name, entity_type):
+            return (False, "firstname_orgname_artifact")
+
         return (True, "")
 
     def filter_batch(self, entities: List[Dict]) -> List[Dict]:
@@ -1381,6 +1479,8 @@ class EntityQualityFilter:
                 'placeholder': 0,
                 # FIX-005: New filter reasons
                 'generic_domain_type': 0,
+                # E325: FirstName-OrgName artifact
+                'firstname_orgname_artifact': 0,
             }
         }
 
