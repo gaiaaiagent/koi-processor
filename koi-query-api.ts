@@ -2014,32 +2014,31 @@ app.get('/api/koi/entity/documents', async (req, res) => {
     }
 
     // Query documents via koi_entity_chunk_links
-    // Use normalized_text to find links (links store entity_name_lower)
+    // Join on document_rid to match koi_memories.rid
     const docQuery = `
-      WITH entity_chunks AS (
+      WITH entity_docs AS (
         SELECT DISTINCT
           l.document_rid,
-          l.chunk_rid,
           l.entity_name,
-          l.confidence as link_confidence
+          MAX(l.confidence) as link_confidence
         FROM koi_entity_chunk_links l
         WHERE l.entity_uri = $1
            OR LOWER(TRIM(l.entity_name)) = LOWER(TRIM($2))
+        GROUP BY l.document_rid, l.entity_name
         LIMIT $3 * 3
       ),
       docs_with_content AS (
         SELECT
-          ec.document_rid,
-          ec.chunk_rid,
-          ec.entity_name,
-          ec.link_confidence,
+          ed.document_rid,
+          ed.entity_name,
+          ed.link_confidence,
           m.content->>'text' as snippet,
           m.metadata->>'source' as source,
           m.metadata->>'url' as url,
           m.published_at,
           m.rid
-        FROM entity_chunks ec
-        JOIN koi_memories m ON m.id::text = ec.chunk_rid OR m.rid = ec.chunk_rid
+        FROM entity_docs ed
+        JOIN koi_memories m ON m.rid = ed.document_rid
         WHERE m.superseded_at IS NULL
           AND m.content->>'text' IS NOT NULL
           ${privacyFilter}
