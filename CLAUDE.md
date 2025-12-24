@@ -130,7 +130,35 @@ set -a; source .env; set +a
 - `migrations/025_add_content_tsv_fts.sql` - FTS schema
 - `scripts/backfill-fts.sql` - Backfill script
 
-**Debug Flags**: `DEBUG_AUTH`, `DEBUG_EXTRACTION`, `DEBUG_FUSION`, `DEBUG_KEYWORD_SEARCH`
+**Debug Flags**: `DEBUG_AUTH`, `DEBUG_EXTRACTION`, `DEBUG_FUSION`, `DEBUG_KEYWORD_SEARCH`, `DEBUG_GRAPH_EXPANSION`
+
+---
+
+## Graph Expansion PoC (2025-12-24)
+
+**Status**: ✅ Deployed - log-only analysis
+
+**Purpose**: Analyze potential recall gains from 1-hop relationship traversal without changing search results.
+
+**How it works**:
+1. Extract matched entity names from entity search results
+2. Look up entities in entity_registry by name
+3. Find 1-hop neighbors via koi_relationships (confidence >= 0.5, occurrence_count >= 2)
+4. Count how many new docs the neighbors would add
+5. Log the analysis (no ranking change)
+
+**Key Function**: `get1HopNeighbors()` in `koi-query-api.ts`
+
+**Sample Output**:
+```
+[GraphExpansion] Query: "Gregory Landua"
+[GraphExpansion] Matched 3 entities: gregory, gregory landua, landua
+[GraphExpansion] Expanded to 5: Regen Network, RND PBC
+[GraphExpansion] Predicates: represents, associated_with, mentions, attended
+[GraphExpansion] Would add 1667/1682 new docs (60 direct)
+```
+
+**Enabling**: Set `DEBUG_GRAPH_EXPANSION=true` in ecosystem.hybrid.config.js
 
 ---
 
