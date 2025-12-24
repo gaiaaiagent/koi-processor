@@ -189,23 +189,24 @@ function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'):
 // Get 1-hop neighbors from koi_relationships for graph expansion
 // Returns neighbor entities connected to the matched entity names
 async function get1HopNeighbors(
-  matchedEntityNames: string[],  // entity names to look up (case-insensitive)
+  matchedEntityNames: string[],  // normalized entity names (lowercased)
   maxPerEntity: number = 5,
   totalLimit: number = 15
-): Promise<{ neighbor_uri: string; neighbor_name: string; via_predicate: string; confidence: number }[]> {
+): Promise<{ neighbor_uri: string; neighbor_name: string; neighbor_type: string; via_predicate: string; confidence: number }[]> {
   if (matchedEntityNames.length === 0) return [];
 
   const query = `
     WITH matched AS (
-      SELECT DISTINCT ON (LOWER(entity_text)) id, fuseki_uri, entity_text
+      SELECT DISTINCT ON (normalized_text) id, fuseki_uri, entity_text, entity_type
       FROM entity_registry
-      WHERE LOWER(entity_text) = ANY($1)
-      ORDER BY LOWER(entity_text), occurrence_count DESC
+      WHERE normalized_text = ANY($1)
+      ORDER BY normalized_text, occurrence_count DESC
     ),
     neighbors_ranked AS (
       SELECT
         er.fuseki_uri as neighbor_uri,
         er.entity_text as neighbor_name,
+        er.entity_type as neighbor_type,
         r.predicate as via_predicate,
         COALESCE(r.confidence, 0) as confidence,
         r.occurrence_count,
@@ -223,7 +224,7 @@ async function get1HopNeighbors(
       WHERE COALESCE(r.confidence, 0) >= 0.5
         AND r.occurrence_count >= 2
     )
-    SELECT DISTINCT neighbor_uri, neighbor_name, via_predicate, confidence
+    SELECT DISTINCT neighbor_uri, neighbor_name, neighbor_type, via_predicate, confidence
     FROM neighbors_ranked
     WHERE rank_per_source <= $2
     ORDER BY confidence DESC
@@ -271,7 +272,6 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           l.chunk_rid,
           l.document_rid,
           array_agg(DISTINCT l.entity_name) as entities_matched,
-          array_agg(DISTINCT l.entity_uri) FILTER (WHERE l.entity_uri IS NOT NULL) AS entity_uris,
           COUNT(DISTINCT l.entity_name_lower) as entity_count,
           MAX(me.entity_length) as max_entity_length
         FROM koi_entity_chunk_links l
@@ -285,7 +285,6 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           m.metadata->>'source' as source,
           m.metadata->>'url' as url,
           em.entities_matched,
-          em.entity_uris,
           em.entity_count,
           em.max_entity_length,
           m.published_at,
@@ -325,11 +324,11 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         FROM web_domain_ranked WHERE domain_rank <= 10
       ),
       combined AS (
-        SELECT rid, content, source, url, entities_matched, entity_uris, entity_count,
+        SELECT rid, content, source, url, entities_matched, entity_count,
                max_entity_length, published_at
         FROM non_web_ranked WHERE source_rank <= 25
         UNION ALL
-        SELECT rid, content, source, url, entities_matched, entity_uris, entity_count,
+        SELECT rid, content, source, url, entities_matched, entity_count,
                max_entity_length, published_at
         FROM web_diverse WHERE source_rank <= 50
       ),
@@ -342,7 +341,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           ) as content_rank
         FROM combined
       )
-      SELECT rid, content, source, url, entities_matched, entity_uris, entity_count,
+      SELECT rid, content, source, url, entities_matched, entity_count,
              max_entity_length, published_at
       FROM deduplicated
       WHERE content_rank = 1
@@ -359,49 +358,56 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
 
     // Log-only expansion analysis - only runs when DEBUG_GRAPH_EXPANSION is set (zero overhead otherwise)
     if (process.env.DEBUG_GRAPH_EXPANSION) {
-      // Extract matched entity names from results (lowercased for lookup), cap at 50
+      // Extract matched entity names from results, filtering to multi-token (>= 2 words or >= 8 chars)
+      // to avoid single-token seeds like "gregory" that explode to 1000+ docs
       const matchedEntityNames = [...new Set(
         results.rows.flatMap(r => (r.entities_matched || []).map((e: string) => e.toLowerCase()))
-      )].slice(0, 50);
+      )].filter(name => name.includes(' ') || name.length >= 8).slice(0, 50);
 
       if (matchedEntityNames.length > 0) {
         const neighbors = await get1HopNeighbors(matchedEntityNames, 5, 15);
 
         if (neighbors.length > 0) {
-          // Get RIDs already in direct results for comparison (cap at 100)
-          const directRids = results.rows.map(r => r.rid).slice(0, 100);
-
-          // Optimized query: counts + small sample, lookup by entity name (lowercased)
-          const expansionQuery = `
-            WITH expansion_docs AS (
-              SELECT DISTINCT m.rid
-              FROM koi_entity_chunk_links ecl
-              JOIN koi_memories m ON m.id::text = ecl.chunk_rid
-              WHERE ecl.entity_name_lower = ANY($1)
-                AND m.superseded_at IS NULL
-                AND m.content->>'text' IS NOT NULL
-                ${privacyFilter}
-            )
-            SELECT
-              COUNT(*) AS total_count,
-              COUNT(*) FILTER (WHERE NOT (rid = ANY($2))) AS new_count,
-              (SELECT array_agg(rid) FROM (SELECT rid FROM expansion_docs LIMIT 5) s) AS sample_rids
-            FROM expansion_docs
-          `;
-          const expansionResult = await pool.query(expansionQuery, [
-            neighbors.map(n => n.neighbor_name.toLowerCase()),
-            directRids
-          ]);
-
-          const { total_count, new_count, sample_rids } = expansionResult.rows[0] || {};
-
           console.log(`[GraphExpansion] Query: "${query}"`);
           console.log(`[GraphExpansion] Matched ${matchedEntityNames.length} entities: ${matchedEntityNames.slice(0, 3).join(', ')}`);
-          console.log(`[GraphExpansion] Expanded to ${neighbors.length}: ${neighbors.slice(0, 3).map(n => n.neighbor_name).join(', ')}`);
+          console.log(`[GraphExpansion] Expanded to ${neighbors.length}: ${neighbors.slice(0, 3).map(n => `${n.neighbor_name} (${n.neighbor_type})`).join(', ')}`);
           console.log(`[GraphExpansion] Predicates: ${[...new Set(neighbors.map(n => n.via_predicate))].join(', ')}`);
-          console.log(`[GraphExpansion] Would add ${new_count || 0}/${total_count || 0} new docs (${directRids.length} direct)`);
-          if (sample_rids?.length) {
-            console.log(`[GraphExpansion] Sample RIDs: ${sample_rids.slice(0, 3).join(', ')}`);
+
+          // Guard: skip count query if too many neighbors (likely to be expensive)
+          if (neighbors.length > 10) {
+            console.log(`[GraphExpansion] Skipping doc count (${neighbors.length} neighbors > 10 limit)`);
+          } else {
+            // Get RIDs already in direct results for comparison (cap at 100)
+            const directRids = results.rows.map(r => r.rid).slice(0, 100);
+
+            // Optimized query: counts + small sample, lookup by entity name (lowercased)
+            const expansionQuery = `
+              WITH expansion_docs AS (
+                SELECT DISTINCT m.rid
+                FROM koi_entity_chunk_links ecl
+                JOIN koi_memories m ON m.id::text = ecl.chunk_rid
+                WHERE ecl.entity_name_lower = ANY($1)
+                  AND m.superseded_at IS NULL
+                  AND m.content->>'text' IS NOT NULL
+                  ${privacyFilter}
+              )
+              SELECT
+                COUNT(*) AS total_count,
+                COUNT(*) FILTER (WHERE NOT (rid = ANY($2))) AS new_count,
+                (SELECT array_agg(rid) FROM (SELECT rid FROM expansion_docs LIMIT 5) s) AS sample_rids
+              FROM expansion_docs
+            `;
+            const expansionResult = await pool.query(expansionQuery, [
+              neighbors.map(n => n.neighbor_name.toLowerCase()),
+              directRids
+            ]);
+
+            const { total_count, new_count, sample_rids } = expansionResult.rows[0] || {};
+
+            console.log(`[GraphExpansion] Would add ${new_count || 0}/${total_count || 0} new docs (${directRids.length} direct)`);
+            if (sample_rids?.length) {
+              console.log(`[GraphExpansion] Sample RIDs: ${sample_rids.slice(0, 3).join(', ')}`);
+            }
           }
         }
       }
@@ -421,8 +427,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         entity_count: parseInt(row.entity_count),
         published_at: row.published_at || null
       },
-      rid: row.rid,
-      entity_uris: row.entity_uris || []
+      rid: row.rid
     }));
 
   } catch (error) {
