@@ -685,8 +685,9 @@ python scripts/resolve_entity_variants.py --report
 
 ## Week 8: API Integration + Evaluation Improvements + Targeted Canary
 
-**Report:** [polysemy_resolver_eval_week8.md](reports/polysemy_resolver_eval_week8.md) (after running eval)
-**Report (with hints):** [polysemy_resolver_eval_week8_with_hints.md](reports/polysemy_resolver_eval_week8_with_hints.md) (after running eval with hints)
+**Eval Report:** [polysemy_resolver_eval_week8.md](reports/polysemy_resolver_eval_week8.md) ✅
+**Eval Report (with hints):** [polysemy_resolver_eval_week8_with_hints.md](reports/polysemy_resolver_eval_week8_with_hints.md) ✅
+**Targeted Canary Reports:** [week8_canary_validation_fix013_fix014_entityqualityfilter.md](reports/week8_canary_validation_fix013_fix014_entityqualityfilter.md), [week8_canary_validation_fix013_fix014_biodiversity.md](reports/week8_canary_validation_fix013_fix014_biodiversity.md)
 
 ### Task 1: Evaluation Dataset Fixes
 
@@ -710,6 +711,7 @@ Added `--use-context-hint` option to `scripts/eval_polysemy_resolver.py`:
 - Passes inferred hints to `resolve_entity()`
 - Generates separate report: `polysemy_resolver_eval_week8_with_hints.md`
 - Tracks hint statistics: hints inferred, hints matched winner
+- Known issue: `ecosystem` can over-trigger PROJECT (e.g., "ecosystem services")
 
 **Usage:**
 ```bash
@@ -795,16 +797,16 @@ PYTHONPATH=src python scripts/validation/week7_canary_fix013_fix014.py \
 - Report includes selection mode and patterns used
 - Goal: Ensure FIX-013/014 actually block entities when trigger strings appear
 
-### Week 8 Metrics (To Be Updated After Running)
+### Week 8 Metrics
 
 | Metric | Value | Status |
 |--------|-------|--------|
 | Eval dataset size | 27 cases | Fixed |
-| Top-1 Accuracy (no hints) | TBD | Run eval |
-| Top-1 Accuracy (with hints) | TBD | Run eval |
-| API endpoint | `/api/koi/entity/resolve` | Implemented |
-| Targeted canary FIX-013 blocked | TBD | Run canary |
-| Targeted canary FIX-014 blocked | TBD | Run canary |
+| Top-1 Accuracy (no hints) | 100.0% (27/27) | PASS |
+| Top-1 Accuracy (with hints) | 96.3% (26/27) | PASS (1 bad hint) |
+| API endpoint | `/api/koi/entity/resolve` | Smoke tested (prod) |
+| Targeted canary FIX-013 blocked | 0 blocked, 0 false negatives | PASS |
+| Targeted canary FIX-014 blocked | 0 blocked, 0 false negatives | PASS |
 
 ### Week 8 Deliverables
 
@@ -814,8 +816,10 @@ PYTHONPATH=src python scripts/validation/week7_canary_fix013_fix014.py \
 | Eval script with hints | `scripts/eval_polysemy_resolver.py` | Complete |
 | API endpoint | `koi-query-api.ts` line 1542 | Complete |
 | Targeted canary script | `scripts/validation/week7_canary_fix013_fix014.py` | Complete |
-| Week 8 eval report | `docs/archive/reports/polysemy_resolver_eval_week8.md` | Run script |
-| Week 8 eval report (hints) | `docs/archive/reports/polysemy_resolver_eval_week8_with_hints.md` | Run script |
+| Week 8 eval report | `docs/archive/reports/polysemy_resolver_eval_week8.md` | Complete |
+| Week 8 eval report (hints) | `docs/archive/reports/polysemy_resolver_eval_week8_with_hints.md` | Complete |
+| Week 8 canary report (FIX-013) | `docs/archive/reports/week8_canary_validation_fix013_fix014_entityqualityfilter.md` | Complete |
+| Week 8 canary report (FIX-014) | `docs/archive/reports/week8_canary_validation_fix013_fix014_biodiversity.md` | Complete |
 
 ### Commands to Run on Production
 
@@ -827,6 +831,9 @@ ssh darren@202.61.196.119
 cd /opt/projects/koi-processor
 set -a; source .env; set +a
 
+# If you see "rapidfuzz not installed" in KG scripts:
+./.venv/bin/pip install "rapidfuzz>=3.0.0"
+
 # Task 1: Run evaluation (no hints)
 PYTHONPATH=src ./.venv/bin/python scripts/eval_polysemy_resolver.py
 
@@ -834,7 +841,7 @@ PYTHONPATH=src ./.venv/bin/python scripts/eval_polysemy_resolver.py
 PYTHONPATH=src ./.venv/bin/python scripts/eval_polysemy_resolver.py --use-context-hint
 
 # Task 3: Restart API and test endpoint
-pm2 restart hybrid-rag-api
+sudo -u shawn pm2 restart hybrid-rag-api
 curl "http://localhost:8301/api/koi/entity/resolve?label=notion"
 curl "http://localhost:8301/api/koi/entity/resolve?label=ethereum&type_hint=TECHNOLOGY"
 
