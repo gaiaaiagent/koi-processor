@@ -521,9 +521,20 @@ PYTHONPATH=src python scripts/validation/week7_canary_fix013_fix014.py --limit 1
 ```
 
 **Acceptance Criteria:**
-- [ ] 0 code modules pass through as PROCESS
-- [ ] 0 abstract concepts pass through as MATERIAL
-- [ ] No regressions in quality gates
+- [x] 0 code modules pass through as PROCESS
+- [x] 0 abstract concepts pass through as MATERIAL
+- [x] No regressions in quality gates
+
+**Canary Results (2025-12-24):**
+| Metric | Value |
+|--------|-------|
+| Documents Processed | 10 |
+| Total Entities Extracted | 83 |
+| Passed Pipeline | 69 |
+| Blocked by Pipeline | 14 |
+| FIX-013 Blocked | 0 (PASS) |
+| FIX-014 Blocked | 0 (PASS) |
+| **Overall Status** | **CANARY PASSED** |
 
 ### Task 2: Polysemy Resolver Module Refactor
 
@@ -591,6 +602,30 @@ PYTHONPATH=src python scripts/eval_polysemy_resolver.py
 | Top-1 Accuracy | ≥80% |
 | Top-3 Coverage | ≥95% |
 
+**Evaluation Results (2025-12-24):**
+| Metric | Value | Status |
+|--------|-------|--------|
+| Total Cases | 30 | — |
+| Found in DB | 27 | — |
+| Not Found | 3 | — |
+| **Top-1 Accuracy** | **92.6% (25/27)** | **✅ EXCEEDS TARGET** |
+| **Top-3 Coverage** | **96.3% (26/27)** | **✅ EXCEEDS TARGET** |
+
+**Resolution Methods Distribution:**
+| Method | Count |
+|--------|-------|
+| dominant_occurrence | 23 |
+| dominant_connectivity | 2 |
+| highest_combined_score | 2 |
+
+**Failures (2):**
+| Label | Expected | Got | Analysis |
+|-------|----------|-----|----------|
+| regen commons | PROJECT or TECHNOLOGY | ORGANIZATION | ORGANIZATION has highest occurrence (151 vs 147) |
+| osmosis | PROJECT or TECHNOLOGY | ORGANIZATION | ORGANIZATION has higher occurrence count |
+
+**Not Found (3):** These entities don't exist in the current knowledge graph with the expected types.
+
 ### Week 7 Deliverables
 
 | Deliverable | Path | Status |
@@ -642,9 +677,107 @@ python scripts/resolve_entity_variants.py --report
 
 1. **Run canary validation on production** - Execute the script and update report
 2. **Run evaluation on production** - Execute eval script and analyze accuracy
-3. **Integrate resolver into GraphRAG** - Call `resolve_entity()` from hybrid search
+3. ~~**Integrate resolver into GraphRAG**~~ - See Week 8 plan below
 4. **Consider CONCEPT↔ORGANIZATION for allowlist** - 157 labels, mostly legitimate
 5. **Tune type priorities** - Adjust based on evaluation results
+
+---
+
+## Week 8: Polysemy Resolver Integration
+
+**Goal:** Integrate the polysemy resolver into the hybrid search / GraphRAG retrieval pipeline.
+
+### Integration Points
+
+The polysemy resolver should be called when:
+
+1. **Hybrid Search Entity Lookup** - When a user query mentions an entity by label
+2. **GraphRAG Retrieval** - When resolving entity references for context augmentation
+3. **Entity Linking** - When linking extracted entities to existing nodes
+
+### Required Inputs
+
+| Input | Source | Description |
+|-------|--------|-------------|
+| `label` | Query / Extracted text | The entity label to resolve (e.g., "ethereum", "notion") |
+| `type_hint` | Query intent heuristic | Optional type hint to bias resolution |
+
+### Type Hint Sourcing Strategy
+
+The `type_hint` parameter can be sourced from:
+
+| Source | Example Query | Inferred Hint |
+|--------|---------------|---------------|
+| Query keywords | "What technology does X use?" | TECHNOLOGY |
+| Query keywords | "Who founded X?" | ORGANIZATION |
+| Query keywords | "What is X?" | CONCEPT |
+| Surrounding text | "...the Ethereum blockchain..." | TECHNOLOGY |
+| User filter | `?type=PROJECT` | PROJECT |
+| Default | (none) | None (use occurrence-based ranking) |
+
+**Heuristic Implementation:**
+```python
+def infer_type_hint(query: str) -> Optional[str]:
+    """Infer type hint from query text."""
+    query_lower = query.lower()
+
+    if any(kw in query_lower for kw in ['technology', 'tool', 'platform', 'software']):
+        return 'TECHNOLOGY'
+    if any(kw in query_lower for kw in ['company', 'organization', 'founded', 'team']):
+        return 'ORGANIZATION'
+    if any(kw in query_lower for kw in ['project', 'initiative', 'repository']):
+        return 'PROJECT'
+    if any(kw in query_lower for kw in ['what is', 'concept', 'definition']):
+        return 'CONCEPT'
+
+    return None  # Let resolver use default ranking
+```
+
+### Integration Code Example
+
+```python
+from knowledge_graph.polysemy_resolver import resolve_entity
+
+def retrieve_entity_context(label: str, query: str, db_config: dict) -> dict:
+    """
+    Retrieve context for an entity, using polysemy resolver to pick the right variant.
+    """
+    # Infer type hint from query
+    type_hint = infer_type_hint(query)
+
+    # Resolve to best variant
+    result = resolve_entity(label, type_hint=type_hint, db_config=db_config)
+
+    if not result.winner:
+        return {"error": f"Entity '{label}' not found"}
+
+    winner = result.winner
+    return {
+        "uri": winner.uri,
+        "label": winner.entity_text,
+        "type": winner.entity_type,
+        "is_polysemy": result.is_polysemy,
+        "alternatives": len(result.alternatives),
+        "resolution_method": result.resolution_method,
+    }
+```
+
+### Success Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Wrong-node retrieval rate | <5% on eval set | Run eval set through integrated pipeline |
+| Resolver latency | <50ms p95 | Add timing instrumentation |
+| Type hint coverage | >30% of queries | Track queries with inferred hints |
+
+### Week 8 Tasks
+
+1. [ ] Identify integration point in hybrid search code
+2. [ ] Implement `infer_type_hint()` function
+3. [ ] Add resolver call to entity lookup path
+4. [ ] Create integration test with eval set entities
+5. [ ] Measure wrong-node retrieval rate before/after
+6. [ ] Add latency monitoring
 
 ---
 
@@ -859,6 +992,9 @@ ORDER BY occurrence_count DESC;
 | **Week 7: Polysemy Module Refactor** | Complete | [Module](../../../src/knowledge_graph/polysemy_resolver.py) - library + CLI |
 | **Week 7: Evaluation Harness** | Complete | [Dataset](reports/polysemy_eval_set_week7.jsonl) + [Script](../../../scripts/eval_polysemy_resolver.py) |
 | **Week 7: Cycle Doc Update** | Complete | Week 7 section with API docs |
+| **Week 7: Canary Execution** | Complete | [Report](reports/week7_canary_validation_fix013_fix014.md) - CANARY PASSED |
+| **Week 7: Evaluation Execution** | Complete | [Report](reports/polysemy_resolver_eval_week7.md) - 92.6% Top-1, 96.3% Top-3 |
+| **Week 8: Integration Plan** | Complete | Documented in cycle doc |
 
 ---
 
