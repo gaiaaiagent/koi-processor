@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-24 (E401 fix verified, Week 10 closeout)
-**Status:** Week 10 Complete - All issues resolved or documented, ready for Week 11
+**Last Updated:** 2025-12-25 (E402 resolved, Week 11 batch validated)
+**Status:** Week 11 Complete - E402 platform relationships fix validated
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1495,29 +1495,167 @@ ORDER BY occurrence_count DESC;
 
 ---
 
-## Week 11: Next Sprint Placeholder
+## Week 11: E402 Data Gap Sprint
 
-**Status:** Not started
-**Proposed Focus:** Relationship coverage for platform/tool entities
+**Status:** Complete (Canary + Batch Validated)
+**Started:** 2025-12-25
+**Focus:** Add relationships for platform/tool entities (Notion, Discord, Telegram, KOI)
 
-### Backlog Items from Week 10
+### E402 Canary Test Results (2025-12-25)
 
-1. **E402 Data Gap** - "notion" and "koi" have high occurrence but 0 relationships
-   - Root cause: Mentioned in non-relational contexts ("see Notion page", "the KOI system")
-   - Future enhancement: Extraction prompt tuning to capture contextual relationships (e.g., `documented_in`, `uses_tool`)
+**Goal:** Test enhanced extraction prompt that adds specific predicates for TECHNOLOGY/PLATFORM entities.
 
-2. **Further Predicate Reduction** - 1,499 → ~100-200 optional consolidation
+#### Baseline (Before Enhancement)
+
+| Entity | Type | Occurrences | Relationships |
+|--------|------|-------------|---------------|
+| notion | TECHNOLOGY | 308 | **0** |
+| telegram | TECHNOLOGY | 212 | **0** |
+| discord | TECHNOLOGY | 193 | **0** |
+| koi | PROJECT | 166 | **0** |
+| github | ORGANIZATION | 281 | 52 |
+| slack | TECHNOLOGY | 38 | 4 |
+
+**Problem:** Platform entities typed as TECHNOLOGY have zero relationships; entities typed as ORGANIZATION have relationships.
+
+#### Prompt Enhancement
+
+Added new section to `src/extraction/prompt_builder.py`:
+
+```markdown
+## RELATIONSHIP PREDICATES FOR TECHNOLOGY/PLATFORM ENTITIES
+
+- uses: Subject actively uses the platform/tool
+- hosted_on: Content/service is hosted on a platform
+- powered_by: System is powered by a technology
+- integrates_with: Two systems connect to each other
+- documents_on: Content is stored/documented on a platform
+- published_on: Content was published on a platform
+- communicates_via: Entity uses a platform for communication
+
+### Avoid generic predicates
+- DO NOT use "associated_with" for platform relationships
+```
+
+#### Canary Set (8 docs)
+
+| Source | Entity | RID |
+|--------|--------|-----|
+| github | discord | `regen.github:github_regen-koi-mcp_docs_README.md` |
+| github | koi | `regen.github:github_regen-koi-mcp_docs_AUTHENTICATION.md` |
+| github | notion | `regen.github:github_koi-sensors_legacy_README.md` |
+| discourse | telegram | `regen.forum-post:forum.regen.network_352_post_1` |
+| discourse | notion | `regen.forum-post:forum.regen.network_19_post_43` |
+| discourse | discord | `regen.forum-post:forum.regen.network_313_post_1` |
+| web | koi | `orn:web.page:forum.regen.network/337bda486f44b273` |
+| web | discord | `orn:web.page:forum.regen.network/4096b7a58e126712` |
+
+#### Extraction Results (With Enhanced Prompt)
+
+| Metric | Value |
+|--------|-------|
+| Docs processed | 8 |
+| Platform relationships extracted | **17** |
+
+**Predicate Distribution:**
+
+| Predicate | Count |
+|-----------|-------|
+| documents_on | 6 |
+| uses | 4 |
+| communicates_via | 3 |
+| integrates_with | 3 |
+| powered_by | 1 |
+
+**Example Relationships Extracted:**
+
+```
+(Regen Tokenomics, uses, Notion)
+(n8n.io, integrates_with, Notion)
+(Witval, communicates_via, Discord)
+(Witval, communicates_via, Telegram)
+(KOI MCP Server, documents_on, Notion)
+(Regen Network, uses, GitHub)
+```
+
+#### Verdict
+
+✅ **SUCCESS** - Enhanced prompt generates meaningful platform relationships.
+
+### Batch Reprocess Results (2025-12-25)
+
+**Prompt integrated:** Added platform relationship predicates to `src/extraction/prompt_builder.py`
+
+**Batch processed:** 40 docs mentioning platform entities (notion, koi, discord, telegram, slack, github)
+
+#### Results (After Privacy Cleanup)
+
+| Metric | Value |
+|--------|-------|
+| Docs processed | 40 |
+| Docs with platform rels | 25 |
+| Platform relationships | **48** |
+| Errors | 0 |
+
+**Predicate Distribution:**
+
+| Predicate | Count |
+|-----------|-------|
+| uses | 15 |
+| integrates_with | 12 |
+| powered_by | 10 |
+| documents_on | 5 |
+| communicates_via | 5 |
+| hosted_on | 1 |
+
+**Sample Relationships:**
+
+```
+(Regen Network, uses, Notion)
+(KOI Event Bridge, integrates_with, FastAPI)
+(BGE MCP Server, powered_by, PostgreSQL)
+(Kytzu, communicates_via, Telegram)
+(Planetary Regeneration Podcast, documents_on, SoundCloud)
+```
+
+#### Privacy Finding
+
+⚠️ **Mixed-privacy Notion docs detected**
+
+Two Notion pages had mixed privacy (some chunks public, others private):
+- `orn:notion.page:regen/2a925b77-eda1-8044-9f41-df761cb44b93`
+- `orn:notion.page:regen/25625b77-eda1-8080-8a55-e56225418197`
+
+**Action:** Removed 12 relationships from these docs. Future batch selection queries should check `MAX(is_private::int) = 0` to ensure ALL chunks are public.
+
+#### E402 Resolution
+
+✅ **E402 RESOLVED** - Platform/tool entities now have relationships via enhanced extraction prompt.
+
+**Before:** notion (308 mentions, 0 relationships), discord (193 mentions, 0 relationships)
+**After:** 48 new platform relationships across 25 docs with 6 distinct predicates
+
+### Artifacts
+
+- `src/extraction/prompt_builder.py` - Enhanced with platform predicates
+- `scripts/e402_platform_extraction_test.py` - Canary test script
+- `scripts/e402_reprocess_batch.py` - Batch reprocess script
+- `data/e402_reprocess_batch.txt` - Batch RID list
+- `e402_extracted_relationships` (temp table) - Validation results
+
+### Next Steps (Optional)
+
+1. **Merge to prod** - If approved, merge temp table relationships to `koi_relationships`
+2. **Broader reprocess** - Run on all docs mentioning platform entities (~500-1000 docs)
+3. **Monitor** - Check new extractions include platform predicates
+
+### Backlog Items (Deferred)
+
+1. **Further Predicate Reduction** - 1,499 → ~100-200 optional consolidation
    - Low priority; current predicates are semantically correct
 
-3. **CONCEPT↔ORGANIZATION Allowlist** - 157 labels, mostly DAOs/working groups
+2. **CONCEPT↔ORGANIZATION Allowlist** - 157 labels, mostly DAOs/working groups
    - Consider adding to expected polysemy set
-
-### Week 11 Sprint Ideas
-
-- **Relationship extraction improvements** - Focus on platform entities (Notion, Discord, Telegram)
-- **Predicate normalization round 2** - Consolidate remaining synonyms
-- **GraphRAG integration** - Use polysemy resolver in hybrid search ranking
-- **Entity linking improvements** - Better cross-document deduplication
 
 ---
 

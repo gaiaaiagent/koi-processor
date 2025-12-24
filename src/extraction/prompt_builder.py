@@ -209,6 +209,43 @@ Use MATERIAL for physical substances:
 - "Organic Matter", "Compost"
 NOT for: Abstract concepts (those are CONCEPT)
 
+## RELATIONSHIP PREDICATES FOR TECHNOLOGY/PLATFORM ENTITIES
+
+When extracting relationships involving TECHNOLOGY, PLATFORM, or TOOL entities, use these specific predicates:
+
+### Usage relationships
+- uses: Subject actively uses the platform/tool
+  - "Regen Network uses Notion for documentation" → (Regen Network, uses, Notion)
+  - "The team uses Slack for communication" → (team, uses, Slack)
+
+- hosted_on: Content/service is hosted on a platform
+  - "The forum is hosted on Discourse" → (forum, hosted_on, Discourse)
+
+- powered_by: System is powered by a technology
+  - "Search is powered by PostgreSQL" → (Search, powered_by, PostgreSQL)
+
+### Integration relationships
+- integrates_with: Two systems connect to each other
+  - "The bot integrates with Discord" → (bot, integrates_with, Discord)
+  - "n8n.io connects to Notion" → (n8n.io, integrates_with, Notion)
+
+### Documentation relationships
+- documents_on: Content is stored/documented on a platform
+  - "Meeting notes are on Notion" → (Meeting notes, documents_on, Notion)
+  - "Specs are documented in Notion" → (specs, documents_on, Notion)
+
+- published_on: Content was published on a platform
+  - "Article was published on Medium" → (Article, published_on, Medium)
+
+### Communication relationships
+- communicates_via: Entity uses a platform for communication
+  - "Community discussions happen on Discord" → (community, communicates_via, Discord)
+  - "Updates are shared on Telegram" → (updates, communicates_via, Telegram)
+
+### Avoid generic predicates
+- DO NOT use "associated_with" for platform/tool relationships
+- Only use "associated_with" if no better predicate applies
+
 ## Confidence Scoring
 - HIGH (0.85-1.0): Explicit named mention ("Regen Network announced...")
 - MEDIUM (0.70-0.84): Implied/contextual ("the network launched...")
