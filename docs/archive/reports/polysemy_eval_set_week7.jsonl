@@ -1,0 +1,30 @@
+{"label": "notion", "context": "We use Notion for project management", "expected_type": ["TECHNOLOGY", "ORGANIZATION"], "notes": "Platform company - both types valid"}
+{"label": "discord", "context": "Join our Discord community", "expected_type": ["TECHNOLOGY", "ORGANIZATION"], "notes": "Platform company - both types valid"}
+{"label": "telegram", "context": "Telegram group for announcements", "expected_type": ["TECHNOLOGY", "ORGANIZATION"], "notes": "Platform company - both types valid"}
+{"label": "youtube", "context": "Watch tutorials on YouTube", "expected_type": ["TECHNOLOGY", "ORGANIZATION"], "notes": "Platform company - both types valid"}
+{"label": "github", "context": "Source code on GitHub", "expected_type": ["TECHNOLOGY", "ORGANIZATION"], "notes": "Platform company - both types valid"}
+{"label": "sparql", "context": "Query the graph with SPARQL", "expected_type": ["TECHNOLOGY", "STANDARD"], "notes": "Query language standard"}
+{"label": "rdf", "context": "Data modeled in RDF", "expected_type": ["TECHNOLOGY", "STANDARD"], "notes": "Semantic web standard"}
+{"label": "json-ld", "context": "Linked data in JSON-LD format", "expected_type": ["TECHNOLOGY", "STANDARD"], "notes": "Linked data format"}
+{"label": "ethereum", "context": "Deployed on Ethereum mainnet", "expected_type": ["TECHNOLOGY"], "notes": "Blockchain should be TECHNOLOGY"}
+{"label": "cosmos", "context": "Built on Cosmos SDK", "expected_type": ["TECHNOLOGY", "PROJECT"], "notes": "Blockchain ecosystem"}
+{"label": "regen network", "context": "Regen Network provides ecological credits", "expected_type": ["PROJECT", "ORGANIZATION"], "notes": "The main project"}
+{"label": "regen commons", "context": "Data shared via Regen Commons", "expected_type": ["PROJECT", "TECHNOLOGY"], "notes": "Data commons infrastructure"}
+{"label": "aerodrome", "context": "Traded on Aerodrome DEX", "expected_type": ["PROJECT", "TECHNOLOGY"], "notes": "DeFi protocol - tricky polysemy"}
+{"label": "koi", "context": "KOI knowledge graph integration", "expected_type": ["PROJECT", "TECHNOLOGY"], "notes": "Internal project name"}
+{"label": "osmosis", "context": "Staking on Osmosis", "expected_type": ["TECHNOLOGY", "PROJECT"], "notes": "Cosmos ecosystem DEX"}
+{"label": "base", "context": "Layer 2 on Base", "expected_type": ["TECHNOLOGY"], "notes": "Coinbase L2 - NOT a location"}
+{"label": "polygon", "context": "NFTs on Polygon", "expected_type": ["TECHNOLOGY"], "notes": "L2 chain - NOT a location"}
+{"label": "carbon credit", "context": "Purchasing carbon credits", "expected_type": ["CONCEPT"], "notes": "Should be CONCEPT not MATERIAL"}
+{"label": "biodiversity", "context": "Measuring biodiversity loss", "expected_type": ["CONCEPT"], "notes": "FIX-014: Should NOT be MATERIAL"}
+{"label": "ecosystem services", "context": "Valuing ecosystem services", "expected_type": ["CONCEPT"], "notes": "FIX-014: Should NOT be MATERIAL"}
+{"label": "regenerative agriculture", "context": "Practices of regenerative agriculture", "expected_type": ["CONCEPT", "PROCESS"], "notes": "Farming methodology"}
+{"label": "verification", "context": "Third-party verification required", "expected_type": ["PROCESS", "CONCEPT"], "notes": "Should be PROCESS not MATERIAL"}
+{"label": "MRV", "context": "MRV protocol implementation", "expected_type": ["TECHNOLOGY", "CONCEPT", "STANDARD"], "notes": "Measurement Reporting Verification"}
+{"label": "data loader", "context": "The DataLoader handles batching", "expected_type": ["TECHNOLOGY"], "notes": "FIX-013: Code module - NOT a PROCESS"}
+{"label": "entity resolver", "context": "Entity dedup via EntityResolver", "expected_type": ["TECHNOLOGY"], "notes": "FIX-013: Code module - NOT a PROCESS"}
+{"label": "gregory landua", "context": "Founded by Gregory Landua", "expected_type": ["PERSON"], "notes": "Real person - should be PERSON"}
+{"label": "will szal", "context": "Will Szal leads the project", "expected_type": ["PERSON"], "notes": "Real person - should be PERSON"}
+{"label": "usdc", "context": "Payment in USDC stablecoins", "expected_type": ["TECHNOLOGY", "CONCEPT"], "notes": "Stablecoin - crypto token"}
+{"label": "ipfs", "context": "Files stored on IPFS", "expected_type": ["TECHNOLOGY"], "notes": "Decentralized storage"}
+{"label": "graphql", "context": "API exposed via GraphQL", "expected_type": ["TECHNOLOGY", "STANDARD"], "notes": "Query language - tech standard"}
