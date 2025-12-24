@@ -1633,21 +1633,49 @@ Two Notion pages had mixed privacy (some chunks public, others private):
 ✅ **E402 RESOLVED** - Platform/tool entities now have relationships via enhanced extraction prompt.
 
 **Before:** notion (308 mentions, 0 relationships), discord (193 mentions, 0 relationships)
-**After:** 48 new platform relationships across 25 docs with 6 distinct predicates
+**After:** 36 new platform relationships merged to `koi_relationships`
+
+#### Data Merge (2025-12-25)
+
+| Metric | Value |
+|--------|-------|
+| Relationships merged to prod | **36** |
+| Skipped (missing entities) | 12 |
+| Skipped (duplicate) | 1 |
+| Total koi_relationships | 15,400 (+36) |
+
+**Merged Predicate Distribution:**
+
+| Predicate | New | Total in prod |
+|-----------|-----|---------------|
+| uses | 6 | 1,078 |
+| integrates_with | 10 | 10 |
+| powered_by | 7 | 7 |
+| communicates_via | 5 | 5 |
+| documents_on | 4 | 4 |
+| hosted_on | 1 | 1 |
+
+**Sample Merged Relationships:**
+
+```
+(Kytzu, communicates_via, Discord)
+(Regen Network, communicates_via, Discord)
+(KOI Event Bridge, integrates_with, FastAPI)
+(BGE MCP Server, powered_by, PostgreSQL)
+(Planetary Regeneration Podcast, documents_on, SoundCloud)
+```
 
 ### Artifacts
 
 - `src/extraction/prompt_builder.py` - Enhanced with platform predicates
-- `scripts/e402_platform_extraction_test.py` - Canary test script
 - `scripts/e402_reprocess_batch.py` - Batch reprocess script
 - `data/e402_reprocess_batch.txt` - Batch RID list
-- `e402_extracted_relationships` (temp table) - Validation results
+- Commit: `1e788691` (pushed to origin/regen-prod)
 
 ### Next Steps (Optional)
 
-1. **Merge to prod** - If approved, merge temp table relationships to `koi_relationships`
-2. **Broader reprocess** - Run on all docs mentioning platform entities (~500-1000 docs)
-3. **Monitor** - Check new extractions include platform predicates
+1. **Broader reprocess** - Run on all docs mentioning platform entities (~500-1000 docs)
+2. **Monitor** - Check new extractions include platform predicates
 
 ### Backlog Items (Deferred)
 
