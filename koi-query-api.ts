@@ -360,9 +360,12 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
     if (process.env.DEBUG_GRAPH_EXPANSION) {
       // Extract matched entity names from results, filtering to multi-token (>= 2 words or >= 8 chars)
       // to avoid single-token seeds like "gregory" that explode to 1000+ docs
-      const matchedEntityNames = [...new Set(
+      const allEntities = [...new Set(
         results.rows.flatMap(r => (r.entities_matched || []).map((e: string) => e.toLowerCase()))
-      )].filter(name => name.includes(' ') || name.length >= 8).slice(0, 50);
+      )];
+      console.log(`[GraphExpansion] Pre-filter: ${allEntities.length} entities: ${allEntities.slice(0, 5).join(', ')}`);
+      const matchedEntityNames = allEntities.filter(name => name.includes(' ') || name.length >= 8).slice(0, 50);
+      console.log(`[GraphExpansion] Post-filter: ${matchedEntityNames.length} entities: ${matchedEntityNames.slice(0, 5).join(', ')}`);
 
       if (matchedEntityNames.length > 0) {
         const neighbors = await get1HopNeighbors(matchedEntityNames, 5, 15);
