@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-24
-**Status:** Week 10 In Progress - MCP Tools Deployed + Graph Audit Sprint
+**Last Updated:** 2025-12-24 (E401 fix verified, Week 10 closeout)
+**Status:** Week 10 Complete - All issues resolved or documented, ready for Week 11
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1136,10 +1136,111 @@ For each issue discovered, log with format:
 | MCP tools deployed | ✅ Complete (2025-12-24) |
 | Nginx routing fix | ✅ Complete (`/api/koi/entity/`, `/api/koi/stats`) |
 | Smoke test passing | ✅ 7/7 tests pass |
-| Curated entity audit | Pending |
-| Relationship audit | Pending |
-| Document coverage audit | Pending |
-| Issue log updated | Pending |
+| Curated entity audit | ✅ Complete (2025-12-24) |
+| Relationship audit | ✅ Complete (2025-12-24) |
+| Document coverage audit | ✅ Complete (2025-12-24) |
+| Privacy check | ✅ Complete (2025-12-24) |
+| FTS verification | ✅ Complete (2025-12-24) |
+| Issue log updated | ✅ Complete (2025-12-24) |
+| E401 fix deployed | ✅ Complete (2025-12-24) - Privacy filter moved into CTE |
+| E401 generalization verified | ✅ Complete - 5 entities tested (ethereum, regen ledger, regen commons, cosmos sdk, polygon) |
+| DEBUG flag hygiene | ✅ Complete - `DEBUG_GRAPH_EXPANSION: "false"` confirmed |
+| Week 11 placeholder | ✅ Complete - Backlog and sprint ideas documented |
+
+### Week 10 Audit Results (2025-12-24)
+
+#### Ops Sanity Check
+
+| Check | Result |
+|-------|--------|
+| pm2 hybrid-rag-api | ✅ Online (31m uptime, 83.8MB) |
+| DEBUG_GRAPH_EXPANSION | ⚠️ Enabled in prod (should disable for clean logs) |
+| Endpoint /entity/resolve | ✅ 200 |
+| Endpoint /entity/neighborhood | ✅ 200 |
+| Endpoint /entity/documents | ✅ 200 |
+| Endpoint /stats | ✅ 200 |
+
+#### FTS Status (koi_memories table)
+
+| Component | Status |
+|-----------|--------|
+| Trigger | ✅ `koi_memories_content_tsv_update` |
+| GIN Index | ✅ `koi_memories_content_tsv_idx` |
+| NULL rows | ✅ 0/54,969 (100% populated) |
+| Index usage | ✅ GIN via Bitmap Index Scan (verified post-ANALYZE) |
+
+**DB Maintenance (2025-12-24):**
+- Ran `ANALYZE koi_memories;` to refresh planner statistics
+- Verified GIN index is used for larger result sets (LIMIT 1000+)
+- For small LIMIT (10), Seq Scan is optimal - PostgreSQL correctly chooses this when bitmap overhead exceeds benefit
+
+#### Curated Entity Audit
+
+| Label | Type | Occurrences | Polysemy | Neighborhood | Documents | Status |
+|-------|------|-------------|----------|--------------|-----------|--------|
+| regen network | ORGANIZATION | 3702 | No | 10 edges | 5 docs | ✅ PASS |
+| ethereum | TECHNOLOGY | 128 | Yes (3) | 2 edges | 5 docs | ✅ PASS (E401 fixed) |
+| regen commons | ORGANIZATION | 151 | Yes (3) | N/A | 5 docs | ✅ PASS |
+| regen ledger | TECHNOLOGY | — | — | — | 5 docs | ✅ PASS (closeout check) |
+| cosmos sdk | TECHNOLOGY | — | — | — | 5 docs | ✅ PASS (closeout check) |
+| polygon | TECHNOLOGY | — | — | — | 5 docs | ✅ PASS (closeout check) |
+| notion | TECHNOLOGY | 308 | Yes (2) | 0 edges | 4 docs | ⚠️ E402 (data gap) |
+| koi | PROJECT | 166 | Yes (2) | 0 edges | 5 docs | ⚠️ E402 (data gap) |
+
+#### Predicate Histogram (Top 10)
+
+| Predicate | Count | Sample |
+|-----------|-------|--------|
+| supports | 1,730 | Regen Ledger → Regenerative Movement |
+| uses | 1,069 | Regen Ledger → Cosmos SDK |
+| associated_with | 859 | Gregory Landua → Regen Network |
+| relates_to | 694 | — |
+| mentions | 529 | — |
+| operates | 510 | — |
+| participates_in | 443 | — |
+| includes | 391 | — |
+| manages | 381 | — |
+| implements | 368 | — |
+
+**Predicate quality:** ✅ PASS - Sample edges are semantically correct.
+
+#### Privacy Check
+
+| Metric | Value |
+|--------|-------|
+| Private docs (is_private=true) | 4,408 |
+| Public docs | 50,561 |
+| Private docs in public API | ✅ 0 (PASS) |
+
+Private document RIDs (prefix `orn:notion.page:regen/2a*`) confirmed NOT appearing in unauthenticated /entity/documents responses.
+
+### Week 10 Issues Found
+
+| ID | Finding | Severity | Category | Root Cause | Status |
+|----|---------|----------|----------|------------|--------|
+| E401 | ethereum (128 occ) has 0 documents via /entity/documents | Low | Query-layer | Privacy filter applied after LIMIT; first 15 docs all private | ✅ **FIXED** |
+| E402 | notion, koi have 0 neighborhood edges despite high occurrence | Low | Data gap | Entities mentioned in non-relational contexts (e.g., "see Notion page") | Documented |
+
+**E401 Root Cause:** The `/entity/documents` query applied `LIMIT` in the first CTE before privacy filtering. For entities like "ethereum" where the first docs in index order are private, all results were filtered out.
+
+**E401 Fix (2025-12-24):** Moved privacy filter into the `entity_docs` CTE so LIMIT applies after filtering. Deployed via `koi-query-api.ts` update. Verified: ethereum now returns 5 documents.
+
+**E402 Root Cause:** "Notion" and "KOI" have 2665 and 2815 chunk mentions respectively, but 0 extracted relationships. These entities appear in non-relational contexts (e.g., "documented in Notion", "the KOI system"), not in semantic relationship patterns that the extractor captures.
+
+**E402 Triage:** Data gap, not query bug. No fix needed - this is expected for tool/platform entities. To improve, extraction prompts would need to recognize contextual relationships (e.g., "documented_in" from "see Notion page").
+
+### Go/No-Go Criteria for Next Re-Extraction
+
+| Criterion | Threshold | Current | Decision |
+|-----------|-----------|---------|----------|
+| Quality gates passing | 4/4 | 4/4 | ✅ GO |
+| Wrong-type entities (systemic) | <50 new/week | 0 observed | ✅ GO |
+| Privacy leaks | 0 | 0 | ✅ GO |
+| Entity resolution accuracy | >95% | 100% (Week 9 eval) | ✅ GO |
+| Relationship semantic correctness | >90% | ✅ (spot check) | ✅ GO |
+| Pipeline-level issues | 0 blocking | 0 | ✅ GO |
+
+**Recommendation:** No re-extraction needed. Query-layer issues (E401/E402) can be addressed via SQL optimization without reprocessing documents.
 
 ### Commands to Start Audit
 
@@ -1195,10 +1296,11 @@ Format: `E4XX` where XX is sequential.
 
 *Document any new quality issues discovered during this cycle.*
 
-| ID | Finding | Severity | Category |
-|----|---------|----------|----------|
-| E400 | Will-Regen Foundation (PERSON, 9 occ) - false artifact | Low | Extraction Artifact |
-| | | | |
+| ID | Finding | Severity | Category | Status |
+|----|---------|----------|----------|--------|
+| E400 | Will-Regen Foundation (PERSON, 9 occ) - false artifact | Low | Extraction Artifact | Fixed (FIX-009) |
+| E401 | ethereum (128 occ) has 0 documents via /entity/documents endpoint | Low | Query-layer | ✅ **FIXED** (2025-12-24) |
+| E402 | notion, koi have 0 neighborhood edges despite high occurrence | Low | Data gap | Documented (non-actionable) |
 
 ---
 
@@ -1206,10 +1308,11 @@ Format: `E4XX` where XX is sequential.
 
 *For each finding, identify the root cause.*
 
-| Finding | Root Cause | Code Location |
-|---------|------------|---------------|
-| E400 | LLM extraction merged "Will" + "Regen Foundation" in a sentence | N/A - extraction-time |
-| | | |
+| Finding | Root Cause | Code Location | Resolution |
+|---------|------------|---------------|------------|
+| E400 | LLM extraction merged "Will" + "Regen Foundation" in a sentence | N/A - extraction-time | FIX-009: Added `is_firstname_orgname_artifact()` filter |
+| E401 | Privacy filter applied after LIMIT in CTE; for "ethereum", first 15 docs in index order were all private | koi-query-api.ts:2131-2147 | Moved JOIN + privacy filter into `entity_docs` CTE before LIMIT |
+| E402 | Entities mentioned in non-relational contexts ("see Notion page", "the KOI system") | koi_relationships table | Data gap - extraction doesn't capture contextual refs |
 
 ---
 
@@ -1381,7 +1484,40 @@ ORDER BY occurrence_count DESC;
 | **Week 9: Eval Execution** | Complete | 100% Top-1 (both with and without hints) |
 | **Week 10: MCP Tools Deployment** | Complete | `resolve_entity`, `get_entity_neighborhood`, `get_entity_documents` |
 | **Week 10: Nginx Routing Fix** | Complete | Added `/api/koi/entity/` and `/api/koi/stats` proxies |
-| **Week 10: Graph Audit Sprint** | In Progress | Curated entity audit, relationship audit, document coverage |
+| **Week 10: Graph Audit Sprint** | Complete | Curated entity audit, relationship audit, document coverage, privacy check |
+| **Week 10: FTS Verification** | Complete | Trigger, GIN index, NULL count verified; ANALYZE ran, GIN working |
+| **Week 10: Go/No-Go Assessment** | Complete | All criteria ✅ GO; no re-extraction needed |
+| **Week 10: E401 Fix** | Complete | Privacy filter moved into CTE before LIMIT; ethereum now returns docs |
+| **Week 10: E402 Documentation** | Complete | Identified as data gap (non-relational mentions), not query bug |
+| **Week 10: DB Maintenance** | Complete | Ran `ANALYZE koi_memories;` to refresh planner statistics |
+| **Week 10: E401 Generalization Check** | Complete | Verified 5 entities return docs: ethereum, regen ledger, regen commons, cosmos sdk, polygon |
+| **Week 10: DEBUG Flag Hygiene** | Complete | `DEBUG_GRAPH_EXPANSION: "false"` confirmed in ecosystem.hybrid.config.js |
+
+---
+
+## Week 11: Next Sprint Placeholder
+
+**Status:** Not started
+**Proposed Focus:** Relationship coverage for platform/tool entities
+
+### Backlog Items from Week 10
+
+1. **E402 Data Gap** - "notion" and "koi" have high occurrence but 0 relationships
+   - Root cause: Mentioned in non-relational contexts ("see Notion page", "the KOI system")
+   - Future enhancement: Extraction prompt tuning to capture contextual relationships (e.g., `documented_in`, `uses_tool`)
+
+2. **Further Predicate Reduction** - 1,499 → ~100-200 optional consolidation
+   - Low priority; current predicates are semantically correct
+
+3. **CONCEPT↔ORGANIZATION Allowlist** - 157 labels, mostly DAOs/working groups
+   - Consider adding to expected polysemy set
+
+### Week 11 Sprint Ideas
+
+- **Relationship extraction improvements** - Focus on platform entities (Notion, Discord, Telegram)
+- **Predicate normalization round 2** - Consolidate remaining synonyms
+- **GraphRAG integration** - Use polysemy resolver in hybrid search ranking
+- **Entity linking improvements** - Better cross-document deduplication
 
 ---
 

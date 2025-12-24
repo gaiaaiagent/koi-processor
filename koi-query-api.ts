@@ -2128,6 +2128,8 @@ app.get('/api/koi/entity/documents', async (req, res) => {
 
     // Query documents via koi_entity_chunk_links
     // Join on document_rid to match koi_memories.rid
+    // NOTE: Privacy filter is applied early (in entity_docs CTE) to ensure LIMIT
+    // doesn't exclude all public docs when private docs come first in index order
     const docQuery = `
       WITH entity_docs AS (
         SELECT DISTINCT
@@ -2135,8 +2137,12 @@ app.get('/api/koi/entity/documents', async (req, res) => {
           l.entity_name,
           MAX(l.confidence) as link_confidence
         FROM koi_entity_chunk_links l
-        WHERE l.entity_uri = $1
-           OR LOWER(TRIM(l.entity_name)) = LOWER(TRIM($2))
+        JOIN koi_memories m ON m.rid = l.document_rid
+        WHERE (l.entity_uri = $1
+           OR LOWER(TRIM(l.entity_name)) = LOWER(TRIM($2)))
+          AND m.superseded_at IS NULL
+          AND m.content->>'text' IS NOT NULL
+          ${privacyFilter}
         GROUP BY l.document_rid, l.entity_name
         LIMIT $3 * 3
       ),
@@ -2154,7 +2160,6 @@ app.get('/api/koi/entity/documents', async (req, res) => {
         JOIN koi_memories m ON m.rid = ed.document_rid
         WHERE m.superseded_at IS NULL
           AND m.content->>'text' IS NOT NULL
-          ${privacyFilter}
       ),
       deduplicated AS (
         SELECT *,

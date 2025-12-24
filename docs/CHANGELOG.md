@@ -5,6 +5,20 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2] - 2025-12-24
+
+### Fixed
+- **E401: Entity Documents Privacy Filter Order** - Fixed `/entity/documents` endpoint returning 0 docs for entities like "ethereum"
+  - Root cause: Privacy filter applied AFTER `LIMIT` in CTE; for entities where first docs in index order were private, all results filtered out
+  - Fix: Moved `JOIN koi_memories` + privacy filter INTO the `entity_docs` CTE before `LIMIT`
+  - Verified: ethereum, regen ledger, regen commons, cosmos sdk, polygon all now return docs correctly
+
+### Changed
+- **Week 10 Closeout Documentation** - Updated `docs/archive/knowledge-graph-review-2026-01.md`
+  - Added E401 fix details and verification results
+  - Added Week 11 placeholder with backlog items
+  - Expanded Curated Entity Audit table with closeout checks
+
 ## [3.1.1] - 2025-12-24
 
 ### Added
