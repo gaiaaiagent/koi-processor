@@ -347,9 +347,10 @@ async def main(persist: bool = False, limit: int = 10):
 
             # Analyze blocked entities for FIX-013/014 effectiveness
             for blocked in blocked_entities:
-                reason = blocked.get('block_reason', blocked.get('reason', ''))
-                name = blocked.get('name', '')
-                etype = blocked.get('type', '')
+                # Entity is a dataclass, access attributes directly
+                reason = blocked.metadata.get('block_reason', blocked.metadata.get('reason', ''))
+                name = blocked.name
+                etype = blocked.type
 
                 if reason == 'code_module_as_process':
                     result.fix013_code_module_as_process_blocked += 1
