@@ -2,7 +2,7 @@
 
 **Started:** 2025-12-24
 **Last Updated:** 2025-12-24
-**Status:** Week 3 Complete - Wrong-Type Cleanup Applied
+**Status:** Week 5 Complete - Allowlist Expanded + Wrong-Type Cleanup
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -237,6 +237,152 @@ The remaining ~2,737 type conflicts are predominantly **legitimate polysemy** - 
 
 ---
 
+## Week 4: Polysemy Handling Strategy
+
+**Report:** [kg_audit_2026_01_polysemy_split.md](reports/kg_audit_2026_01_polysemy_split.md)
+**Variant Analysis:** [entity_variants_top10_2026_01.md](reports/entity_variants_top10_2026_01.md)
+
+### Polysemy Split Summary
+
+| Category | Labels | Percentage |
+|----------|--------|------------|
+| Total type conflicts | 2,743 | 100% |
+| Expected polysemy (allowlist) | 1,561 | 56.9% |
+| **Unexpected conflicts (actionable)** | **1,182** | **43.1%** |
+
+### Expected Polysemy Allowlist
+
+These type pairs represent legitimate multi-type entities and are NOT considered problems:
+
+| Type Pair | Description | Example |
+|-----------|-------------|---------|
+| CONCEPT↔TECHNOLOGY | Abstract concepts that are also implementations | blockchain, AI |
+| CONCEPT↔PROCESS | Concepts that are also processes | governance, verification |
+| CONCEPT↔PROJECT | Concepts that are also projects | refi, tokenomics |
+| PROJECT↔TECHNOLOGY | Repositories/products that are both | koi-processor, regen-koi-mcp |
+| ORGANIZATION↔PROJECT | Orgs that run eponymous projects | Regen Commons, Aerodrome |
+
+### Recommended Allowlist Expansion
+
+Based on analysis, consider adding:
+
+| Type Pair | Labels | Rationale |
+|-----------|--------|-----------|
+| ORGANIZATION↔TECHNOLOGY | 169 | Platforms (Notion, Discord, Telegram) are both companies and tech |
+| CONCEPT↔STANDARD | 131 | Standards are conceptual (SPARQL, RDF) |
+| STANDARD↔TECHNOLOGY | 87 | Tech standards (HTTP, JSON-LD) |
+
+### Polysemy Handling Strategy (Query/UI Layer)
+
+#### When a user searches a label with multiple types:
+
+1. **Default presentation**: Return ALL type variants, sorted by `occurrence_count` DESC
+2. **Type filtering**: Allow explicit type filter (`?type=TECHNOLOGY`)
+3. **Context hints**: Show type distribution in UI (e.g., "Notion: 92% TECHNOLOGY, 8% ORGANIZATION")
+
+#### Default ranking for ambiguous queries:
+
+| Priority | Factor | Rationale |
+|----------|--------|-----------|
+| 1 | `occurrence_count` | Most referenced variant is most relevant |
+| 2 | Relationship connectivity | Variants with more relationships have richer context |
+| 3 | Type priority (configurable) | Domain-specific (e.g., prefer TECHNOLOGY for tech searches) |
+
+#### GraphRAG disambiguation strategy:
+
+1. **Context window analysis**: When retrieving for RAG, examine surrounding text for type signals
+2. **Query intent detection**: If query mentions "company" or "founded by", prefer ORGANIZATION
+3. **Fallback**: Use highest-occurrence variant when context is ambiguous
+4. **Multi-variant inclusion**: For broad queries, include context from multiple type variants
+
+#### Success metrics:
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Wrong-node retrievals | <5% | User feedback / spot checks |
+| Query precision | >90% | Relevant results in top 5 |
+| Type filter usage | Track adoption | Analytics on filter clicks |
+
+### Not Doing (Alternatives Considered)
+
+| Alternative | Why Deferred |
+|-------------|--------------|
+| Multi-typed single node | Would require ontology redesign; breaks existing queries |
+| Automatic type merging | Risk of losing semantic distinction |
+| Full re-extraction with stricter typing | Not needed; extraction quality is sufficient |
+
+### Remaining Wrong-Type Cleanup Targets
+
+From variant analysis, these labels have extraction noise (low-occurrence wrong types):
+
+| Label | Remove | Occurrences | Correct Types |
+|-------|--------|-------------|---------------|
+| notion | PROJECT | 1 | TECHNOLOGY (308), ORGANIZATION (27) |
+| koi | CONCEPT, PERSON, STANDARD | 2, 2, 1 | PROJECT (166), TECHNOLOGY (65) |
+| agent-based modeling | PROJECT, PROCESS | 1, 1 | CONCEPT (178), TECHNOLOGY (4) |
+
+**Impact:** ~8 rows removable with zero relationship/chunk references.
+
+---
+
+## Week 5: Allowlist Expansion + Wrong-Type Cleanup
+
+**Allowlist Review:** [type_conflict_allowlist_review_week5.md](reports/type_conflict_allowlist_review_week5.md)
+**Polysemy Split (Updated):** [kg_audit_2026_01_polysemy_split_week5.md](reports/kg_audit_2026_01_polysemy_split_week5.md)
+**Cleanup Report:** [week5_wrong_type_noise_cleanup.md](reports/week5_wrong_type_noise_cleanup.md)
+**Post-Week 5 Audit:** [kg_audit_2026_01_post_week5.md](reports/kg_audit_2026_01_post_week5.md)
+
+### Allowlist Expansion
+
+After data-driven review of ~50 labels per candidate pair, all three recommended pairs were added:
+
+| Type Pair | Labels | Occurrences | Polysemy % | Decision |
+|-----------|--------|-------------|------------|----------|
+| ORGANIZATION↔TECHNOLOGY | 169 | 4,882 | 96% | **Added** |
+| CONCEPT↔STANDARD | 131 | 1,801 | 94% | **Added** |
+| STANDARD↔TECHNOLOGY | 87 | 1,538 | 92% | **Added** |
+
+**Rationale:**
+- **ORGANIZATION↔TECHNOLOGY**: Platform companies (Notion, Discord, Telegram, YouTube) are legitimately both
+- **CONCEPT↔STANDARD**: Standards are inherently conceptual (RDF, SPARQL, JSON-LD, OAuth)
+- **STANDARD↔TECHNOLOGY**: Tech standards are implemented as technology (OAuth, HTTP, MCP)
+
+### Updated Polysemy Split
+
+| Category | Week 4 | Week 5 | Change |
+|----------|--------|--------|--------|
+| Total type conflicts | 2,743 | 2,737 | -6 |
+| Expected polysemy | 1,561 (56.9%) | 1,816 (66.4%) | +255 |
+| Unexpected (actionable) | 1,182 (43.1%) | 921 (33.6%) | -261 |
+
+The "unexpected" bucket shrank by 22% without hiding real errors.
+
+### Wrong-Type Cleanup
+
+Applied safe deletion of 6 wrong-type entity_registry rows (8 total occurrences):
+
+| Label | Wrong Type | Occurrences | Status |
+|-------|------------|-------------|--------|
+| notion | PROJECT | 1 | **Deleted** |
+| koi | CONCEPT | 2 | **Deleted** |
+| koi | PERSON | 2 | **Deleted** |
+| koi | STANDARD | 1 | **Deleted** |
+| agent-based modeling | PROJECT | 1 | **Deleted** |
+| agent-based modeling | PROCESS | 1 | **Deleted** |
+
+All rows verified to have 0 relationships and 0 chunk links before deletion.
+
+### Week 5 Metrics Summary
+
+| Metric | Post-Week 3 | Post-Week 5 | Change |
+|--------|-------------|-------------|--------|
+| entity_registry rows | 29,655 | 29,649 | -6 |
+| Fuseki triples | 163,639 | 163,609 | -30 |
+| Distinct predicates | 1,499 | 1,499 | 0 |
+| Quality Gates | 4/4 PASS | 4/4 PASS | — |
+
+---
+
 ## Review Sprint Plan
 
 ### Automated Audits
@@ -434,6 +580,12 @@ ORDER BY occurrence_count DESC;
 | **Week 2: FIX-011 Prevention** | Complete | Block LOCATION for blockchain names (59 tests) |
 | **Week 3: FIX-010/011/012 Cleanup** | Complete | [Report](reports/fix010_fix012_cleanup_2026_01.md) - 12 wrong-type rows removed |
 | **Week 3: Baseline Update** | Complete | [Report](reports/kg_audit_2026_01_post_week3.md) - 29,655 entities |
+| **Week 4: Polysemy Split Analysis** | Complete | [Report](reports/kg_audit_2026_01_polysemy_split.md) - 1,182 actionable conflicts |
+| **Week 4: Variant Analysis** | Complete | [Report](reports/entity_variants_top10_2026_01.md) - 10 labels analyzed |
+| **Week 4: Polysemy Strategy** | Complete | Documented query/UI disambiguation approach |
+| **Week 5: Allowlist Expansion** | Complete | [Report](reports/type_conflict_allowlist_review_week5.md) - 3 pairs added |
+| **Week 5: Wrong-Type Cleanup** | Complete | [Report](reports/week5_wrong_type_noise_cleanup.md) - 6 rows deleted |
+| **Week 5: Baseline Update** | Complete | [Report](reports/kg_audit_2026_01_post_week5.md) - 29,649 entities |
 
 ---
 
@@ -445,6 +597,12 @@ ORDER BY occurrence_count DESC;
 - [Type Conflict Pairs 2026-01](reports/type_conflict_pairs_2026_01.md) - Week 2 pair analysis
 - [FIX-010/011/012 Cleanup Report](reports/fix010_fix012_cleanup_2026_01.md) - Week 3 cleanup
 - [Post-Week 3 Audit Report](reports/kg_audit_2026_01_post_week3.md) - Updated baseline
+- [Polysemy Split Report](reports/kg_audit_2026_01_polysemy_split.md) - Week 4 expected vs actionable
+- [Entity Variants Report](reports/entity_variants_top10_2026_01.md) - Week 4 top 10 labels analysis
+- [Allowlist Review Report](reports/type_conflict_allowlist_review_week5.md) - Week 5 data-driven expansion
+- [Polysemy Split (Week 5)](reports/kg_audit_2026_01_polysemy_split_week5.md) - Updated with 8 pairs
+- [Week 5 Cleanup Report](reports/week5_wrong_type_noise_cleanup.md) - 6 rows deleted
+- [Post-Week 5 Audit Report](reports/kg_audit_2026_01_post_week5.md) - Updated baseline
 
 ---
 
@@ -462,9 +620,11 @@ All proposed fixes have been applied. See [Week 3 cleanup report](reports/fix010
 
 ### Remaining Work (Future Cycles)
 
-1. **Polysemy disambiguation** - Query/UI level strategies for multi-type entities
-2. **Targeted wrong-type prevention** - Additional EntityQualityFilter rules as discovered
-3. **Single-token PERSON ambiguity** - Canonical registry protection in place, full resolution optional
+1. **Polysemy disambiguation implementation** - Implement query/UI strategies defined in Week 4
+2. ~~**Additional wrong-type cleanup** - Remove ~8 remaining noise rows (notion, koi, agent-based modeling)~~ **DONE Week 5**
+3. ~~**Allowlist expansion** - Consider adding ORGANIZATION↔TECHNOLOGY, CONCEPT↔STANDARD to allowlist~~ **DONE Week 5**
+4. **Single-token PERSON ambiguity** - Canonical registry protection in place, full resolution optional
+5. **Remaining unexpected conflicts** - 921 labels in unexpected bucket (down from 1,182)
 
 ---
 
