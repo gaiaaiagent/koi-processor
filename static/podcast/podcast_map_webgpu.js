@@ -55,22 +55,30 @@ function hexToRgba(hex, alpha) {
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         logStatus("Checking WebGPU support...");
-        if (!navigator.gpu) {
-            throw new Error("WebGPU is NOT supported in this browser.");
-        }
+        let useWebGPU = false;
         
-        const adapter = await navigator.gpu.requestAdapter();
-        if (!adapter) {
-             throw new Error("No WebGPU adapter found.");
+        if (navigator.gpu) {
+            try {
+                const adapter = await navigator.gpu.requestAdapter();
+                if (adapter) {
+                    useWebGPU = true;
+                    logStatus("WebGPU supported and available.");
+                } else {
+                    logStatus("WebGPU adapter not found, falling back to WebGL.");
+                }
+            } catch (e) {
+                logStatus("WebGPU initialization failed, falling back to WebGL.");
+            }
+        } else {
+            logStatus("WebGPU not supported in this browser, falling back to WebGL.");
         }
-        logStatus("WebGPU adapter found. Fetching graph data...");
 
+        logStatus("Fetching graph data...");
         const response = await fetch('/static/podcast/podcast_map_3d.json?v=' + Date.now());
         if (!response.ok) throw new Error(`Failed to load data: ${response.status} ${response.statusText}`);
         
         logStatus("Data fetched. Parsing JSON...");
         graphData = await response.json();
-
         logStatus(`Loaded: ${graphData.points.length} nodes, ${graphData.links.length} links.`);
 
         // Build cluster colors map
@@ -80,8 +88,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
         }
 
-        logStatus("Initializing 3D Graph...");
-        await initializeGraph();
+        logStatus(`Initializing 3D Graph (${useWebGPU ? 'WebGPU' : 'WebGL'})...`);
+        await initializeGraph(useWebGPU);
         
         logStatus("Done!");
         setupControls();
@@ -96,7 +104,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 });
 
-async function initializeGraph() {
+async function initializeGraph(useWebGPU) {
     const container = document.getElementById('graph-container');
     const width = container.clientWidth;
     const height = container.clientHeight;
@@ -109,8 +117,13 @@ async function initializeGraph() {
     camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 100000);
     camera.position.z = 2500;
 
-    // 3. Setup WebGPU Renderer
-    renderer = new WebGPURenderer({ antialias: true });
+    // 3. Setup Renderer (WebGPU or WebGL)
+    if (useWebGPU) {
+        renderer = new WebGPURenderer({ antialias: true });
+    } else {
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+    }
+    
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(width, height);
     container.appendChild(renderer.domElement);
@@ -212,7 +225,7 @@ async function initializeGraph() {
     // Add graph to scene
     scene.add(graph);
     
-    // Add lights (Standard Three.js lights needed for some materials)
+    // Add lights
     const ambientLight = new THREE.AmbientLight(0xbbbbbb);
     scene.add(ambientLight);
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
@@ -223,32 +236,45 @@ async function initializeGraph() {
     setupInteraction(container, tooltip);
 
     // Start Loop
-    renderer.setAnimationLoop(animate);
+    if (useWebGPU) {
+        renderer.setAnimationLoop(animateWebGPU);
+    } else {
+        animateWebGL();
+    }
     
     // Resize handler
     window.addEventListener('resize', onWindowResize, false);
 }
 
-function onWindowResize() {
-    const container = document.getElementById('graph-container');
-    camera.aspect = container.clientWidth / container.clientHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(container.clientWidth, container.clientHeight);
-}
-
-function animate() {
+function animateWebGPU() {
     graph.tickFrame();
     controls.update();
 
     if (autoRotationEnabled && controls) {
         controls.autoRotate = true;
-        controls.autoRotateSpeed = 2.0; // OrbitControls speed
+        controls.autoRotateSpeed = 2.0;
     } else {
         controls.autoRotate = false;
     }
 
     renderer.renderAsync(scene, camera);
 }
+
+function animateWebGL() {
+    requestAnimationFrame(animateWebGL);
+    graph.tickFrame();
+    controls.update();
+
+    if (autoRotationEnabled && controls) {
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 2.0;
+    } else {
+        controls.autoRotate = false;
+    }
+
+    renderer.render(scene, camera);
+}
+
 
 // Interaction handling
 function setupInteraction(container, tooltip) {
