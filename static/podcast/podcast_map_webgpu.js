@@ -7,6 +7,19 @@ import ThreeForceGraph from 'three-forcegraph';
 // Planetary Regeneration Podcast 3D Map (WebGPU Version)
 // Based on YonEarth implementation
 
+function logStatus(msg, isError = false) {
+    console.log(msg);
+    const loadingEl = document.getElementById('loading');
+    if (loadingEl) {
+        const line = document.createElement('div');
+        line.textContent = msg;
+        line.style.fontSize = '14px';
+        line.style.marginTop = '5px';
+        if (isError) line.style.color = '#ff4444';
+        loadingEl.appendChild(line);
+    }
+}
+
 let graphData = null;
 let graph = null;
 let scene = null;
@@ -41,18 +54,24 @@ function hexToRgba(hex, alpha) {
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
     try {
+        logStatus("Checking WebGPU support...");
         if (!navigator.gpu) {
-            throw new Error("WebGPU not supported in this browser.");
+            throw new Error("WebGPU is NOT supported in this browser.");
         }
+        
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+             throw new Error("No WebGPU adapter found.");
+        }
+        logStatus("WebGPU adapter found. Fetching graph data...");
 
         const response = await fetch('/static/podcast/podcast_map_3d.json?v=' + Date.now());
+        if (!response.ok) throw new Error(`Failed to load data: ${response.status} ${response.statusText}`);
+        
+        logStatus("Data fetched. Parsing JSON...");
         graphData = await response.json();
 
-        console.log('Loaded data:', {
-            points: graphData.points.length,
-            episodes: graphData.episodes.length,
-            links: graphData.links.length
-        });
+        logStatus(`Loaded: ${graphData.points.length} nodes, ${graphData.links.length} links.`);
 
         // Build cluster colors map
         if (graphData.clusters_by_level && graphData.clusters_by_level[currentClusterLevel]) {
@@ -61,12 +80,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
         }
 
+        logStatus("Initializing 3D Graph...");
         await initializeGraph();
+        
+        logStatus("Done!");
         setupControls();
-        document.getElementById('loading').style.display = 'none';
+        setTimeout(() => {
+            const loadingEl = document.getElementById('loading');
+            if(loadingEl) loadingEl.style.display = 'none';
+        }, 1000);
+        
     } catch (error) {
+        logStatus(error.message, true);
         console.error('Error loading data:', error);
-        document.getElementById('loading').textContent = 'Error loading data: ' + error.message;
     }
 });
 
