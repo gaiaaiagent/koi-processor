@@ -365,10 +365,9 @@ class AdaptiveExtractor:
                     rel["source_type"] = entity_type_lookup[source]
                 if target in entity_type_lookup:
                     rel["target_type"] = entity_type_lookup[target]
-                # LLM sometimes puts actual predicate in 'relationship' field
-                actual_rel = rel.get("relationship")
+                # LLM sometimes puts actual predicate in 'relationship' or 'relation' field
+                actual_rel = rel.get("relationship") or rel.get("relation")
                 current_pred = rel.get("predicate")
-                logger.debug(f"[PredicateTypeGuard] Before fix: predicate={current_pred}, relationship={actual_rel}")
                 if actual_rel and current_pred == "associated_with":
                     rel["predicate"] = actual_rel
                     logger.debug(f"[PredicateTypeGuard] Fixed predicate: {current_pred} → {actual_rel}")
