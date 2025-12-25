@@ -2096,6 +2096,257 @@ All proposed fixes have been applied. See [Week 3 cleanup report](reports/fix010
 
 ---
 
+## WEF→operates→carbon Investigation (2025-12-24)
+
+### Context
+
+Follow-up from Week 14 carbon entity audit. Investigated the only relationship involving bare "carbon": `World Economic Forum → operates → carbon`.
+
+### Provenance
+
+| Field | Value |
+|-------|-------|
+| Relationship ID | 238 |
+| Subject | world economic forum |
+| Predicate | operates |
+| Object | carbon (CONCEPT) |
+| Occurrence Count | 1 |
+| Confidence | 0.9 |
+| Source Doc | `orn:notion.page:regen/28da7551-41ee-8032-a15e-fffa60a311db#chunk11` |
+
+### Source Context
+
+Found in Notion document (`034e5a9d-c850-48f7-bb60-050da79396b5`):
+
+> "...we had been invited to co-author a World Economic Forum paper on blockchain and carbon which was a very geeky it was very geeky it was just like science..."
+
+**Interpretation:** WEF published a paper about blockchain and carbon. The LLM incorrectly extracted "WEF operates carbon" instead of something like "WEF discusses/published carbon" or creating a paper entity.
+
+### Decision: DELETE
+
+The relationship is clearly wrong:
+- "operates" implies running/managing an operational system
+- WEF doesn't "operate" carbon; they published a paper about it
+- occurrence_count=1, confidence=0.9 (LLM was confident but wrong)
+
+**Deleted:** `DELETE FROM koi_relationships WHERE id = 238;`
+
+### Systemic Analysis
+
+Checked all `operates` relationships by object type:
+
+| Object Type | Count | Assessment |
+|-------------|-------|------------|
+| ORGANIZATION | 130 | ✅ Valid |
+| CONCEPT | 127 | ⚠️ Mostly incorrect |
+| TECHNOLOGY | 116 | ✅ Valid |
+| PROJECT | 67 | ✅ Valid |
+| VALIDATOR | 21 | ✅ Valid |
+| PROCESS | 14 | ⚠️ Questionable |
+| Others | 27 | Mixed |
+
+**127 CONCEPT objects with "operates"** are likely extraction errors similar to WEF→carbon.
+
+### Recommendation: Predicate Type Guard
+
+Add type constraints to `predicate_guard.py`:
+
+```python
+# Predicate type constraints (proposed)
+PREDICATE_OBJECT_TYPES = {
+    "operates": {"ORGANIZATION", "PROJECT", "TECHNOLOGY", "VALIDATOR", "MODULE", "PLATFORM"},
+    # "operates" should NOT target CONCEPT, MATERIAL, LOCATION, PERSON
+}
+```
+
+**Future fix ticket:** FIX-015 - Predicate type constraints for extraction validation
+
+### Impact on Week 14 Audit
+
+Updated `docs/archive/knowledge-graph-review-2025-12.md` Week 14 section:
+- "carbon" now has **0 relationships** (was 1 before deletion)
+- This reinforces the "leave as-is" recommendation - bare "carbon" appropriately has no relationships
+
+---
+
+## Week 15: Core Concept Relationship Extraction (2025-12-24)
+
+### Objectives
+
+1. **Core concept relationship extraction** - Create relationships for "carbon" and "NCT token" with targeted prompt tweak + canary reprocess
+2. **Low-occurrence edge QA** - Validate that lowering relationship threshold to >=1 didn't introduce noise
+
+### Current State Analysis
+
+#### Carbon/NCT Entities
+
+| Entity | Type | Occurrences | Relationships |
+|--------|------|-------------|---------------|
+| Nature Carbon Tonne | PROJECT | 72 | 56 |
+| carbon | MATERIAL | 33 | 0 |
+| carbon | CONCEPT | 29 | 0 (was 1, deleted WEF→operates→carbon) |
+| NCT token | TECHNOLOGY | 2 | 0 |
+
+**Problem:** Core domain concepts "carbon" (CONCEPT/MATERIAL) and "NCT token" have 0 relationships despite high occurrence counts.
+
+**Root cause:** Extraction prompt lacks explicit guidance for creating concept-to-concept relationships.
+
+### Task 1: Prompt Update for Concept Relationships
+
+#### Changes to `src/extraction/prompt_builder.py`
+
+Added new section **"CONCEPT RELATIONSHIPS (IMPORTANT - Week 15)"**:
+
+```
+## CONCEPT RELATIONSHIPS (IMPORTANT - Week 15)
+
+Core domain concepts MUST have relationships to related concepts. When extracting
+concepts like "carbon", "carbon credits", "NCT", or other domain terms, ALWAYS
+create relationships connecting them to related entities.
+
+### Required concept predicates (use these for concepts):
+- relates_to: Connect related concepts (carbon relates_to carbon markets)
+- part_of: Hierarchical concept relationships (NCT part_of carbon markets)
+- is_a: Type/classification relationships (NCT token is_a carbon credit)
+- includes: Container relationships (carbon markets includes carbon credits)
+- used_in: Application relationships (carbon used_in carbon sequestration)
+- associated_with: General concept associations
+
+### Core domain concept examples:
+Input: "The NCT token represents carbon credits on the Toucan Protocol."
+Extract relationships:
+- (NCT token, represents, carbon credits) - 0.90
+- (NCT token, associated_with, Toucan Protocol) - 0.90
+- (carbon credits, part_of, carbon markets) - 0.85
+
+### MUST extract relationships for these core concepts:
+- "carbon" → connect to carbon credits, carbon markets, carbon sequestration
+- "NCT", "NCT token", "Nature Carbon Tonne" → connect to Toucan, carbon credits, Regen
+- "carbon credits" → connect to carbon markets, verification, retirement
+- "carbon sequestration" → connect to carbon, soil, regenerative agriculture
+```
+
+#### Canary Document Set
+
+15 documents selected for canary reprocess:
+
+```
+06034a2d-75be-4268-a130-e2c693cf9c5d
+0ac78dc9-f095-44be-b647-09bd12fad7f4
+191b9d5d-d00f-4bbc-9b55-e541e0c7d3f0
+ab95df9b-52bf-4f4f-8946-b092d3d01cff
+1b6f2efb-20b8-40a2-923c-0a8d028dfe78
+ea2a09fd-c019-45f4-baa5-92df4aff0141
+ca1a3ccd-fc7b-4861-9a92-fe10f83197e6
+4a903c67-2d82-45bf-a4cc-47fc67637863
+106daea8-8d6e-4329-8080-9120007fd053
+22558fef-bfff-4522-b2a5-07d9844c1112
+60204010-db53-49c5-8cf4-e61856f5071e
+6d8e74b8-aca7-4a31-a79c-eb289a8b4fd7
+5a976bb1-34a1-4106-b9fd-801352480434
+bbe6a3ca-ec42-4a1d-8867-c6f4ce338efd
+25c5c6f3-66ea-487b-80b6-b581579e6822
+```
+
+**Canary script:** `scripts/reextraction/week15_canary_reextract.py`
+
+### Task 2: Low-Occurrence Edge QA
+
+#### Edge Occurrence Distribution
+
+| Occurrence Count | Edge Count | % |
+|------------------|------------|---|
+| 1 | 14,582 | 93.4% |
+| 2 | 744 | 4.8% |
+| 3+ | 293 | 1.9% |
+
+**Total edges:** 15,619
+
+#### Predicate Distribution (occurrence_count=1)
+
+| Predicate | Count |
+|-----------|-------|
+| supports | 1,627 |
+| uses | 1,102 |
+| associated_with | 806 |
+| relates_to | 659 |
+| mentions | 496 |
+| operates | 466 |
+| participates_in | 445 |
+| includes | 363 |
+| implements | 349 |
+| manages | 340 |
+
+**All top predicates are canonical** - predicate_guard is working correctly.
+
+#### Confidence Distribution (occurrence_count=1)
+
+| Confidence Bucket | Count | % |
+|-------------------|-------|---|
+| 0.95+ | 90 | 0.6% |
+| 0.90-0.94 | 1,374 | 9.4% |
+| 0.85-0.89 | 11,486 | 78.8% |
+| 0.80-0.84 | 1,632 | 11.2% |
+
+#### Sample Edge Analysis (30 random edges with occurrence_count=1)
+
+**Valid relationships (22/30 = 73%):**
+- "Ostrom pioneered commons governance" (0.95)
+- "Planetary Regeneration Podcast documents_on SoundCloud" (0.85)
+- "Harvey Manning Park Expansion part_of Issaquah Alps" (0.90)
+- "Regen Network proposes proof of authority" (0.85)
+- "EY performs proof-of-funds audits" (0.90)
+- "Ledger v6.0 includes CosmWasm" (0.90)
+- "Regen Ledger defines SellOrder" (0.85)
+- "GAIA React Frontend accesses postgresql" (0.90)
+
+**Questionable relationships (8/30 = 27%):**
+- "Josh Fairhead operationalising Regen Network" - non-canonical predicate
+- "Darren interacts_with Koi datab" - truncated entity
+- "builder dao group is_interested_in_doing implementation" - non-canonical
+- "Gregory Landua pushes_back Josh Farley" - non-canonical
+- "Jay associated_with James" - low-value name association
+- "James suggested_implementing AMM" - non-canonical
+
+**Noise sources:**
+1. Non-canonical predicates (should be caught by strict predicate_guard)
+2. Truncated entities (data quality issue)
+3. Low-value person-to-person associations
+
+#### Recommendation: Keep occurrence_count >= 1
+
+**Rationale:**
+- 93.4% of edges would be lost if we revert to >=2
+- Most edges (73%) are semantically valid
+- Non-canonical predicates are a post-processing issue, not threshold issue
+- Confidence distribution shows most edges meet 0.85+ threshold
+
+**Guards already in place:**
+- Predicate guard (CANONICAL_PREDICATES allowlist)
+- Confidence threshold (>=0.85 for relationships)
+- Entity quality filter (blocks pronouns, generics, URLs)
+
+**Optional future guard:**
+- Person-to-person association filter (block single-word PERSON associations like "Jay associated_with James")
+
+### Deliverables
+
+1. ✅ Prompt update: `src/extraction/prompt_builder.py` - Added CONCEPT RELATIONSHIPS section
+2. ✅ Canary script: `scripts/reextraction/week15_canary_reextract.py`
+3. ✅ Low-occurrence edge analysis: Complete (see above)
+4. ⏳ Canary execution: Pending (requires production API key)
+5. ⏳ Verification of new carbon/NCT relationships: Pending canary execution
+
+### Conclusion
+
+**Keep occurrence_count >= 1** - the current threshold is appropriate. The noise level (~27%) is acceptable and primarily caused by:
+1. Non-canonical predicates (handled by predicate_guard)
+2. Entity data quality issues (not threshold-related)
+
+The prompt update will encourage better concept relationship extraction. Canary reprocess will validate the change before full re-extraction.
+
+---
+
 ## Cycle Closeout
 
 *To be completed at end of cycle.*

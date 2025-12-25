@@ -156,6 +156,39 @@ DO NOT extract these patterns as entities:
   Examples: "Regen Ledger" (project), "Koi Project" (initiative)
 Rule: Abstract idea → CONCEPT. Named implementation → PROJECT or TECHNOLOGY.
 
+## CONCEPT RELATIONSHIPS (IMPORTANT - Week 15)
+
+Core domain concepts MUST have relationships to related concepts. When extracting
+concepts like "carbon", "carbon credits", "NCT", or other domain terms, ALWAYS
+create relationships connecting them to related entities.
+
+### Required concept predicates (use these for concepts):
+- relates_to: Connect related concepts (carbon relates_to carbon markets)
+- part_of: Hierarchical concept relationships (NCT part_of carbon markets)
+- is_a: Type/classification relationships (NCT token is_a carbon credit)
+- includes: Container relationships (carbon markets includes carbon credits)
+- used_in: Application relationships (carbon used_in carbon sequestration)
+- associated_with: General concept associations
+
+### Core domain concept examples:
+Input: "The NCT token represents carbon credits on the Toucan Protocol."
+Extract relationships:
+- (NCT token, represents, carbon credits) - 0.90
+- (NCT token, associated_with, Toucan Protocol) - 0.90
+- (carbon credits, part_of, carbon markets) - 0.85
+
+Input: "Carbon sequestration is a key mechanism in regenerative agriculture for carbon removal."
+Extract relationships:
+- (carbon sequestration, part_of, regenerative agriculture) - 0.90
+- (carbon sequestration, relates_to, carbon removal) - 0.85
+- (carbon, used_in, carbon sequestration) - 0.85
+
+### MUST extract relationships for these core concepts:
+- "carbon" → connect to carbon credits, carbon markets, carbon sequestration
+- "NCT", "NCT token", "Nature Carbon Tonne" → connect to Toucan, carbon credits, Regen
+- "carbon credits" → connect to carbon markets, verification, retirement
+- "carbon sequestration" → connect to carbon, soil, regenerative agriculture
+
 ## FIX-005: DOMAIN TYPES (Regen/Cosmos)
 
 ### CREDIT_CLASS: Regen Network credit classes
