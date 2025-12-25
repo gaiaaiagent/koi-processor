@@ -499,9 +499,9 @@
     <script type="importmap">
         {
             "imports": {
-                "three": "https://unpkg.com/three@0.159.0/build/three.module.js",
-                "three/addons/": "https://unpkg.com/three@0.159.0/examples/jsm/",
-                "three-forcegraph": "https://esm.sh/three-forcegraph@1.41.6"
+                "three": "https://esm.sh/three@0.159.0",
+                "three/addons/": "https://esm.sh/three@0.159.0/examples/jsm/",
+                "three-forcegraph": "https://esm.sh/three-forcegraph@1.41.6?external=three"
             }
         }
     </script>
@@ -598,13 +598,13 @@
 
     <script>
         // Global Error Handler
-        window.onerror = function(message, source, lineno, colno, error) {
-            console.error('Global Error:', message, error);
+        window.addEventListener('error', function(event) {
+            console.error('Global Error:', event.message, event.error);
             const loadingEl = document.getElementById('loading');
             if (loadingEl) {
-                loadingEl.innerHTML += `<br><span style="color:red; font-size:14px">Error: ${message}</span>`;
+                loadingEl.innerHTML += `<br><span style="color:red; font-size:14px">Error: ${event.message || 'Resource loading failed'}</span>`;
             }
-        };
+        }, true); // Capture phase to catch resource errors
 
         window.addEventListener('unhandledrejection', function(event) {
             console.error('Unhandled Rejection:', event.reason);
