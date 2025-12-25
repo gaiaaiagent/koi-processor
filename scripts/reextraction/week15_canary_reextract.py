@@ -294,7 +294,8 @@ async def run_canary_extraction(dry_run: bool = False) -> Dict[str, Any]:
         },
         'predicate_distribution': predicate_counts,
         'sample_carbon_relationships': all_carbon_rels[:20],
-        'errors': [{'doc_id': r['doc_id'], 'error': r.get('error')} for r in failed]
+        'errors': [{'doc_id': r['doc_id'], 'error': r.get('error')} for r in failed],
+        '_results': results  # Include raw results for persistence
     }
 
     return summary
@@ -334,12 +335,47 @@ def print_summary(summary: Dict):
             logger.info(f"  ({subj}, {pred}, {obj})")
 
 
+async def persist_extraction_results(results: List[Dict], run_id: str) -> Dict[str, int]:
+    """Persist extraction results to database using KnowledgeGraphIntegrator."""
+    conn = get_db_connection()
+    integrator = KnowledgeGraphIntegrator(conn)
+
+    stats = {'entities_saved': 0, 'relationships_saved': 0, 'docs_processed': 0}
+
+    for result in results:
+        if result.get('status') != 'success':
+            continue
+
+        doc_id = result['doc_id']
+        entities = result.get('entities', [])
+        relationships = result.get('relationships', [])
+
+        try:
+            # Save entities and relationships via integrator
+            integrator.process_extraction(
+                doc_id=doc_id,
+                entities=entities,
+                relationships=relationships,
+                run_id=run_id
+            )
+            stats['entities_saved'] += len(entities)
+            stats['relationships_saved'] += len(relationships)
+            stats['docs_processed'] += 1
+            logger.info(f"  Persisted {len(entities)} entities, {len(relationships)} relationships for {doc_id[:8]}")
+        except Exception as e:
+            logger.error(f"  Error persisting {doc_id[:8]}: {e}")
+
+    conn.close()
+    return stats
+
+
 def main():
     """Main entry point."""
     import argparse
 
     parser = argparse.ArgumentParser(description='Week 15 Canary Re-Extraction')
     parser.add_argument('--dry-run', action='store_true', help='Dry run without extraction')
+    parser.add_argument('--persist', action='store_true', help='Persist results to database')
     parser.add_argument('--output', type=str, default=None, help='Output JSON file')
 
     args = parser.parse_args()
@@ -358,6 +394,20 @@ def main():
 
         # Print summary
         print_summary(summary)
+
+        # Persist if requested
+        if args.persist and not args.dry_run:
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("PERSISTING RESULTS TO DATABASE")
+            logger.info("=" * 70)
+            results = summary.pop('_results', [])
+            run_id = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            persist_stats = asyncio.run(persist_extraction_results(results, run_id))
+            logger.info(f"Persistence complete: {persist_stats}")
+            summary['persistence'] = persist_stats
+        else:
+            summary.pop('_results', None)  # Remove raw results from output
 
         # Save output
         output_path = args.output or Path(__file__).parent / 'week15_canary_results.json'

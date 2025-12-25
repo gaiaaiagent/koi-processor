@@ -2329,13 +2329,62 @@ bbe6a3ca-ec42-4a1d-8867-c6f4ce338efd
 **Optional future guard:**
 - Person-to-person association filter (block single-word PERSON associations like "Jay associated_with James")
 
+### Canary Execution Results (2025-12-25)
+
+**Run timestamp:** 2025-12-25T04:59:58 UTC
+
+#### Extraction Summary
+
+| Metric | Value |
+|--------|-------|
+| Documents processed | 15/15 |
+| Total entities extracted | 99 |
+| Total relationships extracted | 43 |
+| Carbon/NCT entities | 17 |
+| Carbon/NCT relationships | 16 |
+
+#### Carbon/NCT Predicate Distribution
+
+| Predicate | Count |
+|-----------|-------|
+| includes | 8 |
+| relates_to | 4 |
+| is_a | 1 |
+| supports | 1 |
+| affects | 1 |
+| part_of | 1 |
+
+#### Sample Carbon/NCT Relationships Extracted
+
+```
+(Regen Network, includes, carbon credits) - 0.85
+(carbon credits, relates_to, carbon credits blockchain) - 0.85
+(ecosystem service credits, includes, carbon credits) - 0.85
+(Carbon Credits, relates_to, Carbon Sequestration) - 0.85
+(Filecoin, supports, carbon credits) - 0.75
+(carbon credit, is_a, financialization) - 0.80
+(regen network, includes, carbon credits) - 0.85
+```
+
+**Assessment:** The prompt update is working correctly:
+- The updated prompt successfully generates concept-to-concept relationships
+- 16 carbon/NCT relationships extracted from 15 documents (vs 0 before)
+- All predicates are canonical (`includes`, `relates_to`, `part_of`, `is_a`, `supports`, `affects`)
+- Confidence scores appropriate (0.75-0.85)
+
+#### Next Steps
+
+1. ✅ Canary validation complete - prompt change is effective
+2. ⏳ **Recommended:** Run broader reprocess (100-200 docs) using `stage6_full_reextract_gemini.py` with carbon/NCT doc filter
+3. ⏳ **Alternative:** Full re-extraction to apply new prompt across all documents
+
 ### Deliverables
 
 1. ✅ Prompt update: `src/extraction/prompt_builder.py` - Added CONCEPT RELATIONSHIPS section
 2. ✅ Canary script: `scripts/reextraction/week15_canary_reextract.py`
 3. ✅ Low-occurrence edge analysis: Complete (see above)
-4. ⏳ Canary execution: Pending (requires production API key)
-5. ⏳ Verification of new carbon/NCT relationships: Pending canary execution
+4. ✅ Canary execution: Complete (2025-12-25)
+5. ✅ Verification of prompt effectiveness: Confirmed (16 carbon/NCT relationships extracted)
 
 ### Conclusion
 
@@ -2343,7 +2392,7 @@ bbe6a3ca-ec42-4a1d-8867-c6f4ce338efd
 1. Non-canonical predicates (handled by predicate_guard)
 2. Entity data quality issues (not threshold-related)
 
-The prompt update will encourage better concept relationship extraction. Canary reprocess will validate the change before full re-extraction.
+The prompt update successfully generates concept relationships. Canary validation shows 16 carbon/NCT relationships extracted from 15 documents (previously 0). Ready for broader reprocess if desired.
 
 ---
 
