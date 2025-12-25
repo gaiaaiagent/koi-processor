@@ -457,10 +457,18 @@ function playAudio(node) {
     }
 
     audio.currentTime = node.timestamp;
-    audio.play().catch(err => {
-        console.log('Audio playback failed:', err);
-        textEl.textContent = `${node.text}\n\n⚠️ Audio playback unavailable.`;
-    });
+    
+    // Handle playback errors
+    const playPromise = audio.play();
+    
+    if (playPromise !== undefined) {
+        playPromise.catch(err => {
+            console.log('Audio playback failed:', err);
+            // Fallback UI
+            const fallbackLink = node.episode_url ? `<br><br><strong>Audio unavailable.</strong> <a href="${node.episode_url}" target="_blank" style="color: #4CAF50;">Listen on external source ↗</a>` : '<br><br><strong>Audio unavailable.</strong>';
+            textEl.innerHTML = node.text + fallbackLink;
+        });
+    }
 
     setupAudioSync(node);
 }
