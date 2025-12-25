@@ -264,6 +264,40 @@ interface GraphContext {
   _privacy_warning?: string;
 }
 
+// Week 14: Normalize query text for entity matching
+// Strips common prefixes (x/, the) and suffixes (module, validator, token)
+function normalizeQueryForEntityMatch(query: string): string[] {
+  const variants: string[] = [];
+  let normalized = query.toLowerCase().trim();
+
+  // Strip Cosmos SDK module prefix
+  if (normalized.startsWith('x/')) {
+    normalized = normalized.slice(2);
+  }
+
+  // Strip common article prefix
+  if (normalized.startsWith('the ')) {
+    normalized = normalized.slice(4);
+  }
+
+  // Strip $ prefix (for tokens like $NCT)
+  if (normalized.startsWith('$')) {
+    normalized = normalized.slice(1);
+  }
+
+  variants.push(normalized);
+
+  // Strip common type suffixes and add variants
+  const suffixes = [' module', ' validator', ' token', ' project', ' network'];
+  for (const suffix of suffixes) {
+    if (normalized.endsWith(suffix)) {
+      variants.push(normalized.slice(0, -suffix.length).trim());
+    }
+  }
+
+  return [...new Set(variants)]; // Deduplicate
+}
+
 // Get dominant entity from entity search results
 // Uses entity occurrence_count and relationship_count to pick the best entity
 // Falls back to resolveEntityInternal if entity search doesn't provide metadata
@@ -297,16 +331,23 @@ async function getDominantEntity(
 
   if (entityCounts.size === 0) {
     // Fallback: try to resolve entity from query text directly
+    // Week 14: Try normalized variants to improve matching
     if (queryText) {
-      const resolved = await resolveEntityInternal(queryText, null, null);
-      if (resolved && resolved.occurrence_count >= entityThreshold) {
-        return {
-          entity_id: resolved.entity_id,
-          uri: resolved.uri,
-          text: resolved.entity_text,
-          type: resolved.entity_type,
-          occurrence_count: resolved.occurrence_count,
-        };
+      const variants = normalizeQueryForEntityMatch(queryText);
+      for (const variant of variants) {
+        const resolved = await resolveEntityInternal(variant, null, null);
+        if (resolved && resolved.occurrence_count >= entityThreshold) {
+          if (process.env.DEBUG_GRAPH_EXPANSION) {
+            console.log(`[GraphRAG] Resolved query '${queryText}' via variant '${variant}' → ${resolved.entity_text}`);
+          }
+          return {
+            entity_id: resolved.entity_id,
+            uri: resolved.uri,
+            text: resolved.entity_text,
+            type: resolved.entity_type,
+            occurrence_count: resolved.occurrence_count,
+          };
+        }
       }
     }
     return null;
