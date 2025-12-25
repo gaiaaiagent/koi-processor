@@ -348,6 +348,26 @@ class AdaptiveExtractor:
         strict_types = os.getenv("PREDICATE_GUARD_STRICT_TYPES", "false").lower() == "true"
 
         if validate_types:
+            # Build entity name -> type lookup from entities list
+            entity_type_lookup = {}
+            for ent in entities:
+                name = ent.get("name", "").lower().strip()
+                etype = ent.get("type", "").upper()
+                if name and etype:
+                    entity_type_lookup[name] = etype
+
+            # Enrich relationships with type info for validation
+            for rel in relationships:
+                source = rel.get("source", "").lower().strip()
+                target = rel.get("target", "").lower().strip()
+                if source in entity_type_lookup:
+                    rel["source_type"] = entity_type_lookup[source]
+                if target in entity_type_lookup:
+                    rel["target_type"] = entity_type_lookup[target]
+                # LLM sometimes puts actual predicate in 'relationship' field
+                if rel.get("relationship") and rel.get("predicate") == "associated_with":
+                    rel["predicate"] = rel["relationship"]
+
             original_count = len(relationships)
             relationships = filter_relationships(
                 relationships,
