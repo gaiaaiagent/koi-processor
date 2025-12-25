@@ -2547,18 +2547,18 @@ Added predicate-type constraints to `src/extraction/predicate_guard.py`:
 - `PREDICATE_TYPE_CONSTRAINTS` - Defines valid/blocked types for constrained predicates
 - `validate_relationship_types()` - Validates subject/object types against constraints
 
-**Constrained predicates:**
+**Constrained predicates (relaxed after canary):**
 
 | Predicate | Subject Constraint | Object Constraint |
 |-----------|-------------------|-------------------|
 | operates | Not CONCEPT/EVENT | Not CONCEPT/MATERIAL/LOCATION/EVENT |
-| founded | PERSON only | ORGANIZATION/PROJECT only |
-| works_at | PERSON only | ORGANIZATION only |
+| founded | PERSON/ORGANIZATION | ORGANIZATION/PROJECT/TECHNOLOGY |
+| works_at | PERSON only | ORGANIZATION/PROJECT/VALIDATOR |
 | employs | ORGANIZATION only | PERSON only |
 | member_of | PERSON/ORG/VALIDATOR | ORGANIZATION/PROJECT only |
-| leads | PERSON only | ORGANIZATION/PROJECT/EVENT only |
+| leads | PERSON/ORGANIZATION | ORGANIZATION/PROJECT/EVENT/PROCESS |
 | located_in | - | LOCATION only |
-| authored | PERSON only | - |
+| authored | PERSON/ORGANIZATION | - |
 | validates | VALIDATOR/ORG/TECH | - |
 | delegates | - | VALIDATOR/PERSON/ORG only |
 | votes | PERSON/ORG/VALIDATOR | - |
@@ -2579,13 +2579,57 @@ filtered = filter_relationships(
 )
 ```
 
-**Environment variable:** Set `PREDICATE_TYPE_GUARD_STRICT=true` to enable strict mode in production.
+**Environment variables:**
+- `PREDICATE_GUARD_VALIDATE_TYPES=true` - Enable type validation
+- `PREDICATE_GUARD_STRICT_TYPES=true` - Reject invalid (vs log-only)
+
+### Pipeline Integration
+
+Wired into `src/extraction/llm_extractor.py` at line 358-369. Controlled by env vars.
+
+### Canary Validation (2025-12-25)
+
+Reviewed 122 type combinations in production data. Relaxed constraints to avoid false positives:
+
+**Relaxed (allow ORGANIZATION as subject):**
+- `founded` - Orgs can found things ("Regen Foundation founded Regen Registry")
+- `leads` - Orgs can lead projects
+- `authored` - Orgs can author documents
+
+**Relaxed (expanded valid objects):**
+- `works_at` - Allow PROJECT and VALIDATOR
+- `leads` - Allow PROCESS
+
+**Would block ~117 rows in existing data** - all genuine errors:
+- 26 `leads→CONCEPT`
+- 30 `operates` with CONCEPT/EVENT subjects
+- 18 `located_in→non-LOCATION`
+- 11 `founded→CONCEPT`
+
+### Deployment Status
+
+| Component | Status |
+|-----------|--------|
+| Constraints defined | ✅ `PREDICATE_TYPE_CONSTRAINTS` in predicate_guard.py |
+| Validation function | ✅ `validate_relationship_types()` |
+| Pipeline wiring | ✅ llm_extractor.py lines 358-369 |
+| Env var control | ✅ `PREDICATE_GUARD_VALIDATE_TYPES`, `PREDICATE_GUARD_STRICT_TYPES` |
+| Production deployed | ✅ Code pulled to production |
+| Enforcement enabled | ⏳ Set env vars to enable |
+
+### To Enable in Production
+
+```bash
+# In ecosystem.hybrid.config.js or .env:
+PREDICATE_GUARD_VALIDATE_TYPES=true
+PREDICATE_GUARD_STRICT_TYPES=true
+```
 
 ### Next Steps (Optional)
 
-1. **Add predicate guidance to prompt** - Help LLM understand predicate constraints
-2. **Audit other predicates** - Check for similar issues with other predicates
-3. **Enable strict mode in production** - Set `PREDICATE_TYPE_GUARD_STRICT=true`
+1. **Enable strict mode** - Set env vars and restart extractors
+2. **Cleanup existing violations** - Delete ~117 invalid relationships from DB
+3. **Add predicate guidance to prompt** - Help LLM understand constraints
 
 ---
 
