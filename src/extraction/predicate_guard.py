@@ -3,11 +3,14 @@ Predicate validation and normalization for knowledge graph relationships.
 
 Week 13: Shared module to avoid import tangles between prompt_builder.py and llm_extractor.py.
 Provides canonical predicate allowlist and validation functions.
+
+Week 16 (FIX-015): Added predicate-type constraints to prevent semantically invalid
+relationships like "operates→CONCEPT" from being created.
 """
 
 import os
 import logging
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Set, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,132 @@ PREDICATE_MAPPINGS = {
 }
 
 
+# ============================================================================
+# PREDICATE TYPE CONSTRAINTS (Week 16 FIX-015)
+# Defines valid subject/object types for predicates with semantic constraints.
+# This prevents nonsensical relationships like "operates→CONCEPT".
+# ============================================================================
+PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
+    "operates": {
+        # "operates" implies running/managing operational infrastructure
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "TECHNOLOGY", "VALIDATOR", "MODULE", "PLATFORM", "PROCESS"},
+        "blocked_object_types": {"CONCEPT", "MATERIAL", "LOCATION", "EVENT"},
+        "blocked_subject_types": {"CONCEPT", "EVENT"},
+    },
+    "founded": {
+        # Only people found organizations/projects
+        "valid_subject_types": {"PERSON"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT"},
+    },
+    "works_at": {
+        # People work at organizations
+        "valid_subject_types": {"PERSON"},
+        "valid_object_types": {"ORGANIZATION"},
+    },
+    "employs": {
+        # Organizations employ people
+        "valid_subject_types": {"ORGANIZATION"},
+        "valid_object_types": {"PERSON"},
+    },
+    "member_of": {
+        # People/orgs are members of organizations
+        "valid_subject_types": {"PERSON", "ORGANIZATION", "VALIDATOR"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT"},
+    },
+    "leads": {
+        # People lead organizations/projects
+        "valid_subject_types": {"PERSON"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT"},
+    },
+    "located_in": {
+        # Things are located in locations
+        "valid_object_types": {"LOCATION"},
+    },
+    "authored": {
+        # People author things
+        "valid_subject_types": {"PERSON"},
+    },
+    "validates": {
+        # Validators validate things
+        "valid_subject_types": {"VALIDATOR", "ORGANIZATION", "TECHNOLOGY"},
+    },
+    "delegates": {
+        # People/orgs delegate to validators
+        "valid_object_types": {"VALIDATOR", "PERSON", "ORGANIZATION"},
+    },
+    "votes": {
+        # People/orgs/validators vote on things
+        "valid_subject_types": {"PERSON", "ORGANIZATION", "VALIDATOR"},
+    },
+}
+
+
+def validate_relationship_types(
+    predicate: str,
+    subject_type: Optional[str],
+    object_type: Optional[str],
+    strict: bool = False
+) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a relationship's types are compatible with the predicate.
+
+    Args:
+        predicate: The relationship predicate
+        subject_type: Entity type of the subject (e.g., "PERSON", "ORGANIZATION")
+        object_type: Entity type of the object
+        strict: If True, reject invalid relationships. If False, log warning only.
+
+    Returns:
+        Tuple of (is_valid, reason)
+        - is_valid: True if the relationship passes type constraints
+        - reason: Description of why it failed (None if valid)
+    """
+    if predicate not in PREDICATE_TYPE_CONSTRAINTS:
+        return (True, None)  # No constraints defined
+
+    constraints = PREDICATE_TYPE_CONSTRAINTS[predicate]
+
+    # Check blocked types first (hard blocks)
+    if object_type and "blocked_object_types" in constraints:
+        if object_type.upper() in constraints["blocked_object_types"]:
+            reason = f"{predicate} cannot target {object_type}"
+            if strict:
+                logger.warning(f"[PredicateTypeGuard] BLOCKED: {reason}")
+            else:
+                logger.info(f"[PredicateTypeGuard] Would block: {reason}")
+            return (False, reason)
+
+    if subject_type and "blocked_subject_types" in constraints:
+        if subject_type.upper() in constraints["blocked_subject_types"]:
+            reason = f"{subject_type} cannot use {predicate}"
+            if strict:
+                logger.warning(f"[PredicateTypeGuard] BLOCKED: {reason}")
+            else:
+                logger.info(f"[PredicateTypeGuard] Would block: {reason}")
+            return (False, reason)
+
+    # Check valid types (allowlist)
+    if object_type and "valid_object_types" in constraints:
+        if object_type.upper() not in constraints["valid_object_types"]:
+            reason = f"{predicate} expects object type in {constraints['valid_object_types']}, got {object_type}"
+            if strict:
+                logger.warning(f"[PredicateTypeGuard] BLOCKED: {reason}")
+            else:
+                logger.info(f"[PredicateTypeGuard] Would block: {reason}")
+            return (False, reason)
+
+    if subject_type and "valid_subject_types" in constraints:
+        if subject_type.upper() not in constraints["valid_subject_types"]:
+            reason = f"{predicate} expects subject type in {constraints['valid_subject_types']}, got {subject_type}"
+            if strict:
+                logger.warning(f"[PredicateTypeGuard] BLOCKED: {reason}")
+            else:
+                logger.info(f"[PredicateTypeGuard] Would block: {reason}")
+            return (False, reason)
+
+    return (True, None)
+
+
 def validate_predicate(predicate: str, strict: bool = False) -> Tuple[str, bool]:
     """
     Validate and optionally normalize a predicate.
@@ -126,14 +255,18 @@ def validate_predicate(predicate: str, strict: bool = False) -> Tuple[str, bool]
 
 def filter_relationships(
     relationships: List[Dict[str, Any]],
-    strict: bool = False
+    strict: bool = False,
+    validate_types: bool = False,
+    strict_types: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    Filter and validate relationships, applying predicate guard.
+    Filter and validate relationships, applying predicate guard and optional type validation.
 
     Args:
         relationships: List of relationship dicts with 'predicate' key
         strict: If True, drop or remap non-canonical predicates
+        validate_types: If True, also validate predicate-type constraints (Week 16)
+        strict_types: If True, reject type-invalid relationships. If False, log only.
 
     Returns:
         Filtered list of relationships with validated predicates
@@ -144,6 +277,7 @@ def filter_relationships(
     validated = []
     rejected_count = 0
     mapped_count = 0
+    type_rejected_count = 0
 
     for rel in relationships:
         if not isinstance(rel, dict):
@@ -162,6 +296,19 @@ def filter_relationships(
         if normalized != original_predicate.lower().strip().replace(" ", "_").replace("-", "_"):
             mapped_count += 1
 
+        # Type validation (Week 16 FIX-015)
+        if validate_types:
+            subject_type = rel.get("source_type") or rel.get("subject_type")
+            object_type = rel.get("target_type") or rel.get("object_type")
+
+            is_valid, reason = validate_relationship_types(
+                normalized, subject_type, object_type, strict=strict_types
+            )
+
+            if not is_valid and strict_types:
+                type_rejected_count += 1
+                continue
+
         # Update predicate in relationship
         rel_copy = rel.copy()
         rel_copy["predicate"] = normalized
@@ -172,6 +319,8 @@ def filter_relationships(
         logger.info(f"[PredicateGuard] Rejected {rejected_count} non-canonical predicates (strict mode)")
     if mapped_count > 0:
         logger.info(f"[PredicateGuard] Mapped {mapped_count} predicates to canonical forms")
+    if type_rejected_count > 0:
+        logger.info(f"[PredicateTypeGuard] Rejected {type_rejected_count} type-invalid relationships")
 
     return validated
 
@@ -217,9 +366,14 @@ def get_predicate_stats(relationships: List[Dict[str, Any]]) -> Dict[str, int]:
 # ============================================================================
 
 __all__ = [
+    # Canonical predicates and mappings
     "CANONICAL_PREDICATES",
     "PREDICATE_MAPPINGS",
+    # Week 16 FIX-015: Type constraints
+    "PREDICATE_TYPE_CONSTRAINTS",
+    # Validation functions
     "validate_predicate",
+    "validate_relationship_types",
     "filter_relationships",
     "get_predicate_stats",
 ]

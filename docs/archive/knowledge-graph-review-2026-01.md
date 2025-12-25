@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (Week 15 carbon/NCT relationship extraction)
-**Status:** Week 15 Complete - Carbon/NCT relationships persisted (+27 new)
+**Last Updated:** 2025-12-25 (Week 16 FIX-015 predicate-type cleanup)
+**Status:** Week 16 Complete - 127 operates→CONCEPT deleted + RelationshipTypeValidator implemented
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1492,6 +1492,12 @@ ORDER BY occurrence_count DESC;
 | **Week 10: DB Maintenance** | Complete | Ran `ANALYZE koi_memories;` to refresh planner statistics |
 | **Week 10: E401 Generalization Check** | Complete | Verified 5 entities return docs: ethereum, regen ledger, regen commons, cosmos sdk, polygon |
 | **Week 10: DEBUG Flag Hygiene** | Complete | `DEBUG_GRAPH_EXPANSION: "false"` confirmed in ecosystem.hybrid.config.js |
+| **Week 11: E402 Platform Relationships** | Complete | Enhanced prompt, 277 new platform relationships |
+| **Week 12: Predicate Normalization** | Complete | 1,506 → 1,462 predicates (44 normalized) |
+| **Week 13: GraphRAG Context Integration** | Complete | Predicate guard, graph context in query response |
+| **Week 14: Entity Matching Improvements** | Complete | 53.3% → 100% GraphRAG coverage |
+| **Week 15: Core Concept Extraction** | Complete | Carbon/NCT relationships (+27 new) |
+| **Week 16: FIX-015 Cleanup** | Complete | 127 operates→CONCEPT deleted + RelationshipTypeValidator in predicate_guard.py |
 
 ---
 
@@ -2468,6 +2474,118 @@ The prompt update successfully generates concept relationships:
 - Canary: 16 carbon/NCT relationships from 15 documents
 - Broader reprocess: 134 total carbon/NCT relationships (+27 new)
 - Key domain relationships now captured (carbon→carbon markets, NCT→carbon credits, etc.)
+
+---
+
+## Week 16: FIX-015 Predicate-Type Cleanup (2025-12-25)
+
+### Objective
+
+Clean up semantically invalid `operates→CONCEPT` relationships identified in the predicate-type constraints analysis.
+
+### Background
+
+The analysis at [predicate_type_constraints_analysis.md](reports/predicate_type_constraints_analysis.md) identified 127 `operates→CONCEPT` relationships that are semantically invalid. Of these:
+- 63 are **clearly wrong** (PERSON/CONCEPT/EVENT → operates → CONCEPT)
+- 64 require **case-by-case review** (ORG/TECH/PROJECT/VALIDATOR → operates → CONCEPT)
+
+### Cleanup Executed
+
+**Backup created:** `koi_relationships_backup_fix015` (127 rows total with full context)
+
+#### Pass 1: Clearly Wrong (63 deleted)
+
+| Subject Type | Count | Rationale |
+|--------------|-------|-----------|
+| PERSON | 52 | People don't "operate" concepts |
+| CONCEPT | 9 | CONCEPT→operates→CONCEPT is nonsense |
+| EVENT | 2 | Events don't "operate" concepts |
+| **Total** | **63** | |
+
+**Sample deleted:**
+- `Robert → operates → burn function` (should be "implements")
+- `market data → operates → economics` (nonsense)
+- `Gregory Landua → operates → Tokenomics` (should be "discusses")
+
+#### Pass 2: Remaining 64 Triaged and Deleted
+
+After review, all 64 remaining cases also had wrong predicates:
+
+| Subject Type | Count | Verdict |
+|--------------|-------|---------|
+| ORGANIZATION | 50 | Delete - wrong predicate (should be "analyzes", "supports", etc.) |
+| TECHNOLOGY | 8 | Delete - wrong predicate |
+| PROJECT | 4 | Delete - wrong predicate |
+| VALIDATOR | 2 | Delete - wrong predicate |
+| **Total** | **64** | |
+
+**Sample deleted:**
+- `McKinsey → operates → nature-based markets` (should be "analyzes")
+- `Regen Registry → operates → NbS` (should be "supports")
+- `GPT → operates → semantic naming conventions` (nonsense)
+- `Stakecito → operates → sell pressure` (nonsense)
+
+**Rationale:** Even borderline cases where the object might be mis-typed (e.g., LASEG's PES programs) had the wrong predicate. "Operates" implies running operational infrastructure, not working with concepts.
+
+### Final Metrics
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Total koi_relationships | 15,796 | 15,669 | -127 |
+| operates→CONCEPT | 127 | **0** | -127 |
+| operates (valid remaining) | 509 | 382 | -127 |
+
+### operates→CONCEPT Cleanup: ✅ COMPLETE
+
+All 127 semantically invalid `operates→CONCEPT` relationships have been deleted. The `operates` predicate now only connects to valid object types (ORGANIZATION, PROJECT, TECHNOLOGY, VALIDATOR, etc.).
+
+### RelationshipTypeValidator Implementation
+
+Added predicate-type constraints to `src/extraction/predicate_guard.py`:
+
+**New exports:**
+- `PREDICATE_TYPE_CONSTRAINTS` - Defines valid/blocked types for constrained predicates
+- `validate_relationship_types()` - Validates subject/object types against constraints
+
+**Constrained predicates:**
+
+| Predicate | Subject Constraint | Object Constraint |
+|-----------|-------------------|-------------------|
+| operates | Not CONCEPT/EVENT | Not CONCEPT/MATERIAL/LOCATION/EVENT |
+| founded | PERSON only | ORGANIZATION/PROJECT only |
+| works_at | PERSON only | ORGANIZATION only |
+| employs | ORGANIZATION only | PERSON only |
+| member_of | PERSON/ORG/VALIDATOR | ORGANIZATION/PROJECT only |
+| leads | PERSON only | ORGANIZATION/PROJECT/EVENT only |
+| located_in | - | LOCATION only |
+| authored | PERSON only | - |
+| validates | VALIDATOR/ORG/TECH | - |
+| delegates | - | VALIDATOR/PERSON/ORG only |
+| votes | PERSON/ORG/VALIDATOR | - |
+
+**Usage:**
+```python
+from src.extraction.predicate_guard import validate_relationship_types, filter_relationships
+
+# Validate single relationship
+is_valid, reason = validate_relationship_types('operates', 'PERSON', 'CONCEPT', strict=True)
+# Returns: (False, "operates cannot target CONCEPT")
+
+# Filter batch with type validation
+filtered = filter_relationships(
+    relationships,
+    validate_types=True,   # Enable type checking
+    strict_types=True      # Reject invalid (vs log-only)
+)
+```
+
+**Environment variable:** Set `PREDICATE_TYPE_GUARD_STRICT=true` to enable strict mode in production.
+
+### Next Steps (Optional)
+
+1. **Add predicate guidance to prompt** - Help LLM understand predicate constraints
+2. **Audit other predicates** - Check for similar issues with other predicates
+3. **Enable strict mode in production** - Set `PREDICATE_TYPE_GUARD_STRICT=true`
 
 ---
 

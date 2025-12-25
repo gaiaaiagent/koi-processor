@@ -356,9 +356,17 @@ Return ONLY valid JSON."""
                 normalized_relationships.append(rel_dict)
 
             # Week 13: Apply predicate guard to validate/normalize predicates
+            # Week 16 (FIX-015): Added type validation to prevent operates→CONCEPT etc.
             if apply_predicate_guard is not None:
                 strict_mode = os.getenv("PREDICATE_GUARD_STRICT", "false").lower() == "true"
-                normalized_relationships = apply_predicate_guard(normalized_relationships, strict=strict_mode)
+                validate_types = os.getenv("PREDICATE_GUARD_VALIDATE_TYPES", "false").lower() == "true"
+                strict_types = os.getenv("PREDICATE_GUARD_STRICT_TYPES", "false").lower() == "true"
+                normalized_relationships = apply_predicate_guard(
+                    normalized_relationships,
+                    strict=strict_mode,
+                    validate_types=validate_types,
+                    strict_types=strict_types
+                )
 
             metadata["extracted_relationships"] = normalized_relationships
 

@@ -3868,5 +3868,117 @@ F12-F17 are additional root causes identified during review (not present in the 
 
 ---
 
+## Week 14: Carbon Entity Relationship Audit (2025-12-24)
+
+### Objective
+
+Investigate why "carbon" exists in entity_registry with 62 occurrences but has only 1 relationship. Determine root cause and recommend next action.
+
+### Baseline Counts
+
+| Entity | Type | Occurrence Count |
+|--------|------|------------------|
+| carbon | CONCEPT | 29 |
+| carbon | MATERIAL | 33 |
+| **Total** | - | **62** |
+
+**Relationships found:** 0 (was 1 before cleanup - see [WEF→operates→carbon investigation](knowledge-graph-review-2026-01.md#wefoperatescarbon-investigation-2025-12-24))
+
+### Compound Carbon Entities (For Comparison)
+
+| Entity | Type | Occurrences | Relationships |
+|--------|------|-------------|---------------|
+| Carbon Credit | CONCEPT | 171 | 47 (8 out, 39 in) |
+| carbon sequestration | CONCEPT | 73 | 17 (4 out, 13 in) |
+| carbon credits blockchain | CONCEPT | 41 | 1 |
+| Carbon Markets | CONCEPT | 41 | 9 |
+| carbon markets integrity | CONCEPT | 31 | 7 |
+| carbon footprint | CONCEPT | 30 | 6 |
+| soil carbon | MATERIAL | 21 | 0 |
+| carbon removal | CONCEPT | 19 | 11 |
+
+### Document Sample Analysis
+
+Reviewed 15 documents mentioning "carbon" via `koi_entity_chunk_links`. Findings:
+
+1. **Scientific/technical contexts** - "leftover carbon ends up...", "30 percent of the CO2..."
+2. **Compound terms in body text** - "carbon credits", "carbon sequestration", "carbon-efficiency"
+3. **Domain references** - "carbon ton" (unit), "Soil Organic Carbon Project"
+4. **Passing mentions** - "carbon" as part of larger explanations
+
+**Key observation:** In most contexts, "carbon" appears as part of compound domain concepts (e.g., "carbon credits", "carbon sequestration") rather than as a standalone entity requiring relationships.
+
+### Root Cause Hypothesis
+
+**Primary cause: LLM Compound Entity Preference (by design)**
+
+The extraction prompt correctly guides the LLM to extract domain-specific compound entities rather than decomposing them:
+
+- When text says "carbon credits", LLM extracts "Carbon Credit" as one entity
+- When text says "carbon sequestration", LLM extracts "carbon sequestration" as one entity
+- This is **correct behavior** - compound entities are more precise and semantically meaningful
+
+**Secondary cause: Bare "carbon" mentions lack clear relationship candidates**
+
+When "carbon" appears alone, it's typically:
+- In scientific descriptions ("30% of CO2 is trapped...")
+- As a unit modifier ("carbon ton")
+- In passing references without clear subject-predicate-object structure
+
+**Not the cause:**
+
+1. **Not filtered** - "carbon" is NOT in EntityQualityFilter stop words
+2. **Not blocked by post-processing** - passes all pipeline modules
+3. **Not a type conflict** - both CONCEPT and MATERIAL are valid types
+
+### Evidence from Extraction Prompt
+
+From `prompt_builder.py`:
+```
+## CONCEPT vs PROJECT
+- CONCEPT: Abstract ideas, methodologies, frameworks, theories
+  Examples: "regenerative agriculture", "proof of stake", "carbon sequestration"
+```
+
+The prompt lists "carbon sequestration" as the example, not bare "carbon", reinforcing compound entity preference.
+
+### Recommendation
+
+**Leave as-is (No fix needed)**
+
+The current behavior is correct:
+
+1. **Compound entities are more valuable** - "Carbon Credit" with 47 relationships is more useful for retrieval than bare "carbon" with generic associations
+2. **Relationship quality > quantity** - Adding relationships like "carbon → relates_to → atmosphere" would introduce noise
+3. **Entity exists for linking** - "carbon" exists in entity_registry for text matching even without relationships
+4. **No precision loss** - Users searching for carbon concepts will match compound entities that have rich relationship context
+
+**Alternative (if wanted):**
+
+If relationships for generic concepts are desired, could add prompt guidance:
+```
+## Broad Concept Relationships (Optional)
+For core domain concepts (carbon, biodiversity, ecosystem), create one
+high-confidence relationship to their primary domain context:
+- (carbon, relates_to, climate)
+- (biodiversity, part_of, ecosystem)
+```
+
+However, this risks noise and is not recommended unless there's a specific retrieval use case.
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| Is "carbon" filtered? | No |
+| Is there a prompt gap? | No - by design |
+| Is post-processing pruning? | No |
+| Should we add extraction guidance? | Not recommended |
+| Root cause | LLM correctly prefers compound entities |
+
+**Note (2025-12-24):** The single "WEF → operates → carbon" relationship was deleted as an extraction error. See [investigation notes](knowledge-graph-review-2026-01.md#wefoperatescarbon-investigation-2025-12-24) for details and FIX-015 proposal for predicate type constraints.
+
+---
+
 **Cycle Closed:** 2025-12-23
 **Next Review:** knowledge-graph-review-2026-01.md
