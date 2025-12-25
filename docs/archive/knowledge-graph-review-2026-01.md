@@ -2446,6 +2446,8 @@ After validating the prompt update with the canary, a broader reprocess was exec
 
 **Targeted reprocess script:** `scripts/reextraction/week15_targeted_reprocess.py`
 
+**Note:** Gemini API key was invalid on production, so OpenAI extractor was used instead. Both extractors use the same `prompt_builder.py`, so the Week 15 prompt update applies equally.
+
 ### Deliverables
 
 1. ✅ Prompt update: `src/extraction/prompt_builder.py` - Added CONCEPT RELATIONSHIPS section
