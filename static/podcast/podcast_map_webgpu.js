@@ -52,8 +52,9 @@ function hexToRgba(hex, alpha) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', async () => {
+(async () => {
     try {
+        logStatus("Script started...");
         logStatus("Checking WebGPU support...");
         let useWebGPU = false;
         
@@ -102,7 +103,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         logStatus(error.message, true);
         console.error('Error loading data:', error);
     }
-});
+})();
 
 async function initializeGraph(useWebGPU) {
     const container = document.getElementById('graph-container');
