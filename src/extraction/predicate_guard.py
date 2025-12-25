@@ -94,19 +94,21 @@ PREDICATE_MAPPINGS = {
 PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
     "operates": {
         # "operates" implies running/managing operational infrastructure
-        "valid_object_types": {"ORGANIZATION", "PROJECT", "TECHNOLOGY", "VALIDATOR", "MODULE", "PLATFORM", "PROCESS"},
+        # Relaxed: Allow most subject types except CONCEPT/EVENT (nonsense)
+        # Strict on object: Can't operate abstract concepts, materials, locations
         "blocked_object_types": {"CONCEPT", "MATERIAL", "LOCATION", "EVENT"},
         "blocked_subject_types": {"CONCEPT", "EVENT"},
     },
     "founded": {
-        # Only people found organizations/projects
-        "valid_subject_types": {"PERSON"},
-        "valid_object_types": {"ORGANIZATION", "PROJECT"},
+        # People AND organizations can found things
+        # "Google founded DeepMind", "Regen Foundation founded Regen Registry"
+        "valid_subject_types": {"PERSON", "ORGANIZATION"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "TECHNOLOGY"},
     },
     "works_at": {
-        # People work at organizations
+        # People work at organizations, projects, or validators
         "valid_subject_types": {"PERSON"},
-        "valid_object_types": {"ORGANIZATION"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "VALIDATOR"},
     },
     "employs": {
         # Organizations employ people
@@ -114,22 +116,24 @@ PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
         "valid_object_types": {"PERSON"},
     },
     "member_of": {
-        # People/orgs are members of organizations
+        # People/orgs/validators are members of organizations/projects
         "valid_subject_types": {"PERSON", "ORGANIZATION", "VALIDATOR"},
         "valid_object_types": {"ORGANIZATION", "PROJECT"},
     },
     "leads": {
-        # People lead organizations/projects
-        "valid_subject_types": {"PERSON"},
-        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT"},
+        # People AND organizations can lead things
+        # "Regen Foundation leads the registry initiative"
+        "valid_subject_types": {"PERSON", "ORGANIZATION"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT", "PROCESS"},
     },
     "located_in": {
-        # Things are located in locations
+        # Things are located in locations (strict - no concepts/projects)
         "valid_object_types": {"LOCATION"},
     },
     "authored": {
-        # People author things
-        "valid_subject_types": {"PERSON"},
+        # People AND organizations can author things
+        # Companies publish papers, proposals, etc.
+        "valid_subject_types": {"PERSON", "ORGANIZATION"},
     },
     "validates": {
         # Validators validate things
