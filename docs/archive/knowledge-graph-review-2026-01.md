@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (Week 12 predicate normalization complete)
-**Status:** Week 12 Complete - Predicate normalization applied (1,506 → 1,462)
+**Last Updated:** 2025-12-25 (Week 13 GraphRAG integration deployed)
+**Status:** Week 13 Complete - GraphRAG context integration + predicate guard
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1910,15 +1910,39 @@ PREDICATE_GUARD_STRICT=true|false    # Reject vs log non-canonical (default: fal
 - `scripts/eval_graphrag.py` - Context relevance evaluation harness
 - `docs/week13_graphrag_context_evaluation.md` - Evaluation results (generated)
 
-### Evaluation (Pending)
+### Evaluation Results (2025-12-25)
 
-15 queries defined (8 entity-heavy, 7 ambiguous). Metrics:
-- % queries with dominant entity detected
-- Average edge count per query
-- Predicate distribution (top-edge sanity)
-- Queries with truncated context (>20 edges)
+**Report:** [week13_graphrag_context_evaluation.md](../week13_graphrag_context_evaluation.md)
 
-*Run `python scripts/eval_graphrag.py` to generate report.*
+| Metric | Value |
+|--------|-------|
+| Total queries | 15 |
+| Queries with graph context | 8 (53.3%) |
+| Queries with dominant entity | 8 (53.3%) |
+| Average edge count | 6.5 |
+| Queries with truncated context | 4 |
+
+**By Category:**
+
+| Category | Total | With Context | % |
+|----------|-------|--------------|---|
+| Entity-Heavy | 8 | 4 | 50.0% |
+| Ambiguous | 7 | 4 | 57.1% |
+
+**Top Predicates Returned:**
+1. `manages` (10)
+2. `associated_with` (9)
+3. `represents` (8)
+4. `mentions` (7)
+5. `operates` (7)
+
+**Key Observations:**
+
+1. **Successful lookups:** Gregory Landua (684 occ), Regen Network (3702 occ), Credit Class (186 occ), Cosmos (145 occ), Ecocredits (126 occ)
+2. **Missing entities:** x/ecocredit module, Chorus One, Martin Wainstein, NCT token - not in entity_registry or below occurrence threshold
+3. **Edge case:** "carbon" matched as MATERIAL (33 occ) but returned 0 edges - entity exists but has no relationships
+
+**Recommendation:** Keep `ENABLE_GRAPHRAG_CONTEXT=false` by default until entity coverage improves. Enable per-request via `graph_context: true` body field for testing.
 
 ---
 
