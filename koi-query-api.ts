@@ -311,7 +311,8 @@ async function getDominantEntity(
   type: string;
   occurrence_count: number;
 } | null> {
-  const entityThreshold = parseInt(process.env.GRAPHRAG_ENTITY_THRESHOLD || '5');
+  // Week 14: Lowered default from 5 to 2 to include more entities
+  const entityThreshold = parseInt(process.env.GRAPHRAG_ENTITY_THRESHOLD || '2');
 
   // Extract unique entities from entity search results
   const entityCounts: Map<string, { name: string; type: string | null; count: number }> = new Map();
@@ -353,35 +354,54 @@ async function getDominantEntity(
     return null;
   }
 
-  // Find the entity with highest count in search results
-  let dominant: { name: string; count: number } | null = null;
-  for (const [_, data] of entityCounts) {
-    if (!dominant || data.count > dominant.count) {
-      dominant = { name: data.name, count: data.count };
+  // Sort entities by search match count (descending)
+  const sortedEntities = Array.from(entityCounts.entries())
+    .sort((a, b) => b[1].count - a[1].count)
+    .map(([_, data]) => data.name);
+
+  if (process.env.DEBUG_GRAPH_EXPANSION) {
+    console.log(`[GraphRAG] Candidates from search: ${sortedEntities.slice(0, 5).join(', ')}`);
+  }
+
+  // Pass 1: Try direct matches first (prefer exact matches)
+  for (const candidateName of sortedEntities) {
+    const resolved = await resolveEntityInternal(candidateName, null, null);
+    if (resolved && resolved.occurrence_count >= entityThreshold) {
+      if (process.env.DEBUG_GRAPH_EXPANSION) {
+        console.log(`[GraphRAG] Resolved '${candidateName}' → ${resolved.entity_text} (occ=${resolved.occurrence_count})`);
+      }
+      return {
+        entity_id: resolved.entity_id,
+        uri: resolved.uri,
+        text: resolved.entity_text,
+        type: resolved.entity_type,
+        occurrence_count: resolved.occurrence_count,
+      };
     }
   }
 
-  if (!dominant) return null;
-
-  // Resolve the dominant entity to get full metadata
-  const resolved = await resolveEntityInternal(dominant.name, null, null);
-  if (!resolved) return null;
-
-  // Apply entity threshold
-  if (resolved.occurrence_count < entityThreshold) {
-    if (process.env.DEBUG_GRAPH_EXPANSION) {
-      console.log(`[GraphRAG] Entity '${dominant.name}' below threshold (${resolved.occurrence_count} < ${entityThreshold})`);
+  // Pass 2: Try plural variants as fallback
+  for (const candidateName of sortedEntities) {
+    const pluralVariants = [candidateName + 's', candidateName.replace(/s$/, '')];
+    for (const variant of pluralVariants) {
+      if (variant === candidateName) continue; // Skip if same as original
+      const resolvedVariant = await resolveEntityInternal(variant, null, null);
+      if (resolvedVariant && resolvedVariant.occurrence_count >= entityThreshold) {
+        if (process.env.DEBUG_GRAPH_EXPANSION) {
+          console.log(`[GraphRAG] Resolved '${candidateName}' via plural variant '${variant}'`);
+        }
+        return {
+          entity_id: resolvedVariant.entity_id,
+          uri: resolvedVariant.uri,
+          text: resolvedVariant.entity_text,
+          type: resolvedVariant.entity_type,
+          occurrence_count: resolvedVariant.occurrence_count,
+        };
+      }
     }
-    return null;
   }
 
-  return {
-    entity_id: resolved.entity_id,
-    uri: resolved.uri,
-    text: resolved.entity_text,
-    type: resolved.entity_type,
-    occurrence_count: resolved.occurrence_count,
-  };
+  return null;
 }
 
 // Get graph context (neighborhood edges) for an entity
