@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (Week 16 FIX-015 predicate-type cleanup)
-**Status:** Week 16 Complete - 127 operates→CONCEPT deleted + RelationshipTypeValidator implemented
+**Last Updated:** 2025-12-25 (Week 16 FIX-015b cleanup complete)
+**Status:** Week 16 Complete - RelationshipTypeValidator in strict mode + 171 violations cleaned
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -2612,24 +2612,66 @@ Reviewed 122 type combinations in production data. Relaxed constraints to avoid 
 |-----------|--------|
 | Constraints defined | ✅ `PREDICATE_TYPE_CONSTRAINTS` in predicate_guard.py |
 | Validation function | ✅ `validate_relationship_types()` |
-| Pipeline wiring | ✅ llm_extractor.py lines 358-369 |
+| Pipeline wiring (batch) | ✅ llm_extractor.py lines 358-369 |
+| Pipeline wiring (API) | ✅ adaptive_extractor.py lines 346-392 |
 | Env var control | ✅ `PREDICATE_GUARD_VALIDATE_TYPES`, `PREDICATE_GUARD_STRICT_TYPES` |
 | Production deployed | ✅ Code pulled to production |
-| Enforcement enabled | ⏳ Set env vars to enable |
+| Enforcement enabled | ✅ **Strict mode enabled 2025-12-25 16:21 UTC** |
 
-### To Enable in Production
+### Strict Mode Enabled (2025-12-25)
 
+**Timestamp:** 2025-12-25 16:21 UTC
+
+**Configuration (in .env):**
 ```bash
-# In ecosystem.hybrid.config.js or .env:
 PREDICATE_GUARD_VALIDATE_TYPES=true
 PREDICATE_GUARD_STRICT_TYPES=true
 ```
 
-### Next Steps (Optional)
+**Verification test results:**
+- Invalid relationship `PERSON → operates → CONCEPT`: **BLOCKED** ✓
+- Valid relationship `PERSON → founded → ORGANIZATION`: **PASSED** ✓
 
-1. **Enable strict mode** - Set env vars and restart extractors
-2. **Cleanup existing violations** - Delete ~117 invalid relationships from DB
-3. **Add predicate guidance to prompt** - Help LLM understand constraints
+**Coverage:**
+- Batch extraction (`llm_extractor.py`): Wired with env var control
+- API extraction (`adaptive_extractor.py`): Wired with entity type lookup + LLM field normalization
+
+The guard handles LLM output variations:
+- Entity names: `entity1/entity2` or `source/target`
+- Predicates: `predicate`, `relationship`, or `relation` fields
+
+### FIX-015b: Type Violation Cleanup (2025-12-25)
+
+**Timestamp:** 2025-12-25 23:57 UTC
+
+**Script:** `scripts/fix015b_cleanup_type_violations.sql`
+
+**Deleted violations by predicate (top 10):**
+- `validates` (PROCESS → CONCEPT): 19 deleted
+- `leads` (PERSON → CONCEPT): 14 deleted
+- `operates` (CONCEPT → ORGANIZATION): 13 deleted
+- `located_in` (ORGANIZATION → CONCEPT): 11 deleted
+- `operates` (CONCEPT → TECHNOLOGY): 10 deleted
+- `leads` (ORGANIZATION → CONCEPT): 8 deleted
+- `founded` (PERSON → CONCEPT): 6 deleted
+- `founded` (ORGANIZATION → CONCEPT): 5 deleted
+- `operates` (PERSON → EVENT): 5 deleted
+- `validates` (CONCEPT → CONCEPT): 5 deleted
+- *(+ 47 more constraint violations across 57 predicate/type combinations)*
+
+**Total deleted:** **171** type-invalid relationships removed
+
+**Post-cleanup verification:** 0 remaining violations across all 16 constraint types.
+
+**Fuseki rebuild:** Completed - 163,703 triples (previously 165,619)
+
+**Backup table:** `koi_relationships_backup_fix015b` (for rollback if needed)
+
+### Next Steps
+
+1. ~~Enable strict mode~~ ✅ Done
+2. ~~Cleanup existing violations~~ ✅ Done (171 deleted)
+3. **Add predicate guidance to prompt** - Help LLM understand constraints (optional)
 
 ---
 
