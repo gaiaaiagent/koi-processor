@@ -121,6 +121,9 @@ async function initializeGraph(useWebGPU) {
     // 3. Setup Renderer (WebGPU or WebGL)
     if (useWebGPU) {
         renderer = new WebGPURenderer({ antialias: true });
+        if (renderer.init) {
+            await renderer.init();
+        }
     } else {
         renderer = new THREE.WebGLRenderer({ antialias: true });
     }
@@ -265,7 +268,11 @@ function animateWebGPU() {
         controls.autoRotate = false;
     }
 
-    renderer.renderAsync(scene, camera);
+    if (renderer.renderAsync) {
+        renderer.renderAsync(scene, camera);
+    } else {
+        renderer.render(scene, camera);
+    }
 }
 
 function animateWebGL() {
