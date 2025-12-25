@@ -192,8 +192,10 @@ async def extract_single_document(
             existing_metadata=doc.get('metadata', {})
         )
 
-        entities = result.get('entities', [])
-        relationships = result.get('relationships', [])
+        # Extract from semantic_extraction structure returned by OpenAI extractor
+        semantic = result.get('semantic_extraction', {})
+        entities = semantic.get('entities', [])
+        relationships = semantic.get('relationships', [])
 
         # Filter for carbon/NCT related
         carbon_entities = [
