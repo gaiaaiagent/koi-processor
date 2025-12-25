@@ -368,6 +368,10 @@ class AdaptiveExtractor:
                 if rel.get("relationship") and rel.get("predicate") == "associated_with":
                     rel["predicate"] = rel["relationship"]
 
+            # Debug: log relationships before filtering
+            for rel in relationships:
+                logger.debug(f"[PredicateTypeGuard] Checking: {rel.get('source_type')} → {rel.get('predicate')} → {rel.get('target_type')}")
+
             original_count = len(relationships)
             relationships = filter_relationships(
                 relationships,
@@ -375,8 +379,11 @@ class AdaptiveExtractor:
                 validate_types=True,
                 strict_types=strict_types
             )
-            if len(relationships) < original_count:
-                logger.info(f"[PredicateTypeGuard] Filtered {original_count - len(relationships)} invalid relationships")
+            filtered_count = original_count - len(relationships)
+            if filtered_count > 0:
+                logger.warning(f"[PredicateTypeGuard] Filtered {filtered_count} invalid relationships (strict={strict_types})")
+            else:
+                logger.info(f"[PredicateTypeGuard] All {original_count} relationships passed validation")
 
         # Store in PostgreSQL
         async with self.db_pool.acquire() as conn:
