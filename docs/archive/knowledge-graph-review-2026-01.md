@@ -1637,44 +1637,59 @@ Two Notion pages had mixed privacy (some chunks public, others private):
 
 #### Data Merge (2025-12-25)
 
+**Initial Batch (40 docs):**
+
 | Metric | Value |
 |--------|-------|
-| Relationships merged to prod | **36** |
+| Relationships merged | 36 |
 | Skipped (missing entities) | 12 |
 | Skipped (duplicate) | 1 |
-| Total koi_relationships | 15,400 (+36) |
 
-**Merged Predicate Distribution:**
+**Broader Batch (500 docs):**
 
-| Predicate | New | Total in prod |
-|-----------|-----|---------------|
-| uses | 6 | 1,078 |
-| integrates_with | 10 | 10 |
-| powered_by | 7 | 7 |
-| communicates_via | 5 | 5 |
-| documents_on | 4 | 4 |
-| hosted_on | 1 | 1 |
+| Metric | Value |
+|--------|-------|
+| Docs processed | 500 |
+| Platform relationships extracted | 597 |
+| Relationships merged | 241 |
+| Skipped (missing entities/duplicates) | 356 |
 
-**Sample Merged Relationships:**
+**Final Platform Predicate Counts (in prod):**
+
+| Predicate | Count |
+|-----------|-------|
+| uses | 1,195 |
+| integrates_with | 53 |
+| documents_on | 41 |
+| powered_by | 33 |
+| communicates_via | 13 |
+| linked_to | 3 |
+| hosted_on | 3 |
+| published_on | 2 |
+
+**Final Total:** 15,641 relationships (+277 from E402 sprint)
+
+**Sample Relationships:**
 
 ```
-(Kytzu, communicates_via, Discord)
-(Regen Network, communicates_via, Discord)
-(KOI Event Bridge, integrates_with, FastAPI)
-(BGE MCP Server, powered_by, PostgreSQL)
-(Planetary Regeneration Podcast, documents_on, SoundCloud)
+(Regen Network, uses, Notion)
+(KOI sensor node, integrates_with, Regen Ledger MCP)
+(Max Semenchuk, documents_on, Medium)
+(NetworkGraph, integrates_with, KoiNetNode)
+(Regen Network, uses, ChatGPT)
 ```
 
 ### Artifacts
 
 - `src/extraction/prompt_builder.py` - Enhanced with platform predicates
 - `scripts/e402_reprocess_batch.py` - Batch reprocess script
-- `data/e402_reprocess_batch.txt` - Batch RID list
-- Commit: `1e788691` (pushed to origin/regen-prod)
+- `data/e402_reprocess_batch.txt` - Initial batch (40 docs)
+- `data/e402_broader_batch.txt` - Broader batch (1,390 docs)
+- Commits: `1e788691`, `fb790fd4` (pushed to origin/regen-prod)
 
 ### Next Steps (Optional)
 
-1. **Broader reprocess** - Run on all docs mentioning platform entities (~500-1000 docs)
+1. **Complete remaining docs** - 890 docs remaining in broader batch
 2. **Monitor** - Check new extractions include platform predicates
 
 ### Backlog Items (Deferred)
