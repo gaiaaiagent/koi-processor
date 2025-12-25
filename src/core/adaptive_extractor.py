@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
@@ -16,6 +17,7 @@ import aiohttp
 from loguru import logger
 
 from src.core.create_cat_receipt import create_cat_receipt
+from src.extraction.predicate_guard import filter_relationships
 
 
 @dataclass
@@ -341,6 +343,21 @@ class AdaptiveExtractor:
         relationships: List[Dict]
     ):
         """Store extracted knowledge in database and graph"""
+        # Week 16 FIX-015: Apply predicate guard to validate relationships
+        validate_types = os.getenv("PREDICATE_GUARD_VALIDATE_TYPES", "false").lower() == "true"
+        strict_types = os.getenv("PREDICATE_GUARD_STRICT_TYPES", "false").lower() == "true"
+
+        if validate_types:
+            original_count = len(relationships)
+            relationships = filter_relationships(
+                relationships,
+                strict=False,  # Don't reject non-canonical predicates
+                validate_types=True,
+                strict_types=strict_types
+            )
+            if len(relationships) < original_count:
+                logger.info(f"[PredicateTypeGuard] Filtered {original_count - len(relationships)} invalid relationships")
+
         # Store in PostgreSQL
         async with self.db_pool.acquire() as conn:
             # Store extraction record
