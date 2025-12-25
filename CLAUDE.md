@@ -1,7 +1,7 @@
 # Project Context for Claude
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
-**Status**: ✅ COMPLETE - Production Deployed (2025-12-23)
+**Status**: ✅ COMPLETE - Production Deployed (2025-12-25)
 **Your Role**: AI coding assistant helping with knowledge graph quality
 
 ---
@@ -17,7 +17,7 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 
 ---
 
-## Current State (2025-12-23)
+## Current State (2025-12-25)
 
 ### Stage 6 Re-Extraction - COMPLETE
 
@@ -26,8 +26,8 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 | Documents processed | 12,002 |
 | Entities extracted | 88,322 |
 | Relationships | 17,329 |
-| Unique entities (entity_registry) | 30,041 |
-| Unique relationships | 15,414 |
+| Unique entities (entity_registry) | 29,641 |
+| Unique relationships | 15,498 |
 
 ### FIX-007 Predicate Consolidation - COMPLETE
 
@@ -36,12 +36,21 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 | Distinct predicates | 3,303 | 1,501 |
 | Relationships | 15,757 | 15,414 |
 
+### FIX-015 Predicate Type Guard - COMPLETE
+
+| Component | Status |
+|-----------|--------|
+| Type constraints | 11 predicates with subject/object type rules |
+| Env vars | `PREDICATE_GUARD_VALIDATE_TYPES`, `PREDICATE_GUARD_STRICT_TYPES` |
+| Violations cleaned | 171 type-invalid relationships deleted |
+| Backup table | `koi_relationships_backup_fix015b` |
+
 ### Production Deployment - COMPLETE
 
 | Endpoint | Triples | Status |
 |----------|---------|--------|
-| /koi (production) | 165,619 | ✅ Deployed |
-| /koi-staging | 165,619 | ✅ Deployed |
+| /koi (production) | 163,703 | ✅ Deployed |
+| /koi-staging | 163,703 | ✅ Deployed |
 
 ### Code↔Docs Bridge - COMPLETE
 
@@ -114,7 +123,7 @@ set -a; source .env; set +a
 - `docs/HYBRID_RAG_ARCHITECTURE.md` - Technical architecture
 - `docs/CODE_DOCS_BRIDGE.md` - Code↔Docs bridge documentation
 - `docs/CHANGELOG.md` - Version history
-- `/Users/darrenzal/projects/RegenAI/knowledge-graph-review-2025-12.md` - Master tracking doc
+- `docs/archive/knowledge-graph-review-2026-01.md` - Current cycle tracking doc
 
 ---
 
@@ -175,8 +184,9 @@ set -a; source .env; set +a
 3. ✅ FIX-006 (entity dedup) - DEPLOYED 2025-12-23
 4. FIX-008 (dual-write strategy review)
 5. Apply safe entity merges (tier1_normalized + tier1_5_canonical = 365 proposals)
+6. ✅ FIX-015 (predicate type guard) - DEPLOYED 2025-12-25
 
 ---
 
-**Last Updated**: 2025-12-24
+**Last Updated**: 2025-12-25
 **Phase**: Complete - All major milestones achieved
