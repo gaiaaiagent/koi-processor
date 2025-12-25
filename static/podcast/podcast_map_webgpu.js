@@ -1,8 +1,9 @@
 
-import * as THREE from 'three';
-import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import ThreeForceGraph from 'three-forcegraph';
+
+// import * as THREE from 'three';
+// import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
+// import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+// import ThreeForceGraph from 'three-forcegraph';
 
 // Planetary Regeneration Podcast 3D Map (WebGPU Version)
 // Based on YonEarth implementation
@@ -20,90 +21,18 @@ function logStatus(msg, isError = false) {
     }
 }
 
-let graphData = null;
-let graph = null;
-let scene = null;
-let camera = null;
-let renderer = null;
-let controls = null;
-let raycaster = null;
-let pointer = null;
-
-let currentEpisode = null;
-let currentCluster = null;
-let currentClusterLevel = '9';
-let activeNode = null;
-let autoRotationEnabled = true;
-let clickProtectionTimeout = null;
-let clusterColors = {};
-let cameraFollowEnabled = true;
-let userInteractionTimeout = null;
-let touchStartTime = 0;
-let touchStartPos = { x: 0, y: 0 };
-let isTouchGesture = false;
-
-// Helper functions
-function hexToRgba(hex, alpha) {
-    if (!hex) return `rgba(100, 100, 100, ${alpha})`;
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
 // Initialize
 (async () => {
+    logStatus("DEBUG MODE: Script started (No Imports).");
+})();
+/*
     try {
         logStatus("Script started...");
         logStatus("Checking WebGPU support...");
         let useWebGPU = false;
-        
-        if (navigator.gpu) {
-            try {
-                const adapter = await navigator.gpu.requestAdapter();
-                if (adapter) {
-                    useWebGPU = true;
-                    logStatus("WebGPU supported and available.");
-                } else {
-                    logStatus("WebGPU adapter not found, falling back to WebGL.");
-                }
-            } catch (e) {
-                logStatus("WebGPU initialization failed, falling back to WebGL.");
-            }
-        } else {
-            logStatus("WebGPU not supported in this browser, falling back to WebGL.");
-        }
+...
+*/
 
-        logStatus("Fetching graph data...");
-        const response = await fetch('/static/podcast/podcast_map_3d.json?v=' + Date.now());
-        if (!response.ok) throw new Error(`Failed to load data: ${response.status} ${response.statusText}`);
-        
-        logStatus("Data fetched. Parsing JSON...");
-        graphData = await response.json();
-        logStatus(`Loaded: ${graphData.points.length} nodes, ${graphData.links.length} links.`);
-
-        // Build cluster colors map
-        if (graphData.clusters_by_level && graphData.clusters_by_level[currentClusterLevel]) {
-            graphData.clusters_by_level[currentClusterLevel].forEach(cluster => {
-                clusterColors[cluster.id] = cluster.color;
-            });
-        }
-
-        logStatus(`Initializing 3D Graph (${useWebGPU ? 'WebGPU' : 'WebGL'})...`);
-        await initializeGraph(useWebGPU);
-        
-        logStatus("Done!");
-        setupControls();
-        setTimeout(() => {
-            const loadingEl = document.getElementById('loading');
-            if(loadingEl) loadingEl.style.display = 'none';
-        }, 1000);
-        
-    } catch (error) {
-        logStatus(error.message, true);
-        console.error('Error loading data:', error);
-    }
-})();
 
 async function initializeGraph(useWebGPU) {
     const container = document.getElementById('graph-container');
