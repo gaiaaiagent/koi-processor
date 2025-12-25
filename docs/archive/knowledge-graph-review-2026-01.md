@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (Week 14 entity matching improvements)
-**Status:** Week 14 Complete - GraphRAG entity coverage 100%
+**Last Updated:** 2025-12-25 (Week 15 carbon/NCT relationship extraction)
+**Status:** Week 15 Complete - Carbon/NCT relationships persisted (+27 new)
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -2063,6 +2063,7 @@ for (const candidate of sortedEntities) {
 - [Week 8 Evaluation Report (Hints)](reports/polysemy_resolver_eval_week8_with_hints.md) - With context hints
 - [Week 9 Evaluation Report](reports/polysemy_resolver_eval_week9.md) - 100% Top-1 accuracy
 - [Week 9 Evaluation Report (Hints)](reports/polysemy_resolver_eval_week9_with_hints.md) - 100% Top-1 with fixed heuristic
+- [Predicate-Type Constraints Analysis](reports/predicate_type_constraints_analysis.md) - FIX-015 proposal for relationship validation
 
 ---
 
@@ -2093,6 +2094,10 @@ All proposed fixes have been applied. See [Week 3 cleanup report](reports/fix010
 11. ~~**Run evaluation on production** - Execute eval script and analyze resolver accuracy~~ **Week 8**: Context hints ready, needs execution
 12. **Measure hint vs no-hint accuracy** - Compare evaluation results with and without context hints
 13. **Tune type hint heuristics** - Adjust keyword lists based on evaluation feedback
+14. **FIX-015: Predicate-type constraints** - Add validation to prevent predicates targeting invalid entity types. Analysis found 127 `operates→CONCEPT` relationships that are semantically invalid. See [full analysis](reports/predicate_type_constraints_analysis.md). Proposed solutions:
+    - Add `RelationshipTypeValidator` post-processing module
+    - Enhance extraction prompt with predicate usage guidance
+    - Consider predicate consolidation (70 → ~40-50)
 
 ---
 
@@ -2160,6 +2165,20 @@ PREDICATE_OBJECT_TYPES = {
 ```
 
 **Future fix ticket:** FIX-015 - Predicate type constraints for extraction validation
+
+### Deep Dive: Predicate-Type Constraints
+
+Further analysis of all 127 `operates→CONCEPT` relationships revealed a **systemic gap**: the extraction prompt defines allowed predicates but provides no guidance on which entity types each predicate should connect.
+
+**Full analysis:** [Predicate-Type Constraints Analysis](reports/predicate_type_constraints_analysis.md)
+
+**Key findings:**
+- 52 PERSON → operates → CONCEPT (all wrong)
+- 50 ORGANIZATION → operates → CONCEPT (mostly wrong)
+- 9 CONCEPT → operates → CONCEPT (nonsense)
+- 121 of 127 have occurrence_count=1 (low confidence extractions)
+
+**Root cause:** We carefully constrained entity extraction but left relationship extraction to LLM intuition. The LLM knows the vocabulary (allowed predicates) but not the grammar (which types they connect).
 
 ### Impact on Week 14 Audit
 
@@ -2375,8 +2394,57 @@ bbe6a3ca-ec42-4a1d-8867-c6f4ce338efd
 #### Next Steps
 
 1. ✅ Canary validation complete - prompt change is effective
-2. ⏳ **Recommended:** Run broader reprocess (100-200 docs) using `stage6_full_reextract_gemini.py` with carbon/NCT doc filter
-3. ⏳ **Alternative:** Full re-extraction to apply new prompt across all documents
+2. ✅ Broader reprocess complete (200 docs) - 249 relationships persisted
+3. ⏳ **Optional:** Full re-extraction to apply new prompt across all documents
+
+### Broader Reprocess Results (2025-12-25)
+
+**Run ID:** week15_20251225_051658
+
+After validating the prompt update with the canary, a broader reprocess was executed on 200 public documents mentioning carbon/NCT terms.
+
+#### Reprocess Summary
+
+| Metric | Value |
+|--------|-------|
+| Documents processed | 200 |
+| Errors | 0 |
+| Total entities persisted | 1,288 |
+| Total relationships persisted | 249 |
+
+#### Carbon/NCT Relationship Counts (After Reprocess)
+
+| Entity | Relationships Before | Relationships After | Change |
+|--------|---------------------|---------------------|--------|
+| carbon credit | 47 | 78 | +31 |
+| nature carbon tonne | 56 | 58 | +2 |
+| carbon | 2 | 2 | 0 |
+| ncts | 1 | 1 | 0 |
+| nct token | 1 | 1 | 0 |
+| **Total** | 107 | 134 | **+27** |
+
+#### Sample New Carbon/NCT Relationships
+
+```
+(regen network, supports, carbon credit) - 0.90 (occurrence: 4)
+(carbon credit, relates_to, carbon markets) - 0.85 (occurrence: 4)
+(carbon markets, includes, carbon credit) - 0.85 (occurrence: 3)
+(carbon credit, part_of, carbon markets) - 0.85 (occurrence: 3)
+(regen registry, manages, nature carbon tonne) - 0.85 (occurrence: 3)
+(carbon removal, relates_to, carbon credit) - 0.85 (occurrence: 2)
+(carbon sequestration, relates_to, carbon credit) - 0.85 (occurrence: 1)
+(nature carbon tonne, is_a, liquid carbon asset) - 0.90 (occurrence: 1)
+(regenerative agriculture, relates_to, carbon credit) - 0.85 (occurrence: 1)
+```
+
+#### Total Graph Metrics (After Week 15)
+
+| Metric | Value |
+|--------|-------|
+| Total koi_relationships | 15,796 |
+| Carbon/NCT relationships | 134 |
+
+**Targeted reprocess script:** `scripts/reextraction/week15_targeted_reprocess.py`
 
 ### Deliverables
 
@@ -2385,6 +2453,8 @@ bbe6a3ca-ec42-4a1d-8867-c6f4ce338efd
 3. ✅ Low-occurrence edge analysis: Complete (see above)
 4. ✅ Canary execution: Complete (2025-12-25)
 5. ✅ Verification of prompt effectiveness: Confirmed (16 carbon/NCT relationships extracted)
+6. ✅ Broader reprocess: Complete - 200 docs, 249 new relationships persisted
+7. ✅ Targeted reprocess script: `scripts/reextraction/week15_targeted_reprocess.py`
 
 ### Conclusion
 
@@ -2392,7 +2462,10 @@ bbe6a3ca-ec42-4a1d-8867-c6f4ce338efd
 1. Non-canonical predicates (handled by predicate_guard)
 2. Entity data quality issues (not threshold-related)
 
-The prompt update successfully generates concept relationships. Canary validation shows 16 carbon/NCT relationships extracted from 15 documents (previously 0). Ready for broader reprocess if desired.
+The prompt update successfully generates concept relationships:
+- Canary: 16 carbon/NCT relationships from 15 documents
+- Broader reprocess: 134 total carbon/NCT relationships (+27 new)
+- Key domain relationships now captured (carbon→carbon markets, NCT→carbon credits, etc.)
 
 ---
 
