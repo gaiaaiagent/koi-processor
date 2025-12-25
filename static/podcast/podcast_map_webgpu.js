@@ -89,7 +89,7 @@ function hexToRgba(hex, alpha) {
             });
         }
 
-        logStatus(`Initializing 3D Graph (${useWebGPU ? 'WebGPU' : 'WebGL'})...");
+        logStatus(`Initializing 3D Graph (${useWebGPU ? 'WebGPU' : 'WebGL'})...`);
         await initializeGraph(useWebGPU);
         
         logStatus("Done!");
