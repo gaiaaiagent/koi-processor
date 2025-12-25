@@ -234,6 +234,170 @@ async function get1HopNeighbors(
   return result.rows;
 }
 
+// ============================================================================
+// Week 13: GraphRAG Integration
+// Provides graph context for query responses
+// ============================================================================
+
+// GraphContext interface for graph-enhanced query responses
+interface GraphContextEdge {
+  predicate: string;
+  subject_uri: string;
+  subject_text: string;
+  object_uri: string;
+  object_text: string;
+  direction: 'out' | 'in';
+  confidence: number;
+  occurrence_count: number;
+}
+
+interface GraphContext {
+  dominant_entity: {
+    uri: string;
+    text: string;
+    type: string;
+    occurrence_count: number;
+  } | null;
+  edges: GraphContextEdge[];
+  edge_count: number;
+  truncated: boolean;
+  _privacy_warning?: string;
+}
+
+// Get dominant entity from entity search results
+// Uses entity occurrence_count and relationship_count to pick the best entity
+// Falls back to resolveEntityInternal if entity search doesn't provide metadata
+async function getDominantEntity(
+  entityResults: any[],
+  queryText?: string
+): Promise<{
+  entity_id: number;
+  uri: string;
+  text: string;
+  type: string;
+  occurrence_count: number;
+} | null> {
+  const entityThreshold = parseInt(process.env.GRAPHRAG_ENTITY_THRESHOLD || '5');
+
+  // Extract unique entities from entity search results
+  const entityCounts: Map<string, { name: string; type: string | null; count: number }> = new Map();
+
+  for (const result of entityResults) {
+    const entities = result.metadata?.entities_matched || [];
+    for (const entity of entities) {
+      const normalized = entity.toLowerCase().trim();
+      const existing = entityCounts.get(normalized);
+      if (existing) {
+        existing.count++;
+      } else {
+        entityCounts.set(normalized, { name: entity, type: null, count: 1 });
+      }
+    }
+  }
+
+  if (entityCounts.size === 0) {
+    // Fallback: try to resolve entity from query text directly
+    if (queryText) {
+      const resolved = await resolveEntityInternal(queryText, null, null);
+      if (resolved && resolved.occurrence_count >= entityThreshold) {
+        return {
+          entity_id: resolved.entity_id,
+          uri: resolved.uri,
+          text: resolved.entity_text,
+          type: resolved.entity_type,
+          occurrence_count: resolved.occurrence_count,
+        };
+      }
+    }
+    return null;
+  }
+
+  // Find the entity with highest count in search results
+  let dominant: { name: string; count: number } | null = null;
+  for (const [_, data] of entityCounts) {
+    if (!dominant || data.count > dominant.count) {
+      dominant = { name: data.name, count: data.count };
+    }
+  }
+
+  if (!dominant) return null;
+
+  // Resolve the dominant entity to get full metadata
+  const resolved = await resolveEntityInternal(dominant.name, null, null);
+  if (!resolved) return null;
+
+  // Apply entity threshold
+  if (resolved.occurrence_count < entityThreshold) {
+    if (process.env.DEBUG_GRAPH_EXPANSION) {
+      console.log(`[GraphRAG] Entity '${dominant.name}' below threshold (${resolved.occurrence_count} < ${entityThreshold})`);
+    }
+    return null;
+  }
+
+  return {
+    entity_id: resolved.entity_id,
+    uri: resolved.uri,
+    text: resolved.entity_text,
+    type: resolved.entity_type,
+    occurrence_count: resolved.occurrence_count,
+  };
+}
+
+// Get graph context (neighborhood edges) for an entity
+async function getGraphContext(
+  entityId: number,
+  maxEdges: number = 20
+): Promise<GraphContext | null> {
+  const query = `
+    WITH edges AS (
+      SELECT
+        r.predicate,
+        COALESCE(r.confidence, 0.5) as confidence,
+        r.occurrence_count,
+        CASE WHEN r.subject_entity_id = $1 THEN 'out' ELSE 'in' END as direction,
+        subj.fuseki_uri as subject_uri,
+        subj.entity_text as subject_text,
+        obj.fuseki_uri as object_uri,
+        obj.entity_text as object_text
+      FROM koi_relationships r
+      JOIN entity_registry subj ON r.subject_entity_id = subj.id
+      JOIN entity_registry obj ON r.object_entity_id = obj.id
+      WHERE (r.subject_entity_id = $1 OR r.object_entity_id = $1)
+        AND COALESCE(r.confidence, 0) >= 0.5
+        AND r.occurrence_count >= 2
+      ORDER BY r.occurrence_count DESC, COALESCE(r.confidence, 0) DESC NULLS LAST
+      LIMIT $2
+    )
+    SELECT * FROM edges
+  `;
+
+  try {
+    const result = await pool.query(query, [entityId, maxEdges]);
+
+    const edges: GraphContextEdge[] = result.rows.map(row => ({
+      predicate: row.predicate,
+      subject_uri: row.subject_uri,
+      subject_text: row.subject_text,
+      object_uri: row.object_uri,
+      object_text: row.object_text,
+      direction: row.direction as 'out' | 'in',
+      confidence: parseFloat(row.confidence) || 0.5,
+      occurrence_count: parseInt(row.occurrence_count) || 1,
+    }));
+
+    return {
+      dominant_entity: null, // Will be set by caller
+      edges,
+      edge_count: edges.length,
+      truncated: edges.length >= maxEdges,
+      _privacy_warning: 'graph_context is not privacy-filtered',
+    };
+  } catch (error) {
+    console.error('[GraphRAG] Error fetching graph context:', error);
+    return null;
+  }
+}
+
 // Entity-based graph search using koi_entity_chunk_links
 // Detects entities in query and returns memories where those entities appear
 async function performEntitySearch(query: string, topK: number = 20, privacyFilter: string = '') {
@@ -838,7 +1002,17 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
 }
 app.post('/api/koi/query', async (req, res) => {
   try {
-    const { question, user_id = 'web-user', agent_id = 'koi-interface', limit = 10, filters = {} } = req.body;
+    const {
+      question,
+      user_id = 'web-user',
+      agent_id = 'koi-interface',
+      limit = 10,
+      filters = {},
+      graph_context: requestGraphContext = false  // Week 13: GraphRAG body field
+    } = req.body;
+
+    // Also accept query param for backward compatibility
+    const queryParamGraphContext = req.query.graph_context === 'true';
 
     if (!question) {
       return res.status(400).json({ error: 'Question is required' });
@@ -921,6 +1095,39 @@ app.post('/api/koi/query', async (req, res) => {
 
     const responseTime = Date.now() - startTime;
 
+    // Week 13: GraphRAG context retrieval
+    let graphContext: GraphContext | null = null;
+    const enableGraphRAG = process.env.ENABLE_GRAPHRAG_CONTEXT === 'true' || requestGraphContext || queryParamGraphContext;
+
+    if (enableGraphRAG && entityResults.length > 0) {
+      try {
+        // Get dominant entity from entity search results
+        const dominant = await getDominantEntity(entityResults, question);
+
+        if (dominant) {
+          // Fetch graph context for the dominant entity
+          graphContext = await getGraphContext(dominant.entity_id, 20);
+
+          if (graphContext) {
+            graphContext.dominant_entity = {
+              uri: dominant.uri,
+              text: dominant.text,
+              type: dominant.type,
+              occurrence_count: dominant.occurrence_count,
+            };
+          }
+
+          if (process.env.DEBUG_GRAPH_EXPANSION) {
+            console.log(`[GraphRAG] Context retrieved for entity '${dominant.text}' (${dominant.type}), edges: ${graphContext?.edge_count || 0}`);
+          }
+        } else if (process.env.DEBUG_GRAPH_EXPANSION) {
+          console.log(`[GraphRAG] No dominant entity found for query: "${question}"`);
+        }
+      } catch (err) {
+        console.error('[GraphRAG] Error retrieving graph context:', err);
+      }
+    }
+
     // Log the query
     try {
       await logQuery(pool, {
@@ -937,7 +1144,7 @@ app.post('/api/koi/query', async (req, res) => {
     }
 
     // Format response
-    const response = {
+    const response: any = {
       question,
       total_results: fusedResults.length,
       confidence: confidence,
@@ -952,6 +1159,11 @@ app.post('/api/koi/query', async (req, res) => {
         metadata: r.metadata || {}
       }))
     };
+
+    // Add graph context if available
+    if (graphContext) {
+      response.graph_context = graphContext;
+    }
 
     res.json(response);
 

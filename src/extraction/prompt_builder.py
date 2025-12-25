@@ -5,6 +5,8 @@ This module provides a single source of truth for extraction prompts,
 ensuring consistency across all extractors (OpenAI, Ollama/Mistral, etc.).
 
 FIX-002: Extractor/Schema Unification + Prompt Hardening
+Week 12: Added CANONICAL_PREDICATES allowlist
+Week 13: Moved CANONICAL_PREDICATES to predicate_guard.py for shared access
 """
 
 from typing import Dict, Any, Optional
@@ -22,6 +24,15 @@ except ImportError:
             "TECHNOLOGY", "CLAIM", "EVIDENCE", "QUESTION",
             "LOCATION", "EVENT"
         }
+
+# Import canonical predicates from shared module (Week 13)
+try:
+    from .predicate_guard import CANONICAL_PREDICATES
+except ImportError:
+    try:
+        from extraction.predicate_guard import CANONICAL_PREDICATES
+    except ImportError:
+        from src.extraction.predicate_guard import CANONICAL_PREDICATES
 
 
 def build_extraction_prompt(
@@ -214,12 +225,11 @@ NOT for: Abstract concepts (those are CONCEPT)
 When extracting relationships involving TECHNOLOGY, PLATFORM, or TOOL entities, use these specific predicates:
 
 ### Usage relationships
-- uses: Subject actively uses the platform/tool
+- uses: Subject actively uses the platform/tool (also for hosting)
   - "Regen Network uses Notion for documentation" → (Regen Network, uses, Notion)
   - "The team uses Slack for communication" → (team, uses, Slack)
-
-- hosted_on: Content/service is hosted on a platform
-  - "The forum is hosted on Discourse" → (forum, hosted_on, Discourse)
+  - "The forum is hosted on Discourse" → (forum, uses, Discourse)
+  - "Project code is hosted on GitHub" → (Project, uses, GitHub)
 
 - powered_by: System is powered by a technology
   - "Search is powered by PostgreSQL" → (Search, powered_by, PostgreSQL)
@@ -230,17 +240,36 @@ When extracting relationships involving TECHNOLOGY, PLATFORM, or TOOL entities, 
   - "n8n.io connects to Notion" → (n8n.io, integrates_with, Notion)
 
 ### Documentation relationships
-- documents_on: Content is stored/documented on a platform
+- documents_on: Content is stored/documented/published on a platform
   - "Meeting notes are on Notion" → (Meeting notes, documents_on, Notion)
   - "Specs are documented in Notion" → (specs, documents_on, Notion)
-
-- published_on: Content was published on a platform
-  - "Article was published on Medium" → (Article, published_on, Medium)
+  - "Article was published on Medium" → (Article, documents_on, Medium)
 
 ### Communication relationships
 - communicates_via: Entity uses a platform for communication
   - "Community discussions happen on Discord" → (community, communicates_via, Discord)
   - "Updates are shared on Telegram" → (updates, communicates_via, Telegram)
+
+### Predicate normalization (Week 12)
+DO NOT use these predicates (they have been normalized):
+- "hosted_on" → use "uses" instead
+- "published_on" → use "documents_on" instead
+- "linked_to" → use "associated_with" instead
+- Tense variants like "exploring", "presented" → use present tense ("discusses")
+- "founder_of", "is_founder_of" → use "founded"
+- "is_ceo_of" → use "leads"
+
+### Canonical predicates (ONLY use these)
+Use ONLY these predicates for relationships:
+- Core: supports, uses, mentions, implements, includes, manages, enables, part_of, requires, provides, associated_with, located_in, defines, relates_to, works_with, represents, contains, addresses, hosts, validates, governs, participates_in, leads, monitors, promotes, performs, focuses_on, affects, queries, updates, aligns_with, is_a, targets, interacts_with, contributes_to, improves, operates, creates, built_on, proposes, authored, founded, discusses
+- People/Org: member_of, works_at, employs, advises
+- Process: executes, processes, generates, analyzes, evaluates, measures, deploys, maintains, funds, connects
+- Knowledge: describes, explains, documents, announces
+- Platform: documents_on, integrates_with, powered_by, communicates_via
+- Regen: anchors, bridges, delegates, votes, credits, issues, retires, verifies, registers, approves, mints, burns
+- Lifecycle: replaces, upgrades
+
+If a relationship doesn't fit these predicates, use the closest match or "associated_with" as fallback.
 
 ### Avoid generic predicates
 - DO NOT use "associated_with" for platform/tool relationships
@@ -335,4 +364,5 @@ __all__ = [
     "build_extraction_prompt",
     "get_system_message",
     "LLM_ALLOWED_TYPES",
+    "CANONICAL_PREDICATES",
 ]

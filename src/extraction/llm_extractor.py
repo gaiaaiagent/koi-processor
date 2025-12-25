@@ -8,6 +8,7 @@ FIX-002: Uses shared prompt builder and type normalization
 import asyncio
 import json
 import logging
+import os
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import httpx
@@ -29,6 +30,16 @@ except ImportError:
         normalize_type = lambda x: x.upper() if x else "ENTITY"
         LLM_ALLOWED_TYPES = {"PERSON", "ORGANIZATION", "PROJECT", "CONCEPT", "TECHNOLOGY", "CLAIM", "EVIDENCE", "QUESTION", "LOCATION", "EVENT"}
         is_llm_allowed_type = lambda x: x.upper() in LLM_ALLOWED_TYPES
+
+# Week 13: Import predicate guard for relationship validation
+try:
+    from extraction.predicate_guard import filter_relationships as apply_predicate_guard
+except ImportError:
+    try:
+        from src.extraction.predicate_guard import filter_relationships as apply_predicate_guard
+    except ImportError:
+        # Fallback: no predicate guard
+        apply_predicate_guard = None
 
 # Import ontology utilities
 try:
@@ -343,6 +354,11 @@ Return ONLY valid JSON."""
                     rel_dict["object_type"] = normalize_type(r["object_type"])
 
                 normalized_relationships.append(rel_dict)
+
+            # Week 13: Apply predicate guard to validate/normalize predicates
+            if apply_predicate_guard is not None:
+                strict_mode = os.getenv("PREDICATE_GUARD_STRICT", "false").lower() == "true"
+                normalized_relationships = apply_predicate_guard(normalized_relationships, strict=strict_mode)
 
             metadata["extracted_relationships"] = normalized_relationships
 

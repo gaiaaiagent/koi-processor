@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (E402 resolved, Week 11 batch validated)
-**Status:** Week 11 Complete - E402 platform relationships fix validated
+**Last Updated:** 2025-12-25 (Week 12 predicate normalization complete)
+**Status:** Week 12 Complete - Predicate normalization applied (1,506 → 1,462)
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1694,11 +1694,231 @@ Two Notion pages had mixed privacy (some chunks public, others private):
 
 ### Backlog Items (Deferred)
 
-1. **Further Predicate Reduction** - 1,499 → ~100-200 optional consolidation
-   - Low priority; current predicates are semantically correct
+1. ~~**Further Predicate Reduction** - 1,499 → ~100-200 optional consolidation~~ **DONE Week 12** - 1,506 → 1,462 (44 normalized)
+   - Additional reduction optional; current predicates are semantically correct
 
 2. **CONCEPT↔ORGANIZATION Allowlist** - 157 labels, mostly DAOs/working groups
    - Consider adding to expected polysemy set
+
+---
+
+## Week 12: Predicate Normalization Sprint (2025-12-24)
+
+### Objective
+
+Improve semantic consistency by collapsing near-duplicate predicates into a canonical set.
+
+### Scope
+
+1. **Platform predicates** - Normalize low-count variants from E402 sprint
+2. **Tense variants** - Normalize to present tense 3rd person singular
+3. **Role predicates** - Consolidate founder/CEO patterns
+4. **Compound predicates** - Simplify to base canonical forms
+
+### Predicate Histogram (Before)
+
+| Predicate | Count | Notes |
+|-----------|-------|-------|
+| supports | 1,730 | Canonical |
+| uses | 1,195 | Canonical |
+| associated_with | 859 | Canonical |
+| participates_in | 443 | Canonical |
+| part_of | 332 | Canonical |
+| ... | ... | ... |
+| linked_to | 3 | → associated_with |
+| hosted_on | 3 | → uses |
+| published_on | 2 | → documents_on |
+
+**Total:** 1,506 distinct predicates, 15,641 relationships
+
+### Normalization Map
+
+| Category | Old Predicate | New (Canonical) | Rows |
+|----------|---------------|-----------------|------|
+| **Platform** | linked_to | associated_with | 3 |
+| **Platform** | published_on | documents_on | 2 |
+| **Platform** | hosted_on | uses | 3 |
+| **Tense** | exploring, presented | discusses | 20 |
+| **Tense** | use, utilized | uses | 10 |
+| **Tense** | enable | enables | 9 |
+| **Tense** | provide | provides | 9 |
+| **Tense** | generate, create | creates | 11 |
+| **Tense** | represent | represents | 7 |
+| **Role** | founder_of, is_founder_of, co_founder_of, is_co_founder_of, co_founded | founded | 30 |
+| **Role** | is_ceo_of, ceo_of | leads | 6 |
+| **Compound** | asked_about, asks_about, asked, asks, asked_question_about | discusses | 24 |
+| **Compound** | presented_at, attends, joined, joins | participates_in | 24 |
+| **Misc** | alignswith | aligns_with | 4 |
+| **Misc** | measuresintensityof | measures | 4 |
+| **Misc** | forms_part_of, falls_under | part_of | 8 |
+| **Misc** | described_as, categorized_as, positioned_as | is_a | 13 |
+
+### Results
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Distinct predicates | 1,506 | 1,462 | -44 (2.9%) |
+| Total relationships | 15,641 | 15,619 | -22 (deduped) |
+| Rows normalized | - | 195 | - |
+| Duplicates removed | - | 22 | - |
+
+### Top 20 Predicates (After)
+
+| Predicate | Count |
+|-----------|-------|
+| supports | 1,739 |
+| uses | 1,205 |
+| associated_with | 862 |
+| relates_to | 694 |
+| mentions | 529 |
+| operates | 510 |
+| participates_in | 465 |
+| includes | 392 |
+| manages | 381 |
+| implements | 368 |
+| part_of | 339 |
+| enables | 334 |
+| contains | 285 |
+| interacts_with | 275 |
+| provides | 248 |
+| creates | 216 |
+| proposes | 214 |
+| requires | 209 |
+| located_in | 207 |
+| defines | 180 |
+
+### Prompt Update
+
+Updated `src/extraction/prompt_builder.py` to prevent regrowth of normalized predicates:
+
+```python
+### Predicate normalization (Week 12)
+DO NOT use these predicates (they have been normalized):
+- "hosted_on" → use "uses" instead
+- "published_on" → use "documents_on" instead
+- "linked_to" → use "associated_with" instead
+- Tense variants like "exploring", "presented" → use present tense ("discusses")
+- "founder_of", "is_founder_of" → use "founded"
+- "is_ceo_of" → use "leads"
+```
+
+### Artifacts
+
+- `scripts/predicate_histogram.py` - Audit script for predicate distribution
+- `scripts/week12_predicate_normalization.py` - Migration script
+- `scripts/week12_normalization_report.json` - Full report with rationale
+
+### Validation
+
+Spot-checked 20 normalized edges - all semantically correct:
+
+```
+(Gregory Landua, discusses, regenerative agriculture) - was: exploring
+(Gregory Landua, founded, Regen Network) - was: founder_of
+(Max, discusses, CadCAD) - was: presented
+(Sarah Bax, participates_in, Nebular Summit) - was: presented_at
+(Giulio, participates_in, ETHDenver) - was: attends
+(Gregory Landua, leads, Regen Network) - was: is_ceo_of
+```
+
+---
+
+## Week 13: GraphRAG Context Integration (2025-12-24)
+
+### Objective
+
+Integrate graph context into the RAG flow, providing relationship edges for the dominant entity in query responses. Validate context relevance without changing retrieval ranking.
+
+### Scope
+
+1. **GraphRAG Integration** - Add optional graph context to POST /api/koi/query
+2. **Predicate Quality Guard** - Runtime validation of relationship predicates
+3. **Evaluation Harness** - Context relevance metrics (not answer quality)
+
+### Design Decisions
+
+- **Graph context destination:** Response payload only (not synthesis prompts)
+- **Input format:** `graph_context` as body field (boolean), query param for compat
+- **Dominant entity source:** Entity search results (not fused), with fallback to entity resolver
+- **Gating:** Entity occurrence threshold (`GRAPHRAG_ENTITY_THRESHOLD`, default 5)
+- **Evaluation focus:** Context relevance (edge count, predicate distribution, % with entity)
+
+### Privacy Note
+
+Relationships in `koi_relationships` do NOT carry privacy provenance. The `graph_context` field is NOT privacy-filtered. This is documented and flagged with `_privacy_warning` in the response.
+
+### Implementation
+
+#### 1. Predicate Quality Guard
+
+**New module:** `src/extraction/predicate_guard.py`
+
+```python
+CANONICAL_PREDICATES = { ... }  # 63 predicates (moved from prompt_builder.py)
+PREDICATE_MAPPINGS = {
+    "hosted_on": "uses",
+    "published_on": "documents_on",
+    "founder_of": "founded",
+    ...
+}
+
+def validate_predicate(predicate, strict=False) -> (normalized, is_canonical)
+def filter_relationships(relationships, strict=False) -> list
+```
+
+**Integration:**
+- `prompt_builder.py` imports `CANONICAL_PREDICATES` from `predicate_guard`
+- `llm_extractor.py` hooks `filter_relationships` in `_parse_extraction()`
+- Controlled by `PREDICATE_GUARD_STRICT` env var (default: false = log only)
+
+#### 2. GraphRAG Functions (koi-query-api.ts)
+
+**New functions:**
+- `getDominantEntity(entityResults, queryText?)` - Picks best entity from entity search
+- `getGraphContext(entityId, maxEdges)` - Fetches top edges for entity
+
+**GraphContext interface:**
+```typescript
+interface GraphContext {
+  dominant_entity: { uri, text, type, occurrence_count } | null;
+  edges: Array<{ predicate, subject_uri, subject_text, object_uri, object_text, direction, confidence, occurrence_count }>;
+  edge_count: number;
+  truncated: boolean;
+  _privacy_warning?: string;
+}
+```
+
+#### 3. Query Endpoint Changes
+
+POST `/api/koi/query` now accepts:
+- `graph_context: true` in body (preferred)
+- `?graph_context=true` query param (backward compat)
+
+Response includes `graph_context` field when enabled and dominant entity exists.
+
+### Environment Variables
+
+```bash
+ENABLE_GRAPHRAG_CONTEXT=true|false   # Global toggle (default: false)
+GRAPHRAG_ENTITY_THRESHOLD=5          # Min occurrence_count for dominant entity
+PREDICATE_GUARD_STRICT=true|false    # Reject vs log non-canonical (default: false)
+```
+
+### Artifacts
+
+- `src/extraction/predicate_guard.py` - Predicate validation module
+- `scripts/eval_graphrag.py` - Context relevance evaluation harness
+- `docs/week13_graphrag_context_evaluation.md` - Evaluation results (generated)
+
+### Evaluation (Pending)
+
+15 queries defined (8 entity-heavy, 7 ambiguous). Metrics:
+- % queries with dominant entity detected
+- Average edge count per query
+- Predicate distribution (top-edge sanity)
+- Queries with truncated context (>20 edges)
+
+*Run `python scripts/eval_graphrag.py` to generate report.*
 
 ---
 
