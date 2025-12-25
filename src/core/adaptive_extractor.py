@@ -357,9 +357,10 @@ class AdaptiveExtractor:
                     entity_type_lookup[name] = etype
 
             # Enrich relationships with type info for validation
+            # LLM uses entity1/entity2 OR source/target, handle both
             for rel in relationships:
-                source = rel.get("source", "").lower().strip()
-                target = rel.get("target", "").lower().strip()
+                source = (rel.get("source") or rel.get("entity1") or "").lower().strip()
+                target = (rel.get("target") or rel.get("entity2") or "").lower().strip()
                 if source in entity_type_lookup:
                     rel["source_type"] = entity_type_lookup[source]
                 if target in entity_type_lookup:
