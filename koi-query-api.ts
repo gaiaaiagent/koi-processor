@@ -425,7 +425,7 @@ async function getGraphContext(
       JOIN entity_registry obj ON r.object_entity_id = obj.id
       WHERE (r.subject_entity_id = $1 OR r.object_entity_id = $1)
         AND COALESCE(r.confidence, 0) >= 0.5
-        AND r.occurrence_count >= 2
+        AND r.occurrence_count >= 1
       ORDER BY r.occurrence_count DESC, COALESCE(r.confidence, 0) DESC NULLS LAST
       LIMIT $2
     )
