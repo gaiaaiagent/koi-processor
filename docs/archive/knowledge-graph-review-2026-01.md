@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (Week 13 GraphRAG integration deployed)
-**Status:** Week 13 Complete - GraphRAG context integration + predicate guard
+**Last Updated:** 2025-12-25 (Week 14 entity matching improvements)
+**Status:** Week 14 Complete - GraphRAG entity coverage 100%
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -1942,7 +1942,100 @@ PREDICATE_GUARD_STRICT=true|false    # Reject vs log non-canonical (default: fal
 2. **Missing entities:** x/ecocredit module, Chorus One, Martin Wainstein, NCT token - not in entity_registry or below occurrence threshold
 3. **Edge case:** "carbon" matched as MATERIAL (33 occ) but returned 0 edges - entity exists but has no relationships
 
-**Recommendation:** Keep `ENABLE_GRAPHRAG_CONTEXT=false` by default until entity coverage improves. Enable per-request via `graph_context: true` body field for testing.
+**Recommendation:** ~~Keep `ENABLE_GRAPHRAG_CONTEXT=false` by default until entity coverage improves.~~ See Week 14 improvements below.
+
+---
+
+## Week 14: Entity Matching Improvements (2025-12-25)
+
+### Objective
+
+Improve GraphRAG entity coverage from 53.3% to 100% by fixing entity matching issues identified in Week 13 evaluation.
+
+### Root Causes Identified
+
+1. **Query normalization mismatch** - "x/ecocredit module" not matching "Ecocredit Module"
+2. **Suffix handling** - "Chorus One validator" not matching "Chorus One"
+3. **Plural variants** - "Ecocredit" not matching "Ecocredits"
+4. **Low occurrence threshold** - Entities with < 5 occurrences filtered out
+5. **Relationship filter** - Low-occurrence relationships (occ=1) filtered out
+
+### Implementation
+
+#### 1. Query Normalization (`normalizeQueryForEntityMatch`)
+
+New function to handle common query patterns:
+
+```typescript
+function normalizeQueryForEntityMatch(query: string): string[] {
+  // Strip Cosmos SDK prefix: "x/ecocredit module" → "ecocredit module"
+  // Strip suffixes: "Chorus One validator" → "Chorus One"
+  // Strip $ prefix: "$NCT" → "NCT"
+  return variants;
+}
+```
+
+#### 2. Two-Pass Entity Resolution
+
+Changed `getDominantEntity` to try all search candidates before falling back to plural variants:
+
+```typescript
+// Pass 1: Direct matches (prefer exact)
+for (const candidate of sortedEntities) {
+  const resolved = await resolveEntityInternal(candidate);
+  if (resolved && resolved.occurrence_count >= threshold) return resolved;
+}
+
+// Pass 2: Plural variants as fallback
+for (const candidate of sortedEntities) {
+  for (const variant of [candidate + 's', candidate.replace(/s$/, '')]) {
+    const resolved = await resolveEntityInternal(variant);
+    if (resolved && resolved.occurrence_count >= threshold) return resolved;
+  }
+}
+```
+
+#### 3. Threshold Adjustments
+
+- **Entity threshold:** Lowered from 5 to 2 (`GRAPHRAG_ENTITY_THRESHOLD`)
+- **Relationship filter:** Lowered from `occurrence_count >= 2` to `>= 1`
+
+### Evaluation Results (Post-Week 14)
+
+| Metric | Week 13 | Week 14 | Change |
+|--------|---------|---------|--------|
+| Queries with graph context | 8/15 (53.3%) | 15/15 (100.0%) | +46.7% |
+| Queries with dominant entity | 8/15 (53.3%) | 15/15 (100.0%) | +46.7% |
+| Average edge count | 6.5 | 12.7 | +6.2 |
+| Queries with truncated context | 4 | 8 | +4 |
+
+**By Category (After):**
+
+| Category | Total | With Context | % |
+|----------|-------|--------------|---|
+| Entity-Heavy | 8 | 8 | 100.0% |
+| Ambiguous | 7 | 7 | 100.0% |
+
+**Fixed Queries:**
+1. ✅ x/ecocredit module → Ecocredit Module (377 occ, 20 edges)
+2. ✅ Chorus One validator → Chorus One (6 occ, 4 edges)
+3. ✅ Martin Wainstein → Martin Wainstein (3 occ, 3 edges)
+4. ✅ What projects use x/group module? → group module (28 occ, 19 edges)
+5. ✅ What validators support Regen mainnet? → Regen Mainnet (48 occ, 4 edges)
+
+**Still 0 Edges (extraction quality issue):**
+- NCT token → NCTs (2 occ, 0 relationships in registry)
+- carbon → carbon (33 occ, 0 relationships in registry)
+- Classes → Classes (2 occ, 0 relationships in registry)
+
+### Artifacts
+
+- Commit `626af06c` - Entity matching improvements
+- Commit `2d17535b` - Relationship occurrence threshold fix
+
+### Recommendation
+
+**ENABLE_GRAPHRAG_CONTEXT can now be set to `true`** for production use. All 15 evaluation queries now return dominant entities. Entities with 0 edges are an extraction quality issue, not a GraphRAG matching issue.
 
 ---
 
