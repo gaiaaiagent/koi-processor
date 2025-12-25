@@ -368,6 +368,7 @@ class AdaptiveExtractor:
                 # LLM sometimes puts actual predicate in 'relationship' or 'relation' field
                 actual_rel = rel.get("relationship") or rel.get("relation")
                 current_pred = rel.get("predicate")
+                logger.debug(f"[PredicateTypeGuard] Raw rel keys: {list(rel.keys())}, actual_rel={actual_rel}, current_pred={current_pred}")
                 if actual_rel and current_pred == "associated_with":
                     rel["predicate"] = actual_rel
                     logger.debug(f"[PredicateTypeGuard] Fixed predicate: {current_pred} → {actual_rel}")
