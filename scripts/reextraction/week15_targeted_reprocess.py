@@ -28,7 +28,7 @@ Usage:
     PYTHONPATH=src ./.venv/bin/python scripts/reextraction/week15_targeted_reprocess.py --dry-run
 
 Environment (required):
-    GEMINI_API_KEY          - Gemini API key
+    OPENAI_API_KEY          - OpenAI API key
     POSTGRES_*              - PostgreSQL connection vars
 """
 
@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from extraction.gemini_extractor import GeminiExtractor
+from extraction.openai_extractor import OpenAIExtractor
 from knowledge_graph.graph_integration import KnowledgeGraphIntegrator, normalize_predicate
 
 # Input file with target RIDs
@@ -135,7 +135,7 @@ def fetch_documents(conn, rids: List[str]) -> List[Dict]:
 
 
 async def process_document(
-    extractor: GeminiExtractor,
+    extractor: OpenAIExtractor,
     kg: KnowledgeGraphIntegrator,
     doc: Dict,
     run_id: str,
@@ -144,7 +144,7 @@ async def process_document(
     """Process a single document through the extraction + persistence pipeline."""
     source_type = infer_source_type(doc["source_sensor"])
 
-    # Step 1: Extract with Gemini
+    # Step 1: Extract with OpenAI
     try:
         extraction = await extractor.extract_metadata(
             doc["text"],
@@ -160,8 +160,10 @@ async def process_document(
             "relationships_persisted": 0,
         }
 
-    raw_entities = extraction.get("extracted_entities", [])
-    raw_relationships = extraction.get("extracted_relationships", [])
+    # OpenAI extractor returns entities/relationships in semantic_extraction
+    semantic = extraction.get("semantic_extraction", {})
+    raw_entities = semantic.get("entities", [])
+    raw_relationships = semantic.get("relationships", [])
     tokens = extraction.get("token_usage", {}).get("total_tokens", 0)
 
     # Step 2: Run pipeline
@@ -285,7 +287,7 @@ async def main(dry_run: bool = False, max_docs: int = None, rate_limit: float = 
         return
 
     # Initialize extractor and integrator
-    extractor = GeminiExtractor()
+    extractor = OpenAIExtractor()
     kg = KnowledgeGraphIntegrator(conn)
 
     # Process documents
