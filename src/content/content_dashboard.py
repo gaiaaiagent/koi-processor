@@ -2660,6 +2660,12 @@ def podcast_map():
     from flask import send_from_directory
     return send_from_directory('../../static/podcast', 'podcast_map_3d.html')
 
+@app.route('/podcast-webgpu')
+def podcast_map_webgpu():
+    """Serve the WebGPU 3D podcast visualization map"""
+    from flask import send_from_directory
+    return send_from_directory('../../static/podcast', 'podcast_map_webgpu.html')
+
 @app.route('/podcast_audio/<filename>')
 def podcast_audio(filename):
     """Serve podcast audio files"""
