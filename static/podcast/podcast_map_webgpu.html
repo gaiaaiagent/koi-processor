@@ -746,7 +746,7 @@
                 // Convert markdown links to HTML
                 const htmlText = text
                     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                    .replace(/\`\[(.*?)\]\((.*?)\)\`/(g, '<a href="$2" target="_blank" style="color: #4CAF50; text-decoration: underline;">$1</a>')
+                    .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" style="color: #4CAF50; text-decoration: underline;">$1</a>')
                     .replace(/\n/g, '<br>');
                 messageDiv.innerHTML = htmlText;
             } else {
