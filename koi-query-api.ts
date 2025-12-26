@@ -1130,6 +1130,11 @@ app.post('/api/koi/query', async (req, res) => {
     // Week 17: Polysemy-aware reranking (optional)
     let resolvedEntity: PolysemyResolution | null = null;
     const enablePolysemyRerank = process.env.ENABLE_POLYSEMY_RERANK === 'true';
+    const debugPolysemy = process.env.DEBUG_POLYSEMY_RERANK === 'true';
+
+    if (debugPolysemy) {
+      console.log(`[PolysemyRerank] Feature flag: ${enablePolysemyRerank}, fused results: ${fusedResults.length}`);
+    }
 
     if (enablePolysemyRerank && fusedResults.length > 0) {
       try {
@@ -1139,7 +1144,7 @@ app.post('/api/koi/query', async (req, res) => {
           const { results: rerankedResults, boosted_count } = applyPolysemyRerank(fusedResults, resolvedEntity);
           fusedResults = rerankedResults;
 
-          if (process.env.DEBUG_POLYSEMY_RERANK) {
+          if (debugPolysemy) {
             console.log(`[PolysemyRerank] Query: "${question}"`);
             console.log(`[PolysemyRerank] Resolved to: ${resolvedEntity.entity_text} (${resolvedEntity.entity_type})`);
             console.log(`[PolysemyRerank] Is polysemous: ${resolvedEntity.is_polysemous}, variants: ${resolvedEntity.variant_count}`);
@@ -1149,7 +1154,7 @@ app.post('/api/koi/query', async (req, res) => {
               console.log(`[PolysemyRerank] Alternatives: ${resolvedEntity.alternatives.map(a => `${a.entity_type}(${a.occurrence_count})`).join(', ')}`);
             }
           }
-        } else if (process.env.DEBUG_POLYSEMY_RERANK) {
+        } else if (debugPolysemy) {
           console.log(`[PolysemyRerank] No entity resolved for query: "${question}"`);
         }
       } catch (err) {
