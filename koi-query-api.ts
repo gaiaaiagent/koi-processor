@@ -1129,20 +1129,12 @@ app.post('/api/koi/query', async (req, res) => {
 
     // Week 17: Polysemy-aware reranking (optional)
     let resolvedEntity: PolysemyResolution | null = null;
-    // Use truthy check - PM2 env vars may be strings or booleans
     const enablePolysemyRerank = String(process.env.ENABLE_POLYSEMY_RERANK).toLowerCase() === 'true';
     const debugPolysemy = String(process.env.DEBUG_POLYSEMY_RERANK).toLowerCase() === 'true';
 
-    // TEMP: Force enable for debugging
-    const forceEnablePolysemy = true;
-
-    console.log(`[DEBUG] BEFORE POLYSEMY CHECK: fusedResults.length=${fusedResults.length}, forceEnable=${forceEnablePolysemy}, enableFromEnv=${enablePolysemyRerank}`);
-
-    if ((enablePolysemyRerank || forceEnablePolysemy) && fusedResults.length > 0) {
+    if (enablePolysemyRerank && fusedResults.length > 0) {
       try {
-        console.log(`[PolysemyRerank] Attempting resolution for: "${question}"`);
         resolvedEntity = await resolveQueryPolysemy(question);
-        console.log(`[PolysemyRerank] Resolution result: ${resolvedEntity ? 'FOUND' : 'NULL'}`);
 
         if (resolvedEntity) {
           const { results: rerankedResults, boosted_count } = applyPolysemyRerank(fusedResults, resolvedEntity);
@@ -2265,10 +2257,8 @@ async function resolveQueryPolysemy(
 ): Promise<PolysemyResolution | null> {
   // Try normalized variants of the query
   const variants = normalizeQueryForEntityMatch(queryText);
-  console.log(`[resolveQueryPolysemy] Query: "${queryText}", variants: ${JSON.stringify(variants)}`);
 
   for (const variant of variants) {
-    console.log(`[resolveQueryPolysemy] Trying variant: "${variant}"`);
     const query = `
       WITH entity_matches AS (
         SELECT
@@ -2311,7 +2301,6 @@ async function resolveQueryPolysemy(
     `;
 
     const result = await pool.query(query, [variant]);
-    console.log(`[resolveQueryPolysemy] DB result for "${variant}": ${result.rows.length} rows`);
     if (result.rows.length === 0) continue;
 
     // Score all variants
