@@ -2984,6 +2984,7 @@ app.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/api/koi/health`);
   console.log(`🔍 Query endpoint: POST http://localhost:${PORT}/api/koi/query`);
   console.log(`🔧 Debug: GET http://localhost:${PORT}/api/koi/ping`);
+  console.log(`🧬 Polysemy rerank: ENABLE=${process.env.ENABLE_POLYSEMY_RERANK}, DEBUG=${process.env.DEBUG_POLYSEMY_RERANK}`);
 });
 
 export default app;
