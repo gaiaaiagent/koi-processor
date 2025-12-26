@@ -1132,9 +1132,9 @@ app.post('/api/koi/query', async (req, res) => {
     const enablePolysemyRerank = process.env.ENABLE_POLYSEMY_RERANK === 'true';
     const debugPolysemy = process.env.DEBUG_POLYSEMY_RERANK === 'true';
 
-    if (debugPolysemy) {
-      console.log(`[PolysemyRerank] Feature flag: ${enablePolysemyRerank}, fused results: ${fusedResults.length}`);
-    }
+    // Always log to trace the issue
+    console.log(`[PolysemyRerank] RAW ENV: ENABLE='${process.env.ENABLE_POLYSEMY_RERANK}' (type=${typeof process.env.ENABLE_POLYSEMY_RERANK}), DEBUG='${process.env.DEBUG_POLYSEMY_RERANK}' (type=${typeof process.env.DEBUG_POLYSEMY_RERANK})`);
+    console.log(`[PolysemyRerank] PARSED: enablePolysemyRerank=${enablePolysemyRerank}, debugPolysemy=${debugPolysemy}, fusedResults=${fusedResults.length}`);
 
     if (enablePolysemyRerank && fusedResults.length > 0) {
       try {
