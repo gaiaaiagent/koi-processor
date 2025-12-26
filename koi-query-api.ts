@@ -1062,7 +1062,6 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
   }
 }
 app.post('/api/koi/query', async (req, res) => {
-  console.log('[Query] Handler invoked');
   try {
     const {
       question,
@@ -1130,12 +1129,9 @@ app.post('/api/koi/query', async (req, res) => {
 
     // Week 17: Polysemy-aware reranking (optional)
     let resolvedEntity: PolysemyResolution | null = null;
-    const enablePolysemyRerank = process.env.ENABLE_POLYSEMY_RERANK === 'true';
-    const debugPolysemy = process.env.DEBUG_POLYSEMY_RERANK === 'true';
-
-    // Always log to trace the issue
-    console.log(`[PolysemyRerank] RAW ENV: ENABLE='${process.env.ENABLE_POLYSEMY_RERANK}' (type=${typeof process.env.ENABLE_POLYSEMY_RERANK}), DEBUG='${process.env.DEBUG_POLYSEMY_RERANK}' (type=${typeof process.env.DEBUG_POLYSEMY_RERANK})`);
-    console.log(`[PolysemyRerank] PARSED: enablePolysemyRerank=${enablePolysemyRerank}, debugPolysemy=${debugPolysemy}, fusedResults=${fusedResults.length}`);
+    // Use truthy check - PM2 env vars may be strings or booleans
+    const enablePolysemyRerank = String(process.env.ENABLE_POLYSEMY_RERANK).toLowerCase() === 'true';
+    const debugPolysemy = String(process.env.DEBUG_POLYSEMY_RERANK).toLowerCase() === 'true';
 
     if (enablePolysemyRerank && fusedResults.length > 0) {
       try {
