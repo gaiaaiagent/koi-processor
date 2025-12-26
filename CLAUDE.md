@@ -177,6 +177,37 @@ set -a; source .env; set +a
 
 ---
 
+## Polysemy Rerank (2025-12-26)
+
+**Status**: ✅ Deployed - production enabled
+
+**Purpose**: Boost search results that match a resolved entity when the query maps to a known entity in the knowledge graph.
+
+**How it works**:
+1. Query text is normalized and looked up in `entity_registry`
+2. If a unique entity match is found, it becomes the "resolved entity"
+3. Results containing that entity get a 1.15x score boost
+4. The `resolved_entity` field is returned in the API response
+
+**Key Functions**:
+- `resolveQueryPolysemy()` in `koi-query-api.ts` - Entity resolution
+- `applyPolysemyRerank()` in `koi-query-api.ts` - Score boosting
+
+**Configuration** (in `ecosystem.hybrid.config.js`):
+- `ENABLE_POLYSEMY_RERANK=true` - Enable/disable feature
+- `DEBUG_POLYSEMY_RERANK=false` - Enable debug logging
+
+**Response Fields**:
+- `resolved_entity` - The matched entity (text, type, occurrence_count, etc.)
+- `polysemy_debug` - Debug info (only when `DEBUG_POLYSEMY_RERANK=true`)
+
+**Evaluation Results** (15-query test):
+- Entity resolution rate: 60% (9/15 queries)
+- Score improvement: +15% for resolved entities
+- No regressions observed
+
+---
+
 ## Future Work (Optional)
 
 1. Further predicate reduction (1,501 → ~100-200)
@@ -185,8 +216,9 @@ set -a; source .env; set +a
 4. FIX-008 (dual-write strategy review)
 5. Apply safe entity merges (tier1_normalized + tier1_5_canonical = 365 proposals)
 6. ✅ FIX-015 (predicate type guard) - DEPLOYED 2025-12-25
+7. ✅ Polysemy rerank - DEPLOYED 2025-12-26
 
 ---
 
-**Last Updated**: 2025-12-25
+**Last Updated**: 2025-12-26
 **Phase**: Complete - All major milestones achieved
