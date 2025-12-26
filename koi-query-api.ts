@@ -1062,6 +1062,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
   }
 }
 app.post('/api/koi/query', async (req, res) => {
+  console.log('[Query] Handler invoked');
   try {
     const {
       question,
