@@ -2953,3 +2953,343 @@ None - polysemy rerank is fully operational.
 ---
 
 **Cycle Closed:** 2025-12-26 (complete - feature deployed and verified)
+
+---
+
+## Week 18: Graph Context UI + Baseline Validation (2025-12-26)
+
+**Status:** In Progress - UI implemented, baseline captured
+
+### Objective
+
+1. **Phase 0:** Establish baseline metrics for entity resolution with current 15-query set
+2. **Phase 1:** Add "Graph Context" tab to GAIA chat right panel
+
+### Phase 0: Baseline Results
+
+15 queries evaluated against production with polysemy rerank ON, graph_context OFF:
+
+| # | Query | Resolved Entity | Type | Occ | Top Score | Total |
+|---|-------|-----------------|------|-----|-----------|-------|
+| 1 | Gregory Landua | Gregory Landua | PERSON | 726 | 0.704 | 42 |
+| 2 | Regen Network ecocredits | — | — | — | 0.774 | 80 |
+| 3 | CarbonPlus Grasslands credit class | — | — | — | 0.768 | 62 |
+| 4 | x/ecocredit module | Ecocredit Module | PROJECT | 384 | 0.784 | 69 |
+| 5 | Chorus One validator | Chorus One | VALIDATOR | 7 | 1.036 | 86 |
+| 6 | Martin Wainstein | Martin Wainstein | PERSON | 3 | 0.508 | 17 |
+| 7 | NCT token | NCT token | TECHNOLOGY | 2 | 0.658 | 64 |
+| 8 | Cosmos SDK | Cosmos SDK | PROJECT | 203 | 0.837 | 79 |
+| 9 | How does the carbon credit retirement process work? | — | — | — | 0.600 | 75 |
+| 10 | Who founded Regen Network? | — | — | — | 0.735 | 81 |
+| 11 | What projects use x/group module? | — | — | — | 0.518 | 76 |
+| 12 | Relationship between NCT and ecocredits | — | — | — | 0.704 | 73 |
+| 13 | Where is Regen Network based? | — | — | — | 0.724 | 81 |
+| 14 | What validators support Regen mainnet? | — | — | — | 0.697 | 70 |
+| 15 | How are credit classes created? | — | — | — | 0.820 | 73 |
+
+**Baseline Metrics:**
+- **Resolution Rate:** 6/15 (40%)
+- **Avg Top Score:** 0.724
+
+**Observations:**
+- Entity queries (person names, specific modules, validators) resolve well
+- Question-style queries ("How does...", "What projects...") don't resolve to entities
+- Compound queries ("Regen Network ecocredits", "NCT and ecocredits") don't resolve
+- Polysemy boost visible (Chorus One: 1.036 > 1.0 indicates 1.15x boost applied)
+
+### Phase 1: Graph Context Tab Implementation
+
+**Components Created:**
+- `packages/client/src/components/graph-context-viewer.tsx` - New component for displaying graph context
+
+**Changes to Existing Files:**
+- `packages/client/src/components/agent-sidebar.tsx` - Added "Graph Context" tab
+
+**Features Implemented:**
+1. New "Graph Context" tab in chat right panel (after Logs)
+2. Lazy loading - graph context only fetched when tab is opened
+3. Displays dominant entity with label, type, and occurrence count
+4. Shows top relationships (predicate + neighbor with direction)
+5. "Open in Graph" link to `/graph` with entity preselected
+6. Privacy warning note when graph_context._privacy_warning is present
+7. Graceful fallback when no graph context available
+
+**API Integration:**
+- Calls `/api/koi/query` with `graph_context: true` parameter
+- Extracts last user message from channel to use as query
+- Displays `resolved_entity` as fallback when full `graph_context` unavailable
+
+### Configuration Required
+
+To enable graph context in koi-processor hybrid API:
+```bash
+# In ecosystem.hybrid.config.js or environment
+ENABLE_GRAPHRAG_CONTEXT=true
+```
+
+### Rollout Steps
+
+1. Deploy GAIA UI changes to staging
+2. Enable `ENABLE_GRAPHRAG_CONTEXT=true` on staging hybrid API
+3. Test Graph Context tab with sample queries
+4. Deploy to production after validation
+
+### Week 18 Deliverables
+
+| Deliverable | Status |
+|-------------|--------|
+| Phase 0 baseline captured | Complete |
+| GraphContextViewer component | Complete |
+| Graph Context tab in sidebar | Complete |
+| Documentation updated | Complete |
+| Production deployment | Complete |
+
+### Production Deployment (2025-12-26)
+
+**Deployed to:** 202.61.196.119
+
+**Changes Applied:**
+1. `graph-context-viewer.tsx` → `/opt/projects/GAIA/packages/client/src/components/`
+2. `agent-sidebar.tsx` → `/opt/projects/GAIA/packages/client/src/components/`
+3. Client rebuilt with `bun run build:no-tsc`
+4. Build copied to `/opt/projects/GAIA/packages/server/dist/client/`
+5. `ENABLE_GRAPHRAG_CONTEXT=true` added to `ecosystem.hybrid.config.js`
+6. `pm2 restart hybrid-rag-api --update-env`
+
+**Smoke Test Results:**
+
+| Query | Resolved Entity | Dominant Entity | Edges |
+|-------|-----------------|-----------------|-------|
+| Gregory Landua | Gregory Landua (PERSON) | Gregory Landua (PERSON) | 20 |
+| Cosmos SDK | Cosmos SDK (PROJECT) | Cosmos (PROJECT) | 20 |
+| Chorus One validator | Chorus One (VALIDATOR) | Chorus One (VALIDATOR) | 4 |
+| How are credit classes created? | — | Classes (API_MESSAGE) | 0 |
+| NCT token | NCT token (TECHNOLOGY) | NCTs (CONCEPT) | 0 |
+
+**Observations:**
+- Entity queries work well with both resolution and graph context
+- Question-style queries don't resolve but may match weak entities
+- Some resolved entities differ from dominant entities (NCT token → NCTs)
+- Privacy warning correctly displayed
+
+**Known Issues:**
+- Pre-existing TypeScript errors in KOI visualization components (used `build:no-tsc`)
+- Some entities have 0 edges (extraction quality issue, not GraphRAG matching)
+
+**Data Quality Note (2025-12-26):**
+- `regen.foundation` website (specifically the team page at `regen.foundation/#team`) is NOT in the KOI database
+- The website sensor may not have crawled this page - needs investigation
+- This gap means some organizational relationships (e.g., board member roles at Regen Foundation) may be missing or only captured from secondary sources like Medium articles
+
+---
+
+## Investigation: regen.foundation/#team Missing from KOI (2025-12-26)
+
+### Summary
+
+The regen.foundation/#team page content is NOT in the KOI database. Investigation confirmed this is a **"blocked by design"** issue due to the website's SPA architecture, NOT a sensor bug.
+
+### Investigation Steps
+
+| Step | Finding |
+|------|---------|
+| DB Query | No `regen.foundation` content in `koi_memories` - only GitHub sensor data present |
+| Sensor Config | regen-foundation configured in `koi-sensors/sensors/websites/config.yaml` with paths: `/`, `/publications`, `/initiatives` |
+| robots.txt | No robots.txt (returns 404) - not blocked |
+| HTTP Headers | Both `/` and `/#team` return identical responses (ETag: `1jyf1p8`, 101KB HTML) |
+| Site Architecture | SvelteKit SPA (`x-sveltekit-page: true` header) - team section is client-side anchor |
+
+### Root Cause Analysis
+
+**Primary Issue: SPA Architecture**
+
+The regen.foundation website is a Single Page Application (SvelteKit). The `/#team` URL is:
+1. A **hash fragment** anchor, not a server-side route
+2. The same HTML content as the main `/` page
+3. Rendered client-side via JavaScript navigation
+
+**Evidence:**
+- Navigation HTML: `<a href="/#team">`, `<a href="/#initiatives">`, `<a href="/#news">`
+- HTTP responses identical for `/` and `/#team` (same ETag, same content-length)
+- No `#team` content visible in static HTML - requires JavaScript hydration
+
+**Secondary Issue: URL Normalization**
+
+The website sensor strips hash fragments during URL discovery:
+- `koi-sensors/sensors/websites/website_sensor.py:278` → `href.split('#')[0]`
+- `koi-sensors/sensors/websites/website_sensor.py:1077-1078` → removes fragments
+
+**Tertiary Issue: Website Sensor Not Running**
+
+Local database shows NO website sensor content:
+- Only `github-sensor-*` sources in `koi_memories`
+- No `website_sensor_state.json` present
+- Production may differ (different database at port 5433)
+
+### Classification
+
+**Status:** Blocked by Design
+
+**Reason:** The team section content is embedded in the main `/` page HTML but requires JavaScript execution to render the team member cards. The website sensor:
+1. Would need Playwright (JavaScript rendering) to extract the full team section
+2. Currently only uses Playwright for `regentokenomics.org` domain
+3. Even with Playwright, the team content may be dynamically loaded
+
+### Remediation Options
+
+| Option | Effort | Impact |
+|--------|--------|--------|
+| A. Enable Playwright for `regen.foundation` | Low | May capture team section if it's in rendered DOM |
+| B. Add `/team` as path in config | None | Won't help - `/team` returns 404 (only `/#team` works) |
+| C. Manual data entry | Low | Add team member info directly to entity_registry |
+| D. Accept limitation | None | Team info available from secondary sources (Medium, LinkedIn) |
+
+### Recommendation
+
+**Option A** (Enable Playwright for regen.foundation) is worth trying:
+1. Edit `koi-sensors/sensors/websites/config.yaml`
+2. Add `www.regen.foundation` to `playwright.domains` list
+3. Restart website sensor
+4. Verify team content is captured in crawl
+
+If team content still not captured, fall back to **Option C** (manual entry of key team members).
+
+### Files Referenced
+
+| File | Purpose |
+|------|---------|
+| `koi-sensors/sensors/websites/config.yaml` | Sensor configuration |
+| `koi-sensors/sensors/websites/website_sensor.py` | Crawler logic (line 278, 1077-1078) |
+| `koi-sensors/sensors/websites/sites/regen_foundation.py` | Site-specific handler |
+
+### Remediation Applied (2025-12-26)
+
+**Option A implemented:** Added `regen.foundation` and `www.regen.foundation` to Playwright domains.
+
+**Config change:**
+```yaml
+# koi-sensors/sensors/websites/config.yaml
+playwright:
+  domains:
+    - regentokenomics.org  # Notion-based site with collapsible toggles
+    - regen.foundation      # SvelteKit SPA - team section requires JS hydration
+    - www.regen.foundation  # Same site with www prefix
+```
+
+**Playwright Test Results:**
+
+Confirmed team section renders correctly with JavaScript hydration:
+
+| Name | Role |
+|------|------|
+| Austin Wade Smith | Executive Director |
+| Shaila Agha | Ecosystem Development Program Officer |
+| Nena Jain | Programs Manager |
+| Will Szal | President of the Board |
+| Amanda Joy Ravenhill | Board Member |
+| Dorn Cox | Board Member |
+| Kei Kreutler | Board Member |
+
+**Next Steps:**
+1. Deploy config change to production (`202.61.196.119`)
+2. Restart website sensor: `sudo systemctl restart koi-sensor@websites`
+3. Trigger manual crawl: `curl -X POST http://localhost:8010/trigger -d '{"url": "https://www.regen.foundation/"}'`
+4. Verify team content appears in `koi_memories` table
+
+**Status:** ✅ Complete - Deployed and verified.
+
+### Production Deployment Results (2025-12-26)
+
+**Deployment Steps Completed:**
+1. Committed to `regen-prod` branch (`23d3da2`)
+2. Pushed to origin
+3. Pulled on production (`202.61.196.119`)
+4. Restarted website sensor via systemd
+5. Triggered manual crawl of `https://www.regen.foundation/`
+
+**Verification Query:**
+```sql
+SELECT
+  (SELECT COUNT(*) FROM koi_memories WHERE rid ILIKE '%regen.foundation%'
+   AND content->>'text' ILIKE '%Austin Wade Smith%') as austin,
+  (SELECT COUNT(*) FROM koi_memories WHERE rid ILIKE '%regen.foundation%'
+   AND content->>'text' ILIKE '%Shaila Agha%') as shaila,
+  ...
+```
+
+**Results:**
+
+| Team Member | Chunks Found |
+|-------------|--------------|
+| Austin Wade Smith | 9 |
+| Will Szal | 6 |
+| Shaila Agha | 5 |
+| Amanda Joy Ravenhill | 4 |
+| Dorn Cox | 4 |
+| Kei Kreutler | 4 |
+| Nena Jain | 3 |
+
+**Conclusion:** All 7 team members from the regen.foundation/#team page are now indexed in the KOI database. The Playwright integration successfully rendered the SvelteKit SPA content.
+
+---
+
+## Investigation: Extraction Pipeline Broken Model (2025-12-26)
+
+### Discovery
+
+While investigating the regen.foundation content, we discovered that the extraction pipeline was producing 0 entities and 0 relationships for ALL new content.
+
+**Symptom:**
+```
+INFO:__main__:LLM extraction: 0 entities, 0 relationships
+```
+
+### Root Cause
+
+The production `.env` file had an invalid model:
+```
+OPENAI_EXTRACT_MODEL=gpt-5.1  # Invalid - model doesn't exist
+```
+
+This caused all extraction API calls to fail silently, producing empty results.
+
+### Fix Applied (2025-12-26)
+
+1. Corrected model in production `.env`:
+   ```
+   OPENAI_EXTRACT_MODEL=gpt-4.1-mini
+   ```
+
+2. Recreated missing startup script (`scripts/start_semantic_bridge.sh`) that was referenced by PM2 but not present on production.
+
+3. Restarted event bridge via PM2.
+
+### Impact
+
+**All content ingested while the model was broken has 0 entities/relationships.** This includes:
+- New website content (regen.foundation, etc.)
+- New sensor data (Discourse, GitHub, Telegram, etc.)
+
+### Backfill Required (Phase 2)
+
+Documents ingested during the broken period need re-extraction. Query to identify:
+```sql
+SELECT m.rid, m.created_at
+FROM koi_memories m
+LEFT JOIN entity_registry e ON e.metadata->>'source_rid' = m.rid
+WHERE m.created_at > '2025-12-15'
+  AND e.id IS NULL
+  AND m.rid NOT LIKE '%heartbeat%'
+ORDER BY m.created_at DESC;
+```
+
+### Status
+
+| Component | Status |
+|-----------|--------|
+| Model config | ✅ Fixed (gpt-4.1-mini) |
+| Startup script | ✅ Created and committed |
+| Event bridge | ✅ Restarted |
+| Backfill | 🔲 Pending (Phase 2) |
+
+---

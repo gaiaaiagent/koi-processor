@@ -8,7 +8,8 @@ module.exports = {
       POSTGRES_URL: 'postgresql://postgres:postgres@localhost:5433/eliza',
       DEBUG_GRAPH_EXPANSION: 'false',
       ENABLE_POLYSEMY_RERANK: 'true',
-      DEBUG_POLYSEMY_RERANK: 'false'
+      DEBUG_POLYSEMY_RERANK: 'false',
+      ENABLE_GRAPHRAG_CONTEXT: 'true'
     },
     out_file: 'logs/pm2-hybrid-rag.log',
     error_file: 'logs/pm2-hybrid-rag-error.log'
