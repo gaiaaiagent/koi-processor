@@ -1133,9 +1133,14 @@ app.post('/api/koi/query', async (req, res) => {
     const enablePolysemyRerank = String(process.env.ENABLE_POLYSEMY_RERANK).toLowerCase() === 'true';
     const debugPolysemy = String(process.env.DEBUG_POLYSEMY_RERANK).toLowerCase() === 'true';
 
-    if (enablePolysemyRerank && fusedResults.length > 0) {
+    // TEMP: Force enable for debugging
+    const forceEnablePolysemy = true;
+
+    if ((enablePolysemyRerank || forceEnablePolysemy) && fusedResults.length > 0) {
       try {
+        console.log(`[PolysemyRerank] Attempting resolution for: "${question}"`);
         resolvedEntity = await resolveQueryPolysemy(question);
+        console.log(`[PolysemyRerank] Resolution result: ${resolvedEntity ? 'FOUND' : 'NULL'}`);
 
         if (resolvedEntity) {
           const { results: rerankedResults, boosted_count } = applyPolysemyRerank(fusedResults, resolvedEntity);
@@ -2258,8 +2263,10 @@ async function resolveQueryPolysemy(
 ): Promise<PolysemyResolution | null> {
   // Try normalized variants of the query
   const variants = normalizeQueryForEntityMatch(queryText);
+  console.log(`[resolveQueryPolysemy] Query: "${queryText}", variants: ${JSON.stringify(variants)}`);
 
   for (const variant of variants) {
+    console.log(`[resolveQueryPolysemy] Trying variant: "${variant}"`);
     const query = `
       WITH entity_matches AS (
         SELECT
@@ -2302,6 +2309,7 @@ async function resolveQueryPolysemy(
     `;
 
     const result = await pool.query(query, [variant]);
+    console.log(`[resolveQueryPolysemy] DB result for "${variant}": ${result.rows.length} rows`);
     if (result.rows.length === 0) continue;
 
     // Score all variants
