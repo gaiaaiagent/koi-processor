@@ -1125,8 +1125,38 @@ app.post('/api/koi/query', async (req, res) => {
     }
 
     // Apply Reciprocal Rank Fusion with entity/graph results
-    const fusedResults = reciprocalRankFusion(vectorResults, entityResults, keywordResults);
-    
+    let fusedResults = reciprocalRankFusion(vectorResults, entityResults, keywordResults);
+
+    // Week 17: Polysemy-aware reranking (optional)
+    let resolvedEntity: PolysemyResolution | null = null;
+    const enablePolysemyRerank = process.env.ENABLE_POLYSEMY_RERANK === 'true';
+
+    if (enablePolysemyRerank && fusedResults.length > 0) {
+      try {
+        resolvedEntity = await resolveQueryPolysemy(question);
+
+        if (resolvedEntity) {
+          const { results: rerankedResults, boosted_count } = applyPolysemyRerank(fusedResults, resolvedEntity);
+          fusedResults = rerankedResults;
+
+          if (process.env.DEBUG_POLYSEMY_RERANK) {
+            console.log(`[PolysemyRerank] Query: "${question}"`);
+            console.log(`[PolysemyRerank] Resolved to: ${resolvedEntity.entity_text} (${resolvedEntity.entity_type})`);
+            console.log(`[PolysemyRerank] Is polysemous: ${resolvedEntity.is_polysemous}, variants: ${resolvedEntity.variant_count}`);
+            console.log(`[PolysemyRerank] Resolution method: ${resolvedEntity.resolution_method}`);
+            console.log(`[PolysemyRerank] Boosted ${boosted_count}/${fusedResults.length} results`);
+            if (resolvedEntity.alternatives.length > 0) {
+              console.log(`[PolysemyRerank] Alternatives: ${resolvedEntity.alternatives.map(a => `${a.entity_type}(${a.occurrence_count})`).join(', ')}`);
+            }
+          }
+        } else if (process.env.DEBUG_POLYSEMY_RERANK) {
+          console.log(`[PolysemyRerank] No entity resolved for query: "${question}"`);
+        }
+      } catch (err) {
+        console.error('[PolysemyRerank] Error:', err);
+      }
+    }
+
     // Calculate confidence
     const confidence = calculateConfidence(fusedResults);
     
@@ -1224,6 +1254,20 @@ app.post('/api/koi/query', async (req, res) => {
     // Add graph context if available
     if (graphContext) {
       response.graph_context = graphContext;
+    }
+
+    // Week 17: Add resolved entity info if polysemy rerank was enabled
+    if (resolvedEntity) {
+      response.resolved_entity = {
+        entity_text: resolvedEntity.entity_text,
+        entity_type: resolvedEntity.entity_type,
+        uri: resolvedEntity.uri,
+        occurrence_count: resolvedEntity.occurrence_count,
+        is_polysemous: resolvedEntity.is_polysemous,
+        variant_count: resolvedEntity.variant_count,
+        resolution_method: resolvedEntity.resolution_method,
+        alternatives: resolvedEntity.alternatives,
+      };
     }
 
     res.json(response);
@@ -2174,6 +2218,192 @@ async function resolveEntityInternal(
     entity_type: winner.entity_type,
     occurrence_count: parseInt(winner.occurrence_count),
   };
+}
+
+// ============================================================================
+// Week 17: Polysemy-Aware Entity Resolution for Query Reranking
+// Returns the dominant entity for a query with polysemy metadata
+// ============================================================================
+
+interface PolysemyResolution {
+  entity_id: number;
+  uri: string;
+  entity_text: string;
+  entity_type: string;
+  occurrence_count: number;
+  is_polysemous: boolean;
+  variant_count: number;
+  alternatives: Array<{
+    entity_type: string;
+    occurrence_count: number;
+    score: number;
+  }>;
+  resolution_method: string;
+  score: number;
+}
+
+/**
+ * Resolve query text to a dominant entity with polysemy awareness.
+ * Returns the highest-scoring entity variant plus metadata about alternatives.
+ *
+ * @param queryText - The query string to resolve
+ * @param typeHint - Optional type to prefer (e.g., "TECHNOLOGY")
+ * @returns PolysemyResolution or null if no entity found
+ */
+async function resolveQueryPolysemy(
+  queryText: string,
+  typeHint?: string
+): Promise<PolysemyResolution | null> {
+  // Try normalized variants of the query
+  const variants = normalizeQueryForEntityMatch(queryText);
+
+  for (const variant of variants) {
+    const query = `
+      WITH entity_matches AS (
+        SELECT
+          id,
+          entity_text,
+          entity_type,
+          normalized_text,
+          occurrence_count,
+          fuseki_uri
+        FROM entity_registry
+        WHERE LOWER(TRIM(normalized_text)) = LOWER(TRIM($1))
+      ),
+      rel_counts AS (
+        SELECT
+          e.id,
+          COALESCE(subj.subj_count, 0) + COALESCE(obj.obj_count, 0) as relationship_count
+        FROM entity_matches e
+        LEFT JOIN (
+          SELECT subject_entity_id, COUNT(*) as subj_count
+          FROM koi_relationships
+          GROUP BY subject_entity_id
+        ) subj ON e.id = subj.subject_entity_id
+        LEFT JOIN (
+          SELECT object_entity_id, COUNT(*) as obj_count
+          FROM koi_relationships
+          GROUP BY object_entity_id
+        ) obj ON e.id = obj.object_entity_id
+      )
+      SELECT
+        e.id,
+        e.entity_text,
+        e.entity_type,
+        e.normalized_text,
+        e.occurrence_count,
+        e.fuseki_uri,
+        r.relationship_count
+      FROM entity_matches e
+      JOIN rel_counts r ON e.id = r.id
+      ORDER BY e.occurrence_count DESC, r.relationship_count DESC
+    `;
+
+    const result = await pool.query(query, [variant]);
+    if (result.rows.length === 0) continue;
+
+    // Score all variants
+    const scoredVariants = result.rows.map(v => {
+      const occScore = parseInt(v.occurrence_count) * 1000;
+      const relScore = parseInt(v.relationship_count) * 100;
+      const typePriority = DEFAULT_TYPE_PRIORITY[v.entity_type] || 0;
+      const typeScore = typePriority * 10;
+
+      let totalScore = occScore + relScore + typeScore;
+
+      // Boost if matches type hint
+      if (typeHint && v.entity_type.toUpperCase() === typeHint.toUpperCase()) {
+        totalScore += 50000;
+      }
+
+      return { ...v, score: totalScore };
+    });
+
+    scoredVariants.sort((a, b) => b.score - a.score);
+    const winner = scoredVariants[0];
+
+    // Check for polysemy (multiple distinct types)
+    const uniqueTypes = new Set(scoredVariants.map(v => v.entity_type));
+    const isPolysemous = uniqueTypes.size > 1;
+
+    // Determine resolution method
+    let resolutionMethod = 'highest_combined_score';
+    if (typeHint && winner.entity_type.toUpperCase() === typeHint.toUpperCase()) {
+      resolutionMethod = 'type_hint_match';
+    } else if (winner.occurrence_count > scoredVariants.reduce((sum, v) => sum + parseInt(v.occurrence_count), 0) * 0.5) {
+      resolutionMethod = 'dominant_occurrence';
+    }
+
+    // Build alternatives list (other type variants, not duplicates of winner)
+    const alternatives = scoredVariants
+      .filter(v => v.entity_type !== winner.entity_type)
+      .slice(0, 5)
+      .map(v => ({
+        entity_type: v.entity_type,
+        occurrence_count: parseInt(v.occurrence_count),
+        score: v.score,
+      }));
+
+    return {
+      entity_id: winner.id,
+      uri: winner.fuseki_uri,
+      entity_text: winner.entity_text,
+      entity_type: winner.entity_type,
+      occurrence_count: parseInt(winner.occurrence_count),
+      is_polysemous: isPolysemous,
+      variant_count: scoredVariants.length,
+      alternatives,
+      resolution_method: resolutionMethod,
+      score: winner.score,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Apply polysemy-based score boost to fused results.
+ * Boosts results that contain the resolved entity name.
+ *
+ * @param fusedResults - Results from RRF fusion
+ * @param resolved - Polysemy resolution result
+ * @param boostFactor - Score multiplier for matching results (default 1.15)
+ * @returns Modified results with boost applied
+ */
+function applyPolysemyRerank(
+  fusedResults: any[],
+  resolved: PolysemyResolution,
+  boostFactor: number = 1.15
+): { results: any[]; boosted_count: number } {
+  const resolvedNameLower = resolved.entity_text.toLowerCase();
+  let boostedCount = 0;
+
+  const rerankResults = fusedResults.map(r => {
+    // Check if this result contains the resolved entity
+    const entitiesMatched = r.metadata?.entities_matched || [];
+    const hasResolvedEntity = entitiesMatched.some(
+      (e: string) => e.toLowerCase() === resolvedNameLower
+    );
+
+    if (hasResolvedEntity) {
+      boostedCount++;
+      return {
+        ...r,
+        score: r.score * boostFactor,
+        metadata: {
+          ...r.metadata,
+          polysemy_boost: boostFactor,
+          polysemy_matched_entity: resolved.entity_text,
+        },
+      };
+    }
+    return r;
+  });
+
+  // Re-sort by boosted score
+  rerankResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  return { results: rerankResults, boosted_count: boostedCount };
 }
 
 // Graph neighborhood endpoint - query local graph structure
