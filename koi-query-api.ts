@@ -1136,6 +1136,8 @@ app.post('/api/koi/query', async (req, res) => {
     // TEMP: Force enable for debugging
     const forceEnablePolysemy = true;
 
+    console.log(`[DEBUG] BEFORE POLYSEMY CHECK: fusedResults.length=${fusedResults.length}, forceEnable=${forceEnablePolysemy}, enableFromEnv=${enablePolysemyRerank}`);
+
     if ((enablePolysemyRerank || forceEnablePolysemy) && fusedResults.length > 0) {
       try {
         console.log(`[PolysemyRerank] Attempting resolution for: "${question}"`);
