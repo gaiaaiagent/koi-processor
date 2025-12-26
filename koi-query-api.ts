@@ -1131,31 +1131,67 @@ app.post('/api/koi/query', async (req, res) => {
     let resolvedEntity: PolysemyResolution | null = null;
     const enablePolysemyRerank = String(process.env.ENABLE_POLYSEMY_RERANK).toLowerCase() === 'true';
     const debugPolysemy = String(process.env.DEBUG_POLYSEMY_RERANK).toLowerCase() === 'true';
+    let polysemyDebugInfo: any = null;
+
+    // Always log entry point when debug is enabled
+    if (debugPolysemy) {
+      console.log(`[PolysemyRerank] Entry: enabled=${enablePolysemyRerank}, fusedResults=${fusedResults.length}, query="${question}"`);
+    }
 
     if (enablePolysemyRerank && fusedResults.length > 0) {
       try {
+        if (debugPolysemy) {
+          console.log(`[PolysemyRerank] Calling resolveQueryPolysemy...`);
+        }
         resolvedEntity = await resolveQueryPolysemy(question);
 
         if (resolvedEntity) {
           const { results: rerankedResults, boosted_count } = applyPolysemyRerank(fusedResults, resolvedEntity);
           fusedResults = rerankedResults;
 
+          polysemyDebugInfo = {
+            enabled: true,
+            resolved: true,
+            entity_text: resolvedEntity.entity_text,
+            entity_type: resolvedEntity.entity_type,
+            occurrence_count: resolvedEntity.occurrence_count,
+            is_polysemous: resolvedEntity.is_polysemous,
+            variant_count: resolvedEntity.variant_count,
+            resolution_method: resolvedEntity.resolution_method,
+            boosted_count,
+            total_results: fusedResults.length,
+          };
+
           if (debugPolysemy) {
-            console.log(`[PolysemyRerank] Query: "${question}"`);
             console.log(`[PolysemyRerank] Resolved to: ${resolvedEntity.entity_text} (${resolvedEntity.entity_type})`);
-            console.log(`[PolysemyRerank] Is polysemous: ${resolvedEntity.is_polysemous}, variants: ${resolvedEntity.variant_count}`);
-            console.log(`[PolysemyRerank] Resolution method: ${resolvedEntity.resolution_method}`);
             console.log(`[PolysemyRerank] Boosted ${boosted_count}/${fusedResults.length} results`);
-            if (resolvedEntity.alternatives.length > 0) {
-              console.log(`[PolysemyRerank] Alternatives: ${resolvedEntity.alternatives.map(a => `${a.entity_type}(${a.occurrence_count})`).join(', ')}`);
-            }
           }
-        } else if (debugPolysemy) {
-          console.log(`[PolysemyRerank] No entity resolved for query: "${question}"`);
+        } else {
+          polysemyDebugInfo = {
+            enabled: true,
+            resolved: false,
+            reason: 'no_entity_match',
+            query: question,
+          };
+          if (debugPolysemy) {
+            console.log(`[PolysemyRerank] No entity resolved for query: "${question}"`);
+          }
         }
       } catch (err) {
+        polysemyDebugInfo = {
+          enabled: true,
+          resolved: false,
+          reason: 'error',
+          error: String(err),
+        };
         console.error('[PolysemyRerank] Error:', err);
       }
+    } else {
+      polysemyDebugInfo = {
+        enabled: enablePolysemyRerank,
+        resolved: false,
+        reason: enablePolysemyRerank ? 'no_fused_results' : 'feature_disabled',
+      };
     }
 
     // Calculate confidence
@@ -1269,6 +1305,11 @@ app.post('/api/koi/query', async (req, res) => {
         resolution_method: resolvedEntity.resolution_method,
         alternatives: resolvedEntity.alternatives,
       };
+    }
+
+    // Always include polysemy debug info when debug is enabled
+    if (debugPolysemy && polysemyDebugInfo) {
+      response.polysemy_debug = polysemyDebugInfo;
     }
 
     res.json(response);
