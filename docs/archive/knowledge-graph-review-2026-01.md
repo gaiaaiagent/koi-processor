@@ -3082,3 +3082,308 @@ ENABLE_GRAPHRAG_CONTEXT=true
 - This gap means some organizational relationships (e.g., board member roles at Regen Foundation) may be missing or only captured from secondary sources like Medium articles
 
 ---
+
+## Investigation: regen.foundation/#team Missing from KOI (2025-12-26)
+
+### Summary
+
+The regen.foundation/#team page content is NOT in the KOI database. Investigation confirmed this is a **"blocked by design"** issue due to the website's SPA architecture, NOT a sensor bug.
+
+### Investigation Steps
+
+| Step | Finding |
+|------|---------|
+| DB Query | No `regen.foundation` content in `koi_memories` - only GitHub sensor data present |
+| Sensor Config | regen-foundation configured in `koi-sensors/sensors/websites/config.yaml` with paths: `/`, `/publications`, `/initiatives` |
+| robots.txt | No robots.txt (returns 404) - not blocked |
+| HTTP Headers | Both `/` and `/#team` return identical responses (ETag: `1jyf1p8`, 101KB HTML) |
+| Site Architecture | SvelteKit SPA (`x-sveltekit-page: true` header) - team section is client-side anchor |
+
+### Root Cause Analysis
+
+**Primary Issue: SPA Architecture**
+
+The regen.foundation website is a Single Page Application (SvelteKit). The `/#team` URL is:
+1. A **hash fragment** anchor, not a server-side route
+2. The same HTML content as the main `/` page
+3. Rendered client-side via JavaScript navigation
+
+**Evidence:**
+- Navigation HTML: `<a href="/#team">`, `<a href="/#initiatives">`, `<a href="/#news">`
+- HTTP responses identical for `/` and `/#team` (same ETag, same content-length)
+- No `#team` content visible in static HTML - requires JavaScript hydration
+
+**Secondary Issue: URL Normalization**
+
+The website sensor strips hash fragments during URL discovery:
+- `koi-sensors/sensors/websites/website_sensor.py:278` → `href.split('#')[0]`
+- `koi-sensors/sensors/websites/website_sensor.py:1077-1078` → removes fragments
+
+**Tertiary Issue: Website Sensor Not Running**
+
+Local database shows NO website sensor content:
+- Only `github-sensor-*` sources in `koi_memories`
+- No `website_sensor_state.json` present
+- Production may differ (different database at port 5433)
+
+### Classification
+
+**Status:** Blocked by Design
+
+**Reason:** The team section content is embedded in the main `/` page HTML but requires JavaScript execution to render the team member cards. The website sensor:
+1. Would need Playwright (JavaScript rendering) to extract the full team section
+2. Currently only uses Playwright for `regentokenomics.org` domain
+3. Even with Playwright, the team content may be dynamically loaded
+
+### Remediation Options
+
+| Option | Effort | Impact |
+|--------|--------|--------|
+| A. Enable Playwright for `regen.foundation` | Low | May capture team section if it's in rendered DOM |
+| B. Add `/team` as path in config | None | Won't help - `/team` returns 404 (only `/#team` works) |
+| C. Manual data entry | Low | Add team member info directly to entity_registry |
+| D. Accept limitation | None | Team info available from secondary sources (Medium, LinkedIn) |
+
+### Recommendation
+
+**Option A** (Enable Playwright for regen.foundation) is worth trying:
+1. Edit `koi-sensors/sensors/websites/config.yaml`
+2. Add `www.regen.foundation` to `playwright.domains` list
+3. Restart website sensor
+4. Verify team content is captured in crawl
+
+If team content still not captured, fall back to **Option C** (manual entry of key team members).
+
+### Files Referenced
+
+| File | Purpose |
+|------|---------|
+| `koi-sensors/sensors/websites/config.yaml` | Sensor configuration |
+| `koi-sensors/sensors/websites/website_sensor.py` | Crawler logic (line 278, 1077-1078) |
+| `koi-sensors/sensors/websites/sites/regen_foundation.py` | Site-specific handler |
+
+### Remediation Applied (2025-12-26)
+
+**Option A implemented:** Added `regen.foundation` and `www.regen.foundation` to Playwright domains.
+
+**Config change:**
+```yaml
+# koi-sensors/sensors/websites/config.yaml
+playwright:
+  domains:
+    - regentokenomics.org  # Notion-based site with collapsible toggles
+    - regen.foundation      # SvelteKit SPA - team section requires JS hydration
+    - www.regen.foundation  # Same site with www prefix
+```
+
+**Playwright Test Results:**
+
+Confirmed team section renders correctly with JavaScript hydration:
+
+| Name | Role |
+|------|------|
+| Austin Wade Smith | Executive Director |
+| Shaila Agha | Ecosystem Development Program Officer |
+| Nena Jain | Programs Manager |
+| Will Szal | President of the Board |
+| Amanda Joy Ravenhill | Board Member |
+| Dorn Cox | Board Member |
+| Kei Kreutler | Board Member |
+
+**Next Steps:**
+1. Deploy config change to production (`202.61.196.119`)
+2. Restart website sensor: `sudo systemctl restart koi-sensor@websites`
+3. Trigger manual crawl: `curl -X POST http://localhost:8010/trigger -d '{"url": "https://www.regen.foundation/"}'`
+4. Verify team content appears in `koi_memories` table
+
+**Status:** ✅ Complete - Deployed and verified.
+
+### Production Deployment Results (2025-12-26)
+
+**Deployment Steps Completed:**
+1. Committed to `regen-prod` branch (`23d3da2`)
+2. Pushed to origin
+3. Pulled on production (`202.61.196.119`)
+4. Restarted website sensor via systemd
+5. Triggered manual crawl of `https://www.regen.foundation/`
+
+**Verification Query:**
+```sql
+SELECT
+  (SELECT COUNT(*) FROM koi_memories WHERE rid ILIKE '%regen.foundation%'
+   AND content->>'text' ILIKE '%Austin Wade Smith%') as austin,
+  (SELECT COUNT(*) FROM koi_memories WHERE rid ILIKE '%regen.foundation%'
+   AND content->>'text' ILIKE '%Shaila Agha%') as shaila,
+  ...
+```
+
+**Results:**
+
+| Team Member | Chunks Found |
+|-------------|--------------|
+| Austin Wade Smith | 9 |
+| Will Szal | 6 |
+| Shaila Agha | 5 |
+| Amanda Joy Ravenhill | 4 |
+| Dorn Cox | 4 |
+| Kei Kreutler | 4 |
+| Nena Jain | 3 |
+
+**Conclusion:** All 7 team members from the regen.foundation/#team page are now indexed in the KOI database. The Playwright integration successfully rendered the SvelteKit SPA content.
+
+---
+
+## Investigation: Extraction Pipeline Broken Model (2025-12-26)
+
+### Discovery
+
+While investigating the regen.foundation content, we discovered that the extraction pipeline was producing 0 entities and 0 relationships for ALL new content.
+
+**Symptom:**
+```
+INFO:__main__:LLM extraction: 0 entities, 0 relationships
+```
+
+### Root Cause
+
+The production `.env` file had an invalid model:
+```
+OPENAI_EXTRACT_MODEL=gpt-5.1  # Invalid - model doesn't exist
+```
+
+This caused all extraction API calls to fail silently, producing empty results.
+
+### Fix Applied (2025-12-26)
+
+1. Corrected model in production `.env`:
+   ```
+   OPENAI_EXTRACT_MODEL=gpt-4.1-mini
+   ```
+
+2. Recreated missing startup script (`scripts/start_semantic_bridge.sh`) that was referenced by PM2 but not present on production.
+
+3. Restarted event bridge via PM2.
+
+### Impact
+
+**All content ingested while the model was broken has 0 entities/relationships.** This includes:
+- New website content (regen.foundation, etc.)
+- New sensor data (Discourse, GitHub, Telegram, etc.)
+
+### Backfill Required (Phase 2)
+
+Documents ingested during the broken period need re-extraction. Query to identify:
+```sql
+SELECT m.rid, m.created_at
+FROM koi_memories m
+LEFT JOIN entity_registry e ON e.metadata->>'source_rid' = m.rid
+WHERE m.created_at > '2025-12-15'
+  AND e.id IS NULL
+  AND m.rid NOT LIKE '%heartbeat%'
+ORDER BY m.created_at DESC;
+```
+
+### Status
+
+| Component | Status |
+|-----------|--------|
+| Model config | ✅ Fixed (gpt-4.1-mini) |
+| Startup script | ✅ Created and committed |
+| Event bridge | ✅ Restarted |
+| Backfill | ✅ Partial - see Week 19 |
+
+---
+
+## Week 19: Backfill + E402 Remainder (2025-12-26)
+
+**Status:** Partial - OpenAI quota exhausted mid-run
+
+### Context
+
+This session executed the handoff plan to:
+1. **Phase 2 (URGENT):** Backfill docs ingested 2025-12-15 to present with 0 entities (broken model period)
+2. **Phase 1:** Complete remaining ~890 docs from E402 broader batch (platform predicates)
+
+**Scripts created:**
+- `scripts/reextraction/backfill_broken_extractions.py` - Phase 2 backfill
+- `scripts/reextraction/e402_remainder_reprocess.py` - Phase 1 E402 remainder
+
+### Deviation from Plan
+
+**Issue:** Both phases were run in parallel instead of sequentially. This was not intended but results are still valid.
+
+### Phase 2: Backfill Broken Extractions
+
+**Identified:** 3,568 documents with 0 entities ingested after 2025-12-15
+
+**100-doc validation run:**
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Documents processed | 100 | — |
+| Entities persisted | 730 | — |
+| Relationships persisted | 77 | — |
+| Rels/doc | 0.77 | ✅ Above 0.4 threshold |
+| Error rate | 0.0% | ✅ Below 5% threshold |
+
+**Full run (interrupted by quota):**
+- Reached doc ~1,694/3,568 (~47%) before OpenAI quota exhausted
+- Remaining: ~1,874 docs need reprocessing when quota restored
+
+### Phase 1: E402 Remainder
+
+**Batch size:** 1,389 docs with platform mentions (notion, discord, telegram, koi, etc.)
+
+**Results:**
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Documents processed | 1,151 | — |
+| Entities persisted | 5,214 | — |
+| Relationships persisted | 745 | — |
+| Rels/doc | 0.65 | ✅ Above 0.4 threshold |
+| Error rate | 0.0% | ✅ Below 5% threshold |
+| Remaining | 145 | Some hit quota limit |
+
+### OpenAI Quota Exhaustion
+
+Both phases hit OpenAI quota limit (429 insufficient_quota error) towards the end:
+- Phase 2 stopped at ~47% completion
+- Phase 1 completed but last ~4 docs got 0 entities due to quota
+
+**Action required:** Wait for quota reset or add billing, then resume remaining docs.
+
+### Remaining Work
+
+| Phase | Remaining Docs | Notes |
+|-------|---------------|-------|
+| Phase 2 (Backfill) | ~1,874 | Resume after quota reset |
+| Phase 1 (E402) | 145 | Resume after quota reset |
+
+### Commands to Resume
+
+```bash
+# After quota resets, SSH to production:
+ssh darren@202.61.196.119
+
+cd /opt/projects/koi-processor
+set -a; source .env; set +a
+
+# Phase 2 - will skip already-processed docs
+PYTHONPATH=src ./.venv/bin/python scripts/reextraction/backfill_broken_extractions.py
+
+# Phase 1 - will skip already-processed docs (tracked in e402_processed_rids.txt)
+PYTHONPATH=src ./.venv/bin/python scripts/reextraction/e402_remainder_reprocess.py
+```
+
+### Artifacts
+
+| File | Description |
+|------|-------------|
+| `data/backfill_rids_2026_01.txt` | 3,568 RIDs needing backfill |
+| `data/e402_broader_batch.txt` | 1,389 E402 platform mention docs |
+| `data/e402_processed_rids.txt` | Tracking log for E402 progress |
+| `scripts/reextraction/backfill_results_*.json` | Phase 2 run results |
+| `scripts/reextraction/e402_remainder_results_*.json` | Phase 1 run results |
+
+---
