@@ -54,7 +54,7 @@ class OpenAIExtractor:
         ontology_dir: str = "/opt/projects/koi-research/ontologies"
     ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model
+        self.model = os.getenv("OPENAI_EXTRACT_MODEL", model)
         self.use_batch_api = use_batch_api
         self.ontology_dir = Path(ontology_dir)
         self.logger = logging.getLogger(__name__)
