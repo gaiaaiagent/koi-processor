@@ -3782,8 +3782,8 @@ Secondary: $NCT (CONCEPT) ← acronym variant matched
    - Query parsing splits "leadership roles", only extracts first PERSON
    - Tweak candidate extraction for PERSON × PERSON patterns
 
-2. **$NCT canonicalization**
-   - Add `$NCT` and `NCT token` to `data/canonical_entities.json` for stability
-   - Ensures resolution works even if acronym logic changes
+2. ~~**$NCT canonicalization**~~ ✅ Done (2025-12-28)
+   - Added `$NCT`, `$nct`, `NCT token`, `nct token` to `data/canonical_entities.json`
+   - NCT now resolves via canonical aliases without relying on acronym heuristics
 
 ---

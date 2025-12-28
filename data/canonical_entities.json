@@ -706,11 +706,15 @@
         "aliases": [
           "NCT",
           "nct",
+          "$NCT",
+          "$nct",
+          "NCT token",
+          "nct token",
           "Nature Carbon Tonnes"
         ],
         "entity_type": "PROJECT",
         "confidence": 1.0,
-        "notes": "Regen-issued basket token"
+        "notes": "Regen-issued basket token (Week 21b: added $ and token variants)"
       }
     },
     "people": {
