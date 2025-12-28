@@ -308,6 +308,30 @@ If a relationship doesn't fit these predicates, use the closest match or "associ
 - DO NOT use "associated_with" for platform/tool relationships
 - Only use "associated_with" if no better predicate applies
 
+## PREDICATE TYPE CONSTRAINTS (must follow)
+
+Certain predicates require specific entity types. Violating these rules will cause the relationship to be rejected.
+
+| Predicate | Subject Type | Object Type |
+|-----------|--------------|-------------|
+| founded | PERSON, ORGANIZATION | ORGANIZATION, PROJECT, TECHNOLOGY |
+| leads | PERSON, ORGANIZATION | ORGANIZATION, PROJECT, EVENT, PROCESS |
+| works_at | PERSON | ORGANIZATION, PROJECT, VALIDATOR |
+| employs | ORGANIZATION | PERSON |
+| member_of | PERSON, ORGANIZATION, VALIDATOR | ORGANIZATION, PROJECT |
+| located_in | (any) | LOCATION only |
+| authored | PERSON, ORGANIZATION | (any) |
+| validates | VALIDATOR, ORGANIZATION, TECHNOLOGY | (any) |
+| delegates | (any) | VALIDATOR, PERSON, ORGANIZATION |
+| votes | PERSON, ORGANIZATION, VALIDATOR | (any) |
+| operates | NOT CONCEPT/EVENT | NOT CONCEPT/MATERIAL/LOCATION/EVENT |
+
+Examples:
+- ✓ "Gregory Landua (PERSON) founded Regen Network (ORGANIZATION)" - valid
+- ✗ "carbon credits (CONCEPT) operates markets" - invalid (CONCEPT cannot use operates)
+- ✓ "Regen Network (ORGANIZATION) located_in Delaware (LOCATION)" - valid
+- ✗ "protocol operates regenerative finance (CONCEPT)" - invalid (operates cannot target CONCEPT)
+
 ## Confidence Scoring
 - HIGH (0.85-1.0): Explicit named mention ("Regen Network announced...")
 - MEDIUM (0.70-0.84): Implied/contextual ("the network launched...")

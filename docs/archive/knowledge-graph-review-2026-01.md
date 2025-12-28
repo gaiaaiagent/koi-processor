@@ -3834,3 +3834,44 @@ Multi-entity queries like "Gregory Landua vs Martin Wainstein leadership roles" 
 | No regression ORG×TECH, ORG×PROJECT | Same as before | Pending verification |
 
 ---
+
+
+## Week 21b Addendum: Extraction Prompt Type Constraints (2025-12-28)
+
+**Status**: ✅ Complete
+
+### Objective
+
+Add type constraint guidance to the extraction prompt so the LLM avoids invalid predicate/type combinations that would be rejected by `predicate_guard.py`. This reduces wasted extraction cycles and keeps outputs aligned with constraints.
+
+### Changes
+
+**File**: `src/extraction/prompt_builder.py`
+
+Added a "PREDICATE TYPE CONSTRAINTS" section after canonical predicates, containing:
+1. **Type constraint table** - 11 predicates with subject/object type rules
+2. **Examples** - Valid and invalid relationship patterns
+
+### Type Constraints Added
+
+| Predicate | Subject Type | Object Type |
+|-----------|--------------|-------------|
+| founded | PERSON, ORGANIZATION | ORGANIZATION, PROJECT, TECHNOLOGY |
+| leads | PERSON, ORGANIZATION | ORGANIZATION, PROJECT, EVENT, PROCESS |
+| works_at | PERSON | ORGANIZATION, PROJECT, VALIDATOR |
+| employs | ORGANIZATION | PERSON |
+| member_of | PERSON, ORG, VALIDATOR | ORGANIZATION, PROJECT |
+| located_in | (any) | LOCATION only |
+| authored | PERSON, ORGANIZATION | (any) |
+| validates | VALIDATOR, ORG, TECH | (any) |
+| delegates | (any) | VALIDATOR, PERSON, ORG |
+| votes | PERSON, ORG, VALIDATOR | (any) |
+| operates | NOT CONCEPT/EVENT | NOT CONCEPT/MATERIAL/LOCATION/EVENT |
+
+### Success Criteria
+
+- ✅ Prompt renders without formatting errors
+- ✅ Constraints aligned with `predicate_guard.py`
+- Expected: Fewer type-invalid relationships generated (to verify in next extraction run)
+
+---
