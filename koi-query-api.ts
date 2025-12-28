@@ -622,9 +622,11 @@ async function getMergedGraphContext(
 
 // Week 14: Normalize query text for entity matching
 // Strips common prefixes (x/, the) and suffixes (module, validator, token)
+// Week 21: Added acronym/token variant handling for short names like NCT
 function normalizeQueryForEntityMatch(query: string): string[] {
   const variants: string[] = [];
-  let normalized = query.toLowerCase().trim();
+  const original = query.trim();
+  let normalized = original.toLowerCase();
 
   // Strip Cosmos SDK module prefix
   if (normalized.startsWith('x/')) {
@@ -649,6 +651,24 @@ function normalizeQueryForEntityMatch(query: string): string[] {
     if (normalized.endsWith(suffix)) {
       variants.push(normalized.slice(0, -suffix.length).trim());
     }
+  }
+
+  // Week 21: Add variants for short acronyms (2-5 chars, all letters)
+  // Try: uppercase, with $ prefix, with 's' suffix
+  if (normalized.length >= 2 && normalized.length <= 5 && /^[a-z]+$/.test(normalized)) {
+    const upper = normalized.toUpperCase();
+    variants.push(upper);                    // NCT
+    variants.push('$' + normalized);         // $nct
+    variants.push('$' + upper);              // $NCT
+    variants.push(normalized + 's');         // ncts
+    variants.push(upper + 's');              // NCTs
+    variants.push(normalized + ' token');    // nct token
+    variants.push(upper + ' token');         // NCT token
+  }
+
+  // Week 21: If query ends with 's', try singular form
+  if (normalized.endsWith('s') && normalized.length > 3) {
+    variants.push(normalized.slice(0, -1));
   }
 
   return [...new Set(variants)]; // Deduplicate

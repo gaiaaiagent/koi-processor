@@ -33,8 +33,9 @@ except ImportError:
 # API configuration
 DEFAULT_API_URL = "http://localhost:8301"
 
-# Evaluation queries (18 total - 8 entity + 10 question)
+# Evaluation queries (21 total - 8 entity + 13 question)
 # Week 21: Renamed "ambiguous" to "question" for clarity, added 3 new question queries
+# Week 21b: Added 3 more multi-entity queries (4 total) to avoid single-case success skew
 EVAL_QUERIES = [
     # Entity-Heavy Queries (8)
     {
@@ -109,6 +110,27 @@ EVAL_QUERIES = [
         "category": "question",
         "expected_type": None,
         "notes": "Multi-entity query - expects dual resolution",
+        "expected_query_type": "multi_entity",
+    },
+    {
+        "query": "Gregory Landua vs Martin Wainstein leadership roles",
+        "category": "question",
+        "expected_type": None,
+        "notes": "Multi-entity query with two PERSON entities",
+        "expected_query_type": "multi_entity",
+    },
+    {
+        "query": "Relationship between Regen Network and Cosmos SDK",
+        "category": "question",
+        "expected_type": None,
+        "notes": "Multi-entity query with ORG and TECHNOLOGY",
+        "expected_query_type": "multi_entity",
+    },
+    {
+        "query": "CarbonPlus Grasslands and Regen Registry connection",
+        "category": "question",
+        "expected_type": None,
+        "notes": "Multi-entity query with CREDIT_CLASS and ORGANIZATION",
         "expected_query_type": "multi_entity",
     },
     {
