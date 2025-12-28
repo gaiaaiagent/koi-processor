@@ -249,6 +249,7 @@ interface GraphContextEdge {
   direction: 'out' | 'in';
   confidence: number;
   occurrence_count: number;
+  source_entity?: string; // Week 21: For multi-entity queries, indicates which entity contributed this edge
 }
 
 interface GraphContext {
@@ -258,10 +259,365 @@ interface GraphContext {
     type: string;
     occurrence_count: number;
   } | null;
+  secondary_entity?: { // Week 21: For multi-entity queries
+    uri: string;
+    text: string;
+    type: string;
+    occurrence_count: number;
+  } | null;
   edges: GraphContextEdge[];
   edge_count: number;
   truncated: boolean;
+  query_type?: 'entity' | 'question' | 'multi_entity'; // Week 21: Query classification
   _privacy_warning?: string;
+}
+
+// ============================================================================
+// Week 21: Query Type Detection and Entity Extraction for Question Queries
+// ============================================================================
+
+type QueryType = 'entity' | 'question' | 'multi_entity';
+
+interface QueryClassification {
+  type: QueryType;
+  entity_candidates: string[];
+  multi_entity_pattern?: 'relationship_between' | 'and' | 'vs' | null;
+}
+
+/**
+ * Detect whether a query is entity-style, question-style, or multi-entity.
+ *
+ * Entity-style: Direct entity mentions (e.g., "Gregory Landua", "x/ecocredit module")
+ * Question-style: Questions starting with How/What/Who/Where/Why/When
+ * Multi-entity: Queries mentioning relationships between entities (e.g., "relationship between X and Y")
+ */
+function classifyQuery(query: string): QueryClassification {
+  const q = query.trim();
+  const qLower = q.toLowerCase();
+
+  // Pattern 1: Multi-entity - "relationship between X and Y"
+  const relationshipBetweenMatch = qLower.match(/relationship\s+between\s+(.+?)\s+and\s+(.+?)(?:\?|$)/i);
+  if (relationshipBetweenMatch) {
+    return {
+      type: 'multi_entity',
+      entity_candidates: [
+        relationshipBetweenMatch[1].trim(),
+        relationshipBetweenMatch[2].trim()
+      ],
+      multi_entity_pattern: 'relationship_between'
+    };
+  }
+
+  // Pattern 2: Multi-entity - "X vs Y" or "X versus Y"
+  const vsMatch = q.match(/^(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\?|$)/i);
+  if (vsMatch) {
+    return {
+      type: 'multi_entity',
+      entity_candidates: [vsMatch[1].trim(), vsMatch[2].trim()],
+      multi_entity_pattern: 'vs'
+    };
+  }
+
+  // Pattern 3: Multi-entity - "X and Y" at the start (without relationship keyword)
+  // Only if both look like entity names (capitalized or known patterns)
+  const andMatch = q.match(/^(.+?)\s+and\s+(.+?)(?:\?|$)/i);
+  if (andMatch && !qLower.startsWith('how') && !qLower.startsWith('what') &&
+      !qLower.startsWith('who') && !qLower.startsWith('where') &&
+      !qLower.startsWith('why') && !qLower.startsWith('when')) {
+    const candidate1 = andMatch[1].trim();
+    const candidate2 = andMatch[2].trim();
+    // Check if candidates look like entity names (capitalized or short phrases)
+    if (looksLikeEntityName(candidate1) && looksLikeEntityName(candidate2)) {
+      return {
+        type: 'multi_entity',
+        entity_candidates: [candidate1, candidate2],
+        multi_entity_pattern: 'and'
+      };
+    }
+  }
+
+  // Pattern 4: Question-style queries
+  if (/^(how|what|who|where|why|when|which|is|are|does|do|can|could|would|will)\s+/i.test(qLower)) {
+    const candidates = extractEntityCandidatesFromQuestion(q);
+    return {
+      type: 'question',
+      entity_candidates: candidates,
+      multi_entity_pattern: null
+    };
+  }
+
+  // Default: Entity-style query
+  return {
+    type: 'entity',
+    entity_candidates: [q],
+    multi_entity_pattern: null
+  };
+}
+
+/**
+ * Check if a string looks like an entity name (capitalized, short phrase, known patterns)
+ */
+function looksLikeEntityName(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2 || t.length > 50) return false;
+
+  // Known patterns that indicate entity names
+  if (t.startsWith('x/') || t.startsWith('$')) return true;
+
+  // Check for capitalization (at least first word capitalized)
+  const words = t.split(/\s+/);
+  if (words.length > 0 && /^[A-Z]/.test(words[0])) return true;
+
+  // Short phrases (2-4 words) are likely entity names
+  if (words.length >= 1 && words.length <= 4) return true;
+
+  return false;
+}
+
+/**
+ * Extract potential entity names from a question-style query.
+ * Looks for capitalized phrases, quoted text, and known entity patterns.
+ */
+function extractEntityCandidatesFromQuestion(question: string): string[] {
+  const candidates: string[] = [];
+
+  // Remove question words from the start
+  let cleaned = question.replace(/^(how|what|who|where|why|when|which|is|are|does|do|can|could|would|will)\s+/i, '');
+
+  // Extract quoted phrases first
+  const quotedMatches = question.match(/"([^"]+)"|'([^']+)'/g);
+  if (quotedMatches) {
+    for (const match of quotedMatches) {
+      const content = match.replace(/['"]/g, '').trim();
+      if (content.length > 0) candidates.push(content);
+    }
+  }
+
+  // Extract Cosmos SDK module patterns (x/modulename)
+  const moduleMatches = cleaned.match(/x\/\w+/gi);
+  if (moduleMatches) {
+    for (const match of moduleMatches) {
+      candidates.push(match);
+    }
+  }
+
+  // Extract token patterns ($TOKEN)
+  const tokenMatches = cleaned.match(/\$\w+/g);
+  if (tokenMatches) {
+    for (const match of tokenMatches) {
+      candidates.push(match.slice(1)); // Remove $ prefix for matching
+    }
+  }
+
+  // Extract capitalized phrases (2+ words starting with capitals, or single proper nouns)
+  // Match sequences like "Regen Network", "Gregory Landua", "NCT", "Cosmos SDK"
+  const capitalizedMatches = cleaned.match(/(?:[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)|(?:[A-Z]{2,})/g);
+  if (capitalizedMatches) {
+    for (const match of capitalizedMatches) {
+      const trimmed = match.trim();
+      // Filter out common words that might be capitalized at sentence start
+      const commonWords = ['The', 'A', 'An', 'This', 'That', 'It', 'They', 'How', 'What', 'Who', 'Where', 'When', 'Which', 'Is', 'Are', 'Does', 'Do', 'Can', 'Could', 'Would', 'Will'];
+      if (!commonWords.includes(trimmed) && trimmed.length > 1) {
+        candidates.push(trimmed);
+      }
+    }
+  }
+
+  // Extract known entity suffixes (ending in "module", "token", "validator", "network", etc.)
+  const suffixPatterns = [
+    /(\w+(?:\s+\w+)*\s+module)/gi,
+    /(\w+(?:\s+\w+)*\s+token)/gi,
+    /(\w+(?:\s+\w+)*\s+validator)/gi,
+    /(\w+(?:\s+\w+)*\s+network)/gi,
+    /(\w+(?:\s+\w+)*\s+credit\s+class)/gi,
+    /(\w+(?:\s+\w+)*\s+credits?)/gi,
+  ];
+
+  for (const pattern of suffixPatterns) {
+    const matches = cleaned.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        candidates.push(match.trim());
+      }
+    }
+  }
+
+  // Deduplicate and filter
+  const uniqueCandidates = [...new Set(candidates)]
+    .filter(c => c.length >= 2)
+    .sort((a, b) => b.length - a.length); // Prefer longer matches
+
+  return uniqueCandidates;
+}
+
+/**
+ * Week 21: Resolve entity candidates from a question query.
+ * Tries each candidate through the entity resolver until one matches.
+ */
+async function resolveQuestionQueryEntity(
+  candidates: string[],
+  minOccurrenceCount: number = 2
+): Promise<{
+  entity_id: number;
+  uri: string;
+  text: string;
+  type: string;
+  occurrence_count: number;
+  matched_candidate: string;
+} | null> {
+  for (const candidate of candidates) {
+    // Try the candidate directly
+    const resolved = await resolveEntityInternal(candidate, null, null);
+    if (resolved && resolved.occurrence_count >= minOccurrenceCount) {
+      if (process.env.DEBUG_GRAPH_EXPANSION) {
+        console.log(`[GraphRAG-W21] Question query resolved '${candidate}' → ${resolved.entity_text} (${resolved.entity_type})`);
+      }
+      return {
+        entity_id: resolved.entity_id,
+        uri: resolved.uri,
+        text: resolved.entity_text,
+        type: resolved.entity_type,
+        occurrence_count: resolved.occurrence_count,
+        matched_candidate: candidate
+      };
+    }
+
+    // Try normalized variants
+    const variants = normalizeQueryForEntityMatch(candidate);
+    for (const variant of variants) {
+      if (variant === candidate.toLowerCase()) continue; // Skip if same as original
+      const resolvedVariant = await resolveEntityInternal(variant, null, null);
+      if (resolvedVariant && resolvedVariant.occurrence_count >= minOccurrenceCount) {
+        if (process.env.DEBUG_GRAPH_EXPANSION) {
+          console.log(`[GraphRAG-W21] Question query resolved '${candidate}' via variant '${variant}' → ${resolvedVariant.entity_text}`);
+        }
+        return {
+          entity_id: resolvedVariant.entity_id,
+          uri: resolvedVariant.uri,
+          text: resolvedVariant.entity_text,
+          type: resolvedVariant.entity_type,
+          occurrence_count: resolvedVariant.occurrence_count,
+          matched_candidate: candidate
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Week 21: Resolve two entities for multi-entity queries.
+ * Returns up to 2 resolved entities.
+ */
+async function resolveMultiEntityQuery(
+  candidates: [string, string],
+  minOccurrenceCount: number = 2
+): Promise<{
+  primary: { entity_id: number; uri: string; text: string; type: string; occurrence_count: number } | null;
+  secondary: { entity_id: number; uri: string; text: string; type: string; occurrence_count: number } | null;
+}> {
+  const results: Array<{ entity_id: number; uri: string; text: string; type: string; occurrence_count: number } | null> = [];
+
+  for (const candidate of candidates) {
+    // Try direct resolution
+    let resolved = await resolveEntityInternal(candidate, null, null);
+
+    // If not found, try normalized variants
+    if (!resolved || resolved.occurrence_count < minOccurrenceCount) {
+      const variants = normalizeQueryForEntityMatch(candidate);
+      for (const variant of variants) {
+        const resolvedVariant = await resolveEntityInternal(variant, null, null);
+        if (resolvedVariant && resolvedVariant.occurrence_count >= minOccurrenceCount) {
+          resolved = resolvedVariant;
+          break;
+        }
+      }
+    }
+
+    if (resolved && resolved.occurrence_count >= minOccurrenceCount) {
+      results.push({
+        entity_id: resolved.entity_id,
+        uri: resolved.uri,
+        text: resolved.entity_text,
+        type: resolved.entity_type,
+        occurrence_count: resolved.occurrence_count
+      });
+      if (process.env.DEBUG_GRAPH_EXPANSION) {
+        console.log(`[GraphRAG-W21] Multi-entity resolved '${candidate}' → ${resolved.entity_text} (${resolved.entity_type})`);
+      }
+    } else {
+      results.push(null);
+      if (process.env.DEBUG_GRAPH_EXPANSION) {
+        console.log(`[GraphRAG-W21] Multi-entity failed to resolve '${candidate}'`);
+      }
+    }
+  }
+
+  // Sort by occurrence_count to determine primary vs secondary
+  const [first, second] = results;
+  if (first && second) {
+    if (first.occurrence_count >= second.occurrence_count) {
+      return { primary: first, secondary: second };
+    } else {
+      return { primary: second, secondary: first };
+    }
+  }
+
+  return { primary: first || second, secondary: first ? second : null };
+}
+
+/**
+ * Week 21: Merge graph contexts from two entities.
+ * Combines edges from both entities, marks source_entity, and limits to maxEdges.
+ */
+async function getMergedGraphContext(
+  primaryEntityId: number,
+  secondaryEntityId: number | null,
+  primaryText: string,
+  secondaryText: string | null,
+  maxEdges: number = 20
+): Promise<{ edges: GraphContextEdge[]; truncated: boolean }> {
+  const allEdges: GraphContextEdge[] = [];
+
+  // Get edges for primary entity
+  const primaryContext = await getGraphContext(primaryEntityId, maxEdges);
+  if (primaryContext) {
+    for (const edge of primaryContext.edges) {
+      allEdges.push({
+        ...edge,
+        source_entity: primaryText
+      });
+    }
+  }
+
+  // Get edges for secondary entity if present
+  if (secondaryEntityId !== null && secondaryText) {
+    const secondaryContext = await getGraphContext(secondaryEntityId, maxEdges);
+    if (secondaryContext) {
+      for (const edge of secondaryContext.edges) {
+        // Avoid duplicate edges
+        const isDuplicate = allEdges.some(
+          e => e.subject_uri === edge.subject_uri &&
+               e.object_uri === edge.object_uri &&
+               e.predicate === edge.predicate
+        );
+        if (!isDuplicate) {
+          allEdges.push({
+            ...edge,
+            source_entity: secondaryText
+          });
+        }
+      }
+    }
+  }
+
+  // Sort by occurrence_count DESC and limit
+  allEdges.sort((a, b) => b.occurrence_count - a.occurrence_count);
+  const truncated = allEdges.length > maxEdges;
+  const limitedEdges = allEdges.slice(0, maxEdges);
+
+  return { edges: limitedEdges, truncated };
 }
 
 // Week 14: Normalize query text for entity matching
@@ -1224,32 +1580,120 @@ app.post('/api/koi/query', async (req, res) => {
     const responseTime = Date.now() - startTime;
 
     // Week 13: GraphRAG context retrieval
+    // Week 21: Enhanced with question-query and multi-entity resolution
     let graphContext: GraphContext | null = null;
     const enableGraphRAG = process.env.ENABLE_GRAPHRAG_CONTEXT === 'true' || requestGraphContext || queryParamGraphContext;
 
-    if (enableGraphRAG && entityResults.length > 0) {
+    if (enableGraphRAG) {
       try {
-        // Get dominant entity from entity search results
-        const dominant = await getDominantEntity(entityResults, question);
+        // Week 21: Classify the query type
+        const queryClassification = classifyQuery(question);
+        if (process.env.DEBUG_GRAPH_EXPANSION) {
+          console.log(`[GraphRAG-W21] Query classified as: ${queryClassification.type}, candidates: ${queryClassification.entity_candidates.join(', ')}`);
+        }
 
-        if (dominant) {
-          // Fetch graph context for the dominant entity
-          graphContext = await getGraphContext(dominant.entity_id, 20);
+        // Try different resolution strategies based on query type
+        if (queryClassification.type === 'multi_entity' && queryClassification.entity_candidates.length >= 2) {
+          // Week 21: Multi-entity resolution
+          const multiResult = await resolveMultiEntityQuery(
+            queryClassification.entity_candidates.slice(0, 2) as [string, string],
+            2 // minOccurrenceCount
+          );
 
-          if (graphContext) {
-            graphContext.dominant_entity = {
-              uri: dominant.uri,
-              text: dominant.text,
-              type: dominant.type,
-              occurrence_count: dominant.occurrence_count,
+          if (multiResult.primary) {
+            // Get merged graph context
+            const merged = await getMergedGraphContext(
+              multiResult.primary.entity_id,
+              multiResult.secondary?.entity_id || null,
+              multiResult.primary.text,
+              multiResult.secondary?.text || null,
+              20 // maxEdges
+            );
+
+            graphContext = {
+              dominant_entity: {
+                uri: multiResult.primary.uri,
+                text: multiResult.primary.text,
+                type: multiResult.primary.type,
+                occurrence_count: multiResult.primary.occurrence_count,
+              },
+              secondary_entity: multiResult.secondary ? {
+                uri: multiResult.secondary.uri,
+                text: multiResult.secondary.text,
+                type: multiResult.secondary.type,
+                occurrence_count: multiResult.secondary.occurrence_count,
+              } : null,
+              edges: merged.edges,
+              edge_count: merged.edges.length,
+              truncated: merged.truncated,
+              query_type: 'multi_entity',
+              _privacy_warning: 'graph_context is not privacy-filtered',
             };
+
+            if (process.env.DEBUG_GRAPH_EXPANSION) {
+              console.log(`[GraphRAG-W21] Multi-entity context: primary='${multiResult.primary.text}', secondary='${multiResult.secondary?.text || 'none'}', edges: ${graphContext.edge_count}`);
+            }
+          }
+        } else if (queryClassification.type === 'question' && queryClassification.entity_candidates.length > 0) {
+          // Week 21: Question-query resolution
+          // First try to get dominant entity from entity search (existing behavior)
+          let dominant = entityResults.length > 0 ? await getDominantEntity(entityResults, question) : null;
+
+          // If entity search didn't find anything, try extracting from question
+          if (!dominant) {
+            const questionResolved = await resolveQuestionQueryEntity(queryClassification.entity_candidates, 2);
+            if (questionResolved) {
+              dominant = {
+                entity_id: questionResolved.entity_id,
+                uri: questionResolved.uri,
+                text: questionResolved.text,
+                type: questionResolved.type,
+                occurrence_count: questionResolved.occurrence_count,
+              };
+              if (process.env.DEBUG_GRAPH_EXPANSION) {
+                console.log(`[GraphRAG-W21] Question resolved via candidate '${questionResolved.matched_candidate}' → ${dominant.text}`);
+              }
+            }
           }
 
-          if (process.env.DEBUG_GRAPH_EXPANSION) {
-            console.log(`[GraphRAG] Context retrieved for entity '${dominant.text}' (${dominant.type}), edges: ${graphContext?.edge_count || 0}`);
+          if (dominant) {
+            graphContext = await getGraphContext(dominant.entity_id, 20);
+            if (graphContext) {
+              graphContext.dominant_entity = {
+                uri: dominant.uri,
+                text: dominant.text,
+                type: dominant.type,
+                occurrence_count: dominant.occurrence_count,
+              };
+              graphContext.query_type = 'question';
+            }
+
+            if (process.env.DEBUG_GRAPH_EXPANSION) {
+              console.log(`[GraphRAG-W21] Question context for '${dominant.text}' (${dominant.type}), edges: ${graphContext?.edge_count || 0}`);
+            }
           }
-        } else if (process.env.DEBUG_GRAPH_EXPANSION) {
-          console.log(`[GraphRAG] No dominant entity found for query: "${question}"`);
+        } else {
+          // Entity-style query: use existing getDominantEntity
+          const dominant = entityResults.length > 0 ? await getDominantEntity(entityResults, question) : null;
+
+          if (dominant) {
+            graphContext = await getGraphContext(dominant.entity_id, 20);
+            if (graphContext) {
+              graphContext.dominant_entity = {
+                uri: dominant.uri,
+                text: dominant.text,
+                type: dominant.type,
+                occurrence_count: dominant.occurrence_count,
+              };
+              graphContext.query_type = 'entity';
+            }
+
+            if (process.env.DEBUG_GRAPH_EXPANSION) {
+              console.log(`[GraphRAG] Context retrieved for entity '${dominant.text}' (${dominant.type}), edges: ${graphContext?.edge_count || 0}`);
+            }
+          } else if (process.env.DEBUG_GRAPH_EXPANSION) {
+            console.log(`[GraphRAG] No dominant entity found for query: "${question}"`);
+          }
         }
       } catch (err) {
         console.error('[GraphRAG] Error retrieving graph context:', err);

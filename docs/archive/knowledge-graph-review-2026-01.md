@@ -3471,3 +3471,269 @@ PYTHONPATH=src ./.venv/bin/python scripts/reextraction/e402_remainder_reprocess.
 *Note: Entity count unchanged because most extracted entities already existed (dedup working correctly). Relationships increased by ~1,900.*
 
 ---
+
+## Week 21: Question-Query & Multi-Entity GraphRAG Resolution (2025-12-28)
+
+**Status:** Implementation Complete - Awaiting Evaluation
+
+### Objective
+
+Improve GraphRAG coverage for question-style queries and multi-entity queries, then evaluate impact.
+
+### Problem Statement
+
+From Week 18 baseline observations:
+- Entity queries (person names, specific modules, validators) resolve well
+- **Question-style queries** ("How does...", "What projects...") don't resolve to entities
+- **Compound queries** ("Regen Network ecocredits", "NCT and ecocredits") don't resolve
+
+### Approach
+
+#### Phase 1: Question-Query Resolution
+
+Added query classification and entity extraction for question-style queries:
+
+1. **Query Classification** (`classifyQuery()`)
+   - Detects query type: `entity`, `question`, or `multi_entity`
+   - Extracts entity candidates from each query type
+   - Returns classification with candidate labels
+
+2. **Entity Extraction from Questions** (`extractEntityCandidatesFromQuestion()`)
+   - Extracts quoted phrases (`"Regen Network"`)
+   - Extracts Cosmos SDK module patterns (`x/ecocredit`)
+   - Extracts token patterns (`$NCT`)
+   - Extracts capitalized phrases (proper nouns)
+   - Extracts known entity suffixes (module, token, validator, network, credit class)
+
+3. **Question Query Resolution** (`resolveQuestionQueryEntity()`)
+   - Tries each extracted candidate through entity resolver
+   - Uses existing `resolveEntityInternal()` for scoring
+   - Falls back to normalized variants if direct match fails
+   - Only accepts entities with occurrence_count >= 2
+
+#### Phase 2: Multi-Entity Resolution
+
+Added dual-entity resolution for relationship queries:
+
+1. **Multi-Entity Detection** (in `classifyQuery()`)
+   - Pattern: "relationship between X and Y"
+   - Pattern: "X vs Y" / "X versus Y"
+   - Pattern: "X and Y" (when both look like entity names)
+
+2. **Dual Resolution** (`resolveMultiEntityQuery()`)
+   - Resolves both entity candidates
+   - Sorts by occurrence_count to determine primary vs secondary
+   - Returns both or falls back to single entity
+
+3. **Merged Graph Context** (`getMergedGraphContext()`)
+   - Fetches edges for both entities
+   - Deduplicates common edges
+   - Marks each edge with `source_entity`
+   - Limits to 20 total edges
+
+#### Response Payload Changes
+
+Extended `GraphContext` interface:
+```typescript
+interface GraphContext {
+  dominant_entity: { uri, text, type, occurrence_count } | null;
+  secondary_entity?: { uri, text, type, occurrence_count } | null;  // NEW
+  edges: GraphContextEdge[];
+  edge_count: number;
+  truncated: boolean;
+  query_type?: 'entity' | 'question' | 'multi_entity';  // NEW
+  _privacy_warning?: string;
+}
+
+interface GraphContextEdge {
+  // ... existing fields ...
+  source_entity?: string;  // NEW: For multi-entity queries
+}
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `koi-query-api.ts` | Added query classification functions, updated GraphRAG retrieval logic |
+| `scripts/eval_graphrag.py` | Added category split metrics, 3 new question queries, baseline comparison |
+
+### Evaluation Script Updates
+
+Added to `eval_graphrag.py`:
+- Renamed category "ambiguous" → "question" for clarity
+- Added 3 new test queries:
+  - "How is the Regen Ledger related to Cosmos SDK?"
+  - "Who leads Regen Network?"
+  - "What tools integrate with Regen Registry?"
+- Metrics now track by category:
+  - Resolution rate (entity vs question)
+  - Average edge count (entity vs question)
+  - Multi-entity resolution success
+- Added `--save-baseline` and `--compare-baseline` flags
+
+### Success Criteria
+
+| Criterion | Target | Status |
+|-----------|--------|--------|
+| Question-style resolution rate | >70% | Pending evaluation |
+| No regression in entity-style queries | >=80% | Pending evaluation |
+| Avg edges per resolved query | >=5 | Pending evaluation |
+
+### Testing Commands
+
+```bash
+# SSH to production
+ssh darren@202.61.196.119
+cd /opt/projects/koi-processor
+set -a && source .env && set +a
+
+# Enable debug logging
+export DEBUG_GRAPH_EXPANSION=true
+
+# Test question-style query
+curl -X POST "http://localhost:8301/api/koi/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Who founded Regen Network?", "limit": 5, "graph_context": true}' | jq '.graph_context'
+
+# Test multi-entity query
+curl -X POST "http://localhost:8301/api/koi/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Relationship between NCT and ecocredits", "limit": 5, "graph_context": true}' | jq '.graph_context'
+```
+
+### Pre-Deployment Checks
+
+1. **Verify ENABLE_GRAPHRAG_CONTEXT is set** (required for graph_context feature):
+   ```bash
+   grep ENABLE_GRAPHRAG_CONTEXT ecosystem.hybrid.config.js
+   # Should show: ENABLE_GRAPHRAG_CONTEXT: 'true'
+   ```
+
+2. **GAIA UI compatibility** - The Graph Context tab ignores unknown fields:
+   - `secondary_entity` - Not rendered (safe)
+   - `edge.source_entity` - Not rendered (safe)
+   - `query_type` - Not rendered (safe)
+   - No TypeScript errors expected
+
+### Deployment Sequence (IMPORTANT ORDER)
+
+**Step 1: Capture Baseline (BEFORE pulling changes)**
+```bash
+ssh darren@202.61.196.119
+cd /opt/projects/koi-processor
+set -a && source .env && set +a
+
+# Baseline eval BEFORE code changes (critical for true comparison)
+PYTHONPATH=src ./.venv/bin/python scripts/eval_graphrag.py --save-baseline
+```
+
+**Step 2: Deploy Code Changes**
+```bash
+# Pull from regen-prod branch (NOT main)
+git pull origin regen-prod
+
+# Restart hybrid RAG API
+sudo -u shawn pm2 restart hybrid-rag-api
+
+# Verify API is healthy
+curl http://localhost:8301/health
+```
+
+**Step 3: Post-Deploy Evaluation**
+```bash
+# Run comparison evaluation
+PYTHONPATH=src ./.venv/bin/python scripts/eval_graphrag.py --compare-baseline
+
+# Review the generated report
+cat docs/week21_graphrag_evaluation.md
+```
+
+**Step 4: Verify Success Criteria**
+- Question-style resolution rate >70%
+- Entity-style resolution >=80% (no regression)
+- Avg edges per resolved query >=5
+
+**Step 5: Log Verification**
+```bash
+# Check for W21 debug logs (successful classification)
+sudo -u shawn pm2 logs hybrid-rag-api --lines 100 | grep -E "\[GraphRAG-W21\]"
+# Expected: "Query classified as: question" or "multi_entity"
+
+# Check for any GraphRAG errors
+sudo -u shawn pm2 logs hybrid-rag-api --lines 100 | grep -E "\[GraphRAG\].*Error"
+# Expected: None (or pre-existing issues)
+```
+
+**Step 6: Update Documentation**
+- Update this file with baseline vs after metrics
+- Mark deployment checklist items complete
+
+### Rollback Plan
+
+If issues are detected post-deploy:
+
+```bash
+# 1. Revert to previous commit
+cd /opt/projects/koi-processor
+git log --oneline -3  # Find previous commit hash
+git checkout <previous-commit-hash> -- koi-query-api.ts
+
+# 2. Restart API
+sudo -u shawn pm2 restart hybrid-rag-api
+
+# 3. Verify rollback
+curl -s -X POST "http://localhost:8301/api/koi/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Gregory Landua", "limit": 5, "graph_context": true}' \
+  | jq '.graph_context.query_type'
+# Should return null (old behavior) instead of "entity"
+
+# 4. Re-run eval to confirm baseline behavior restored
+PYTHONPATH=src ./.venv/bin/python scripts/eval_graphrag.py
+```
+
+**Rollback triggers:**
+- Question resolution rate drops below 50%
+- Entity resolution rate drops below 70% (regression)
+- API errors in logs mentioning `classifyQuery` or `resolveQuestionQueryEntity`
+- GAIA Graph Context tab throwing JS errors (check browser console)
+
+### Suggested Heuristics Implemented
+
+| Heuristic | Implementation |
+|-----------|----------------|
+| Multi-entity detection | Regex patterns for "relationship between", "vs", "and" |
+| Question-style detection | Check for How/What/Who/Where question words |
+| Entity candidate extraction | Capitalized phrases, quoted text, x/ prefixes, $ prefixes |
+| Occurrence threshold | Minimum 2 (consistent with existing GRAPHRAG_ENTITY_THRESHOLD) |
+| Edge limit | 20 total edges (split across both entities for multi-entity) |
+
+### Baseline (Pre-Change)
+
+From Week 18:
+- **Overall Resolution Rate:** 6/15 (40%)
+- **Entity Resolution Rate:** 6/8 (75%)
+- **Question Resolution Rate:** 0/7 (0%)
+- **Avg Edges (Resolved):** ~12
+
+### Expected Improvement
+
+- Question resolution should improve from 0% to >70%
+- Multi-entity queries should resolve both entities
+- Entity queries should maintain current performance
+
+### Deployment Checklist
+
+- [x] Code changes to `koi-query-api.ts`
+- [x] Evaluation script updated
+- [x] Master doc updated with approach
+- [x] Pre-deployment checks documented (ENABLE_GRAPHRAG_CONTEXT, GAIA UI compatibility)
+- [x] Deployment sequence corrected (baseline BEFORE pull, use regen-prod branch)
+- [ ] **ON PROD**: Run baseline evaluation (BEFORE pulling changes)
+- [ ] **ON PROD**: `git pull origin regen-prod` + restart API
+- [ ] **ON PROD**: Run post-change evaluation with `--compare-baseline`
+- [ ] Update master doc with baseline vs after metrics
+- [ ] Verify all success criteria met
+
+---
