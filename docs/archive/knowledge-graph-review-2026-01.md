@@ -3730,10 +3730,60 @@ From Week 18:
 - [x] Master doc updated with approach
 - [x] Pre-deployment checks documented (ENABLE_GRAPHRAG_CONTEXT, GAIA UI compatibility)
 - [x] Deployment sequence corrected (baseline BEFORE pull, use regen-prod branch)
-- [ ] **ON PROD**: Run baseline evaluation (BEFORE pulling changes)
-- [ ] **ON PROD**: `git pull origin regen-prod` + restart API
-- [ ] **ON PROD**: Run post-change evaluation with `--compare-baseline`
-- [ ] Update master doc with baseline vs after metrics
-- [ ] Verify all success criteria met
+- [x] **ON PROD**: Run baseline evaluation (BEFORE pulling changes)
+- [x] **ON PROD**: `git pull origin regen-prod` + restart API
+- [x] **ON PROD**: Run post-change evaluation with `--compare-baseline`
+- [x] Update master doc with baseline vs after metrics
+- [x] Verify all success criteria met
+
+---
+
+## Week 21b: Acronym Variants & Multi-Entity Eval (2025-12-28)
+
+**Status**: ✅ Complete
+
+### Changes
+
+1. **Acronym variant handling** in `normalizeQueryForEntityMatch()`:
+   - Short names (2-5 chars, all letters) now generate variants:
+     - Uppercase: `nct` → `NCT`
+     - $ prefix: `$nct`, `$NCT`
+     - Plural: `ncts`, `NCTs`
+     - Token suffix: `nct token`, `NCT token`
+   - Plural-to-singular fallback: `ncts` → `nct`
+
+2. **Expanded multi-entity eval coverage** (4 queries, up from 1):
+   - "Gregory Landua vs Martin Wainstein leadership roles" (PERSON × PERSON)
+   - "Relationship between Regen Network and Cosmos SDK" (ORG × TECH)
+   - "CarbonPlus Grasslands and Regen Registry connection" (CREDIT_CLASS × ORG)
+
+### Results
+
+| Metric | Value | Target |
+|--------|-------|--------|
+| Overall Resolution | 100% (21/21) | — |
+| Entity Resolution | 100% (8/8) | ≥80% ✅ |
+| Question Resolution | 100% (13/13) | >70% ✅ |
+| Avg Edges | 14.8 | ≥5 ✅ |
+| Multi-entity detection | 4/4 correct | — |
+| Secondary entity resolved | 3/4 | — |
+
+### NCT Fix Confirmed
+
+```
+Query: "Relationship between NCT and ecocredits"
+Dominant: Ecocredits (PROJECT)
+Secondary: $NCT (CONCEPT) ← acronym variant matched
+```
+
+### Backlog (Low Priority)
+
+1. **Gregory Landua vs Martin Wainstein secondary resolution**
+   - Query parsing splits "leadership roles", only extracts first PERSON
+   - Tweak candidate extraction for PERSON × PERSON patterns
+
+2. **$NCT canonicalization**
+   - Add `$NCT` and `NCT token` to `data/canonical_entities.json` for stability
+   - Ensures resolution works even if acronym logic changes
 
 ---
