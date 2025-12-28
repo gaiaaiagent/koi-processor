@@ -2029,10 +2029,10 @@ for (const candidate of sortedEntities) {
 4. ✅ What projects use x/group module? → group module (28 occ, 19 edges)
 5. ✅ What validators support Regen mainnet? → Regen Mainnet (48 occ, 4 edges)
 
-**Still 0 Edges (extraction quality issue):**
-- NCT token → NCTs (2 occ, 0 relationships in registry)
-- carbon → carbon (33 occ, 0 relationships in registry)
-- Classes → Classes (2 occ, 0 relationships in registry)
+**0-edge follow-up (updated):**
+- NCT token → NCTs: relationships added after Week 15+19 reprocess (no longer 0-edge)
+- carbon → carbon: reviewed; acceptable to keep minimal edges (prefer compound entities)
+- Classes → Classes: still 0 edges (low-priority)
 
 ### Artifacts
 
@@ -2041,7 +2041,7 @@ for (const candidate of sortedEntities) {
 
 ### Recommendation
 
-**ENABLE_GRAPHRAG_CONTEXT can now be set to `true`** for production use. All 15 evaluation queries now return dominant entities. Entities with 0 edges are an extraction quality issue, not a GraphRAG matching issue.
+**ENABLE_GRAPHRAG_CONTEXT can now be set to `true`** for production use. All 15 evaluation queries now return dominant entities. Known 0-edge cases were reviewed (carbon acceptable; NCT now has relationships after Week 15+19 reprocess).
 
 ---
 
@@ -2100,10 +2100,7 @@ All proposed fixes have been applied. See [Week 3 cleanup report](reports/fix010
 11. ~~**Run evaluation on production** - Execute eval script and analyze resolver accuracy~~ **Week 8**: Context hints ready, needs execution
 12. **Measure hint vs no-hint accuracy** - Compare evaluation results with and without context hints
 13. **Tune type hint heuristics** - Adjust keyword lists based on evaluation feedback
-14. **FIX-015: Predicate-type constraints** - Add validation to prevent predicates targeting invalid entity types. Analysis found 127 `operates→CONCEPT` relationships that are semantically invalid. See [full analysis](reports/predicate_type_constraints_analysis.md). Proposed solutions:
-    - Add `RelationshipTypeValidator` post-processing module
-    - Enhance extraction prompt with predicate usage guidance
-    - Consider predicate consolidation (70 → ~40-50)
+14. ~~**FIX-015: Predicate-type constraints** - Add validation to prevent predicates targeting invalid entity types (see [full analysis](reports/predicate_type_constraints_analysis.md)).~~ **DONE Week 16** - PredicateTypeValidator + strict mode; prompt guidance added Week 21b (commit 5f13e1c8)
 
 ---
 
@@ -2671,7 +2668,7 @@ The guard handles LLM output variations:
 
 1. ~~Enable strict mode~~ ✅ Done
 2. ~~Cleanup existing violations~~ ✅ Done (171 deleted)
-3. **Add predicate guidance to prompt** - Help LLM understand constraints (optional)
+3. ~~Add predicate guidance to prompt~~ ✅ Done (Week 21b; commit 5f13e1c8)
 
 ---
 
@@ -2958,7 +2955,7 @@ None - polysemy rerank is fully operational.
 
 ## Week 18: Graph Context UI + Baseline Validation (2025-12-26)
 
-**Status:** In Progress - UI implemented, baseline captured
+**Status:** ✅ Complete - deployed (Graph Context tab + ENABLE_GRAPHRAG_CONTEXT)
 
 ### Objective
 
@@ -3073,13 +3070,12 @@ ENABLE_GRAPHRAG_CONTEXT=true
 - Privacy warning correctly displayed
 
 **Known Issues:**
-- Pre-existing TypeScript errors in KOI visualization components (used `build:no-tsc`)
-- Some entities have 0 edges (extraction quality issue, not GraphRAG matching)
+- ✅ Resolved: KOI visualization TypeScript errors fixed (PipelineFlowGraphDynamic/Enhanced, PipelineMonitor)
+- 0-edge cases reviewed: carbon acceptable (prefer compound entities); NCT now has relationships after Week 15+19 reprocess
 
 **Data Quality Note (2025-12-26):**
-- `regen.foundation` website (specifically the team page at `regen.foundation/#team`) is NOT in the KOI database
-- The website sensor may not have crawled this page - needs investigation
-- This gap means some organizational relationships (e.g., board member roles at Regen Foundation) may be missing or only captured from secondary sources like Medium articles
+- Resolved: `regen.foundation/#team` content indexed after Playwright-enabled crawl (see Investigation below)
+- Board/staff roles now present in KOI; remaining gaps can be handled via standard crawls
 
 ---
 
@@ -3474,7 +3470,7 @@ PYTHONPATH=src ./.venv/bin/python scripts/reextraction/e402_remainder_reprocess.
 
 ## Week 21: Question-Query & Multi-Entity GraphRAG Resolution (2025-12-28)
 
-**Status:** Implementation Complete - Awaiting Evaluation
+**Status:** ✅ Complete - evaluation results recorded (Week 21/21b)
 
 ### Objective
 
@@ -3576,9 +3572,9 @@ Added to `eval_graphrag.py`:
 
 | Criterion | Target | Status |
 |-----------|--------|--------|
-| Question-style resolution rate | >70% | Pending evaluation |
-| No regression in entity-style queries | >=80% | Pending evaluation |
-| Avg edges per resolved query | >=5 | Pending evaluation |
+| Question-style resolution rate | >70% | ✅ Met (see Week 21b Results) |
+| No regression in entity-style queries | >=80% | ✅ Met (see Week 21b Results) |
+| Avg edges per resolved query | >=5 | ✅ Met (see Week 21b Results) |
 
 ### Testing Commands
 
