@@ -56,6 +56,7 @@ from psycopg2.extras import RealDictCursor
 from psycopg2 import IntegrityError
 
 from extraction.gemini_extractor import GeminiExtractor
+from extraction.predicate_guard import validate_predicate
 from knowledge_graph.graph_integration import KnowledgeGraphIntegrator, normalize_predicate
 
 # Checkpoint file path
@@ -214,8 +215,12 @@ async def process_document(
 
     with kg.pg_conn.cursor() as pg_cur:
         for r in passed_rels:
-            # Normalize predicate
+            # Normalize predicate: first snake_case, then canonical mapping
             pred = normalize_predicate(r.predicate)
+            if not pred:
+                continue
+            # Apply predicate guard mapping (e.g., exploring -> discusses)
+            pred, is_canonical = validate_predicate(pred)
             if not pred:
                 continue
 

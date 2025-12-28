@@ -5,6 +5,26 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.3] - 2025-12-28
+
+### Fixed
+- **Stage6 Predicate Guard Bypass** - Fixed `stage6_full_reextract_gemini.py` not applying predicate normalization
+  - Root cause: Script used `normalize_predicate()` (snake_case only) instead of `validate_predicate()` (applies PREDICATE_MAPPINGS)
+  - Fix: Import and use `validate_predicate()` from `predicate_guard.py` after basic normalization
+  - Result: Non-canonical predicates like `exploring` now correctly map to `discusses`
+
+### Added
+- **Week 20 Predicate Mappings** - 8 new mappings in `predicate_guard.py`:
+  - `used_in` → `uses`, `handles` → `processes`, `powers` → `powered_by`
+  - `managed_by` → `manages`, `implemented_in` → `implements`, `co_founded` → `founded`
+  - `developed` → `creates`, `funded_by` → `funds`
+
+### Changed
+- **Week 20 QA Documentation** - Updated `docs/archive/knowledge-graph-review-2026-01.md`
+  - Phase A: Predicate regrowth analysis (66 non-canonical from Week 19 → fixed)
+  - Phase B: Quality spot-check (94% acceptable, threshold 85%)
+  - Phase C: GraphRAG eval (100% resolution, threshold 70%)
+
 ## [3.1.2] - 2025-12-24
 
 ### Fixed

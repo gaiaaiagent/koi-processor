@@ -83,6 +83,16 @@ PREDICATE_MAPPINGS = {
     "member": "member_of",
     "employed_by": "works_at",
     "employes": "employs",  # typo fix
+
+    # Week 20: High-volume non-canonical predicates
+    "used_in": "uses",
+    "handles": "processes",
+    "powers": "powered_by",
+    "managed_by": "manages",
+    "implemented_in": "implements",
+    "co_founded": "founded",
+    "developed": "creates",
+    "funded_by": "funds",
 }
 
 
