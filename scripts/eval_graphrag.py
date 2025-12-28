@@ -133,6 +133,21 @@ EVAL_QUERIES = [
         "notes": "Multi-entity query with CREDIT_CLASS and ORGANIZATION",
         "expected_query_type": "multi_entity",
     },
+    # Week 21b: Additional PERSON×PERSON test cases
+    {
+        "query": "Will Szal and Kevin Owocki",
+        "category": "question",
+        "expected_type": None,
+        "notes": "Multi-entity query with two PERSON entities (and pattern)",
+        "expected_query_type": "multi_entity",
+    },
+    {
+        "query": "Sarah Bax vs Max Semenchuk",
+        "category": "question",
+        "expected_type": None,
+        "notes": "Multi-entity query with two PERSON entities (vs pattern)",
+        "expected_query_type": "multi_entity",
+    },
     {
         "query": "Where is Regen Network based?",
         "category": "question",

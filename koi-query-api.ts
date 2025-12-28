@@ -285,6 +285,70 @@ interface QueryClassification {
 }
 
 /**
+ * Week 21b: Stop-phrases that indicate context rather than entity names.
+ * These often follow PERSON names in multi-entity queries.
+ */
+const ENTITY_CONTEXT_STOP_PHRASES = [
+  'leadership roles', 'leadership', 'roles', 'role',
+  'background', 'backgrounds', 'bio', 'bios', 'profile', 'profiles',
+  'career', 'careers', 'timeline', 'timelines',
+  'involvement', 'involvements', 'contribution', 'contributions',
+  'work', 'works', 'history', 'experience', 'experiences',
+  'connection', 'connections', 'relationship', 'relationships',
+  'comparison', 'comparisons', 'difference', 'differences',
+  'collaboration', 'collaborations', 'partnership', 'partnerships',
+];
+
+/**
+ * Week 21b: Clean an entity candidate by stripping trailing stop-phrases.
+ * For PERSON×PERSON patterns, this helps isolate the actual name.
+ *
+ * Examples:
+ *   "Martin Wainstein leadership roles" → "Martin Wainstein"
+ *   "Gregory Landua background" → "Gregory Landua"
+ */
+function cleanEntityCandidate(candidate: string): string {
+  let cleaned = candidate.trim();
+
+  // Try stripping each stop-phrase from the end (case-insensitive)
+  for (const phrase of ENTITY_CONTEXT_STOP_PHRASES) {
+    const regex = new RegExp(`\\s+${phrase}\\s*$`, 'i');
+    if (regex.test(cleaned)) {
+      cleaned = cleaned.replace(regex, '').trim();
+      // Continue checking - might have multiple trailing phrases
+    }
+  }
+
+  // If we stripped too much, return original
+  if (cleaned.length < 2) {
+    return candidate.trim();
+  }
+
+  return cleaned;
+}
+
+/**
+ * Week 21b: Extract a clean name from a candidate by preferring capitalized spans.
+ * This helps with patterns like "Martin Wainstein leadership roles" where
+ * the name is "Martin Wainstein" (capitalized) and "leadership roles" is lowercase.
+ *
+ * Returns the original candidate if no clear capitalized span is found.
+ */
+function extractCapitalizedName(candidate: string): string {
+  // First apply stop-phrase cleaning
+  const cleaned = cleanEntityCandidate(candidate);
+
+  // Match sequences of capitalized words at the start
+  // Pattern: One or more words starting with uppercase, followed by lowercase letters
+  const nameMatch = cleaned.match(/^([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)/);
+  if (nameMatch && nameMatch[1].length >= 3) {
+    return nameMatch[1].trim();
+  }
+
+  return cleaned;
+}
+
+/**
  * Detect whether a query is entity-style, question-style, or multi-entity.
  *
  * Entity-style: Direct entity mentions (e.g., "Gregory Landua", "x/ecocredit module")
@@ -309,23 +373,27 @@ function classifyQuery(query: string): QueryClassification {
   }
 
   // Pattern 2: Multi-entity - "X vs Y" or "X versus Y"
+  // Week 21b: Use extractCapitalizedName to strip trailing context like "leadership roles"
   const vsMatch = q.match(/^(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\?|$)/i);
   if (vsMatch) {
+    const candidate1 = extractCapitalizedName(vsMatch[1]);
+    const candidate2 = extractCapitalizedName(vsMatch[2]);
     return {
       type: 'multi_entity',
-      entity_candidates: [vsMatch[1].trim(), vsMatch[2].trim()],
+      entity_candidates: [candidate1, candidate2],
       multi_entity_pattern: 'vs'
     };
   }
 
   // Pattern 3: Multi-entity - "X and Y" at the start (without relationship keyword)
   // Only if both look like entity names (capitalized or known patterns)
+  // Week 21b: Use extractCapitalizedName to strip trailing context
   const andMatch = q.match(/^(.+?)\s+and\s+(.+?)(?:\?|$)/i);
   if (andMatch && !qLower.startsWith('how') && !qLower.startsWith('what') &&
       !qLower.startsWith('who') && !qLower.startsWith('where') &&
       !qLower.startsWith('why') && !qLower.startsWith('when')) {
-    const candidate1 = andMatch[1].trim();
-    const candidate2 = andMatch[2].trim();
+    const candidate1 = extractCapitalizedName(andMatch[1]);
+    const candidate2 = extractCapitalizedName(andMatch[2]);
     // Check if candidates look like entity names (capitalized or short phrases)
     if (looksLikeEntityName(candidate1) && looksLikeEntityName(candidate2)) {
       return {

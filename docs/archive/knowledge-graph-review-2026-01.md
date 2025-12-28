@@ -3778,12 +3778,59 @@ Secondary: $NCT (CONCEPT) ← acronym variant matched
 
 ### Backlog (Low Priority)
 
-1. **Gregory Landua vs Martin Wainstein secondary resolution**
+1. ~~**Gregory Landua vs Martin Wainstein secondary resolution**~~ ✅ Fixed (2025-12-28)
    - Query parsing splits "leadership roles", only extracts first PERSON
    - Tweak candidate extraction for PERSON × PERSON patterns
 
 2. ~~**$NCT canonicalization**~~ ✅ Done (2025-12-28)
    - Added `$NCT`, `$nct`, `NCT token`, `nct token` to `data/canonical_entities.json`
    - NCT now resolves via canonical aliases without relying on acronym heuristics
+
+---
+
+## Week 21b Addendum: PERSON×PERSON Resolution Fix (2025-12-28)
+
+**Status**: ✅ Complete
+
+### Problem
+
+Multi-entity queries like "Gregory Landua vs Martin Wainstein leadership roles" failed to resolve the secondary entity because trailing context ("leadership roles") was included in the second candidate.
+
+- Input: `"Gregory Landua vs Martin Wainstein leadership roles"`
+- Before: candidate2 = `"Martin Wainstein leadership roles"` ❌
+- After: candidate2 = `"Martin Wainstein"` ✅
+
+### Solution
+
+1. **Added stop-phrase list** (`ENTITY_CONTEXT_STOP_PHRASES`):
+   - Common context phrases: `leadership roles`, `roles`, `background`, `bio`, `profile`, `career`, `timeline`, `involvement`, `contribution`, `work`, `history`, `experience`, `connection`, `relationship`, `comparison`, `collaboration`, `partnership`
+
+2. **Added cleaning helpers**:
+   - `cleanEntityCandidate()`: Strips trailing stop-phrases from candidates
+   - `extractCapitalizedName()`: Prefers capitalized spans (PERSON name detection)
+
+3. **Updated `classifyQuery()`**:
+   - Pattern 2 (vs/versus): Now uses `extractCapitalizedName()` for both candidates
+   - Pattern 3 (and): Now uses `extractCapitalizedName()` for both candidates
+
+### Files Changed
+
+- `koi-query-api.ts`: Added stop-phrase list and cleaning helpers, updated classifyQuery()
+- `scripts/eval_graphrag.py`: Added 2 new PERSON×PERSON test cases
+
+### New Test Cases
+
+| Query | Pattern | Expected |
+|-------|---------|----------|
+| Will Szal and Kevin Owocki | and | Both resolve as PERSON |
+| Sarah Bax vs Max Semenchuk | vs | Both resolve as PERSON |
+
+### Success Criteria
+
+| Criterion | Target | Status |
+|-----------|--------|--------|
+| Multi-entity detection correct | 6/6 | Pending verification |
+| Secondary entity resolved (PERSON×PERSON) | 4/4 → target | Pending verification |
+| No regression ORG×TECH, ORG×PROJECT | Same as before | Pending verification |
 
 ---
