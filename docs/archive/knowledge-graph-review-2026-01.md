@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-29 (FIX-017 NCT token canonicalization applied)
-**Status:** Week 16 Complete - FIX-017 NCT token canonicalization applied
+**Last Updated:** 2025-12-29 (FIX-019 graph dataset rebuild)
+**Status:** Week 16 Complete - FIX-019 graph dataset rebuilt from entity_registry
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -4247,3 +4247,221 @@ curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=NCT"
 - ✅ BCT/TCO2 entities renamed to canonical names in database
 - ✅ Fuseki rebuilt with updated entity names
 - ✅ API returns canonical names for all test cases
+
+---
+
+## FIX-018b: Graph UI Search Canonicalization (2025-12-29)
+
+**Problem:** Graph UI at https://regen.gaiaai.xyz/graph/#view=structural shows "NCT Project" when searching "NCT", even though `/api/koi/entity/resolve` correctly returns "Nature Carbon Tonne".
+
+**Root Cause:** The graph UI (`GraphRAG3D_EmbeddingView.js`) performs client-side search against a static dataset loaded from `graphrag_hierarchy.json`. It doesn't use the `/api/koi/entity/resolve` API.
+
+**Solution:** Modified the `searchEntities()` function to:
+1. Call `/api/koi/entity/resolve?label=<query>` asynchronously (with 300ms debounce)
+2. If a canonical entity is found, prepend it to search results
+3. Display canonical matches with a green "✓ Canonical" badge
+4. Show the resolved entity type from the registry
+
+**Files Modified:**
+- `yonearth-gaia-chatbot/web/graph/GraphRAG3D_EmbeddingView.js` - Added `resolveCanonicalEntity()` and async search
+- `yonearth-gaia-chatbot/web/graph/GraphRAG3D_EmbeddingView.html` - Added CSS for canonical badge, fixed header overlap
+- `GAIA/graph/` - Copied updated files for deployment
+
+**Additional Fixes:**
+- Fixed controls panel and info panel overlapping with fixed header (`top: 60px`)
+- Updated header to show "Regen Knowledge Graph" instead of "YonEarth"
+- Added cache-busting version v=70
+
+**Deployment:**
+```bash
+# On production server (202.61.196.119):
+cd /opt/projects/GAIA
+git pull origin main  # or copy files from local
+
+# Files to deploy:
+# GAIA/graph/GraphRAG3D_EmbeddingView.html
+# GAIA/graph/GraphRAG3D_EmbeddingView.js
+# GAIA/graph/index.html (redirect to main viewer)
+```
+
+**Verification:**
+1. Navigate to https://regen.gaiaai.xyz/graph/#view=structural
+2. Search for "NCT" - should show "Nature Carbon Tonne" with green canonical badge
+3. Search for "BCT" - should show "Base Carbon Tonne" with canonical badge
+4. Search for "TCO2" - should show "Toucan Carbon Tonne" with canonical badge
+5. Verify controls panel is not hidden under header
+
+**Success criteria:**
+- ✅ Graph search calls `/api/koi/entity/resolve` for canonical resolution
+- ✅ Canonical entities appear first in search results with visual indicator
+- ✅ Entity type matches canonical type (TECHNOLOGY/PROJECT)
+- ✅ Header no longer overlaps controls panel
+
+---
+
+## FIX-019: Graph Dataset Rebuild from entity_registry (2025-12-29)
+
+**Problem:** FIX-018b made BCT/TCO2 searchable with canonical resolution, but when clicking results, they showed amber "(not in graph)" badge because the static `graphrag_hierarchy_v6_fixed.json` dataset was stale and didn't include these entities.
+
+**Root Cause:** The v6 dataset was ~4-5 months old (from YonEarth podcast clustering work). No generator script existed to rebuild it from the current KOI knowledge graph.
+
+**Solution:** Created new export script `scripts/export_graph_hierarchy.py` that:
+1. Loads `canonical_entities.json` to ensure canonical entities are always included
+2. Exports entities from PostgreSQL `entity_registry` (with occurrence_count filter)
+3. Fetches canonical entities even if they have low occurrence counts
+4. Parses pgvector 1536D embeddings
+5. Computes UMAP 3D positions for visualization (or random if UMAP unavailable)
+6. Exports relationships from `koi_relationships`
+7. Computes degree centrality
+8. Outputs `graphrag_hierarchy_v7.json` in format compatible with GraphRAG3D viewer
+
+**Key Implementation Details:**
+- Data source: PostgreSQL `entity_registry` + `koi_relationships`
+- Canonical source: `data/canonical_entities.json` (85 entities, 252 aliases)
+- **Filter: `occurrence_count >= 2`** — Rationale: Single-occurrence entities are often extraction noise (typos, fragments, one-off mentions). This reduces dataset size by ~60% while retaining meaningful entities. Canonical entities bypass this filter to ensure important mapped entities (like TCO2→Toucan Carbon Tonne) are always included.
+- Max entities: 12,000 (ordered by occurrence_count DESC)
+- Output format: `test_mode: true` (flat entity format for direct parsing in JS)
+- Positions: Random 3D (UMAP not installed on server, optional enhancement)
+
+**Entities exported: 11,038** (filter: `occurrence_count >= 2` + canonical override)
+
+**Files Created/Modified:**
+- `koi-processor/scripts/export_graph_hierarchy.py` - NEW export script with canonical entity support
+- `GAIA/graph/GraphRAG3D_EmbeddingView.js` - Added v7 to fallback list
+- `GAIA/graph/data/graphrag_hierarchy/graphrag_hierarchy_v7.json` - NEW dataset
+
+**Coverage:**
+| Metric | Database | Exported | Notes |
+|--------|----------|----------|-------|
+| Total entities | 29,678 | 11,038 | Filtered to occurrence >= 2, plus canonical |
+| With embeddings | 12,036 | 11,038 | Some duplicates removed |
+| Relationships | 21,566 | 15,741 | Only between exported entities |
+| Canonical entities | 85 | 2 added | Low-occurrence canonicals now included |
+
+**Export Statistics (v7):**
+| Metric | Value |
+|--------|-------|
+| Entities exported | 11,038 |
+| Relationships | 15,741 |
+| Max degree | 2,497 (Regen Network) |
+| Avg degree | 4.72 |
+| File size | 5.02 MB |
+
+**Verified Entities Now Navigable:**
+| Entity | Type | Degree | Status |
+|--------|------|--------|--------|
+| Base Carbon Tonne (BCT) | TECHNOLOGY | 2 | ✅ Green badge, clickable |
+| Nature Carbon Tonne (NCT) | TECHNOLOGY | 85 | ✅ Green badge, clickable |
+| Toucan Carbon Tonne (TCO2) | TECHNOLOGY | 4 | ✅ Green badge, clickable (was missing before) |
+| TCO2 tokens | TECHNOLOGY | 3 | ✅ In graph, clickable |
+
+**Usage:**
+```bash
+# On production server (202.61.196.119):
+cd /opt/projects/koi-processor
+set -a && source .env && set +a
+.venv/bin/python scripts/export_graph_hierarchy.py --max-entities 12000
+
+# Output: /opt/projects/GAIA/graph/data/graphrag_hierarchy/graphrag_hierarchy_v7.json
+```
+
+**Future Enhancements (optional):**
+1. Install `umap-learn` on server for proper 3D embedding positions
+2. Add cluster hierarchy (L0/L1/L2) for community visualization
+3. Add entity descriptions from document chunks
+
+**Success criteria:**
+- ✅ Export script runs from PostgreSQL data
+- ✅ Canonical entities included regardless of occurrence count
+- ✅ BCT, NCT, TCO2 now appear in graph visualization with green canonical badges
+- ✅ Clicking search results navigates to node details
+- ✅ Relationship connections visible in detail panel
+
+---
+
+## FIX-020: Canonical Alias Audit and Merge (2025-12-29)
+
+**Problem:** After canonical alias resolution was implemented (FIX-018), there were still entity_registry rows that matched aliases defined in `canonical_entities.json` but existed as separate entities with different types or names.
+
+**Goal:** Identify alias duplicates and merge them into their canonical entities where safe.
+
+**Solution:** Created audit and merge scripts:
+1. `scripts/alias_audit.py` - Scans entity_registry for alias matches, classifies merge safety
+2. `scripts/apply_alias_merges.py` - Applies safe merges with full backup
+
+### Audit Results
+
+| Metric | Value |
+|--------|-------|
+| Total entities scanned | 29,678 |
+| Alias mappings in canonical_entities.json | 226 |
+| Alias duplicates found | 9 |
+| Safe to merge | 8 |
+| Deferred (ambiguous) | 1 |
+
+### Alias Duplicates Found
+
+| Alias Text | Alias Type | Occurrences | Canonical Name | Canonical Type | Action |
+|------------|------------|-------------|----------------|----------------|--------|
+| regen-network | PROJECT | 26 | Regen Network | ORGANIZATION | MERGE_RETYPE |
+| regen-network | TECHNOLOGY | 4 | Regen Network | ORGANIZATION | MERGE_RETYPE |
+| Monitoring, Reporting, Verification | PROCESS | 5 | Monitoring, Reporting and Verification | CONCEPT | MERGED |
+| CosmosSDK | TECHNOLOGY | 4 | Cosmos SDK | PROJECT | MERGED |
+| RegenLedger | PROJECT | 2 | Regen Ledger | TECHNOLOGY | MERGED |
+| RegenLedger | TECHNOLOGY | 2 | Regen Ledger | TECHNOLOGY | MERGED |
+| interblockchain communication | TECHNOLOGY | 1 | Inter-Blockchain Communication Protocol | PROJECT | MERGED |
+| regen.foundation | PROJECT | 1 | Regen Foundation | ORGANIZATION | MERGED |
+| registry | PROJECT | 1 | Regen Registry | ORGANIZATION | DEFERRED (ambiguous) |
+
+### Merge Statistics
+
+| Metric | Value |
+|--------|-------|
+| Entities merged | 8 |
+| Relationships updated | 1 |
+| Relationships deduplicated | 0 |
+| Chunk links updated | 0 |
+
+### Backup Tables Created
+
+| Table | Rows |
+|-------|------|
+| alias_merge_backup_20251229_entity_registry | 14 |
+| alias_merge_backup_20251229_koi_relationships | 4,543 |
+| alias_merge_backup_20251229_koi_entity_chunk_links | 0 |
+
+### Fuseki Rebuild
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Entities | 29,678 | 29,670 |
+| Relationships | 21,566 | 21,566 |
+| Triples | 163,703 | 169,916 |
+
+**Scripts Created:**
+- `koi-processor/scripts/alias_audit.py` - Audit script
+- `koi-processor/scripts/apply_alias_merges.py` - Merge script
+- `koi-processor/data/alias_audit_report.csv` - Audit report
+
+**Usage:**
+```bash
+# Run audit
+python scripts/alias_audit.py
+
+# Apply merges (interactive confirmation)
+python scripts/apply_alias_merges.py
+
+# Or dry-run first
+python scripts/apply_alias_merges.py --dry-run
+
+# Rebuild Fuseki after merge
+.venv/bin/python scripts/regenerate_fuseki_graph.py --confirm-prod
+```
+
+**Success Criteria:**
+- ✅ Alias audit report generated
+- ✅ 8 alias duplicates merged safely
+- ✅ 1 ambiguous alias deferred (registry)
+- ✅ Backup tables created for rollback if needed
+- ✅ Fuseki graph rebuilt with updated entity count
+- ✅ No regressions in relationships/chunk links
