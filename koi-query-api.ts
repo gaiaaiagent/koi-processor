@@ -7,6 +7,8 @@
 
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
 import { Pool } from "pg";
 
 // Import the adaptive features
@@ -40,6 +42,113 @@ const dbConfig = parsePostgresUrl(POSTGRES_URL);
 const pool = new Pool(dbConfig);
 
 // HNSW index provides excellent recall without tuning parameters
+
+type CanonicalAliasEntry = {
+  canonical_name: string;
+  entity_type: string;
+};
+
+const canonicalAliasMap = new Map<string, CanonicalAliasEntry>();
+
+function normalizeForCanonicalLookup(name: string, entityType?: string | null): string {
+  if (!name) return '';
+  let normalized = name.trim();
+
+  // Strip leading @ (usernames)
+  if (normalized.startsWith('@')) {
+    normalized = normalized.slice(1);
+  }
+
+  // Strip trailing "| SOMETHING" suffix pattern
+  normalized = normalized.replace(/\s*\|\s*[A-Za-z0-9\s]+$/, '');
+
+  // Convert underscores and hyphens to spaces
+  normalized = normalized.replace(/[_-]+/g, ' ');
+
+  // Lowercase
+  normalized = normalized.toLowerCase();
+
+  // Organization/project/technology: convert dots to spaces (regen.foundation -> regen foundation)
+  if (!entityType || ['ORGANIZATION', 'ORG', 'PROJECT', 'TECHNOLOGY'].includes(entityType.toUpperCase())) {
+    normalized = normalized.replace(/(\w)\.(\w)/g, '$1 $2');
+  }
+
+  // Remove common corporate suffixes for matching
+  normalized = normalized.replace(/,?\s*(inc|llc|ltd|corp|pbc|ag)\.?$/i, '');
+
+  // Remove common articles at start
+  normalized = normalized.replace(/^\s*(the|a|an)\s+/i, '');
+
+  // Normalize whitespace + trailing punctuation
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  normalized = normalized.replace(/[.,;:!?]+$/g, '');
+
+  return normalized.trim();
+}
+
+function loadCanonicalAliasMap() {
+  const registryPath = process.env.CANONICAL_ENTITIES_PATH
+    || path.join(process.cwd(), 'data', 'canonical_entities.json');
+
+  try {
+    const raw = fs.readFileSync(registryPath, 'utf-8');
+    const registry = JSON.parse(raw);
+    const categories = registry?.entities || {};
+
+    for (const category of Object.values(categories)) {
+      if (!category || typeof category !== 'object') continue;
+      for (const entityData of Object.values(category as Record<string, any>)) {
+        const canonicalName = entityData?.canonical_name;
+        const entityType = entityData?.entity_type || 'ENTITY';
+        if (!canonicalName) continue;
+
+        const canonicalKey = normalizeForCanonicalLookup(canonicalName, entityType);
+        if (canonicalKey && !canonicalAliasMap.has(canonicalKey)) {
+          canonicalAliasMap.set(canonicalKey, { canonical_name: canonicalName, entity_type: entityType });
+        }
+
+        const aliases: string[] = entityData?.aliases || [];
+        for (const alias of aliases) {
+          const aliasKey = normalizeForCanonicalLookup(alias, entityType);
+          if (aliasKey && !canonicalAliasMap.has(aliasKey)) {
+            canonicalAliasMap.set(aliasKey, { canonical_name: canonicalName, entity_type: entityType });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[CanonicalAlias] Failed to load registry: ${registryPath}`, err);
+  }
+}
+
+function resolveCanonicalAlias(label: string): CanonicalAliasEntry | null {
+  const key = normalizeForCanonicalLookup(label, null);
+  return canonicalAliasMap.get(key) || null;
+}
+
+function buildNormalizedLookupKeys(label: string, typeHint?: string | null): string[] {
+  const base = label.trim();
+  if (!base) return [];
+
+  const variants = new Set<string>();
+  variants.add(base);
+  for (const variant of normalizeQueryForEntityMatch(base)) {
+    variants.add(variant);
+  }
+
+  const keys = new Set<string>();
+  for (const variant of variants) {
+    const canonical = resolveCanonicalAlias(variant);
+    if (canonical) {
+      keys.add(normalizeForCanonicalLookup(canonical.canonical_name, canonical.entity_type));
+    }
+    keys.add(normalizeForCanonicalLookup(variant, typeHint));
+  }
+
+  return Array.from(keys).filter(Boolean);
+}
+
+loadCanonicalAliasMap();
 
 // Helper function to fix duplicated paths in entity data
 function fixEntityPaths(entity: any): any {
@@ -2553,7 +2662,12 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
       return res.status(400).json({ error: 'label parameter is required' });
     }
 
-    // Query for entity variants matching the label
+    const lookupKeys = buildNormalizedLookupKeys(label, typeHint);
+    if (lookupKeys.length === 0) {
+      return res.status(400).json({ error: 'label parameter is required' });
+    }
+
+    // Query for entity variants matching the label or canonical aliases
     const query = `
       WITH entity_matches AS (
         SELECT
@@ -2564,7 +2678,7 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
           occurrence_count,
           fuseki_uri
         FROM entity_registry
-        WHERE LOWER(TRIM(normalized_text)) = LOWER(TRIM($1))
+        WHERE LOWER(TRIM(normalized_text)) = ANY($1)
       ),
       rel_counts AS (
         SELECT
@@ -2595,7 +2709,7 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
       ORDER BY e.occurrence_count DESC, r.relationship_count DESC
     `;
 
-    const result = await pool.query(query, [label]);
+    const result = await pool.query(query, [lookupKeys]);
     const variants = result.rows;
 
     if (variants.length === 0) {
@@ -2720,6 +2834,9 @@ async function resolveEntityInternal(
 
   if (!label) return null;
 
+  const lookupKeys = buildNormalizedLookupKeys(label, typeHint);
+  if (lookupKeys.length === 0) return null;
+
   // Use the same logic as /api/koi/entity/resolve
   const query = `
     WITH entity_matches AS (
@@ -2731,7 +2848,7 @@ async function resolveEntityInternal(
         occurrence_count,
         fuseki_uri
       FROM entity_registry
-      WHERE LOWER(TRIM(normalized_text)) = LOWER(TRIM($1))
+      WHERE LOWER(TRIM(normalized_text)) = ANY($1)
     ),
     rel_counts AS (
       SELECT
@@ -2762,7 +2879,7 @@ async function resolveEntityInternal(
     ORDER BY e.occurrence_count DESC, r.relationship_count DESC
   `;
 
-  const result = await pool.query(query, [label]);
+  const result = await pool.query(query, [lookupKeys]);
   if (result.rows.length === 0) return null;
 
   // Score and find winner (same logic as /api/koi/entity/resolve)

@@ -4097,6 +4097,7 @@ LIMIT 20;
 - Merged `NCTs` (CONCEPT, id 16030) → `Nature Carbon Tonne` (id 683)
 - Updated `koi_entity_chunk_links` for `NCT` / `Nature Carbon Tonne` to `TECHNOLOGY` + new URI
 - Updated `data/canonical_entities.json` NCT entry to `TECHNOLOGY`
+- Updated `/api/koi/entity/resolve` to honor canonical aliases from `data/canonical_entities.json`
 
 **Relationship updates:**
 - `associated_with` (object 1384): +4 occurrences merged
