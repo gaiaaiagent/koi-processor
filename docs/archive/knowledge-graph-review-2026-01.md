@@ -4503,3 +4503,196 @@ python scripts/apply_alias_merges.py --dry-run
 **Follow-ups:**
 1. Run type-constraint violations check (per `docs/runbooks/post_extraction_audit.md`)
 2. Optional: GraphRAG eval if query behavior shifts
+
+---
+
+## Type-Constraint Violations Check (2025-12-29)
+
+**Status:** ⚠️ 52 violations found
+
+**Commit:** 58c9a569 on regen-prod
+
+**Query:** Per `docs/runbooks/post_extraction_audit.md` Section 2
+
+### Violation Summary by Predicate
+
+| Predicate | Subject Type | Object Type | Count |
+|-----------|--------------|-------------|-------|
+| leads | PERSON | CONCEPT | 7 |
+| validates | API_MESSAGE | CONCEPT | 5 |
+| operates | ORGANIZATION | LOCATION | 4 |
+| leads | ORGANIZATION | TECHNOLOGY | 3 |
+| leads | PERSON | VALIDATOR | 3 |
+| works_at | VALIDATOR | ORGANIZATION | 2 |
+| authored | VALIDATOR | GOVERNANCE_PROPOSAL | 2 |
+| leads | PROJECT | ORGANIZATION | 2 |
+| operates | ORGANIZATION | CONCEPT | 2 |
+| operates | VALIDATOR | CONCEPT | 2 |
+| validates | PERSON | ORGANIZATION | 2 |
+| works_at | ORGANIZATION | ORGANIZATION | 2 |
+| located_in | LOCATION | CONCEPT | 1 |
+| located_in | VALIDATOR | ORGANIZATION | 1 |
+| works_at | PERSON | CONCEPT | 1 |
+| delegates | ORGANIZATION | CONCEPT | 1 |
+| works_at | PERSON | LOCATION | 1 |
+| validates | API_MESSAGE | API_MESSAGE | 1 |
+| authored | PROJECT | ORGANIZATION | 1 |
+| validates | API_MESSAGE | PROJECT | 1 |
+| works_at | PERSON | TECHNOLOGY | 1 |
+| validates | PROJECT | CONCEPT | 1 |
+| authored | CONCEPT | ORGANIZATION | 1 |
+| founded | PERSON | CONCEPT | 1 |
+| leads | PERSON | TECHNOLOGY | 1 |
+| founded | ORGANIZATION | CONCEPT | 1 |
+| works_at | ORGANIZATION | VALIDATOR | 1 |
+| leads | VALIDATOR | ORGANIZATION | 1 |
+| **TOTAL** | | | **52** |
+
+### Analysis
+
+**Root Causes:**
+1. **FIX-015 applied after Stage 6** - The predicate type guard prevents *new* violations but doesn't retroactively clean existing relationships
+2. **Entity type mismatches** - Some entities may need reclassification (e.g., VALIDATOR → ORGANIZATION)
+3. **Predicate semantics** - Some relationships may need predicate changes (e.g., `leads` → `associated_with`)
+
+### Proposed Next Actions
+
+| Action | Priority | Scope | Notes |
+|--------|----------|-------|-------|
+| Delete `validates` with API_MESSAGE subject | High | 8 rows | API_MESSAGE is not a valid subject for validates |
+| Delete `operates` with LOCATION/CONCEPT object | High | 8 rows | Object constraint violated |
+| Review `leads` violations | Medium | 17 rows | May need predicate change or entity retype |
+| Review `works_at` violations | Medium | 8 rows | May need predicate change or entity retype |
+| Whitelist reasonable patterns | Low | TBD | e.g., VALIDATOR works_at ORGANIZATION |
+
+**Recommendation:** Create FIX-015c cleanup script to delete clear violations (API_MESSAGE subjects, CONCEPT objects where inappropriate) and remap borderline cases.
+
+
+---
+
+## FIX-015c High-Confidence Cleanup (2025-12-29)
+
+**Status:** ✅ Complete
+
+**Scope:** Delete clear type-constraint violations (legacy data predating FIX-015 strict guard)
+
+### Deletions Applied
+
+| Predicate | Subject Type | Object Type | Rows Deleted |
+|-----------|--------------|-------------|--------------|
+| operates | ORGANIZATION | LOCATION | 4 |
+| operates | ORGANIZATION | CONCEPT | 2 |
+| operates | VALIDATOR | CONCEPT | 2 |
+| validates | API_MESSAGE | CONCEPT | 5 |
+| validates | API_MESSAGE | API_MESSAGE | 1 |
+| validates | API_MESSAGE | PROJECT | 1 |
+| **TOTAL** | | | **15** |
+
+### Results
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Relationships | 21,566 | 21,551 |
+| Triples | 169,916 | 169,901 |
+| Type-constraint violations | 52 | 37 |
+
+### Backup Table
+
+| Table | Rows |
+|-------|------|
+| koi_relationships_backup_fix015c | 15 |
+
+### Remaining Violations (Medium Priority)
+
+37 violations remain, requiring manual review:
+- `leads` (17 rows): PERSON/ORG/PROJECT/VALIDATOR → CONCEPT/TECHNOLOGY/VALIDATOR/ORG
+- `works_at` (8 rows): VALIDATOR/ORG/PERSON → ORG/CONCEPT/LOCATION/TECHNOLOGY/VALIDATOR
+- `validates` (2 rows): PERSON/PROJECT → ORGANIZATION/CONCEPT
+- `authored` (4 rows): VALIDATOR/PROJECT/CONCEPT → GOVERNANCE_PROPOSAL/ORGANIZATION
+- `located_in` (2 rows): LOCATION/VALIDATOR → CONCEPT/ORGANIZATION
+- `founded` (2 rows): PERSON/ORG → CONCEPT
+- `delegates` (1 row): ORGANIZATION → CONCEPT
+
+**Next Step:** Sample 10-20 edges from medium group to decide delete vs retype.
+
+
+
+---
+
+## FIX-015d Constraint Relaxation & Cleanup (2025-12-29)
+
+**Status:** ✅ Complete
+
+**Scope:** 
+1. Delete additional clear-cut invalid edges (10 rows)
+2. Relax type constraints to allow legitimate VALIDATOR patterns
+
+### Constraint Changes
+
+| Predicate | Change | Reason |
+|-----------|--------|--------|
+| `authored` | Added VALIDATOR to valid_subject_types | Validators author governance proposals |
+| `leads` | Added VALIDATOR to valid_object_types | Person/Org can lead a validator |
+
+### Deletions Applied
+
+| Predicate | Subject Type | Object Type | Rows Deleted |
+|-----------|--------------|-------------|--------------|
+| leads | PERSON | CONCEPT | 7 |
+| authored | PROJECT | ORGANIZATION | 1 |
+| authored | CONCEPT | ORGANIZATION | 1 |
+| delegates | ORGANIZATION | CONCEPT | 1 |
+| **TOTAL** | | | **10** |
+
+### Results
+
+| Metric | After FIX-015c | After FIX-015d |
+|--------|----------------|----------------|
+| Relationships | 21,551 | 21,541 |
+| Triples | 169,901 | 169,891 |
+| Type-constraint violations | 37 | 22 |
+
+### Backup Table
+
+| Table | Rows |
+|-------|------|
+| koi_relationships_backup_fix015d | 10 |
+
+### Remaining Violations (22)
+
+| Predicate | Subject Type | Object Type | Count |
+|-----------|--------------|-------------|-------|
+| leads | ORGANIZATION | TECHNOLOGY | 3 |
+| works_at | VALIDATOR | ORGANIZATION | 2 |
+| leads | PROJECT | ORGANIZATION | 2 |
+| validates | PERSON | ORGANIZATION | 2 |
+| works_at | ORGANIZATION | ORGANIZATION | 2 |
+| leads | VALIDATOR | ORGANIZATION | 1 |
+| located_in | LOCATION | CONCEPT | 1 |
+| located_in | VALIDATOR | ORGANIZATION | 1 |
+| works_at | PERSON | TECHNOLOGY | 1 |
+| validates | PROJECT | CONCEPT | 1 |
+| founded | ORGANIZATION | CONCEPT | 1 |
+| works_at | ORGANIZATION | VALIDATOR | 1 |
+| works_at | PERSON | CONCEPT | 1 |
+| founded | PERSON | CONCEPT | 1 |
+| leads | PERSON | TECHNOLOGY | 1 |
+| works_at | PERSON | LOCATION | 1 |
+| **TOTAL** | | | **22** |
+
+### Analysis of Remaining Violations
+
+**Constraint expansion candidates:**
+- `works_at`: May need to allow VALIDATOR as subject (validators have operational roles)
+- `leads`: Consider allowing TECHNOLOGY as object (projects/persons lead tech initiatives)
+
+**Entity retype candidates:**
+- "Regen Ledger" TECHNOLOGY → PROJECT
+- "Regen Marketplace" TECHNOLOGY → PROJECT
+
+**Delete candidates:**
+- `located_in LOCATION → CONCEPT` - semantically invalid
+- `founded X → CONCEPT` - concepts aren't founded
+- Various extraction errors
+
+**Deferred:** Remaining 22 violations are low-priority edge cases for future cleanup cycle.
