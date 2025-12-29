@@ -4,6 +4,14 @@ FIX-016 follow-up: cleanup existing single-token PERSON entities.
 
 Dry-run by default. Use --apply to delete selected entities and their
 relationships/chunk links after creating backup tables.
+
+Safe deletion (default): Only deletes entities with 0 relationships AND 0 chunk links.
+This ensures no semantic edges or mention anchors are lost.
+
+Options:
+  --max-rel-count N   Delete entities with relationship_count <= N (default: 0)
+  --max-link-count N  Delete entities with chunk_link_count <= N (default: 0)
+  --max-occurrence N  Optional cap on occurrence_count for extra caution
 """
 
 from __future__ import annotations
@@ -158,6 +166,12 @@ def main() -> None:
         help="Optional upper bound on occurrence_count for deletion.",
     )
     parser.add_argument(
+        "--max-link-count",
+        type=int,
+        default=0,
+        help="Only delete entities with chunk_link_count <= this value (default: 0).",
+    )
+    parser.add_argument(
         "--output",
         default="data/fix016_single_token_persons.csv",
         help="CSV output path for full candidate report.",
@@ -214,11 +228,13 @@ def main() -> None:
         for r in rows:
             if r["relationship_count"] > args.max_rel_count:
                 continue
+            if r["chunk_link_count"] > args.max_link_count:
+                continue
             if args.max_occurrence is not None and int(r["occurrence_count"]) > args.max_occurrence:
                 continue
             deletable.append(r)
 
-        print(f"Deletion candidates (max_rel_count={args.max_rel_count}, max_occurrence={args.max_occurrence}): {len(deletable)}")
+        print(f"Deletion candidates (max_rel_count={args.max_rel_count}, max_link_count={args.max_link_count}, max_occurrence={args.max_occurrence}): {len(deletable)}")
 
         if not args.apply:
             conn.rollback()
