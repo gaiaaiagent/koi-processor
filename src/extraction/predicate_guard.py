@@ -10,6 +10,10 @@ relationships like "operates→CONCEPT" from being created.
 Week 20 (FIX-015d): Relaxed constraints to allow legitimate patterns:
 - VALIDATOR can author (e.g., governance proposals)
 - VALIDATOR can be led by PERSON/ORGANIZATION
+
+Week 20 (FIX-015e): Further constraint relaxations:
+- leads: Added TECHNOLOGY as valid object (orgs/people lead tech projects)
+- works_at: Added VALIDATOR as valid subject, TECHNOLOGY as valid object
 """
 
 import os
@@ -121,8 +125,10 @@ PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
     },
     "works_at": {
         # People work at organizations, projects, or validators
-        "valid_subject_types": {"PERSON"},
-        "valid_object_types": {"ORGANIZATION", "PROJECT", "VALIDATOR"},
+        # FIX-015e: Added VALIDATOR as valid subject (validators have operational roles)
+        # FIX-015e: Added TECHNOLOGY as valid object (people work on tech projects)
+        "valid_subject_types": {"PERSON", "VALIDATOR"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "VALIDATOR", "TECHNOLOGY"},
     },
     "employs": {
         # Organizations employ people
@@ -138,8 +144,9 @@ PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
         # People AND organizations can lead things
         # "Regen Foundation leads the registry initiative"
         # FIX-015d: Added VALIDATOR as valid object (e.g., "Gregory Landua leads Chomp")
+        # FIX-015e: Added TECHNOLOGY as valid object (e.g., "Regen Network leads Regen Ledger")
         "valid_subject_types": {"PERSON", "ORGANIZATION"},
-        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT", "PROCESS", "VALIDATOR"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT", "PROCESS", "VALIDATOR", "TECHNOLOGY"},
     },
     "located_in": {
         # Things are located in locations (strict - no concepts/projects)
