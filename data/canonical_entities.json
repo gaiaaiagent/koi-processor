@@ -422,7 +422,7 @@
           "regen",
           "REGEN"
         ],
-        "entity_type": "PROJECT",
+        "entity_type": "TECHNOLOGY",
         "confidence": 1.0,
         "occurrences": 157
       },

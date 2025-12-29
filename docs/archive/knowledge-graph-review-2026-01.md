@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-28 (FIX-016 single-token PERSON guard complete)
-**Status:** Week 16 Complete - FIX-016 added single-token PERSON guard
+**Last Updated:** 2025-12-29 (FIX-016b single-token PERSON merges applied)
+**Status:** Week 16 Complete - FIX-016b merged 9 high-confidence single-token PERSONs
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -4023,4 +4023,93 @@ LIMIT 20;
 - Review for merge candidates (e.g., "Chirstian" → correct full name)
 - Do not bulk delete - they have semantic edges worth preserving or merging
 
+### FIX-016b: Single-Token PERSON Merges (2025-12-29)
+
+**Status**: ✅ Complete
+
+**Objective**: Merge high-confidence single-token PERSON names to their canonical full names.
+
+**Artifacts:**
+- Merge plan: `data/fix016_merge_plan.csv` (winner_uri, loser_uri, method, reason)
+- Raw data: `data/fix016_single_token_persons_raw.csv` (all 290 pre-merge single-token names)
+
+**Applied Merges (9 total):**
+
+| Loser | Winner | Method | Reason |
+|-------|--------|--------|--------|
+| Will | Will Szal | manual_review | Both work at Regen Foundation/Network with overlapping relationship patterns |
+| Max | Max Semenchuk | manual_review | Both discuss Tokenomics and work with Christian Shearer and Regen team |
+| Max Semenchuck | Max Semenchuk | typo_fix | Obvious typo correction |
+| Brandon | Brandon Kelly | manual_review | Both work at Regen Network and work with Mark |
+| Giulio | Giulio Quarta | manual_review | Both at Regen Network with only one candidate full name |
+| Darren | Darren Zal | manual_review | Both work on KOI project infrastructure |
+| Becca | Becca Harman | manual_review | Both at Regen Network/Registry with only one candidate full name |
+| Scott | Scott Kilduff | manual_review | Both associated with KlimaDAO and Liquidity DAO proposals |
+| Scott Kildoff | Scott Kilduff | typo_fix | Obvious typo correction |
+
+**Backup**: `backups/fix006_merge_backup_20251229_063733.sql`
+*(Note: filename says "fix006" because `apply_dedup_merges.py` was written for FIX-006; content is FIX-016b)*
+
+**Results:**
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Single-token PERSON entities | 290 | 283 | -7 |
+| Total entities | 29,694 | 29,685 | -9 |
+| Relationships | 21,569 | 21,569 | 0 |
+| Triples (Fuseki) | 170,049 | 169,994 | -55 |
+
+**Why -7 single-token but -9 total?**
+- 7 merges were single-token → full-name (Will, Max, Brandon, Giulio, Darren, Becca, Scott)
+- 2 merges were multi-token typo fixes (Max Semenchuck, Scott Kildoff) — already had spaces, not counted as single-token
+
+**Deferred (Top 10 Ambiguous Names):**
+
+| Name | Rel Count | Candidates | Reason Deferred |
+|------|-----------|------------|-----------------|
+| James | 105 | James Bettauer (12), James Evans (5), +5 more | Multiple candidates, unclear clustering |
+| Mark | 79 | Mark DeRugeriis (33), Mark Phillips (2), +5 more | Multiple candidates |
+| Alice | 54 | (no clear candidates) | Generic name, no obvious match |
+| Julia | 33 | (no clear candidates) | Generic name |
+| Sarah | 22 | (no clear candidates) | Generic name |
+| Paul | 24 | (no clear candidates) | Generic name |
+| Chris | 15 | Chris Fields (18), Chris Smaje (5), +5 more | Multiple candidates |
+| Monty | 17 | Monty Merlin Bryant (3), Monty Faith (1) | Low-occurrence candidates |
+| Alex | 17 | (no clear candidates) | Generic name |
+| Luke | 15 | (no clear candidates) | Generic name |
+
+**Note**: Ambiguous single-token names retained for now. Future options:
+1. Context-based clustering using relationship graphs
+2. Manual review with document-level evidence
+3. Keep as ambiguous if multiple people genuinely share the first name
+
 ---
+
+### FIX-017: NCT Token Canonicalization (2025-12-29)
+
+**Status**: ✅ Complete
+
+**Objective**: Ensure "NCT token" resolves to the canonical "Nature Carbon Tonne" entity and align type with other tokens.
+
+**Changes Applied:**
+- Re-typed `Nature Carbon Tonne` from `PROJECT` → `TECHNOLOGY` and updated URI to `https://regen.network/tech/41456437403d1515`
+- Merged `NCT token` (TECHNOLOGY, id 22301) → `Nature Carbon Tonne` (id 683)
+- Merged `NCTs` (CONCEPT, id 16030) → `Nature Carbon Tonne` (id 683)
+- Updated `koi_entity_chunk_links` for `NCT` / `Nature Carbon Tonne` to `TECHNOLOGY` + new URI
+- Updated `data/canonical_entities.json` NCT entry to `TECHNOLOGY`
+
+**Relationship updates:**
+- `associated_with` (object 1384): +4 occurrences merged
+- `is_a` (object 441): +5 occurrences merged
+- `represents` (object 441): +3 occurrences merged
+- `represents` (object 193): reassigned to canonical entity
+
+**Backups:**
+- `entity_registry_backup_fix017_nct`
+- `koi_relationships_backup_fix017_nct`
+- `koi_entity_chunk_links_backup_fix017_nct`
+
+**Fuseki rebuild:**
+- Entities: 29,683
+- Relationships: 21,566
+- Triples: 169,981
