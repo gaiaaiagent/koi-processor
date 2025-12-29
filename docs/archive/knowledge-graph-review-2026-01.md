@@ -4108,6 +4108,7 @@ LIMIT 20;
 - `entity_registry_backup_fix017_nct`
 - `koi_relationships_backup_fix017_nct`
 - `koi_entity_chunk_links_backup_fix017_nct`
+- `koi_entity_chunk_links_backup_fix017_nct_full`
 
 **Fuseki rebuild:**
 - Entities: 29,683
