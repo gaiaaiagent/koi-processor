@@ -6,6 +6,10 @@ Provides canonical predicate allowlist and validation functions.
 
 Week 16 (FIX-015): Added predicate-type constraints to prevent semantically invalid
 relationships like "operates→CONCEPT" from being created.
+
+Week 20 (FIX-015d): Relaxed constraints to allow legitimate patterns:
+- VALIDATOR can author (e.g., governance proposals)
+- VALIDATOR can be led by PERSON/ORGANIZATION
 """
 
 import os
@@ -133,8 +137,9 @@ PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
     "leads": {
         # People AND organizations can lead things
         # "Regen Foundation leads the registry initiative"
+        # FIX-015d: Added VALIDATOR as valid object (e.g., "Gregory Landua leads Chomp")
         "valid_subject_types": {"PERSON", "ORGANIZATION"},
-        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT", "PROCESS"},
+        "valid_object_types": {"ORGANIZATION", "PROJECT", "EVENT", "PROCESS", "VALIDATOR"},
     },
     "located_in": {
         # Things are located in locations (strict - no concepts/projects)
@@ -143,7 +148,8 @@ PREDICATE_TYPE_CONSTRAINTS: Dict[str, Dict[str, Set[str]]] = {
     "authored": {
         # People AND organizations can author things
         # Companies publish papers, proposals, etc.
-        "valid_subject_types": {"PERSON", "ORGANIZATION"},
+        # FIX-015d: Added VALIDATOR (e.g., "Chomp authored Proposal #42")
+        "valid_subject_types": {"PERSON", "ORGANIZATION", "VALIDATOR"},
     },
     "validates": {
         # Validators validate things
