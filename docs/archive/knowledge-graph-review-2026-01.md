@@ -4212,13 +4212,38 @@ curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=$NCT"
 # [EntitySearch] Canonical expansions: bct → Base Carbon Tonne
 ```
 
-**UI Layer (if needed):**
-If the graph search UI at `/graph/` doesn't show canonical entities at top, update it to:
-1. Call `/api/koi/entity/resolve?label=<query>` before displaying results
-2. If a winner is returned, prepend it to the search results
-3. Show alternatives below for exploratory discovery
+**Data-level changes (entity_registry):**
+
+The original entities only existed as alias rows ("BCT", "TCO2"). Renamed to canonical names:
+
+| ID | Before | After | Type |
+|----|--------|-------|------|
+| 1391 | BCT | Base Carbon Tonne | TECHNOLOGY |
+| 1389 | TCO2 | Toucan Carbon Tonne | TECHNOLOGY |
+
+- Relationships preserved (9 total)
+- Chunk links preserved (4 total)
+- Backup table: `entity_registry_backup_fix018`
+- Fuseki rebuild: 29,678 entities, 169,956 triples
+
+**Verification (all passing):**
+```bash
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=BCT"
+# → "Base Carbon Tonne" (TECHNOLOGY)
+
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=TCO2"
+# → "Toucan Carbon Tonne" (TECHNOLOGY)
+
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=%24BCT"
+# → "Base Carbon Tonne" (TECHNOLOGY)
+
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=NCT"
+# → "Nature Carbon Tonne" (TECHNOLOGY)
+```
 
 **Success criteria:**
 - ✅ `canonical_entities.json` includes BCT and TCO2 mappings
 - ✅ `performEntitySearch()` expands aliases via `resolveCanonicalAlias()`
-- ⏳ UI verification pending deployment
+- ✅ BCT/TCO2 entities renamed to canonical names in database
+- ✅ Fuseki rebuilt with updated entity names
+- ✅ API returns canonical names for all test cases
