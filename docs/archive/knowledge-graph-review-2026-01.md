@@ -1,14 +1,16 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-29 (FIX-019 graph dataset rebuild)
-**Status:** Week 16 Complete - FIX-019 graph dataset rebuilt from entity_registry
+**Last Updated:** 2025-12-29 (post-extraction audit run)
+**Status:** Week 21b Complete - FIX-020 alias audit + post-extraction audit run
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
 
 **Day-1 Audit Report:** [kg_audit_2026_01_day1.md](reports/kg_audit_2026_01_day1.md)
 **Post-Week 3 Audit Report:** [kg_audit_2026_01_post_week3.md](reports/kg_audit_2026_01_post_week3.md)
+**Post-Extraction Audit Report:** [post_extraction_audit_20251229_153030.md](reports/post_extraction_audit_20251229_153030.md)
+**Post-Extraction KG Audit:** [kg_audit_post_extraction_20251229_153030.md](reports/kg_audit_post_extraction_20251229_153030.md)
 
 ---
 
@@ -2070,6 +2072,10 @@ for (const candidate of sortedEntities) {
 - [Week 9 Evaluation Report](reports/polysemy_resolver_eval_week9.md) - 100% Top-1 accuracy
 - [Week 9 Evaluation Report (Hints)](reports/polysemy_resolver_eval_week9_with_hints.md) - 100% Top-1 with fixed heuristic
 - [Predicate-Type Constraints Analysis](reports/predicate_type_constraints_analysis.md) - FIX-015 proposal for relationship validation
+- [Post-Extraction Audit Report (2025-12-29)](reports/post_extraction_audit_20251229_153030.md) - Summary + follow-ups
+- [Post-Extraction KG Audit (2025-12-29)](reports/kg_audit_post_extraction_20251229_153030.md) - Metrics snapshot
+- [Predicate Histogram (2025-12-29)](reports/predicate_histogram_20251229_153030.json) - Predicate distribution
+- [Alias Audit Report (2025-12-29)](reports/alias_audit_report_20251229_153030.csv) - Alias duplicate scan
 
 ---
 
@@ -3292,7 +3298,7 @@ ORDER BY m.created_at DESC;
 
 ## Week 19: Backfill + E402 Remainder (2025-12-26 to 2025-12-27)
 
-**Status:** ✅ Phase 2 Complete | Phase 1 Pending
+**Status:** ✅ Phase 2 Complete | ✅ Phase 1 Complete (remaining RIDs missing)
 
 ### Context
 
@@ -3825,9 +3831,9 @@ Multi-entity queries like "Gregory Landua vs Martin Wainstein leadership roles" 
 
 | Criterion | Target | Status |
 |-----------|--------|--------|
-| Multi-entity detection correct | 6/6 | Pending verification |
-| Secondary entity resolved (PERSON×PERSON) | 4/4 → target | Pending verification |
-| No regression ORG×TECH, ORG×PROJECT | Same as before | Pending verification |
+| Multi-entity detection correct | 6/6 | ✅ Verified |
+| Secondary entity resolved (PERSON×PERSON) | 6/6 | ✅ Verified |
+| No regression ORG×TECH, ORG×PROJECT | Same as before | ✅ Verified |
 
 ---
 
@@ -4465,3 +4471,35 @@ python scripts/apply_alias_merges.py --dry-run
 - ✅ Backup tables created for rollback if needed
 - ✅ Fuseki graph rebuilt with updated entity count
 - ✅ No regressions in relationships/chunk links
+
+---
+
+## Post-Extraction Audit Run (2025-12-29)
+
+**Status:** ✅ Complete
+
+**Script:** `scripts/post_extraction_audit.sh`
+
+**Outputs:**
+- `reports/post_extraction_audit_20251229_153030.md`
+- `reports/kg_audit_post_extraction_20251229_153030.md`
+- `reports/predicate_histogram_20251229_153030.json`
+- `reports/alias_audit_report_20251229_153030.csv`
+
+**Key Metrics (from KG audit):**
+| Metric | Value |
+|--------|-------|
+| Entities | 29,670 |
+| Relationships | 21,566 |
+| Distinct Predicates | 1,495 |
+| Quality Gates | 4/4 PASS |
+
+**Alias Audit Result:**
+| Metric | Value |
+|--------|-------|
+| Alias duplicates found | 1 |
+| Deferred | 1 (`registry` → Regen Registry, ambiguous) |
+
+**Follow-ups:**
+1. Run type-constraint violations check (per `docs/runbooks/post_extraction_audit.md`)
+2. Optional: GraphRAG eval if query behavior shifts
