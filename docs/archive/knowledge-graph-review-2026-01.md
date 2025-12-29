@@ -4115,3 +4115,110 @@ LIMIT 20;
 - Entities: 29,683
 - Relationships: 21,566
 - Triples: 169,981
+
+---
+
+### FIX-017b: $NCT Polysemy Cleanup (2025-12-29)
+
+**Status**: ✅ Complete
+
+**Objective**: Merge all remaining `$NCT` variants into the canonical `Nature Carbon Tonne` (TECHNOLOGY) entity to eliminate polysemy noise in resolver.
+
+**Problem**: `/api/koi/entity/resolve?label=NCT` showed low-occurrence alternatives (`$NCT` in CONCEPT/TECHNOLOGY/CREDIT_CLASS/MATERIAL/PROJECT) instead of returning a single canonical entity.
+
+**Merged Entities (5 total):**
+
+| ID | Entity Text | Type | Occurrence Count | Fuseki URI |
+|----|-------------|------|------------------|------------|
+| 7769 | $NCT | CONCEPT | 7 | https://regen.network/concept/86aeb63876e7917c |
+| 7199 | $NCT | TECHNOLOGY | 6 | https://regen.network/tech/c7e2a350ae04482d |
+| 24993 | $NCT | CREDIT_CLASS | 2 | https://regen.network/credit-class/b95ff17c99c672dc |
+| 10134 | $NCT | MATERIAL | 2 | https://regen.network/material/f600f78e7b2d5bff |
+| 22117 | $NCT | PROJECT | 1 | https://regen.network/project/aa7369539c161f9b |
+
+**Winner:**
+- ID 683: `Nature Carbon Tonne` (TECHNOLOGY)
+- URI: `https://regen.network/tech/41456437403d1515`
+- Occurrence count: 133 → 151 (+18 merged)
+
+**Pre-merge checks:**
+- Relationships: 0 (none to migrate)
+- Chunk links: 0 (none to update)
+
+**Backup table:** `entity_registry_backup_nct_merge_20251229`
+
+**Fuseki rebuild:**
+- Entities: 29,678 (was 29,683)
+- Relationships: 21,566
+- Triples: 169,956 (was 169,981)
+
+**Verification:**
+```
+resolve?label=NCT → Nature Carbon Tonne (TECHNOLOGY, 151 occ)
+resolve?label=$NCT → Nature Carbon Tonne (TECHNOLOGY, 151 occ)
+Both return: is_polysemy: false, alternatives: []
+```
+
+**Success criteria met:**
+- ✅ No `$NCT` or `NCTs` entities remain in `entity_registry`
+- ✅ Resolver no longer shows polysemy alternatives for NCT
+
+---
+
+### FIX-018: Graph Search Canonicalization (2025-12-29)
+
+**Status**: ✅ Complete
+
+**Objective**: Update graph search flow so typing aliases (BCT, NCT, TCO2) resolves to canonical entities at the top of search results.
+
+**Problem**: Graph search and entity search returned alias rows (e.g., "BCT Project") instead of canonical names (e.g., "Base Carbon Tonne"). The `/api/koi/entity/resolve` endpoint honored canonical aliases, but `performEntitySearch()` in the hybrid RAG pipeline did not.
+
+**Changes Made:**
+
+1. **Updated `canonical_entities.json` (v2.1.0 → v2.2.0):**
+   - Added `bct` → "Base Carbon Tonne" (PROJECT)
+     - Aliases: BCT, bct, $BCT, $bct, BCT token, bct token, Base Carbon Tonnes
+   - Added `tco2` → "Toucan Carbon Tonne" (PROJECT)
+     - Aliases: TCO2, tco2, TCO2 token, tco2 token, Toucan CO2, Tokenized CO2
+
+2. **Updated `performEntitySearch()` in `koi-query-api.ts`:**
+   - Added canonical alias expansion before entity pattern matching
+   - Uses `resolveCanonicalAlias()` to expand search terms
+   - Example: searching "BCT" now also searches for "base carbon tonne"
+   - Added debug logging: `[EntitySearch] Canonical expansions: BCT → Base Carbon Tonne`
+
+**Files modified:**
+- `data/canonical_entities.json`
+- `koi-query-api.ts` (lines 1038-1062)
+
+**API Behavior (before/after):**
+
+| Query | Before | After |
+|-------|--------|-------|
+| `?label=BCT` | No results or unrelated entities | "Base Carbon Tonne" at top |
+| `?label=TCO2` | No results or unrelated entities | "Toucan Carbon Tonne" at top |
+| `?label=NCT` | "Nature Carbon Tonne" (already working) | No change |
+| `?label=$NCT` | "Nature Carbon Tonne" (already working) | No change |
+
+**Verification:**
+```bash
+# Test entity resolution (API-level)
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=BCT"
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=TCO2"
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=NCT"
+curl "https://regen.gaiaai.xyz/api/koi/entity/resolve?label=$NCT"
+
+# Check server logs for canonical expansions
+# [EntitySearch] Canonical expansions: bct → Base Carbon Tonne
+```
+
+**UI Layer (if needed):**
+If the graph search UI at `/graph/` doesn't show canonical entities at top, update it to:
+1. Call `/api/koi/entity/resolve?label=<query>` before displaying results
+2. If a winner is returned, prepend it to the search results
+3. Show alternatives below for exploratory discovery
+
+**Success criteria:**
+- ✅ `canonical_entities.json` includes BCT and TCO2 mappings
+- ✅ `performEntitySearch()` expands aliases via `resolveCanonicalAlias()`
+- ⏳ UI verification pending deployment

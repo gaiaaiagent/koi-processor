@@ -1,7 +1,7 @@
 {
-  "version": "2.1.0",
-  "last_updated": "2025-12-23",
-  "description": "Canonical entity registry for Regen KOI knowledge graph deduplication - FIX-006 Enhanced",
+  "version": "2.2.0",
+  "last_updated": "2025-12-29",
+  "description": "Canonical entity registry for Regen KOI knowledge graph deduplication - FIX-018 Added BCT/TCO2 aliases",
   "entities": {
     "organizations": {
       "regen-network": {
@@ -715,6 +715,35 @@
         "entity_type": "PROJECT",
         "confidence": 1.0,
         "notes": "Regen-issued basket token (Week 21b: added $ and token variants)"
+      },
+      "bct": {
+        "canonical_name": "Base Carbon Tonne",
+        "aliases": [
+          "BCT",
+          "bct",
+          "$BCT",
+          "$bct",
+          "BCT token",
+          "bct token",
+          "Base Carbon Tonnes"
+        ],
+        "entity_type": "PROJECT",
+        "confidence": 1.0,
+        "notes": "Toucan Protocol carbon basket token (FIX-018: canonical alias for graph search)"
+      },
+      "tco2": {
+        "canonical_name": "Toucan Carbon Tonne",
+        "aliases": [
+          "TCO2",
+          "tco2",
+          "TCO2 token",
+          "tco2 token",
+          "Toucan CO2",
+          "Tokenized CO2"
+        ],
+        "entity_type": "PROJECT",
+        "confidence": 1.0,
+        "notes": "Toucan Protocol tokenized carbon credit (FIX-018: canonical alias for graph search)"
       }
     },
     "people": {

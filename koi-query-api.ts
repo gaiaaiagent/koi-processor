@@ -1035,6 +1035,32 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
       }
     }
 
+    // FIX-018: Expand patterns with canonical aliases (e.g., "BCT" → "Base Carbon Tonne")
+    const expandedPatterns = new Set(patterns);
+    const canonicalExpansions: string[] = [];
+    for (const pattern of patterns) {
+      const canonical = resolveCanonicalAlias(pattern);
+      if (canonical && canonical.canonical_name) {
+        // Add the canonical name (normalized to lowercase)
+        const canonicalLower = canonical.canonical_name.toLowerCase();
+        if (!expandedPatterns.has(canonicalLower)) {
+          expandedPatterns.add(canonicalLower);
+          canonicalExpansions.push(`${pattern} → ${canonical.canonical_name}`);
+        }
+        // Also add common variations of multi-word names
+        const canonicalWords = canonicalLower.split(/\s+/);
+        if (canonicalWords.length > 1) {
+          expandedPatterns.add(canonicalWords.join(' '));
+        }
+      }
+    }
+    const finalPatterns = Array.from(expandedPatterns);
+
+    // Log canonical expansions for debugging
+    if (canonicalExpansions.length > 0) {
+      console.log(`[EntitySearch] Canonical expansions: ${canonicalExpansions.join(', ')}`);
+    }
+
     // Query for entities matching these patterns
     // Uses source-diversity sampling to prevent any single source from dominating
     const entityQuery = `
@@ -1127,7 +1153,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
       LIMIT $2
     `;
 
-    const results = await pool.query(entityQuery, [patterns, topK]);
+    const results = await pool.query(entityQuery, [finalPatterns, topK]);
 
     // Calculate scores based on entity count (normalized)
     const maxCount = results.rows.length > 0
