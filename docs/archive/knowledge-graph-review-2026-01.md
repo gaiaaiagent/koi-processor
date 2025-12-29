@@ -3995,4 +3995,32 @@ LIMIT 20;
 
 **Note:** Full extraction canary requires `GEMINI_API_KEY` which was not configured. The guard was validated by testing the filter against existing database entities.
 
+### Cleanup: Safe Deletion of Orphan Entities (2025-12-29)
+
+**Script:** `scripts/fix016_cleanup_single_token_persons.py`
+
+**Deletion criteria (conservative):**
+- 0 relationships (no semantic edges)
+- 0 chunk links (no mention anchors)
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Total single-token PERSON | 432 |
+| Orphans deleted | 141 |
+| Remaining (have relationships) | 291 |
+| Relationships deleted | 0 |
+| Chunk links deleted | 0 |
+
+**Backup tables:** `*_fix016_20251229_004727`
+
+**Fuseki rebuild:**
+- Entities: 29,694 (was 29,835)
+- Triples: 170,049
+
+**Next steps for remaining 291:**
+- Review for merge candidates (e.g., "Chirstian" → correct full name)
+- Do not bulk delete - they have semantic edges worth preserving or merging
+
 ---
