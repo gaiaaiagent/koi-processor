@@ -4696,3 +4696,69 @@ python scripts/apply_alias_merges.py --dry-run
 - Various extraction errors
 
 **Deferred:** Remaining 22 violations are low-priority edge cases for future cleanup cycle.
+
+
+---
+
+## FIX-015e Final Cleanup (2025-12-29)
+
+**Status:** ✅ Complete
+
+**Scope:** 
+1. Delete 12 clear semantic violations
+2. Retype 2 misclassified entities
+3. Relax constraints for legitimate patterns
+
+### Deletions Applied (12 edges)
+
+| ID | Predicate | Subject | Object | Reason |
+|----|-----------|---------|--------|--------|
+| 23558 | founded | Regen Network (ORG) | regenerative fi (CONCEPT) | Truncated/invalid |
+| 24339 | leads | Koi Project (PROJECT) | RMIT (ORG) | PROJECT can't lead ORG |
+| 24338 | leads | Koi Project (PROJECT) | Blockscience (ORG) | PROJECT can't lead ORG |
+| 18420 | located_in | Amazon basin (LOC) | environmental due diligence (CONCEPT) | Nonsense |
+| 19079 | located_in | hammerfest (VAL) | Hetzner (ORG) | Wrong predicate |
+| 21350 | validates | Regenald (PERSON) | Regen Network (ORG) | PERSON can't validate |
+| 18973 | validates | LIUHUA (PERSON) | Regen Network (ORG) | PERSON can't validate |
+| 24693 | validates | Data Module (PROJECT) | genesis state (CONCEPT) | Wrong semantic |
+| 25996 | works_at | RND Inc (ORG) | Regen Network (ORG) | ORG doesn't work at ORG |
+| 19040 | works_at | Cosmos Hub (ORG) | Regen Network (ORG) | ORG doesn't work at ORG |
+| 18939 | works_at | Chainode (ORG) | ChainodeTech (VAL) | Wrong predicate |
+| 18421 | works_at | Julio Andrés Rozo (PERSON) | Amazonia (LOC) | Can't work at a location |
+
+### Entity Retypes (2 entities)
+
+| Entity | Old Type | New Type | Reason |
+|--------|----------|----------|--------|
+| KOI research | CONCEPT | PROJECT | Founded by Darren Zal |
+| Future Earth | CONCEPT | ORGANIZATION | Owen Gaffney works there |
+
+### Constraint Relaxations
+
+| Predicate | Change | Reason |
+|-----------|--------|--------|
+| `leads` | +TECHNOLOGY to valid_object_types | Orgs/people lead tech projects |
+| `works_at` | +VALIDATOR to valid_subject_types | Validators have operational roles |
+| `works_at` | +TECHNOLOGY to valid_object_types | People work on tech projects |
+
+### Results
+
+| Metric | After FIX-015d | After FIX-015e |
+|--------|----------------|----------------|
+| Relationships | 21,541 | 21,529 |
+| Triples | 169,891 | 169,879 |
+| Type-constraint violations | 22 | 1 |
+
+### Backup Table
+
+| Table | Rows |
+|-------|------|
+| koi_relationships_backup_fix015e | 12 |
+
+### Remaining Violation (1 - Deferred)
+
+| ID | Predicate | Subject | Object | Status |
+|----|-----------|---------|--------|--------|
+| 18979 | leads | aliefaisala (VALIDATOR) | Regen community (ORG) | Deferred - might be valid |
+
+**Decision:** This edge may represent a legitimate validator operator leading community efforts. Defer to next review cycle.
