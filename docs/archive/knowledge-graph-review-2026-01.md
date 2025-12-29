@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-25 (Week 16 FIX-015b cleanup complete)
-**Status:** Week 16 Complete - RelationshipTypeValidator in strict mode + 171 violations cleaned
+**Last Updated:** 2025-12-28 (FIX-016 single-token PERSON guard complete)
+**Status:** Week 16 Complete - FIX-016 added single-token PERSON guard
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -82,7 +82,7 @@ Top 5:
 
 1. **tier1x_fuzzy PERSON proposals** - 6-8 identified false positives. Requires manual review.
 2. **type_conflict backlog** - 2,749 cross-type collisions. Informational only.
-3. **Single-token PERSON ambiguity** - Protected by canonical registry but not fully resolved.
+3. **Single-token PERSON ambiguity** - ✅ Resolved via FIX-016 single-token guard (2025-12-28).
 4. **Further predicate reduction** - 1,499 → ~100-200 optional consolidation.
 5. **E325 Will-Regen Foundation** - False extraction artifact (9 occurrences). Candidate for removal.
 
@@ -3869,5 +3869,66 @@ Added a "PREDICATE TYPE CONSTRAINTS" section after canonical predicates, contain
 - ✅ Prompt renders without formatting errors
 - ✅ Constraints aligned with `predicate_guard.py`
 - Expected: Fewer type-invalid relationships generated (to verify in next extraction run)
+
+---
+
+## FIX-016: Single-Token PERSON Guard (2025-12-28)
+
+**Status**: ✅ Complete
+
+### Objective
+
+Block capitalized single-token PERSON names (e.g., "Max", "Will", "Mark") that cause false merges in entity resolution. Allow when explicit cue prefixes are present (Dr., CEO, Chairman) or when multi-token full names.
+
+### Policy: Moderate
+
+| Condition | Blocked? | Example |
+|-----------|----------|---------|
+| Single-token, capitalized, no cue | ✅ Blocked | "Max", "Will", "Mark" |
+| With cue prefix | ❌ Allowed | "Dr. Jane", "CEO Alice", "CEO: Alice" |
+| Multi-token full name | ❌ Allowed | "Max Semenchuk", "Will Szal" |
+| Hyphenated/underscored | ❌ Allowed | "Mary-Jane", "Max_Semenchuk" |
+| Lowercase single-token | ❌ Not this guard | "bob" (handled by `is_lowercase_person`) |
+
+### Implementation
+
+**File**: `src/knowledge_graph/improvements/entity_quality_filter.py`
+
+**New Components**:
+1. `PERSON_CUE_PREFIXES` - Set of 30+ honorifics and role prefixes (Dr., CEO, Chairman, etc.)
+2. `PERSON_CUE_PREFIX_PATTERN` - Regex for matching prefixes with optional punctuation
+3. `has_person_cue_prefix()` - Checks for cue prefix match
+4. `is_single_token_person()` - Main guard method (runs BEFORE whitelist)
+
+**Pipeline Position**: Guard runs BEFORE whitelist check in `filter_entity()` and `filter_with_reasons()`. This ensures whitelisted names like "Will" in `PERSON_NAMES_WHITELIST` are still blocked by this guard while preserving whitelist behavior for other filters.
+
+**Tokenization**: Uses `re.split(r'[\s_-]+', ...)` so "Mary-Jane" and "Max_Semenchuk" are treated as multi-token and allowed.
+
+### Test Coverage
+
+**File**: `src/knowledge_graph/improvements/tests/test_entity_quality_filter.py`
+
+**New Class**: `TestSingleTokenPersonGuard` (32 tests)
+
+| Test Category | Count | Examples |
+|---------------|-------|----------|
+| Blocks single-token | 5 | Max, Will, Mark, Alice, Bob |
+| Allows cue prefix | 9 | Dr. Jane, CEO: Alice, Chairman Bob |
+| Allows full names | 4 | Max Semenchuk, Will Szal |
+| Allows hyphenated | 4 | Mary-Jane, Jean-Pierre |
+| Non-PERSON types | 3 | Max as ORGANIZATION |
+| Whitelist bypass | 1 | Will still blocked |
+| Full filter tests | 6 | filter_entity, filter_with_reasons |
+
+### Results
+
+**All 352 tests pass** (349 existing + 3 new lowercase tests)
+
+### Carry-Over Item Status
+
+This resolves the carry-over item:
+> 3. **Single-token PERSON ambiguity** - Protected by canonical registry but not fully resolved.
+
+Now **resolved** via extraction-time guard in `entity_quality_filter.py`.
 
 ---

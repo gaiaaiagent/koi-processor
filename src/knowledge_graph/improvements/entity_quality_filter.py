@@ -644,6 +644,36 @@ class EntityQualityFilter:
         re.compile(r'\b(team|group|committee|council|task\s*force|working\s*group)\b', re.IGNORECASE),
     ]
 
+    # ========================================================================
+    # FIX-016: Single-Token PERSON Guard
+    # ========================================================================
+    # Blocks single-token PERSON names (e.g., "Max", "Will") unless they have
+    # an explicit PERSON cue prefix (Dr., CEO, Chairman, etc.).
+    # ========================================================================
+    PERSON_CUE_PREFIXES: Set[str] = {
+        # Honorifics
+        'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.', 'miss',
+        'dr', 'dr.', 'prof', 'prof.', 'professor',
+        'sir', 'dame', 'lord', 'lady', 'rev', 'rev.', 'reverend',
+        # Corporate roles
+        'ceo', 'cfo', 'cto', 'coo', 'cmo', 'cio',
+        'president', 'vp', 'vice president',
+        'chairman', 'chairwoman', 'chairperson', 'chair',
+        'director', 'founder', 'co-founder', 'cofounder',
+        'partner', 'managing partner',
+        # Other roles
+        'chief', 'head', 'lead', 'manager', 'senior', 'principal',
+    }
+
+    # Regex pattern for matching cue prefixes with optional punctuation
+    # Matches: "Dr. Jane", "Dr Jane", "CEO Alice", "CEO: Alice"
+    # Build pattern from unique prefix roots (without trailing periods)
+    _prefix_roots = sorted(set(p.rstrip('.') for p in PERSON_CUE_PREFIXES if p), key=len, reverse=True)
+    PERSON_CUE_PREFIX_PATTERN: re.Pattern = re.compile(
+        r'^(' + '|'.join(re.escape(p) for p in _prefix_roots) + r')[.:]?\s+',
+        re.IGNORECASE
+    )
+
     def __init__(self, config: Optional[FilterConfig] = None):
         """
         Initialize the entity quality filter.
@@ -700,6 +730,8 @@ class EntityQualityFilter:
                 'code_module_as_process': 0,
                 # FIX-014: Abstract concept as MATERIAL
                 'abstract_concept_as_material': 0,
+                # FIX-016: Single-token PERSON
+                'single_token_person': 0,
             }
         }
 
@@ -1005,6 +1037,85 @@ class EntityQualityFilter:
             return True
 
         return False
+
+    # ========================================================================
+    # FIX-016: Single-Token PERSON Guard Methods
+    # ========================================================================
+
+    def has_person_cue_prefix(self, name: str) -> bool:
+        """
+        FIX-016: Check if name has an explicit PERSON cue prefix.
+
+        Matches: "Dr. Jane", "Dr Jane", "CEO Alice", "CEO: Alice"
+
+        Args:
+            name: Entity name to check
+
+        Returns:
+            True if name starts with a recognized PERSON cue prefix
+        """
+        return bool(self.PERSON_CUE_PREFIX_PATTERN.match(name.strip()))
+
+    def is_single_token_person(self, name: str, entity_type: str) -> bool:
+        """
+        FIX-016: Check if entity is a CAPITALIZED single-token PERSON without cues.
+
+        Blocks capitalized single-token PERSON names (e.g., "Max", "Will") unless:
+        1. Has explicit PERSON cue prefix (Dr., CEO, Chairman, etc.)
+        2. Is multi-token (full name like "Max Semenchuk")
+        3. Is hyphenated/underscored (treated as multi-token: "Mary-Jane")
+
+        Note: Lowercase single-token names like "bob" are handled by is_lowercase_person().
+
+        Args:
+            name: Entity name to check
+            entity_type: Entity type
+
+        Returns:
+            True if should be blocked (is capitalized single-token PERSON without cues)
+
+        Examples:
+            >>> filter.is_single_token_person("Max", "PERSON")
+            True  # Blocked: capitalized single-token, no cue
+            >>> filter.is_single_token_person("bob", "PERSON")
+            False  # Not blocked here: lowercase (handled by is_lowercase_person)
+            >>> filter.is_single_token_person("Dr. Jane", "PERSON")
+            False  # Allowed: has "Dr." prefix
+            >>> filter.is_single_token_person("CEO: Alice", "PERSON")
+            False  # Allowed: has "CEO:" prefix
+            >>> filter.is_single_token_person("Max Semenchuk", "PERSON")
+            False  # Allowed: multi-token (full name)
+            >>> filter.is_single_token_person("Mary-Jane", "PERSON")
+            False  # Allowed: hyphenated (multi-token)
+            >>> filter.is_single_token_person("Max_Semenchuk", "PERSON")
+            False  # Allowed: underscored (multi-token)
+            >>> filter.is_single_token_person("Max", "ORGANIZATION")
+            False  # Not applicable: wrong type
+        """
+        if not entity_type or entity_type.upper() != 'PERSON':
+            return False
+
+        stripped = name.strip()
+
+        # Allow if has PERSON cue prefix
+        if self.has_person_cue_prefix(stripped):
+            return False
+
+        # Tokenize on whitespace, hyphens, and underscores
+        # This treats "Mary-Jane" and "Max_Semenchuk" as multi-token
+        tokens = re.split(r'[\s_-]+', stripped)
+        tokens = [t for t in tokens if t]  # Remove empty tokens
+
+        if len(tokens) != 1:
+            return False
+
+        # If lowercase single-token, let is_lowercase_person() handle it
+        # This guard only blocks CAPITALIZED single-token names like "Max", "Will"
+        if stripped[0].islower():
+            return False
+
+        # Capitalized single-token PERSON without cue - block it
+        return True
 
     # ========================================================================
     # FIX-002: New Filter Methods
@@ -1447,11 +1558,16 @@ class EntityQualityFilter:
             - (True, []) if entity passes all filters
             - (False, ["reason1", "reason2", ...]) if entity should be filtered
         """
-        # 0. Whitelist check - if whitelisted, skip all other checks
-        if self.is_whitelisted(name):
-            return True, []
-
         reasons = []
+
+        # FIX-016: Single-token PERSON guard runs BEFORE whitelist
+        if self.is_single_token_person(name, entity_type):
+            reasons.append("single_token_person")
+
+        # 0. Whitelist check - if whitelisted, skip all other checks
+        # (but still return single_token_person if caught above)
+        if self.is_whitelisted(name):
+            return (len(reasons) == 0, reasons)
 
         # ====================================================================
         # FIX-003: Early checks for min-length and placeholder
@@ -1591,7 +1707,12 @@ class EntityQualityFilter:
         name = entity.get('name', '')
         entity_type = entity.get('type', '')
 
-        # Check whitelist first (includes built-in + user config)
+        # FIX-016: Single-token PERSON guard runs BEFORE whitelist
+        # This prevents whitelist from bypassing this specific guard
+        if self.is_single_token_person(name, entity_type):
+            return (False, "single_token_person")
+
+        # Check whitelist (includes built-in + user config)
         if self.is_whitelisted(name):
             return (True, "")
 
@@ -1796,6 +1917,8 @@ class EntityQualityFilter:
                 'code_module_as_process': 0,
                 # FIX-014: Abstract concept as MATERIAL
                 'abstract_concept_as_material': 0,
+                # FIX-016: Single-token PERSON
+                'single_token_person': 0,
             }
         }
 

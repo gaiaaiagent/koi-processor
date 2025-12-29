@@ -1136,5 +1136,104 @@ class TestFIX014AbstractConceptAsMaterial:
         assert ("carbon sequestration", "MATERIAL") not in passed_names
 
 
+class TestSingleTokenPersonGuard:
+    """
+    Tests for FIX-016: Single-token PERSON guard.
+
+    Blocks single-token PERSON names (e.g., "Max", "Will") unless:
+    - Has explicit cue prefix (Dr., CEO, Chairman, etc.)
+    - Is multi-token (full name)
+    - Is hyphenated/underscored (treated as multi-token)
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_filter(self):
+        self.filter = EntityQualityFilter()
+
+    # Block: Single-token without cue
+    @pytest.mark.parametrize("name", ["Max", "Will", "Mark", "Alice", "Bob"])
+    def test_blocks_single_token_person(self, name):
+        """Single-token PERSON names should be blocked."""
+        is_valid, reasons = self.filter.filter_with_reasons(name, "PERSON")
+        assert is_valid is False
+        assert "single_token_person" in reasons
+
+    # Allow: With title/role prefix (various punctuation styles)
+    @pytest.mark.parametrize("name", [
+        "Dr. Jane",      # Standard with period
+        "Dr Jane",       # Without period
+        "CEO Alice",     # Role prefix
+        "CEO: Alice",    # With colon
+        "Chairman Bob",
+        "President Max",
+        "Director Sarah",
+        "Prof. Smith",
+        "Mr. Jones",
+    ])
+    def test_allows_with_cue_prefix(self, name):
+        """Names with cue prefixes should be allowed."""
+        assert self.filter.is_single_token_person(name, "PERSON") is False
+
+    # Allow: Multi-token full names
+    @pytest.mark.parametrize("name", [
+        "Max Semenchuk",
+        "Will Szal",
+        "Mark Johnson",
+        "Gregory Landua",
+    ])
+    def test_allows_full_names(self, name):
+        """Multi-token full names should be allowed."""
+        assert self.filter.is_single_token_person(name, "PERSON") is False
+
+    # Allow: Hyphenated and underscored names (multi-token by tokenization)
+    @pytest.mark.parametrize("name", [
+        "Mary-Jane",       # Hyphenated first name
+        "Max_Semenchuk",   # Underscored full name
+        "Jean-Pierre",     # French hyphenated name
+        "Smith-Jones",     # Hyphenated surname
+    ])
+    def test_allows_hyphenated_underscored_names(self, name):
+        """Hyphenated/underscored names should be treated as multi-token and allowed."""
+        assert self.filter.is_single_token_person(name, "PERSON") is False
+
+    # Non-PERSON types should pass
+    @pytest.mark.parametrize("entity_type", ["ORGANIZATION", "PROJECT", "CONCEPT"])
+    def test_allows_non_person_types(self, entity_type):
+        """Single-token entities with non-PERSON types should pass."""
+        assert self.filter.is_single_token_person("Max", entity_type) is False
+
+    # Verify whitelisted names are still blocked by this guard
+    def test_blocks_whitelisted_single_token(self):
+        """Will and Mark are whitelisted but should still be blocked by single-token guard."""
+        is_valid, reasons = self.filter.filter_with_reasons("Will", "PERSON")
+        assert "single_token_person" in reasons
+
+    def test_full_filter_blocks_single_token_person(self):
+        """filter_entity should block single-token PERSON."""
+        entity = {"name": "Max", "type": "PERSON"}
+        passes, reason = self.filter.filter_entity(entity)
+        assert passes is False
+        assert reason == "single_token_person"
+
+    def test_full_filter_allows_full_name(self):
+        """filter_entity should allow full names."""
+        entity = {"name": "Max Semenchuk", "type": "PERSON"}
+        passes, reason = self.filter.filter_entity(entity)
+        assert passes is True
+
+    def test_full_filter_allows_cue_prefix(self):
+        """filter_entity should allow names with cue prefixes."""
+        entity = {"name": "Dr. Jane", "type": "PERSON"}
+        passes, reason = self.filter.filter_entity(entity)
+        assert passes is True
+
+    # Verify lowercase single-token names are not blocked by this guard
+    # (they are handled by is_lowercase_person instead)
+    @pytest.mark.parametrize("name", ["bob", "friend", "guy"])
+    def test_lowercase_not_blocked_by_this_guard(self, name):
+        """Lowercase single-token names should be handled by is_lowercase_person, not this guard."""
+        assert self.filter.is_single_token_person(name, "PERSON") is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
