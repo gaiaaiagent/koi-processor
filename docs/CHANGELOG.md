@@ -5,6 +5,22 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.4] - 2025-12-29
+
+### Added
+- **FIX-020: Alias Audit & Merge Scripts** - Entity deduplication tooling
+  - `scripts/alias_audit.py` - Generates audit report of alias entities matching canonical_entities.json
+  - `scripts/apply_alias_merges.py` - Applies safe merges with backup tables
+  - Merged 8 alias entities into their canonical counterparts
+  - Backup tables: `alias_merge_backup_20251229_*`
+- **GraphRAG 3D Export** - `scripts/export_graph_hierarchy.py`
+  - Exports entity_registry + koi_relationships to 3D visualization format
+  - Uses UMAP for 3D positioning from pgvector embeddings
+  - Outputs JSON for `GAIA/graph/GraphRAG3D_EmbeddingView.html`
+- **Post-Extraction Audit Runbook** - `docs/runbooks/post_extraction_audit.md`
+  - Standardized checklist for validating extraction quality
+  - Companion script: `scripts/post_extraction_audit.sh`
+
 ## [3.1.3] - 2025-12-28
 
 ### Fixed

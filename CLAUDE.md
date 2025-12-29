@@ -214,11 +214,22 @@ set -a; source .env; set +a
 2. ~10 snake_case entities cleanup
 3. ✅ FIX-006 (entity dedup) - DEPLOYED 2025-12-23
 4. FIX-008 (dual-write strategy review)
-5. Apply safe entity merges (tier1_normalized + tier1_5_canonical = 365 proposals)
+5. ✅ FIX-020 (alias audit/merge) - DEPLOYED 2025-12-29 (8 merges)
 6. ✅ FIX-015 (predicate type guard) - DEPLOYED 2025-12-25
 7. ✅ Polysemy rerank - DEPLOYED 2025-12-26
 
 ---
 
-**Last Updated**: 2025-12-26
+## New Scripts (2025-12-29)
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/alias_audit.py` | Generate audit report of alias duplicates |
+| `scripts/apply_alias_merges.py` | Apply safe merges with backups |
+| `scripts/export_graph_hierarchy.py` | Export to 3D viz format (→ GAIA/graph/) |
+| `scripts/post_extraction_audit.sh` | Post-extraction quality checklist |
+
+---
+
+**Last Updated**: 2025-12-29
 **Phase**: Complete - All major milestones achieved
