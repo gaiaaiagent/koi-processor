@@ -3931,4 +3931,50 @@ This resolves the carry-over item:
 
 Now **resolved** via extraction-time guard in `entity_quality_filter.py`.
 
+### Deployment & Baseline (Commit `4a323292`)
+
+**Pre-deploy baseline queries (run BEFORE git pull):**
+
+```sql
+-- Capitalized single-token PERSONs (target of FIX-016)
+SELECT COUNT(*) as capitalized_single_token
+FROM entity_registry
+WHERE entity_type = 'PERSON'
+  AND entity_text !~ '[\s_-]'
+  AND entity_text ~ '^[A-Z]'
+  AND entity_text !~ '^(Dr|Mr|Mrs|Ms|CEO|CTO|CFO|Prof)';
+
+-- Lowercase single-token PERSONs (handled by is_lowercase_person)
+SELECT COUNT(*) as lowercase_single_token
+FROM entity_registry
+WHERE entity_type = 'PERSON'
+  AND entity_text !~ '[\s_-]'
+  AND entity_text ~ '^[a-z]';
+
+-- Sample capitalized (top 20 by occurrence)
+SELECT entity_text, occurrence_count
+FROM entity_registry
+WHERE entity_type = 'PERSON'
+  AND entity_text !~ '[\s_-]'
+  AND entity_text ~ '^[A-Z]'
+  AND entity_text !~ '^(Dr|Mr|Mrs|Ms|CEO|CTO|CFO|Prof)'
+ORDER BY occurrence_count DESC
+LIMIT 20;
+```
+
+**Baseline counts (pre-deploy):**
+
+| Metric | Count |
+|--------|-------|
+| Capitalized single-token PERSON | _TBD_ |
+| Lowercase single-token PERSON | _TBD_ |
+
+**Canary extraction observations:**
+
+| Metric | Value |
+|--------|-------|
+| Docs processed | _TBD_ |
+| `single_token_person` filter count | _TBD_ |
+| Sample blocked names | _TBD_ |
+
 ---
