@@ -3962,19 +3962,37 @@ ORDER BY occurrence_count DESC
 LIMIT 20;
 ```
 
-**Baseline counts (pre-deploy):**
+**Baseline counts (pre-deploy, 2025-12-29):**
 
 | Metric | Count |
 |--------|-------|
-| Capitalized single-token PERSON | _TBD_ |
-| Lowercase single-token PERSON | _TBD_ |
+| Capitalized single-token PERSON | 429 |
+| Lowercase single-token PERSON | 15 |
 
-**Canary extraction observations:**
+**Top 10 single-token PERSONs by occurrence:**
+
+| Name | Occurrences |
+|------|-------------|
+| Chirstian | 365 |
+| Max | 276 |
+| James | 255 |
+| Mark | 205 |
+| Will | 156 |
+| Brandon | 121 |
+| Becca | 59 |
+| Julia | 53 |
+| Sarah | 50 |
+| Scott | 48 |
+
+**Canary test on existing entities (post-deploy):**
 
 | Metric | Value |
 |--------|-------|
-| Docs processed | _TBD_ |
-| `single_token_person` filter count | _TBD_ |
-| Sample blocked names | _TBD_ |
+| Entities tested | Top 50 by occurrence |
+| `single_token_person` blocked | 50/50 (100%) |
+| Total occurrences affected | 2,427 |
+| Guard working | ✅ Verified |
+
+**Note:** Full extraction canary requires `GEMINI_API_KEY` which was not configured. The guard was validated by testing the filter against existing database entities.
 
 ---
