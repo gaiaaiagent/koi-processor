@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-29 (FIX-016b single-token PERSON merges applied)
-**Status:** Week 16 Complete - FIX-016b merged 9 high-confidence single-token PERSONs
+**Last Updated:** 2025-12-29 (FIX-017 NCT token canonicalization applied)
+**Status:** Week 16 Complete - FIX-017 NCT token canonicalization applied
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
