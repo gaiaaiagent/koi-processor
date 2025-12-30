@@ -4747,7 +4747,7 @@ python scripts/apply_alias_merges.py --dry-run
 |--------|----------------|----------------|
 | Relationships | 21,541 | 21,529 |
 | Triples | 169,891 | 169,879 |
-| Type-constraint violations | 22 | 1 |
+| Type-constraint violations | 22 | 0 |
 
 ### Backup Table
 
@@ -4755,10 +4755,10 @@ python scripts/apply_alias_merges.py --dry-run
 |-------|------|
 | koi_relationships_backup_fix015e | 12 |
 
-### Remaining Violation (1 - Deferred)
+### Remaining Violations
 
 | ID | Predicate | Subject | Object | Status |
 |----|-----------|---------|--------|--------|
-| 18979 | leads | aliefaisala (VALIDATOR) | Regen community (ORG) | Deferred - might be valid |
+None - all type-constraint violations resolved.
 
-**Decision:** This edge may represent a legitimate validator operator leading community efforts. Defer to next review cycle.
+**Final:** aliefaisala leads Regen community was determined to be an extraction error and deleted.
