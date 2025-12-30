@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-01
 
 **Started:** 2025-12-24
-**Last Updated:** 2025-12-29 (post-extraction audit run)
-**Status:** Week 21b Complete - FIX-020 alias audit + post-extraction audit run
+**Last Updated:** 2025-12-29 (FIX-015e closeout + post-extraction audit run)
+**Status:** Cycle closeout - FIX-015e complete, type-constraint violations = 0
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -4474,6 +4474,35 @@ python scripts/apply_alias_merges.py --dry-run
 
 ---
 
+## Cycle Closeout (2025-12-29)
+
+**Status:** ✅ Closed
+
+### Final Metrics
+
+| Metric | Value |
+|--------|-------|
+| Entities (entity_registry) | 29,670 |
+| Relationships | 21,528 |
+| Triples | 169,878 |
+| Distinct predicates | 1,495 |
+| Type-constraint violations | 0 |
+
+### Major Outcomes
+
+- Predicate guard strict mode fully enforced (FIX-015b → FIX-015e) with 0 violations remaining.
+- GraphRAG query resolution + polysemy rerank live and validated.
+- Canonical alias audit + merges completed (FIX-020).
+- Graph dataset export rebuilt (FIX-019) with canonical overrides.
+
+### Carry-Over (Next Cycle)
+
+1. Ambiguous single-token PERSONs with relationships (manual review optional).
+2. Deferred alias: `registry` → Regen Registry (ambiguous).
+3. Optional predicate consolidation (long-tail cleanup) if desired.
+
+---
+
 ## Post-Extraction Audit Run (2025-12-29)
 
 **Status:** ✅ Complete
@@ -4748,6 +4777,8 @@ python scripts/apply_alias_merges.py --dry-run
 | Relationships | 21,541 | 21,529 |
 | Triples | 169,891 | 169,879 |
 | Type-constraint violations | 22 | 0 |
+
+**Runtime note:** `batch_queue.py` extraction has been running since Sep 17. Updated constraints are in place and will apply on restart or new extraction runs. No restart required unless running active extractions.
 
 ### Backup Table
 
