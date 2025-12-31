@@ -20,6 +20,22 @@ import {
   selectDocumentsForExtraction
 } from "./bge-mcp-ts/adaptive-features.ts";
 
+// Import canonical response envelope types (Session D1)
+import {
+  type KoiResponseEnvelope,
+  type Citation,
+  type KoiError,
+  type WarningCode,
+  type ToolTraceEntry,
+  type AsOfMetadata,
+  generateRequestId,
+  getKoiAsOfMetadata,
+  summarizeParams,
+  extractCitations,
+  createSuccessEnvelope,
+  createErrorEnvelope,
+} from "./src/types/koi-response-envelope.ts";
+
 const app = express();
 const PORT = 8301;
 
@@ -1641,6 +1657,10 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
   }
 }
 app.post('/api/koi/query', async (req, res) => {
+  // Session D1: Generate request_id for traceability
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
   try {
     const {
       question: questionParam,
@@ -1659,10 +1679,19 @@ app.post('/api/koi/query', async (req, res) => {
     const queryParamGraphContext = req.query.graph_context === 'true';
 
     if (!question) {
-      return res.status(400).json({ error: 'Either "question" or "query" parameter is required' });
+      const envelope = createErrorEnvelope(requestId, {
+        code: 'MISSING_PARAMETER',
+        message: 'Either "question" or "query" parameter is required',
+        retryable: false,
+      });
+      return res.status(400).json(envelope);
     }
 
     const startTime = Date.now();
+
+    // Session D1: Initialize tool trace and warnings
+    const toolTrace: ToolTraceEntry[] = [];
+    const warnings: WarningCode[] = [];
 
     // Extract session token from Authorization header and validate
     // Format: "Bearer <session_token>" - NOT the Google OAuth token
@@ -1942,8 +1971,27 @@ app.post('/api/koi/query', async (req, res) => {
       console.error('Query logging failed:', error);
     }
 
-    // Format response
-    const response: any = {
+    // Session D1: Add tool trace entries for search operations
+    toolTrace.push({
+      tool: 'hybrid_search',
+      params_summary: summarizeParams({ question, limit, filters }),
+      timestamp: new Date(startTime).toISOString(),
+      data_source: 'koi-derived',
+      duration_ms: responseTime,
+    });
+
+    // Session D1: Add warnings for triggered extraction
+    if (triggeredExtraction) {
+      warnings.push('extraction_triggered');
+    }
+
+    // Session D1: Add privacy filter warning if applicable
+    if (!isAuthenticated) {
+      warnings.push('privacy_filtered');
+    }
+
+    // Format response data
+    const responseData: any = {
       question,
       total_results: fusedResults.length,
       confidence: confidence,
@@ -1961,12 +2009,18 @@ app.post('/api/koi/query', async (req, res) => {
 
     // Add graph context if available
     if (graphContext) {
-      response.graph_context = graphContext;
+      responseData.graph_context = graphContext;
+      toolTrace.push({
+        tool: 'graph_context',
+        params_summary: `entity=${graphContext.dominant_entity?.text || 'unknown'}`,
+        timestamp: new Date().toISOString(),
+        data_source: 'graph',
+      });
     }
 
     // Week 17: Add resolved entity info if polysemy rerank was enabled
     if (resolvedEntity) {
-      response.resolved_entity = {
+      responseData.resolved_entity = {
         entity_text: resolvedEntity.entity_text,
         entity_type: resolvedEntity.entity_type,
         uri: resolvedEntity.uri,
@@ -1980,17 +2034,34 @@ app.post('/api/koi/query', async (req, res) => {
 
     // Always include polysemy debug info when debug is enabled
     if (debugPolysemy && polysemyDebugInfo) {
-      response.polysemy_debug = polysemyDebugInfo;
+      responseData.polysemy_debug = polysemyDebugInfo;
     }
 
-    res.json(response);
+    // Session D1: Extract citations from results
+    const citations = extractCitations(fusedResults.slice(0, limit));
+
+    // Session D1: Create envelope response
+    const envelope = createSuccessEnvelope(requestId, responseData, {
+      citations,
+      warnings,
+      tool_trace: toolTrace,
+    });
+
+    res.json(envelope);
 
   } catch (error) {
     console.error('Query error:', error);
-    res.status(500).json({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    const koiError: KoiError = {
+      code: 'QUERY_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: error instanceof Error &&
+        (error.message.includes('timeout') || error.message.includes('connection')),
+    };
+    if (koiError.retryable) {
+      koiError.retry_after_ms = 1000;
+    }
+    const envelope = createErrorEnvelope(requestId, koiError);
+    res.status(500).json(envelope);
   }
 });
 
@@ -2173,6 +2244,11 @@ Answer the question using the context above.`;
 // Accepts 'query_type' for specific graph operations
 // Also accepts 'query' as a natural language description (for OpenAPI compatibility)
 app.post('/api/koi/graph', async (req, res) => {
+  // Session D1: Generate request_id for traceability
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+  const startTime = Date.now();
+
   try {
     const { query_type, query, ...params } = req.body;
 
@@ -2187,9 +2263,14 @@ app.post('/api/koi/graph', async (req, res) => {
 
     // If only 'query' is provided (OpenAPI compatibility), provide guidance
     if (!query_type && query) {
-      return res.status(400).json({
-        error: 'query_type is required for graph queries',
-        hint: 'The "query" field is for natural language description. Use "query_type" to specify the operation.',
+      const envelope = createErrorEnvelope(requestId, {
+        code: 'MISSING_QUERY_TYPE',
+        message: 'query_type is required for graph queries. The "query" field is for natural language description.',
+        retryable: false,
+      });
+      // Add helpful info to the error response
+      (envelope.data as any) = {
+        hint: 'Use "query_type" to specify the operation.',
         supported_query_types: supportedQueryTypes,
         examples: [
           { query_type: 'list_repos', description: 'List all indexed repositories' },
@@ -2197,22 +2278,29 @@ app.post('/api/koi/graph', async (req, res) => {
           { query_type: 'search_entities', params: { entity_name: 'credit' }, description: 'Search entities by name' },
           { query_type: 'related_entities', params: { entity_name: 'MsgCreateBatch' }, description: 'Find related entities' },
         ]
-      });
+      };
+      return res.status(400).json(envelope);
     }
 
     if (!query_type) {
-      return res.status(400).json({
-        error: 'query_type is required',
-        supported_query_types: supportedQueryTypes
+      const envelope = createErrorEnvelope(requestId, {
+        code: 'MISSING_QUERY_TYPE',
+        message: 'query_type is required',
+        retryable: false,
       });
+      (envelope.data as any) = { supported_query_types: supportedQueryTypes };
+      return res.status(400).json(envelope);
     }
 
     // Validate query_type
     if (!supportedQueryTypes.includes(query_type)) {
-      return res.status(400).json({
-        error: `Invalid query_type: ${query_type}`,
-        supported_query_types: supportedQueryTypes
+      const envelope = createErrorEnvelope(requestId, {
+        code: 'INVALID_QUERY_TYPE',
+        message: `Invalid query_type: ${query_type}`,
+        retryable: false,
       });
+      (envelope.data as any) = { supported_query_types: supportedQueryTypes };
+      return res.status(400).json(envelope);
     }
 
     // Create a client for this request to manage AGE setup
@@ -2485,11 +2573,29 @@ app.post('/api/koi/graph', async (req, res) => {
         return fixed;
       });
 
-      res.json({
+      const responseTime = Date.now() - startTime;
+
+      // Session D1: Create tool trace for graph query
+      const toolTrace: ToolTraceEntry[] = [{
+        tool: 'graph_query',
+        params_summary: summarizeParams({ query_type, ...params }),
+        timestamp: new Date(startTime).toISOString(),
+        data_source: 'graph',
+        duration_ms: responseTime,
+      }];
+
+      // Session D1: Create envelope response
+      const responseData = {
         query_type,
         total_results: fixedRows.length,
         results: fixedRows
+      };
+
+      const envelope = createSuccessEnvelope(requestId, responseData, {
+        tool_trace: toolTrace,
       });
+
+      res.json(envelope);
 
     } finally {
       client.release();
@@ -2497,10 +2603,17 @@ app.post('/api/koi/graph', async (req, res) => {
 
   } catch (error) {
     console.error('Graph query error:', error);
-    res.status(500).json({
-      error: 'Graph query failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    const koiError: KoiError = {
+      code: 'GRAPH_QUERY_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: error instanceof Error &&
+        (error.message.includes('timeout') || error.message.includes('connection')),
+    };
+    if (koiError.retryable) {
+      koiError.retry_after_ms = 1000;
+    }
+    const envelope = createErrorEnvelope(requestId, koiError);
+    res.status(500).json(envelope);
   }
 });
 
@@ -3484,6 +3597,13 @@ app.get('/api/koi/entity/documents', async (req, res) => {
 // Supports query_type: resolve, neighborhood, documents
 // This consolidates the three GET endpoints into one for GPT's 30-operation limit
 app.post('/api/koi/entity', async (req, res) => {
+  // Session D1: Generate request_id for traceability
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+  const startTime = Date.now();
+  const toolTrace: ToolTraceEntry[] = [];
+  const warnings: WarningCode[] = [];
+
   try {
     const {
       query_type,
@@ -3495,17 +3615,23 @@ app.post('/api/koi/entity', async (req, res) => {
     } = req.body;
 
     if (!query_type) {
-      return res.status(400).json({
-        error: 'query_type is required',
-        valid_types: ['resolve', 'neighborhood', 'documents']
+      const envelope = createErrorEnvelope(requestId, {
+        code: 'MISSING_QUERY_TYPE',
+        message: 'query_type is required',
+        retryable: false,
       });
+      (envelope.data as any) = { valid_types: ['resolve', 'neighborhood', 'documents'] };
+      return res.status(400).json(envelope);
     }
 
     if (!['resolve', 'neighborhood', 'documents'].includes(query_type)) {
-      return res.status(400).json({
-        error: `Invalid query_type: ${query_type}`,
-        valid_types: ['resolve', 'neighborhood', 'documents']
+      const envelope = createErrorEnvelope(requestId, {
+        code: 'INVALID_QUERY_TYPE',
+        message: `Invalid query_type: ${query_type}`,
+        retryable: false,
       });
+      (envelope.data as any) = { valid_types: ['resolve', 'neighborhood', 'documents'] };
+      return res.status(400).json(envelope);
     }
 
     // Handle resolve query type
@@ -3515,12 +3641,22 @@ app.post('/api/koi/entity', async (req, res) => {
       const limit = Math.min(Math.max(parseInt(requestLimit) || 5, 1), 20);
 
       if (!labelValue) {
-        return res.status(400).json({ error: 'label parameter is required for resolve query' });
+        const envelope = createErrorEnvelope(requestId, {
+          code: 'MISSING_PARAMETER',
+          message: 'label parameter is required for resolve query',
+          retryable: false,
+        });
+        return res.status(400).json(envelope);
       }
 
       const lookupKeys = buildNormalizedLookupKeys(labelValue, typeHintValue);
       if (lookupKeys.length === 0) {
-        return res.status(400).json({ error: 'label parameter is required for resolve query' });
+        const envelope = createErrorEnvelope(requestId, {
+          code: 'MISSING_PARAMETER',
+          message: 'label parameter is required for resolve query',
+          retryable: false,
+        });
+        return res.status(400).json(envelope);
       }
 
       const query = `
@@ -3568,7 +3704,16 @@ app.post('/api/koi/entity', async (req, res) => {
       const variants = result.rows;
 
       if (variants.length === 0) {
-        return res.json({
+        // Session D1: Add tool trace for resolve query
+        toolTrace.push({
+          tool: 'entity_resolve',
+          params_summary: summarizeParams({ label: labelValue, type_hint: typeHintValue }),
+          timestamp: new Date(startTime).toISOString(),
+          data_source: 'koi-derived',
+          duration_ms: Date.now() - startTime,
+        });
+
+        const responseData = {
           query_type: 'resolve',
           query_label: labelValue,
           type_hint: typeHintValue,
@@ -3577,7 +3722,8 @@ app.post('/api/koi/entity', async (req, res) => {
           alternatives: [],
           is_polysemy: false,
           resolution_method: 'no_match'
-        });
+        };
+        return res.json(createSuccessEnvelope(requestId, responseData, { tool_trace: toolTrace }));
       }
 
       const scoredVariants = variants.map(v => {
@@ -3629,7 +3775,16 @@ app.post('/api/koi/entity', async (req, res) => {
         }
       }
 
-      return res.json({
+      // Session D1: Add tool trace for resolve query
+      toolTrace.push({
+        tool: 'entity_resolve',
+        params_summary: summarizeParams({ label: labelValue, type_hint: typeHintValue, limit }),
+        timestamp: new Date(startTime).toISOString(),
+        data_source: 'koi-derived',
+        duration_ms: Date.now() - startTime,
+      });
+
+      const responseData = {
         query_type: 'resolve',
         query_label: labelValue,
         type_hint: typeHintValue,
@@ -3638,7 +3793,8 @@ app.post('/api/koi/entity', async (req, res) => {
         alternatives: alternatives,
         is_polysemy: isPolysemy,
         resolution_method: resolutionMethod
-      });
+      };
+      return res.json(createSuccessEnvelope(requestId, responseData, { tool_trace: toolTrace }));
     }
 
     // Handle neighborhood query type
@@ -3650,17 +3806,35 @@ app.post('/api/koi/entity', async (req, res) => {
       const directionValue = (direction || 'both').toLowerCase();
 
       if (!labelValue && !uriValue) {
-        return res.status(400).json({ error: 'Either label or uri parameter is required for neighborhood query' });
+        const envelope = createErrorEnvelope(requestId, {
+          code: 'MISSING_PARAMETER',
+          message: 'Either label or uri parameter is required for neighborhood query',
+          retryable: false,
+        });
+        return res.status(400).json(envelope);
       }
 
       if (!['out', 'in', 'both'].includes(directionValue)) {
-        return res.status(400).json({ error: 'direction must be one of: out, in, both' });
+        const envelope = createErrorEnvelope(requestId, {
+          code: 'INVALID_PARAMETER',
+          message: 'direction must be one of: out, in, both',
+          retryable: false,
+        });
+        return res.status(400).json(envelope);
       }
 
       const resolved = await resolveEntityInternal(labelValue, uriValue, typeHintValue);
 
       if (!resolved) {
-        return res.json({
+        toolTrace.push({
+          tool: 'entity_neighborhood',
+          params_summary: summarizeParams({ label: labelValue, uri: uriValue, type_hint: typeHintValue }),
+          timestamp: new Date(startTime).toISOString(),
+          data_source: 'koi-derived',
+          duration_ms: Date.now() - startTime,
+        });
+
+        const responseData = {
           query_type: 'neighborhood',
           query_label: labelValue,
           query_uri: uriValue,
@@ -3671,7 +3845,8 @@ app.post('/api/koi/entity', async (req, res) => {
           edges: [],
           truncated: false,
           error: 'Entity not found'
-        });
+        };
+        return res.json(createSuccessEnvelope(requestId, responseData, { tool_trace: toolTrace }));
       }
 
       let directionClause = '';
@@ -3799,7 +3974,20 @@ app.post('/api/koi/entity', async (req, res) => {
 
       const truncated = edges.length >= limit;
 
-      return res.json({
+      // Session D1: Add tool trace for neighborhood query
+      toolTrace.push({
+        tool: 'entity_neighborhood',
+        params_summary: summarizeParams({ label: labelValue, uri: uriValue, direction: directionValue, limit }),
+        timestamp: new Date(startTime).toISOString(),
+        data_source: 'graph',
+        duration_ms: Date.now() - startTime,
+      });
+
+      if (truncated) {
+        warnings.push('pagination_not_exhausted');
+      }
+
+      const responseData = {
         query_type: 'neighborhood',
         query_label: labelValue,
         query_uri: uriValue,
@@ -3813,7 +4001,8 @@ app.post('/api/koi/entity', async (req, res) => {
         node_count: nodes.length,
         edge_count: edges.length,
         truncated: truncated,
-      });
+      };
+      return res.json(createSuccessEnvelope(requestId, responseData, { tool_trace: toolTrace, warnings }));
     }
 
     // Handle documents query type
@@ -3824,7 +4013,12 @@ app.post('/api/koi/entity', async (req, res) => {
       const limit = Math.min(Math.max(parseInt(requestLimit) || 20, 1), 50);
 
       if (!labelValue && !uriValue) {
-        return res.status(400).json({ error: 'Either label or uri parameter is required for documents query' });
+        const envelope = createErrorEnvelope(requestId, {
+          code: 'MISSING_PARAMETER',
+          message: 'Either label or uri parameter is required for documents query',
+          retryable: false,
+        });
+        return res.status(400).json(envelope);
       }
 
       // Extract session token and validate for privacy filter
@@ -3837,7 +4031,15 @@ app.post('/api/koi/entity', async (req, res) => {
       const resolved = await resolveEntityInternal(labelValue, uriValue, typeHintValue);
 
       if (!resolved) {
-        return res.json({
+        toolTrace.push({
+          tool: 'entity_documents',
+          params_summary: summarizeParams({ label: labelValue, uri: uriValue, type_hint: typeHintValue }),
+          timestamp: new Date(startTime).toISOString(),
+          data_source: 'koi-derived',
+          duration_ms: Date.now() - startTime,
+        });
+
+        const responseData = {
           query_type: 'documents',
           query_label: labelValue,
           query_uri: uriValue,
@@ -3846,7 +4048,8 @@ app.post('/api/koi/entity', async (req, res) => {
           resolved_entity_id: null,
           documents: [],
           error: 'Entity not found'
-        });
+        };
+        return res.json(createSuccessEnvelope(requestId, responseData, { tool_trace: toolTrace }));
       }
 
       const docQuery = `
@@ -3917,7 +4120,28 @@ app.post('/api/koi/entity', async (req, res) => {
         confidence: row.link_confidence,
       }));
 
-      return res.json({
+      // Session D1: Add tool trace for documents query
+      toolTrace.push({
+        tool: 'entity_documents',
+        params_summary: summarizeParams({ label: labelValue, uri: uriValue, limit }),
+        timestamp: new Date(startTime).toISOString(),
+        data_source: 'koi-derived',
+        duration_ms: Date.now() - startTime,
+      });
+
+      // Session D1: Add privacy warning if applicable
+      if (!isAuthenticated) {
+        warnings.push('privacy_filtered');
+      }
+
+      // Session D1: Extract citations from documents
+      const citations = extractCitations(documents.map(d => ({
+        rid: d.document_rid,
+        metadata: { url: d.url },
+        content: d.snippet,
+      })));
+
+      const responseData = {
         query_type: 'documents',
         query_label: labelValue,
         query_uri: uriValue,
@@ -3928,15 +4152,23 @@ app.post('/api/koi/entity', async (req, res) => {
         resolved_entity_type: resolved.entity_type,
         document_count: documents.length,
         documents: documents,
-      });
+      };
+      return res.json(createSuccessEnvelope(requestId, responseData, { citations, tool_trace: toolTrace, warnings }));
     }
 
   } catch (error) {
     console.error('Entity query error:', error);
-    res.status(500).json({
-      error: 'Entity query failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    const koiError: KoiError = {
+      code: 'ENTITY_QUERY_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: error instanceof Error &&
+        (error.message.includes('timeout') || error.message.includes('connection')),
+    };
+    if (koiError.retryable) {
+      koiError.retry_after_ms = 1000;
+    }
+    const envelope = createErrorEnvelope(requestId, koiError);
+    res.status(500).json(envelope);
   }
 });
 
@@ -4009,13 +4241,20 @@ app.get('/api/koi/stats', async (req, res) => {
 });
 // Weekly digest endpoint - simplified version using search
 app.get('/api/koi/weekly-digest', async (req, res) => {
+  // Session D1: Generate request_id for traceability
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+  const startTime = Date.now();
+  const toolTrace: ToolTraceEntry[] = [];
+  const warnings: WarningCode[] = [];
+
   try {
     const { start_date, end_date, format = 'markdown' } = req.query;
 
     // Calculate dates
     const now = new Date();
     const endDateStr = end_date || now.toISOString().split('T')[0];
-    
+
     let startDateStr = start_date;
     if (!startDateStr) {
       const weekAgo = new Date(now);
@@ -4073,6 +4312,7 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
       results = queryResults.rows;
     } else {
       // Fallback to keyword search
+      warnings.push('fallback_used');
       const fallbackQuery = `
         SELECT
           m.rid,
@@ -4091,7 +4331,7 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
         ORDER BY m.published_at DESC
         LIMIT $3
       `;
-      
+
       const queryResults = await pool.query(fallbackQuery, [startDateStr, endDateStr, topK]);
       results = queryResults.rows;
     }
@@ -4128,8 +4368,25 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
 
     const wordCount = markdownContent.split(/\\s+/).length;
 
+    // Session D1: Add tool trace
+    toolTrace.push({
+      tool: 'weekly_digest',
+      params_summary: summarizeParams({ start_date: startDateStr, end_date: endDateStr, format }),
+      timestamp: new Date(startTime).toISOString(),
+      data_source: 'koi-derived',
+      duration_ms: Date.now() - startTime,
+    });
+
+    // Session D1: Extract citations from results
+    const citations = extractCitations(results.map(r => ({
+      rid: r.rid,
+      metadata: { url: r.url, title: r.source },
+      content: r.content,
+    })));
+
+    let responseData: any;
     if (format === 'json') {
-      res.json({
+      responseData = {
         success: true,
         week_start: startDateStr,
         week_end: endDateStr,
@@ -4139,9 +4396,9 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
           word_count: wordCount,
           source_count: results.length
         }
-      });
+      };
     } else {
-      res.json({
+      responseData = {
         success: true,
         format: 'markdown',
         content: markdownContent,
@@ -4151,14 +4408,28 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
           total_items: results.length,
           word_count: wordCount
         }
-      });
+      };
     }
+
+    const envelope = createSuccessEnvelope(requestId, responseData, {
+      citations,
+      warnings,
+      tool_trace: toolTrace,
+    });
+    res.json(envelope);
   } catch (error) {
     console.error('Weekly digest error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to generate weekly digest'
-    });
+    const koiError: KoiError = {
+      code: 'WEEKLY_DIGEST_ERROR',
+      message: error instanceof Error ? error.message : 'Failed to generate weekly digest',
+      retryable: error instanceof Error &&
+        (error.message.includes('timeout') || error.message.includes('connection')),
+    };
+    if (koiError.retryable) {
+      koiError.retry_after_ms = 1000;
+    }
+    const envelope = createErrorEnvelope(requestId, koiError);
+    res.status(500).json(envelope);
   }
 });
 
