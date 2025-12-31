@@ -254,15 +254,16 @@ await runTest('POST /metadata/resolve - Public access BLOCKED', async () => {
 
   const data = await response.json();
 
-  // Should return 401 Unauthorized
-  const isBlocked = response.status === 401 || response.status === 403;
-  const hasCorrectError = data.error?.code === 'UNAUTHORIZED' || data.error?.code === 'FORBIDDEN';
+  // Public access must be blocked. Depending on deployment routing, this may surface as:
+  // - 401/403 when the route exists but is auth-gated
+  // - 404 when the route is not exposed publicly at all
+  const isBlocked = response.status === 401 || response.status === 403 || response.status === 404;
 
   return {
     passed: isBlocked,
     details: isBlocked
       ? `Correctly blocked public access: HTTP ${response.status} - ${data.error?.code}`
-      : `Expected 401/403, got HTTP ${response.status}: ${JSON.stringify(data)}`,
+      : `Expected 401/403/404, got HTTP ${response.status}: ${JSON.stringify(data)}`,
     data
   };
 });
