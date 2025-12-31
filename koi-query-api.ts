@@ -36,6 +36,64 @@ import {
   createErrorEnvelope,
 } from "./src/types/koi-response-envelope.ts";
 
+// Import anchored metadata system (Session E)
+import {
+  AnchoredMetadataIntegration,
+  createAnchoredMetadataIntegration,
+  AnchoredMetadataResolver,
+  createAnchoredMetadataSystem,
+  type MetadataCitation,
+  type AnchoredMetric,
+  type ResolvedMetadata,
+} from "./src/metadata/index.ts";
+
+// =============================================================================
+// Internal API Key Gating (MCP-only endpoints)
+// =============================================================================
+const KOI_INTERNAL_API_KEY = process.env.KOI_INTERNAL_API_KEY || '';
+
+/**
+ * Middleware to gate MCP-only endpoints with internal API key
+ * Returns 401 if key missing, 403 if key invalid
+ */
+function requireInternalApiKey(req: any, res: any, next: () => void) {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  // Check if internal API key is configured
+  if (!KOI_INTERNAL_API_KEY) {
+    console.warn('[Metadata] KOI_INTERNAL_API_KEY not configured - blocking all requests');
+    const koiError: KoiError = {
+      code: 'NOT_CONFIGURED',
+      message: 'Internal API not configured',
+      retryable: false,
+    };
+    return res.status(503).json(createErrorEnvelope(requestId, koiError));
+  }
+
+  const providedKey = req.headers['x-internal-api-key'];
+
+  if (!providedKey) {
+    const koiError: KoiError = {
+      code: 'UNAUTHORIZED',
+      message: 'X-Internal-API-Key header required',
+      retryable: false,
+    };
+    return res.status(401).json(createErrorEnvelope(requestId, koiError));
+  }
+
+  if (providedKey !== KOI_INTERNAL_API_KEY) {
+    const koiError: KoiError = {
+      code: 'FORBIDDEN',
+      message: 'Invalid internal API key',
+      retryable: false,
+    };
+    return res.status(403).json(createErrorEnvelope(requestId, koiError));
+  }
+
+  next();
+}
+
 const app = express();
 const PORT = 8301;
 
@@ -56,6 +114,25 @@ function parsePostgresUrl(url: string) {
 
 const dbConfig = parsePostgresUrl(POSTGRES_URL);
 const pool = new Pool(dbConfig);
+
+// Lazy-loaded anchored metadata system (Session E)
+let _metadataIntegration: AnchoredMetadataIntegration | null = null;
+let _metadataResolver: AnchoredMetadataResolver | null = null;
+
+function getMetadataIntegration(): AnchoredMetadataIntegration {
+  if (!_metadataIntegration) {
+    _metadataIntegration = createAnchoredMetadataIntegration(pool);
+  }
+  return _metadataIntegration;
+}
+
+function getMetadataResolver(): AnchoredMetadataResolver {
+  if (!_metadataResolver) {
+    const { resolver } = createAnchoredMetadataSystem(pool);
+    _metadataResolver = resolver;
+  }
+  return _metadataResolver;
+}
 
 // HNSW index provides excellent recall without tuning parameters
 
@@ -4430,6 +4507,220 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
     }
     const envelope = createErrorEnvelope(requestId, koiError);
     res.status(500).json(envelope);
+  }
+});
+
+// =============================================================================
+// Anchored Metadata Endpoints (Session E: MCP-only tools)
+// INTERNAL ONLY: Requires X-Internal-API-Key header
+// =============================================================================
+
+/**
+ * POST /api/koi/metadata/resolve
+ * Resolve a Regen metadata IRI via the allowlisted resolver
+ *
+ * INTERNAL ONLY: Requires X-Internal-API-Key header
+ *
+ * This endpoint ONLY resolves and caches metadata. It does NOT require
+ * hectares derivation to succeed. Use derive_offchain_hectares for metrics.
+ *
+ * Request headers:
+ *   X-Internal-API-Key: <KOI_INTERNAL_API_KEY>
+ *
+ * Request body:
+ *   { iri: string, force_refresh?: boolean }
+ *
+ * Response (success):
+ *   { iri, resolver_url, content_hash, rid, resolved_at, from_cache }
+ */
+app.post('/api/koi/metadata/resolve', requireInternalApiKey, async (req, res) => {
+  const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
+  const startTime = Date.now();
+
+  try {
+    const { iri, force_refresh = false } = req.body || {};
+
+    if (!iri || typeof iri !== 'string') {
+      const koiError: KoiError = {
+        code: 'INVALID_REQUEST',
+        message: 'Missing or invalid "iri" parameter',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    console.log(`[Metadata] Resolving IRI: ${iri} (force_refresh=${force_refresh})`);
+
+    // Use resolver directly - no hectares derivation required
+    const resolver = getMetadataResolver();
+    const result = await resolver.resolveMetadataIri(iri, force_refresh);
+
+    if (!result.success || !result.metadata) {
+      const koiError: KoiError = {
+        code: result.error?.code || 'RESOLUTION_FAILED',
+        message: result.error?.message || 'Failed to resolve metadata IRI',
+        retryable: result.error?.retryable ?? false,
+      };
+      console.log(`[Metadata] Resolution failed: ${koiError.code} - ${koiError.message}`);
+      return res.status(404).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Success - return resolution details (no citations for pure resolution)
+    const metadata = result.metadata as ResolvedMetadata;
+    const responseData = {
+      iri: metadata.iri,
+      resolver_url: metadata.resolver_url,
+      content_hash: metadata.content_hash,
+      rid: metadata.rid,
+      resolved_at: metadata.resolved_at.toISOString(),
+      from_cache: metadata.from_cache,
+    };
+
+    console.log(`[Metadata] Resolved successfully in ${Date.now() - startTime}ms (from_cache=${metadata.from_cache})`);
+
+    // Create envelope with appropriate data_source
+    const envelope = createSuccessEnvelope(requestId, responseData);
+    envelope.data_source = 'metadata';
+    return res.json(envelope);
+
+  } catch (error) {
+    console.error('[Metadata] Resolve error:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
+/**
+ * POST /api/koi/metadata/hectares
+ * Derive hectares from a resolved metadata IRI with full citation
+ *
+ * INTERNAL ONLY: Requires X-Internal-API-Key header
+ *
+ * Enforces "no citation, no metric" policy - returns blocked=true if
+ * derivation is not possible.
+ *
+ * Request headers:
+ *   X-Internal-API-Key: <KOI_INTERNAL_API_KEY>
+ *
+ * Request body:
+ *   { iri: string, force_refresh?: boolean }
+ *
+ * Response (success):
+ *   { hectares, unit, derivation: { iri, rid, resolver_url, content_hash, json_pointer, expected_unit }, citations[] }
+ *
+ * Response (error with blocked=true):
+ *   { blocked: true, code, message } - metric should NOT be reported
+ */
+app.post('/api/koi/metadata/hectares', requireInternalApiKey, async (req, res) => {
+  const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
+  const startTime = Date.now();
+
+  try {
+    const { iri, force_refresh = false } = req.body || {};
+
+    if (!iri || typeof iri !== 'string') {
+      const koiError: KoiError = {
+        code: 'INVALID_REQUEST',
+        message: 'Missing or invalid "iri" parameter',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    console.log(`[Metadata] Deriving hectares for IRI: ${iri} (force_refresh=${force_refresh})`);
+
+    const integration = getMetadataIntegration();
+    const result = await integration.extractHectaresWithCitation(iri, force_refresh);
+
+    if (!result.success || !result.metric || !result.citation) {
+      // Derivation failed - return blocked error (no metric should be reported)
+      const koiError: KoiError = {
+        code: result.error?.code || 'DERIVATION_FAILED',
+        message: result.error?.message || 'Failed to derive hectares from metadata',
+        retryable: false,
+      };
+      console.log(`[Metadata] Derivation blocked: ${koiError.code} - ${koiError.message}`);
+      return res.status(404).json({
+        ...createErrorEnvelope(requestId, koiError),
+        blocked: true, // Critical: no citation, no metric
+      });
+    }
+
+    // Success - return hectares with full derivation provenance
+    const metric = result.metric as AnchoredMetric;
+    const citation = result.citation as MetadataCitation;
+
+    const responseData = {
+      hectares: metric.value,
+      unit: metric.unit,
+      derivation: {
+        iri,
+        rid: citation.rid,
+        resolver_url: citation.resolver_url,
+        content_hash: citation.content_hash,
+        json_pointer: citation.json_pointer,
+        expected_unit: 'unit:HA',
+      },
+      citations: [{
+        rid: citation.rid,
+        url: citation.url,
+        title: citation.title,
+        excerpt: citation.excerpt,
+        content_hash: citation.content_hash,
+        json_pointer: citation.json_pointer,
+        resolver_url: citation.resolver_url,
+        resolved_at: citation.resolved_at,
+        citation_type: citation.citation_type,
+      }],
+    };
+
+    console.log(`[Metadata] Derived hectares: ${metric.value} ${metric.unit} in ${Date.now() - startTime}ms`);
+
+    // Create envelope with appropriate data_source and citations
+    const envelope = createSuccessEnvelope(requestId, responseData);
+    envelope.data_source = 'koi-derived';
+    envelope.citations = responseData.citations;
+    return res.json(envelope);
+
+  } catch (error) {
+    console.error('[Metadata] Hectares derivation error:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
+/**
+ * GET /api/koi/metadata/stats
+ * Get statistics about anchored metadata records
+ *
+ * INTERNAL ONLY: Requires X-Internal-API-Key header
+ */
+app.get('/api/koi/metadata/stats', requireInternalApiKey, async (req, res) => {
+  const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
+
+  try {
+    const integration = getMetadataIntegration();
+    const stats = await integration.getAnchoredMetadataStats();
+
+    const envelope = createSuccessEnvelope(requestId, stats);
+    envelope.data_source = 'metadata';
+    return res.json(envelope);
+  } catch (error) {
+    console.error('[Metadata] Stats error:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
   }
 });
 

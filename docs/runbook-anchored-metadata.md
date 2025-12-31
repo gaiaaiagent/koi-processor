@@ -133,6 +133,105 @@ SELECT payload_jsonb FROM anchored_metadata_records WHERE iri = 'YOUR_IRI';
 - No redirects followed
 - All payloads hashed for integrity verification
 
+## MCP-Only HTTP Endpoints
+
+The metadata system is exposed via **internal-only** HTTP endpoints that require the `X-Internal-API-Key` header. These endpoints are NOT publicly accessible.
+
+### Environment Setup
+
+```bash
+# In koi-processor/.env (server)
+KOI_INTERNAL_API_KEY=your-secret-key-here
+
+# In regen-koi-mcp/.env (MCP client)
+KOI_INTERNAL_API_KEY=your-secret-key-here
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/koi/metadata/resolve` | POST | Resolve and cache a metadata IRI |
+| `/api/koi/metadata/hectares` | POST | Derive hectares with citation (no citation = blocked) |
+| `/api/koi/metadata/stats` | GET | Get metadata cache statistics |
+
+### Calling Internally (with API Key)
+
+```bash
+# Set API key
+export KOI_API=http://localhost:8301/api/koi
+export KOI_INTERNAL_API_KEY=your-secret-key-here
+
+# Resolve metadata IRI
+curl -X POST "$KOI_API/metadata/resolve" \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY" \
+  -d '{"iri": "regen:13toVfvfM5B7yuJqq8h3iVRHp3PKUJ4ABxHyvn4MeUMwwv1pWQGL295.rdf"}'
+
+# Derive hectares with citation
+curl -X POST "$KOI_API/metadata/hectares" \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY" \
+  -d '{"iri": "regen:13toVfvfM5B7yuJqq8h3iVRHp3PKUJ4ABxHyvn4MeUMwwv1pWQGL295.rdf"}'
+
+# Get stats
+curl -X GET "$KOI_API/metadata/stats" \
+  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY"
+```
+
+### Public Access Blocked
+
+Requests without the `X-Internal-API-Key` header receive:
+
+```json
+{
+  "blocked": true,
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "X-Internal-API-Key header required",
+    "retryable": false
+  }
+}
+```
+
+### MCP Configuration
+
+The `regen-koi-mcp` server automatically sends the internal API key for metadata endpoints.
+
+**Location**: `regen-koi-mcp/src/index.ts`
+
+```typescript
+// Request interceptor adds internal API key for metadata endpoints
+apiClient.interceptors.request.use((config) => {
+  if (config.url?.includes('/metadata/') && KOI_INTERNAL_API_KEY && config.headers) {
+    config.headers['X-Internal-API-Key'] = KOI_INTERNAL_API_KEY;
+  }
+  return config;
+});
+```
+
+**MCP Tools Available**:
+
+| Tool Name | Description |
+|-----------|-------------|
+| `resolve_metadata_iri` | Resolve a Regen metadata IRI to cached JSON-LD |
+| `derive_offchain_hectares` | Extract hectares from metadata with citation |
+
+### Test Script
+
+```bash
+cd /opt/projects/koi-processor
+
+# Set the internal API key
+export KOI_INTERNAL_API_KEY=your-secret-key-here
+
+# Run tests (includes auth validation and public blocking test)
+bun run scripts/test-mcp-metadata-tools.ts
+
+# Test with custom IRI
+bun run scripts/test-mcp-metadata-tools.ts --iri "regen:YOUR_IRI.rdf"
+```
+
 ## Integration Points (For Developers)
 
 The system is exposed via:
