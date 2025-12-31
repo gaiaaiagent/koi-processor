@@ -2345,6 +2345,36 @@ def koi_weekly_digest():
     """
     import asyncio
     from datetime import datetime, timedelta
+    import uuid
+
+    request_id = str(uuid.uuid4())
+
+    def respond(data, *, data_source='cached', warnings=None, errors=None, tool_trace=None, citations=None, status_code=200):
+        now_iso = datetime.utcnow().isoformat() + "Z"
+        envelope = {
+            "data": data,
+            "request_id": request_id,
+            "data_source": data_source,
+            "citations": citations or [],
+            "warnings": warnings or [],
+            "errors": errors or [],
+            "as_of": {
+                "koi": {
+                    "corpus_version": os.environ.get("KOI_CORPUS_VERSION") or now_iso.split("T")[0],
+                    "indexed_at": os.environ.get("KOI_LAST_INDEXED") or now_iso,
+                }
+            },
+            "tool_trace": tool_trace or [{
+                "tool": "weekly_digest",
+                "params_summary": f"start_date={bool(request.args.get('start_date'))},end_date={bool(request.args.get('end_date'))},format={request.args.get('format','markdown')}",
+                "timestamp": now_iso,
+                "data_source": data_source,
+            }],
+        }
+        resp = jsonify(envelope)
+        resp.status_code = status_code
+        resp.headers["X-Request-ID"] = request_id
+        return resp
 
     try:
         # Get parameters
@@ -2365,13 +2395,13 @@ def koi_weekly_digest():
                     with open(latest_file, 'r') as f:
                         content = f.read()
                     logger.info(f"Returning cached digest from {latest_file}")
-                    return jsonify({
+                    return respond({
                         'success': True,
                         'content': content,
                         'source': 'cached',
                         'cached_file': files[0],
                         'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600)
-                    })
+                    }, data_source='cached')
 
         # Generate new digest using WeeklyCuratorLLM
         logger.info("Generating fresh weekly digest via API")
@@ -2398,12 +2428,12 @@ def koi_weekly_digest():
         if digest and digest.get('brief'):
             content = digest.get('brief', '')
             logger.info(f"Generated fresh digest: {len(content)} chars")
-            return jsonify({
+            return respond({
                 'success': True,
                 'content': content,
                 'source': 'generated',
                 'statistics': digest.get('statistics', {})
-            })
+            }, data_source='koi-derived')
         else:
             # Fallback: return any cached file regardless of age, or a helpful message
             logger.warning("LLM generation returned empty, checking for any cached digest")
@@ -2415,21 +2445,21 @@ def koi_weekly_digest():
                     with open(latest_file, 'r') as f:
                         content = f.read()
                     logger.info(f"Returning older cached digest from {latest_file}")
-                    return jsonify({
+                    return respond({
                         'success': True,
                         'content': content,
                         'source': 'cached_fallback',
                         'cached_file': files[0],
                         'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600),
                         'warning': 'Fresh digest generation failed, returning older cached version'
-                    })
+                    }, data_source='cached', warnings=['fallback_used'])
             # No cached files at all - return a placeholder
-            return jsonify({
+            return respond({
                 'success': True,
                 'content': '# Weekly Digest Unavailable\n\nNo recent digest content is currently available. Please try again later or contact support.',
                 'source': 'placeholder',
                 'warning': 'No digest content available - generation failed and no cached files found'
-            })
+            }, data_source='cached', warnings=['fallback_used'])
 
     except Exception as e:
         logger.error(f"Error generating weekly digest: {e}")
@@ -2447,24 +2477,34 @@ def koi_weekly_digest():
                     with open(latest_file, 'r') as f:
                         content = f.read()
                     logger.info(f"Returning cached digest after error: {latest_file}")
-                    return jsonify({
+                    return respond({
                         'success': True,
                         'content': content,
                         'source': 'cached_error_fallback',
                         'cached_file': files[0],
                         'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600),
                         'warning': f'Fresh digest generation failed with error: {str(e)}'
-                    })
+                    }, data_source='cached', warnings=['fallback_used'], errors=[{
+                        "code": "DIGEST_GENERATION_FAILED",
+                        "message": str(e),
+                        "retryable": True,
+                        "retry_after_ms": 60000,
+                    }])
                 except Exception as cache_error:
                     logger.error(f"Failed to read cached digest: {cache_error}")
 
         # Return placeholder instead of 500
-        return jsonify({
+        return respond({
             'success': True,
             'content': '# Weekly Digest Temporarily Unavailable\n\nThe digest generation system encountered an error. Please try again later.',
             'source': 'error_placeholder',
             'warning': str(e)
-        })
+        }, data_source='cached', warnings=['fallback_used'], errors=[{
+            "code": "DIGEST_GENERATION_FAILED",
+            "message": str(e),
+            "retryable": True,
+            "retry_after_ms": 60000,
+        }])
 
 @app.route('/api/koi/weekly-digest/notebooklm', methods=['GET'])
 def koi_weekly_digest_notebooklm():

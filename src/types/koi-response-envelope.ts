@@ -71,6 +71,8 @@ export interface ToolTraceEntry {
   duration_ms?: number;
 }
 
+export type PrimaryDataSource = 'koi-derived' | 'cached' | 'graph' | 'metadata';
+
 /**
  * As-of metadata for data freshness
  * Split by source per the remediation plan
@@ -111,6 +113,9 @@ export interface KoiResponseEnvelope<T = unknown> {
 
   /** UUID for request correlation and debugging */
   request_id: string;
+
+  /** Primary data source for this response (high-level label) */
+  data_source: PrimaryDataSource;
 
   /** Citations for verifiable evidence (KOI search results) */
   citations: Citation[];
@@ -231,6 +236,7 @@ export function createErrorEnvelope(
   return {
     data: null,
     request_id: requestId,
+    data_source: 'koi-derived',
     citations: [],
     warnings: [],
     errors: [error],
@@ -246,6 +252,7 @@ export function createSuccessEnvelope<T>(
   requestId: string,
   data: T,
   options: {
+    data_source?: PrimaryDataSource;
     citations?: Citation[];
     warnings?: WarningCode[];
     tool_trace?: ToolTraceEntry[];
@@ -255,6 +262,7 @@ export function createSuccessEnvelope<T>(
   return {
     data,
     request_id: requestId,
+    data_source: options.data_source || 'koi-derived',
     citations: options.citations || [],
     warnings: options.warnings || [],
     errors: [],
