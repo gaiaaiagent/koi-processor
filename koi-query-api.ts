@@ -1643,7 +1643,8 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
 app.post('/api/koi/query', async (req, res) => {
   try {
     const {
-      question,
+      question: questionParam,
+      query: queryParam,  // Accept both 'question' and 'query' for compatibility
       user_id = 'web-user',
       agent_id = 'koi-interface',
       limit = 10,
@@ -1651,11 +1652,14 @@ app.post('/api/koi/query', async (req, res) => {
       graph_context: requestGraphContext = false  // Week 13: GraphRAG body field
     } = req.body;
 
+    // Accept either 'question' or 'query' parameter (question takes precedence)
+    const question = questionParam || queryParam;
+
     // Also accept query param for backward compatibility
     const queryParamGraphContext = req.query.graph_context === 'true';
 
     if (!question) {
-      return res.status(400).json({ error: 'Question is required' });
+      return res.status(400).json({ error: 'Either "question" or "query" parameter is required' });
     }
 
     const startTime = Date.now();
@@ -2166,12 +2170,49 @@ Answer the question using the context above.`;
 });
 
 // Graph Query Endpoint - Direct Apache AGE access
+// Accepts 'query_type' for specific graph operations
+// Also accepts 'query' as a natural language description (for OpenAPI compatibility)
 app.post('/api/koi/graph', async (req, res) => {
   try {
-    const { query_type, ...params } = req.body;
+    const { query_type, query, ...params } = req.body;
+
+    // List of supported query types for helpful error messages
+    const supportedQueryTypes = [
+      'list_repos', 'find_by_type', 'search_entities', 'list_modules',
+      'get_module', 'keeper_for_msg', 'msgs_for_keeper', 'related_entities',
+      'list_entity_types', 'get_entity_stats', 'list_concepts', 'explain_concept',
+      'find_concept_for_query', 'find_callers', 'find_callees', 'find_call_graph',
+      'search_modules', 'module_entities', 'module_for_entity'
+    ];
+
+    // If only 'query' is provided (OpenAPI compatibility), provide guidance
+    if (!query_type && query) {
+      return res.status(400).json({
+        error: 'query_type is required for graph queries',
+        hint: 'The "query" field is for natural language description. Use "query_type" to specify the operation.',
+        supported_query_types: supportedQueryTypes,
+        examples: [
+          { query_type: 'list_repos', description: 'List all indexed repositories' },
+          { query_type: 'find_by_type', params: { entity_type: 'Function', limit: 10 }, description: 'Find entities by type' },
+          { query_type: 'search_entities', params: { entity_name: 'credit' }, description: 'Search entities by name' },
+          { query_type: 'related_entities', params: { entity_name: 'MsgCreateBatch' }, description: 'Find related entities' },
+        ]
+      });
+    }
 
     if (!query_type) {
-      return res.status(400).json({ error: 'query_type is required' });
+      return res.status(400).json({
+        error: 'query_type is required',
+        supported_query_types: supportedQueryTypes
+      });
+    }
+
+    // Validate query_type
+    if (!supportedQueryTypes.includes(query_type)) {
+      return res.status(400).json({
+        error: `Invalid query_type: ${query_type}`,
+        supported_query_types: supportedQueryTypes
+      });
     }
 
     // Create a client for this request to manage AGE setup
@@ -3434,6 +3475,466 @@ app.get('/api/koi/entity/documents', async (req, res) => {
     console.error('Entity documents query error:', error);
     res.status(500).json({
       error: 'Entity documents query failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Consolidated entity endpoint for GPT (POST /api/koi/entity)
+// Supports query_type: resolve, neighborhood, documents
+// This consolidates the three GET endpoints into one for GPT's 30-operation limit
+app.post('/api/koi/entity', async (req, res) => {
+  try {
+    const {
+      query_type,
+      label,
+      uri,
+      type_hint,
+      limit: requestLimit,
+      direction = 'both'
+    } = req.body;
+
+    if (!query_type) {
+      return res.status(400).json({
+        error: 'query_type is required',
+        valid_types: ['resolve', 'neighborhood', 'documents']
+      });
+    }
+
+    if (!['resolve', 'neighborhood', 'documents'].includes(query_type)) {
+      return res.status(400).json({
+        error: `Invalid query_type: ${query_type}`,
+        valid_types: ['resolve', 'neighborhood', 'documents']
+      });
+    }
+
+    // Handle resolve query type
+    if (query_type === 'resolve') {
+      const labelValue = (label || '').trim();
+      const typeHintValue = (type_hint || '').trim().toUpperCase() || null;
+      const limit = Math.min(Math.max(parseInt(requestLimit) || 5, 1), 20);
+
+      if (!labelValue) {
+        return res.status(400).json({ error: 'label parameter is required for resolve query' });
+      }
+
+      const lookupKeys = buildNormalizedLookupKeys(labelValue, typeHintValue);
+      if (lookupKeys.length === 0) {
+        return res.status(400).json({ error: 'label parameter is required for resolve query' });
+      }
+
+      const query = `
+        WITH entity_matches AS (
+          SELECT
+            id,
+            entity_text,
+            entity_type,
+            normalized_text,
+            occurrence_count,
+            fuseki_uri
+          FROM entity_registry
+          WHERE LOWER(TRIM(normalized_text)) = ANY($1)
+        ),
+        rel_counts AS (
+          SELECT
+            e.id,
+            COALESCE(subj.subj_count, 0) + COALESCE(obj.obj_count, 0) as relationship_count
+          FROM entity_matches e
+          LEFT JOIN (
+            SELECT subject_entity_id, COUNT(*) as subj_count
+            FROM koi_relationships
+            GROUP BY subject_entity_id
+          ) subj ON e.id = subj.subject_entity_id
+          LEFT JOIN (
+            SELECT object_entity_id, COUNT(*) as obj_count
+            FROM koi_relationships
+            GROUP BY object_entity_id
+          ) obj ON e.id = obj.object_entity_id
+        )
+        SELECT
+          e.id,
+          e.entity_text,
+          e.entity_type,
+          e.normalized_text,
+          e.occurrence_count,
+          e.fuseki_uri,
+          r.relationship_count
+        FROM entity_matches e
+        JOIN rel_counts r ON e.id = r.id
+        ORDER BY e.occurrence_count DESC, r.relationship_count DESC
+      `;
+
+      const result = await pool.query(query, [lookupKeys]);
+      const variants = result.rows;
+
+      if (variants.length === 0) {
+        return res.json({
+          query_type: 'resolve',
+          query_label: labelValue,
+          type_hint: typeHintValue,
+          variant_count: 0,
+          winner: null,
+          alternatives: [],
+          is_polysemy: false,
+          resolution_method: 'no_match'
+        });
+      }
+
+      const scoredVariants = variants.map(v => {
+        const occScore = parseInt(v.occurrence_count) * 1000;
+        const relScore = parseInt(v.relationship_count) * 100;
+        const typePriority = DEFAULT_TYPE_PRIORITY[v.entity_type] || 0;
+        const typeScore = typePriority * 10;
+
+        let totalScore = occScore + relScore + typeScore;
+        const reasons: string[] = [
+          `occ=${v.occurrence_count}`,
+          `rels=${v.relationship_count}`,
+          `type_pri=${typePriority}`
+        ];
+
+        if (typeHintValue && v.entity_type.toUpperCase() === typeHintValue) {
+          totalScore += 50000;
+          reasons.push('type_hint_match=+50k');
+        }
+
+        return {
+          uri: v.fuseki_uri,
+          entity_text: v.entity_text,
+          entity_type: v.entity_type,
+          occurrence_count: parseInt(v.occurrence_count),
+          relationship_count: parseInt(v.relationship_count),
+          score: totalScore,
+          score_breakdown: reasons.join(', ')
+        };
+      });
+
+      scoredVariants.sort((a, b) => b.score - a.score);
+      const winner = scoredVariants[0];
+      const alternatives = scoredVariants.slice(1, limit);
+      const uniqueTypes = new Set(scoredVariants.map(v => v.entity_type));
+      const isPolysemy = uniqueTypes.size > 1;
+
+      let resolutionMethod = 'highest_combined_score';
+      if (typeHintValue && winner.entity_type.toUpperCase() === typeHintValue) {
+        resolutionMethod = 'type_hint_match';
+      } else {
+        const totalOcc = scoredVariants.reduce((sum, v) => sum + v.occurrence_count, 0);
+        const totalRels = scoredVariants.reduce((sum, v) => sum + v.relationship_count, 0);
+
+        if (winner.occurrence_count > totalOcc * 0.5) {
+          resolutionMethod = 'dominant_occurrence';
+        } else if (winner.relationship_count > totalRels * 0.5) {
+          resolutionMethod = 'dominant_connectivity';
+        }
+      }
+
+      return res.json({
+        query_type: 'resolve',
+        query_label: labelValue,
+        type_hint: typeHintValue,
+        variant_count: scoredVariants.length,
+        winner: winner,
+        alternatives: alternatives,
+        is_polysemy: isPolysemy,
+        resolution_method: resolutionMethod
+      });
+    }
+
+    // Handle neighborhood query type
+    if (query_type === 'neighborhood') {
+      const labelValue = (label || '').trim() || null;
+      const uriValue = (uri || '').trim() || null;
+      const typeHintValue = (type_hint || '').trim().toUpperCase() || null;
+      const limit = Math.min(Math.max(parseInt(requestLimit) || 50, 1), 200);
+      const directionValue = (direction || 'both').toLowerCase();
+
+      if (!labelValue && !uriValue) {
+        return res.status(400).json({ error: 'Either label or uri parameter is required for neighborhood query' });
+      }
+
+      if (!['out', 'in', 'both'].includes(directionValue)) {
+        return res.status(400).json({ error: 'direction must be one of: out, in, both' });
+      }
+
+      const resolved = await resolveEntityInternal(labelValue, uriValue, typeHintValue);
+
+      if (!resolved) {
+        return res.json({
+          query_type: 'neighborhood',
+          query_label: labelValue,
+          query_uri: uriValue,
+          type_hint: typeHintValue,
+          resolved_uri: null,
+          resolved_entity_id: null,
+          nodes: [],
+          edges: [],
+          truncated: false,
+          error: 'Entity not found'
+        });
+      }
+
+      let directionClause = '';
+      if (directionValue === 'out') {
+        directionClause = 'AND r.subject_entity_id = $1';
+      } else if (directionValue === 'in') {
+        directionClause = 'AND r.object_entity_id = $1';
+      } else {
+        directionClause = 'AND (r.subject_entity_id = $1 OR r.object_entity_id = $1)';
+      }
+
+      const relQuery = `
+        WITH edges AS (
+          SELECT
+            r.id as rel_id,
+            r.predicate,
+            r.confidence,
+            r.occurrence_count as rel_occurrence_count,
+            r.subject_entity_id,
+            r.object_entity_id,
+            CASE
+              WHEN r.subject_entity_id = $1 THEN 'out'
+              ELSE 'in'
+            END as direction
+          FROM koi_relationships r
+          WHERE 1=1 ${directionClause}
+          ORDER BY r.occurrence_count DESC, r.confidence DESC NULLS LAST
+          LIMIT $2
+        ),
+        all_entity_ids AS (
+          SELECT DISTINCT subject_entity_id as entity_id FROM edges
+          UNION
+          SELECT DISTINCT object_entity_id as entity_id FROM edges
+        ),
+        nodes AS (
+          SELECT
+            e.id,
+            e.fuseki_uri as uri,
+            e.entity_text as text,
+            e.entity_type as type,
+            e.occurrence_count,
+            COALESCE(subj.subj_count, 0) + COALESCE(obj.obj_count, 0) as relationship_count
+          FROM entity_registry e
+          JOIN all_entity_ids a ON e.id = a.entity_id
+          LEFT JOIN (
+            SELECT subject_entity_id, COUNT(*) as subj_count
+            FROM koi_relationships
+            GROUP BY subject_entity_id
+          ) subj ON e.id = subj.subject_entity_id
+          LEFT JOIN (
+            SELECT object_entity_id, COUNT(*) as obj_count
+            FROM koi_relationships
+            GROUP BY object_entity_id
+          ) obj ON e.id = obj.object_entity_id
+        )
+        SELECT
+          'edge' as result_type,
+          ed.rel_id,
+          ed.predicate,
+          ed.confidence,
+          ed.rel_occurrence_count,
+          ed.direction,
+          subj.fuseki_uri as subject_uri,
+          obj.fuseki_uri as object_uri,
+          NULL as node_id,
+          NULL as node_uri,
+          NULL as node_text,
+          NULL as node_type,
+          NULL as node_occurrence_count,
+          NULL as node_relationship_count
+        FROM edges ed
+        JOIN entity_registry subj ON ed.subject_entity_id = subj.id
+        JOIN entity_registry obj ON ed.object_entity_id = obj.id
+
+        UNION ALL
+
+        SELECT
+          'node' as result_type,
+          NULL as rel_id,
+          NULL as predicate,
+          NULL as confidence,
+          NULL as rel_occurrence_count,
+          NULL as direction,
+          NULL as subject_uri,
+          NULL as object_uri,
+          n.id as node_id,
+          n.uri as node_uri,
+          n.text as node_text,
+          n.type as node_type,
+          n.occurrence_count as node_occurrence_count,
+          n.relationship_count as node_relationship_count
+        FROM nodes n
+      `;
+
+      const results = await pool.query(relQuery, [resolved.entity_id, limit]);
+
+      const nodes: any[] = [];
+      const edges: any[] = [];
+      const nodeSet = new Set<number>();
+
+      for (const row of results.rows) {
+        if (row.result_type === 'node') {
+          if (!nodeSet.has(row.node_id)) {
+            nodeSet.add(row.node_id);
+            nodes.push({
+              id: row.node_id,
+              uri: row.node_uri,
+              text: row.node_text,
+              type: row.node_type,
+              occurrence_count: parseInt(row.node_occurrence_count),
+              relationship_count: parseInt(row.node_relationship_count),
+            });
+          }
+        } else if (row.result_type === 'edge') {
+          edges.push({
+            predicate: row.predicate,
+            subject_uri: row.subject_uri,
+            object_uri: row.object_uri,
+            direction: row.direction,
+            confidence: row.confidence,
+            occurrence_count: parseInt(row.rel_occurrence_count),
+          });
+        }
+      }
+
+      const truncated = edges.length >= limit;
+
+      return res.json({
+        query_type: 'neighborhood',
+        query_label: labelValue,
+        query_uri: uriValue,
+        type_hint: typeHintValue,
+        resolved_uri: resolved.uri,
+        resolved_entity_id: resolved.entity_id,
+        resolved_entity_text: resolved.entity_text,
+        resolved_entity_type: resolved.entity_type,
+        nodes: nodes,
+        edges: edges,
+        node_count: nodes.length,
+        edge_count: edges.length,
+        truncated: truncated,
+      });
+    }
+
+    // Handle documents query type
+    if (query_type === 'documents') {
+      const labelValue = (label || '').trim() || null;
+      const uriValue = (uri || '').trim() || null;
+      const typeHintValue = (type_hint || '').trim().toUpperCase() || null;
+      const limit = Math.min(Math.max(parseInt(requestLimit) || 20, 1), 50);
+
+      if (!labelValue && !uriValue) {
+        return res.status(400).json({ error: 'Either label or uri parameter is required for documents query' });
+      }
+
+      // Extract session token and validate for privacy filter
+      const authHeader = req.headers['authorization'] as string | undefined;
+      const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+      const authenticatedEmail = await validateSessionToken(sessionToken);
+      const isAuthenticated = !!authenticatedEmail;
+      const privacyFilter = buildPrivacyFilter(isAuthenticated);
+
+      const resolved = await resolveEntityInternal(labelValue, uriValue, typeHintValue);
+
+      if (!resolved) {
+        return res.json({
+          query_type: 'documents',
+          query_label: labelValue,
+          query_uri: uriValue,
+          type_hint: typeHintValue,
+          resolved_uri: null,
+          resolved_entity_id: null,
+          documents: [],
+          error: 'Entity not found'
+        });
+      }
+
+      const docQuery = `
+        WITH entity_docs AS (
+          SELECT DISTINCT
+            l.document_rid,
+            l.entity_name,
+            MAX(l.confidence) as link_confidence
+          FROM koi_entity_chunk_links l
+          JOIN koi_memories m ON m.rid = l.document_rid
+          WHERE (l.entity_uri = $1
+             OR LOWER(TRIM(l.entity_name)) = LOWER(TRIM($2)))
+            AND m.superseded_at IS NULL
+            AND m.content->>'text' IS NOT NULL
+            ${privacyFilter}
+          GROUP BY l.document_rid, l.entity_name
+          LIMIT $3 * 3
+        ),
+        docs_with_content AS (
+          SELECT
+            ed.document_rid,
+            ed.entity_name,
+            ed.link_confidence,
+            m.content->>'text' as snippet,
+            m.metadata->>'source' as source,
+            m.metadata->>'url' as url,
+            m.published_at,
+            m.rid
+          FROM entity_docs ed
+          JOIN koi_memories m ON m.rid = ed.document_rid
+          WHERE m.superseded_at IS NULL
+            AND m.content->>'text' IS NOT NULL
+        ),
+        deduplicated AS (
+          SELECT *,
+            ROW_NUMBER() OVER (
+              PARTITION BY md5(snippet)
+              ORDER BY published_at DESC NULLS LAST
+            ) as content_rank
+          FROM docs_with_content
+        )
+        SELECT
+          rid,
+          document_rid,
+          url,
+          source,
+          SUBSTRING(snippet, 1, 500) as snippet,
+          published_at,
+          entity_name,
+          link_confidence
+        FROM deduplicated
+        WHERE content_rank = 1
+        ORDER BY published_at DESC NULLS LAST, link_confidence DESC NULLS LAST
+        LIMIT $3
+      `;
+
+      const normalizedLabel = labelValue || resolved.entity_text;
+      const results = await pool.query(docQuery, [resolved.uri, normalizedLabel, limit]);
+
+      const documents = results.rows.map(row => ({
+        rid: row.rid,
+        document_rid: row.document_rid,
+        url: row.url,
+        source: row.source,
+        snippet: row.snippet,
+        published_at: row.published_at,
+        entity_matched: row.entity_name,
+        confidence: row.link_confidence,
+      }));
+
+      return res.json({
+        query_type: 'documents',
+        query_label: labelValue,
+        query_uri: uriValue,
+        type_hint: typeHintValue,
+        resolved_uri: resolved.uri,
+        resolved_entity_id: resolved.entity_id,
+        resolved_entity_text: resolved.entity_text,
+        resolved_entity_type: resolved.entity_type,
+        document_count: documents.length,
+        documents: documents,
+      });
+    }
+
+  } catch (error) {
+    console.error('Entity query error:', error);
+    res.status(500).json({
+      error: 'Entity query failed',
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }
