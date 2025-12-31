@@ -2359,9 +2359,9 @@ def koi_weekly_digest():
             files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
             if files:
                 latest_file = os.path.join(output_dir, files[0])
-                # Check if file is recent (within last 24 hours)
+                # Check if file is recent (within last 7 days) - extended from 24 hours for reliability
                 file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
-                if datetime.now() - file_mtime < timedelta(hours=24):
+                if datetime.now() - file_mtime < timedelta(days=7):
                     with open(latest_file, 'r') as f:
                         content = f.read()
                     logger.info(f"Returning cached digest from {latest_file}")
@@ -2369,7 +2369,8 @@ def koi_weekly_digest():
                         'success': True,
                         'content': content,
                         'source': 'cached',
-                        'cached_file': files[0]
+                        'cached_file': files[0],
+                        'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600)
                     })
 
         # Generate new digest using WeeklyCuratorLLM
@@ -2404,19 +2405,66 @@ def koi_weekly_digest():
                 'statistics': digest.get('statistics', {})
             })
         else:
+            # Fallback: return any cached file regardless of age, or a helpful message
+            logger.warning("LLM generation returned empty, checking for any cached digest")
+            if os.path.exists(output_dir):
+                files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
+                if files:
+                    latest_file = os.path.join(output_dir, files[0])
+                    file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
+                    with open(latest_file, 'r') as f:
+                        content = f.read()
+                    logger.info(f"Returning older cached digest from {latest_file}")
+                    return jsonify({
+                        'success': True,
+                        'content': content,
+                        'source': 'cached_fallback',
+                        'cached_file': files[0],
+                        'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600),
+                        'warning': 'Fresh digest generation failed, returning older cached version'
+                    })
+            # No cached files at all - return a placeholder
             return jsonify({
-                'success': False,
-                'error': {'message': 'No content generated', 'code': 500}
-            }), 500
+                'success': True,
+                'content': '# Weekly Digest Unavailable\n\nNo recent digest content is currently available. Please try again later or contact support.',
+                'source': 'placeholder',
+                'warning': 'No digest content available - generation failed and no cached files found'
+            })
 
     except Exception as e:
         logger.error(f"Error generating weekly digest: {e}")
         import traceback
         traceback.print_exc()
+
+        # Try to return cached content as fallback
+        output_dir = '/opt/projects/koi-processor/output/weekly_digests'
+        if os.path.exists(output_dir):
+            files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
+            if files:
+                try:
+                    latest_file = os.path.join(output_dir, files[0])
+                    file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
+                    with open(latest_file, 'r') as f:
+                        content = f.read()
+                    logger.info(f"Returning cached digest after error: {latest_file}")
+                    return jsonify({
+                        'success': True,
+                        'content': content,
+                        'source': 'cached_error_fallback',
+                        'cached_file': files[0],
+                        'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600),
+                        'warning': f'Fresh digest generation failed with error: {str(e)}'
+                    })
+                except Exception as cache_error:
+                    logger.error(f"Failed to read cached digest: {cache_error}")
+
+        # Return placeholder instead of 500
         return jsonify({
-            'success': False,
-            'error': {'message': str(e), 'code': 500}
-        }), 500
+            'success': True,
+            'content': '# Weekly Digest Temporarily Unavailable\n\nThe digest generation system encountered an error. Please try again later.',
+            'source': 'error_placeholder',
+            'warning': str(e)
+        })
 
 @app.route('/api/koi/weekly-digest/notebooklm', methods=['GET'])
 def koi_weekly_digest_notebooklm():
@@ -2437,9 +2485,9 @@ def koi_weekly_digest_notebooklm():
             files = sorted([f for f in os.listdir(output_dir) if f.endswith('_notebooklm.md')], reverse=True)
             if files:
                 latest_file = os.path.join(output_dir, files[0])
-                # Check if file is recent (within last 24 hours)
+                # Check if file is recent (within last 7 days) - extended from 24 hours for reliability
                 file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
-                if datetime.now() - file_mtime < timedelta(hours=24):
+                if datetime.now() - file_mtime < timedelta(days=7):
                     with open(latest_file, 'r') as f:
                         content = f.read()
 
