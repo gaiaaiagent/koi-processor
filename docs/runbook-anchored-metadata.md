@@ -179,9 +179,31 @@ curl -X GET "$KOI_API/metadata/stats" \
   -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY"
 ```
 
-### Public Access Blocked
+### Public Access (Design Decision)
 
-Requests without the `X-Internal-API-Key` header receive:
+**Behavior**: Public URL returns **404 from nginx** (endpoint not routed).
+
+```bash
+# Public access attempt - returns nginx 404
+curl -s https://regen.gaiaai.xyz/api/koi/metadata/stats
+# Response: 404 Not Found (nginx default page)
+```
+
+**Rationale**: The metadata endpoints are intentionally NOT exposed via nginx. This provides defense-in-depth:
+1. **404 from nginx** - No information disclosure about endpoint existence
+2. **Internal-only routing** - Only services on the server can reach port 8301 directly
+3. **API key required** - Even internal callers need `X-Internal-API-Key`
+
+**For internal services** (MCP server, scripts), call the local endpoint:
+```bash
+# Internal access (from server) - works with API key
+curl -X GET "http://127.0.0.1:8301/api/koi/metadata/stats" \
+  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY"
+```
+
+### Auth Error Response (Internal Only)
+
+When calling internally without the `X-Internal-API-Key` header:
 
 ```json
 {

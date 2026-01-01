@@ -210,7 +210,8 @@ export function extractCitations(results: Array<{
       };
 
       if (r.metadata?.url) {
-        citation.url = r.metadata.url;
+        const trimmed = r.metadata.url.trim();
+        if (trimmed) citation.url = trimmed;
       }
 
       if (r.metadata?.title) {

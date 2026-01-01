@@ -1319,7 +1319,7 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
       metadata: {
         rid: row.rid,
         source: row.source,
-        url: row.url,
+        url: typeof row.url === 'string' ? row.url.trim() : row.url,
         entities_matched: row.entities_matched,
         entity_count: parseInt(row.entity_count),
         published_at: row.published_at || null
@@ -1394,7 +1394,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
         metadata: {
           rid: row.rid,
           source: row.source,
-          url: row.url,
+          url: typeof row.url === 'string' ? row.url.trim() : row.url,
           similarity: parseFloat(row.similarity),
           published_at: row.published_at || null
         },
@@ -1473,7 +1473,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       metadata: {
         rid: row.rid,
         source: row.source,
-        url: row.url,
+        url: typeof row.url === 'string' ? row.url.trim() : row.url,
         similarity: parseFloat(row.similarity),
         published_at: row.published_at || null
       },
@@ -1661,7 +1661,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
         metadata: {
           rid: row.rid,
           source: row.source,
-          url: row.url,
+          url: typeof row.url === 'string' ? row.url.trim() : row.url,
           published_at: row.published_at || null,
           fts_rank: rawRank,
           normalized_score: normalizedScore,
@@ -1726,7 +1726,7 @@ async function performKeywordSearch(query: string, topK: number = 10, filters?: 
       metadata: {
         rid: row.rid,
         source: row.source,
-        url: row.url,
+        url: typeof row.url === 'string' ? row.url.trim() : row.url,
         published_at: row.published_at || null
       },
       rid: row.rid
@@ -3641,7 +3641,7 @@ app.get('/api/koi/entity/documents', async (req, res) => {
     const documents = results.rows.map(row => ({
       rid: row.rid,
       document_rid: row.document_rid,
-      url: row.url,
+      url: typeof row.url === 'string' ? row.url.trim() : row.url,
       source: row.source,
       snippet: row.snippet,
       published_at: row.published_at,
@@ -4189,7 +4189,7 @@ app.post('/api/koi/entity', async (req, res) => {
       const documents = results.rows.map(row => ({
         rid: row.rid,
         document_rid: row.document_rid,
-        url: row.url,
+        url: typeof row.url === 'string' ? row.url.trim() : row.url,
         source: row.source,
         snippet: row.snippet,
         published_at: row.published_at,
@@ -4214,7 +4214,7 @@ app.post('/api/koi/entity', async (req, res) => {
       // Session D1: Extract citations from documents
       const citations = extractCitations(documents.map(d => ({
         rid: d.document_rid,
-        metadata: { url: d.url },
+        metadata: { url: typeof d.url === 'string' ? d.url.trim() : d.url },
         content: d.snippet,
       })));
 
@@ -4457,7 +4457,7 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
     // Session D1: Extract citations from results
     const citations = extractCitations(results.map(r => ({
       rid: r.rid,
-      metadata: { url: r.url, title: r.source },
+      metadata: { url: typeof r.url === 'string' ? r.url.trim() : r.url, title: r.source },
       content: r.content,
     })));
 
@@ -4667,7 +4667,7 @@ app.post('/api/koi/metadata/hectares', requireInternalApiKey, async (req, res) =
       },
       citations: [{
         rid: citation.rid,
-        url: citation.url,
+        url: typeof citation.url === 'string' ? citation.url.trim() : citation.url,
         title: citation.title,
         excerpt: citation.excerpt,
         content_hash: citation.content_hash,
