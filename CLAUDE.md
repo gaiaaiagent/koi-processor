@@ -231,5 +231,41 @@ set -a; source .env; set +a
 
 ---
 
-**Last Updated**: 2025-12-29
+## Weekly Digest Cache Fix (2026-01-02)
+
+**Status**: ✅ Deployed
+
+**Root Cause**: Cache lookup ignored date parameters, returning stale 6+ day old digests
+
+**Fix**: Date-range aware caching with new filename pattern `weekly_digest_{start}_to_{end}.md`
+
+**Key Files**:
+- `src/content/content_dashboard.py` - Cache lookup with date-range matching
+- `src/content/weekly_curator_llm.py` - Date-range filename on export
+
+---
+
+## Event Bridge Routing Fix (2026-01-02)
+
+**Status**: ✅ Fixed
+
+**Root Cause**: Forwarder was sending to semantic bridge (port 8004) instead of v2 bridge (port 8100)
+
+**Fix**: Set `EVENT_BRIDGE_URL=http://localhost:8100` and `EVENT_BRIDGE_ENDPOINT=/process-koi-event` in .env
+
+---
+
+## Fuseki Provenance Auth Fix (2026-01-02)
+
+**Status**: ✅ Deployed
+
+**Root Cause**: `provenance_to_rdf.py` didn't pass credentials for Fuseki writes
+
+**Fix**: Added Basic Auth support via `FUSEKI_USER`/`FUSEKI_PASSWORD` env vars
+
+**Runbook**: `docs/runbook-fuseki-provenance.md`
+
+---
+
+**Last Updated**: 2026-01-02
 **Phase**: Complete - All major milestones achieved

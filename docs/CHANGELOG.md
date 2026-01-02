@@ -5,6 +5,28 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.5] - 2026-01-02
+
+### Fixed
+- **Weekly Digest Stale Cache** - Date-range aware caching for `/api/koi/weekly-digest`
+  - Root cause: Cache lookup ignored `start_date`/`end_date` params, returning 6+ day old digests
+  - Fix: Cache filename now includes date range (`weekly_digest_{start}_to_{end}.md`)
+  - Affected files: `content_dashboard.py`, `weekly_curator_llm.py`
+
+- **Event Bridge Routing** - Forwarder now targets correct endpoint
+  - Root cause: Forwarder posted to semantic bridge (port 8004) instead of v2 bridge (port 8100)
+  - Fix: `EVENT_BRIDGE_URL=http://localhost:8100`, `EVENT_BRIDGE_ENDPOINT=/process-koi-event`
+
+- **Fuseki Provenance 401** - Added Basic Auth support for provenance writes
+  - Root cause: `provenance_to_rdf.py` didn't authenticate with Fuseki
+  - Fix: Added `FUSEKI_USER`/`FUSEKI_PASSWORD` env var support
+  - Runbook: `docs/runbook-fuseki-provenance.md`
+
+### Changed
+- **Pipeline Health** - All event flow components verified working:
+  - Sensors → Coordinator → Forwarder → Event Bridge v2 → BGE → koi_embeddings ✅
+  - Provenance → Fuseki ✅
+
 ## [3.1.4] - 2025-12-29
 
 ### Added
