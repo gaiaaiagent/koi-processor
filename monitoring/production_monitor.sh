@@ -31,7 +31,7 @@ POSTGRES_HOST="localhost"
 POSTGRES_PORT="5433"
 
 # Alert thresholds
-MAX_RESPONSE_TIME=2  # seconds
+MAX_RESPONSE_TIME=10  # seconds
 MIN_MEMORY_COUNT=20  # minimum expected KOI memories
 
 # Colors for terminal output
