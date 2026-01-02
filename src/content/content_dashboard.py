@@ -2378,39 +2378,60 @@ def koi_weekly_digest():
 
     try:
         # Get parameters
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date')
+        start_date_param = request.args.get('start_date')
+        end_date_param = request.args.get('end_date')
         format_type = request.args.get('format', 'markdown')
 
-        # Check for recent digest file first
-        output_dir = '/opt/projects/koi-processor/output/weekly_digests'
-        if os.path.exists(output_dir):
-            # Look for most recent digest file
-            files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
-            if files:
-                latest_file = os.path.join(output_dir, files[0])
-                # Check if file is recent (within last 7 days) - extended from 24 hours for reliability
-                file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
-                if datetime.now() - file_mtime < timedelta(days=7):
-                    with open(latest_file, 'r') as f:
+        # Compute effective date range (default: last 7 days)
+        today = datetime.now()
+        if start_date_param and end_date_param:
+            effective_start = start_date_param
+            effective_end = end_date_param
+        else:
+            effective_end = today.strftime('%Y-%m-%d')
+            effective_start = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+
+        # Check for cached digest matching THIS date range
+        # Support both old directory (weekly_digests) and new (weekly)
+        output_dirs = [
+            '/opt/projects/koi-processor/output/weekly_digests',
+            '/opt/projects/koi-processor/output/weekly'
+        ]
+
+        # Date-range aware cache filename
+        cache_filename = f"weekly_digest_{effective_start}_to_{effective_end}.md"
+
+        for output_dir in output_dirs:
+            if not os.path.exists(output_dir):
+                continue
+
+            cache_path = os.path.join(output_dir, cache_filename)
+            if os.path.exists(cache_path):
+                file_mtime = datetime.fromtimestamp(os.path.getmtime(cache_path))
+                cache_age_hours = int((datetime.now() - file_mtime).total_seconds() / 3600)
+
+                # Only use cache if < 24 hours old (fresh enough for the specific range)
+                if cache_age_hours < 24:
+                    with open(cache_path, 'r') as f:
                         content = f.read()
-                    logger.info(f"Returning cached digest from {latest_file}")
+                    logger.info(f"Returning cached digest from {cache_filename} (age: {cache_age_hours}h)")
                     return respond({
                         'success': True,
                         'content': content,
                         'source': 'cached',
-                        'cached_file': files[0],
-                        'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600)
+                        'cached_file': cache_filename,
+                        'cached_age_hours': cache_age_hours,
+                        'date_range': {'start': effective_start, 'end': effective_end}
                     }, data_source='cached')
+                else:
+                    logger.info(f"Cache file {cache_filename} exists but is {cache_age_hours}h old (> 24h), regenerating")
 
-        # Generate new digest using WeeklyCuratorLLM
-        logger.info("Generating fresh weekly digest via API")
+        # No valid cache found - generate fresh digest
+        logger.info(f"Generating fresh weekly digest for {effective_start} to {effective_end}")
 
-        # Set date range environment variables if provided
-        if start_date:
-            os.environ['DIGEST_START_DATE'] = start_date
-        if end_date:
-            os.environ['DIGEST_END_DATE'] = end_date
+        # Set date range environment variables for the curator
+        os.environ['DIGEST_START_DATE'] = effective_start
+        os.environ['DIGEST_END_DATE'] = effective_end
 
         # Import and run the curator
         from src.content.weekly_curator_llm import WeeklyCuratorLLM
@@ -2432,15 +2453,18 @@ def koi_weekly_digest():
                 'success': True,
                 'content': content,
                 'source': 'generated',
+                'date_range': {'start': effective_start, 'end': effective_end},
                 'statistics': digest.get('statistics', {})
             }, data_source='koi-derived')
         else:
             # Fallback: return any cached file regardless of age, or a helpful message
             logger.warning("LLM generation returned empty, checking for any cached digest")
-            if os.path.exists(output_dir):
-                files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
+            for fallback_dir in output_dirs:
+                if not os.path.exists(fallback_dir):
+                    continue
+                files = sorted([f for f in os.listdir(fallback_dir) if f.startswith('weekly_digest_') and f.endswith('.md') and '_notebooklm' not in f], reverse=True)
                 if files:
-                    latest_file = os.path.join(output_dir, files[0])
+                    latest_file = os.path.join(fallback_dir, files[0])
                     file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
                     with open(latest_file, 'r') as f:
                         content = f.read()
@@ -2451,6 +2475,7 @@ def koi_weekly_digest():
                         'source': 'cached_fallback',
                         'cached_file': files[0],
                         'cached_age_hours': int((datetime.now() - file_mtime).total_seconds() / 3600),
+                        'date_range': {'start': effective_start, 'end': effective_end},
                         'warning': 'Fresh digest generation failed, returning older cached version'
                     }, data_source='cached', warnings=['fallback_used'])
             # No cached files at all - return a placeholder
@@ -2458,6 +2483,7 @@ def koi_weekly_digest():
                 'success': True,
                 'content': '# Weekly Digest Unavailable\n\nNo recent digest content is currently available. Please try again later or contact support.',
                 'source': 'placeholder',
+                'date_range': {'start': effective_start, 'end': effective_end},
                 'warning': 'No digest content available - generation failed and no cached files found'
             }, data_source='cached', warnings=['fallback_used'])
 
@@ -2467,12 +2493,17 @@ def koi_weekly_digest():
         traceback.print_exc()
 
         # Try to return cached content as fallback
-        output_dir = '/opt/projects/koi-processor/output/weekly_digests'
-        if os.path.exists(output_dir):
-            files = sorted([f for f in os.listdir(output_dir) if f.startswith('weekly_digest_') and f.endswith('.md')], reverse=True)
+        fallback_dirs = [
+            '/opt/projects/koi-processor/output/weekly_digests',
+            '/opt/projects/koi-processor/output/weekly'
+        ]
+        for fallback_dir in fallback_dirs:
+            if not os.path.exists(fallback_dir):
+                continue
+            files = sorted([f for f in os.listdir(fallback_dir) if f.startswith('weekly_digest_') and f.endswith('.md') and '_notebooklm' not in f], reverse=True)
             if files:
                 try:
-                    latest_file = os.path.join(output_dir, files[0])
+                    latest_file = os.path.join(fallback_dir, files[0])
                     file_mtime = datetime.fromtimestamp(os.path.getmtime(latest_file))
                     with open(latest_file, 'r') as f:
                         content = f.read()

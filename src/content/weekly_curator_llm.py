@@ -1564,16 +1564,28 @@ Format as structured JSON with these exact keys:
         output_dir = Path("/opt/projects/koi-processor/output/weekly")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        # Use date range from environment variables for cache-compatible filenames
+        start_date_str = os.getenv('DIGEST_START_DATE')
+        end_date_str = os.getenv('DIGEST_END_DATE')
+
+        if start_date_str and end_date_str:
+            # Date-range aware filename for proper cache lookup
+            date_range_str = f"{start_date_str}_to_{end_date_str}"
+        else:
+            # Fallback to default 7-day range
+            today = datetime.now()
+            end_date = today.strftime('%Y-%m-%d')
+            start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+            date_range_str = f"{start_date}_to_{end_date}"
 
         # Save JSON
-        json_path = output_dir / f"weekly_digest_{date_str}.json"
+        json_path = output_dir / f"weekly_digest_{date_range_str}.json"
         with open(json_path, 'w') as f:
             json.dump(digest, f, indent=2, default=str)
         logger.info(f"Exported JSON to {json_path}")
 
         # Save Markdown
-        md_path = output_dir / f"weekly_digest_{date_str}.md"
+        md_path = output_dir / f"weekly_digest_{date_range_str}.md"
         with open(md_path, 'w') as f:
             f.write(digest['brief'])
 
@@ -1594,10 +1606,20 @@ Format as structured JSON with these exact keys:
         output_dir = Path("/opt/projects/koi-processor/output/weekly")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        # Use date range from environment variables for cache-compatible filenames
+        start_date_str = os.getenv('DIGEST_START_DATE')
+        end_date_str = os.getenv('DIGEST_END_DATE')
+
+        if start_date_str and end_date_str:
+            date_range_str = f"{start_date_str}_to_{end_date_str}"
+        else:
+            today = datetime.now()
+            end_date = today.strftime('%Y-%m-%d')
+            start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+            date_range_str = f"{start_date}_to_{end_date}"
 
         # Create NotebookLM enhanced export
-        notebooklm_path = output_dir / f"weekly_digest_{date_str}_notebooklm.md"
+        notebooklm_path = output_dir / f"weekly_digest_{date_range_str}_notebooklm.md"
         with open(notebooklm_path, 'w') as f:
             f.write("# Regen Network Weekly Digest - NotebookLM Enhanced Export\n\n")
             f.write("*This document contains the complete weekly digest with full forum thread content embedded for comprehensive analysis.*\n\n")
