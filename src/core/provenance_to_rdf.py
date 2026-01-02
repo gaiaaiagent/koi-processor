@@ -19,12 +19,18 @@ FUSEKI_URL = os.getenv('FUSEKI_URL', 'http://localhost:3030')
 FUSEKI_DATASET = os.getenv('FUSEKI_DATASET', 'koi')
 FUSEKI_UPDATE_URL = f"{FUSEKI_URL}/{FUSEKI_DATASET}/update"
 FUSEKI_QUERY_URL = f"{FUSEKI_URL}/{FUSEKI_DATASET}/sparql"
+FUSEKI_USER = os.getenv("FUSEKI_USER")
+FUSEKI_PASSWORD = os.getenv("FUSEKI_PASSWORD")
 
 class ProvenanceToRDF:
     """Writes document provenance to RDF knowledge graph"""
 
     def __init__(self):
         self.fuseki_url = FUSEKI_UPDATE_URL
+        self.fuseki_query_url = FUSEKI_QUERY_URL
+        self._auth: Optional[httpx.BasicAuth] = None
+        if FUSEKI_USER and FUSEKI_PASSWORD:
+            self._auth = httpx.BasicAuth(FUSEKI_USER, FUSEKI_PASSWORD)
         self.prefixes = """
         PREFIX koi: <http://koi.regen.network/ontology#>
         PREFIX doc: <http://koi.regen.network/document/>
@@ -107,7 +113,7 @@ class ProvenanceToRDF:
             insert_query += "\n}"
 
             # Execute SPARQL UPDATE
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, auth=self._auth) as client:
                 response = await client.post(
                     self.fuseki_url,
                     data=insert_query,
@@ -169,7 +175,7 @@ class ProvenanceToRDF:
             }}
             """
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, auth=self._auth) as client:
                 response = await client.post(
                     self.fuseki_url,
                     data=insert_query,
@@ -213,9 +219,9 @@ class ProvenanceToRDF:
             }}
             """
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, auth=self._auth) as client:
                 response = await client.post(
-                    FUSEKI_QUERY_URL,
+                    self.fuseki_query_url,
                     data={"query": query},
                     headers={"Accept": "application/sparql-results+json"}
                 )
