@@ -195,6 +195,31 @@ export function summarizeParams(params: Record<string, unknown>): string {
  * Extract citations from search results
  * Converts result items to Citation objects
  */
+export function shouldExcludeKoiResultSource(rid?: string, url?: string): boolean {
+  const safeRid = (rid || "").toLowerCase();
+  const safeUrl = (url || "").toLowerCase();
+
+  // Exclude derived crawl artifacts that can cause double-indexing and often become unreachable (404) later.
+  // Example: koi-sensors discourse crawl dumps committed to GitHub under indexing/discourse/storage/*.json
+  if (
+    safeUrl.includes("github.com/gaiaaiagent/koi-sensors/blob/") &&
+    safeUrl.includes("/indexing/") &&
+    safeUrl.includes("/storage/") &&
+    safeUrl.endsWith(".json")
+  ) {
+    return true;
+  }
+
+  if (safeRid.includes("_indexing_discourse_storage_") && safeRid.endsWith(".json")) {
+    return true;
+  }
+  if (safeRid.includes("forum_crawl_") && safeRid.endsWith(".json")) {
+    return true;
+  }
+
+  return false;
+}
+
 export function extractCitations(results: Array<{
   rid?: string;
   metadata?: { url?: string; title?: string };
@@ -203,6 +228,7 @@ export function extractCitations(results: Array<{
 }>): Citation[] {
   return results
     .filter(r => r.rid) // Only include results with RIDs
+    .filter(r => !shouldExcludeKoiResultSource(r.rid, r.metadata?.url))
     .slice(0, 10) // Limit to top 10 citations
     .map(r => {
       const citation: Citation = {

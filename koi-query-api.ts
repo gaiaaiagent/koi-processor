@@ -32,6 +32,7 @@ import {
   getKoiAsOfMetadata,
   summarizeParams,
   extractCitations,
+  shouldExcludeKoiResultSource,
   createSuccessEnvelope,
   createErrorEnvelope,
 } from "./src/types/koi-response-envelope.ts";
@@ -2067,14 +2068,17 @@ app.post('/api/koi/query', async (req, res) => {
       warnings.push('privacy_filtered');
     }
 
+    // Filter out derived artifacts (e.g., crawl dumps committed to GitHub) to avoid double-indexing + dead links
+    const userResults = fusedResults.filter(r => !shouldExcludeKoiResultSource(r.rid, r.metadata?.url));
+
     // Format response data
     const responseData: any = {
       question,
-      total_results: fusedResults.length,
+      total_results: userResults.length,
       confidence: confidence,
       execution_time: responseTime / 1000,
       triggered_extraction: triggeredExtraction,
-      results: fusedResults.slice(0, limit).map(r => ({
+      results: userResults.slice(0, limit).map(r => ({
         title: `Document ${r.rid}`,
         content: r.content,
         score: r.score,
@@ -2115,7 +2119,7 @@ app.post('/api/koi/query', async (req, res) => {
     }
 
     // Session D1: Extract citations from results
-    const citations = extractCitations(fusedResults.slice(0, limit));
+    const citations = extractCitations(userResults.slice(0, limit));
 
     // Session D1: Create envelope response
     const envelope = createSuccessEnvelope(requestId, responseData, {
@@ -4195,7 +4199,7 @@ app.post('/api/koi/entity', async (req, res) => {
         published_at: row.published_at,
         entity_matched: row.entity_name,
         confidence: row.link_confidence,
-      }));
+      })).filter(d => !shouldExcludeKoiResultSource(d.document_rid, d.url));
 
       // Session D1: Add tool trace for documents query
       toolTrace.push({
