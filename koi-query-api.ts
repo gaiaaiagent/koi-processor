@@ -723,10 +723,13 @@ function applyRetrievalProfile(
     }
   }
 
+  const candidatesAfterProfile = filtered.length;
+
   // Phase 3: Check answerability
   let answerable = true;
   let answerabilityReason: AnswerabilityReason = 'sufficient_evidence';
   let evidenceSummary: string | undefined = undefined;
+  let resultsToReturn = filtered;
 
   if (filtered.length === 0) {
     answerable = false;
@@ -749,11 +752,18 @@ function applyRetrievalProfile(
     if (withActivity.length === 0) {
       answerable = false;
       answerabilityReason = 'sources_only_identity_mentions';
+      evidenceSummary = `Found 0 activity-bearing source(s) among ${filtered.length} candidate(s) after filtering`;
+
+      // For public surfaces, do not return identity-only "mentions" as results/citations.
+      // This prevents the caller (e.g., a Custom GPT) from citing irrelevant engineering artifacts.
+      if (effectivePolicy === 'public') {
+        resultsToReturn = [];
+      }
     } else {
       // Build evidence summary from activity-bearing results
       evidenceSummary = `Found ${withActivity.length} source(s) with activity indicators`;
       // For person_activity, only return activity-bearing results to prevent "mention ≠ evidence" citations.
-      filtered = withActivity;
+      resultsToReturn = withActivity;
     }
   }
 
@@ -764,12 +774,12 @@ function applyRetrievalProfile(
     effective_policy: effectivePolicy,
     recency_window_used: recencyWindowUsed,
     candidates_total: candidatesTotal,
-    candidates_filtered: candidatesTotal - filtered.length,
-    candidates_kept: filtered.length,
+    candidates_filtered: candidatesTotal - candidatesAfterProfile,
+    candidates_kept: candidatesAfterProfile,
   };
 
   return {
-    filteredResults: filtered,
+    filteredResults: resultsToReturn,
     profileDebug,
     answerable,
     answerabilityReason,
@@ -2339,7 +2349,7 @@ app.post('/api/koi/query', async (req, res) => {
     // Week 13: GraphRAG context retrieval
     // Week 21: Enhanced with question-query and multi-entity resolution
     let graphContext: GraphContext | null = null;
-    const enableGraphRAG = process.env.ENABLE_GRAPHRAG_CONTEXT === 'true' || requestGraphContext || queryParamGraphContext;
+    const enableGraphRAG = requestGraphContext || queryParamGraphContext || (process.env.ENABLE_GRAPHRAG_CONTEXT === 'true' && intent !== 'person_activity');
 
     if (enableGraphRAG) {
       try {

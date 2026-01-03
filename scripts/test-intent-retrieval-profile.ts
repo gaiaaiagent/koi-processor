@@ -147,6 +147,16 @@ async function testPersonActivityQuery(): Promise<TestResult[]> {
       message: `answerability_reason = ${data.answerability_reason}`,
     });
 
+    // Test 6.5: Graph context should be omitted for person_activity unless explicitly requested
+    results.push({
+      name: 'graph_context omitted for person_activity',
+      passed: data.graph_context === undefined || data.graph_context === null,
+      message: (data.graph_context === undefined || data.graph_context === null)
+        ? 'graph_context not present (correct)'
+        : 'graph_context present (should be omitted for person_activity)',
+      details: data.graph_context ? { has_graph_context: true } : undefined,
+    });
+
     // Test 7: Check that koi-sensors is NOT in citations
     const citations = envelope.citations || [];
     const koiSensorsCitations = citations.filter((c: any) =>
@@ -161,6 +171,22 @@ async function testPersonActivityQuery(): Promise<TestResult[]> {
         : `Found ${koiSensorsCitations.length} koi-sensors citations (should be 0)`,
       details: koiSensorsCitations.length > 0 ? { koiSensorsCitations } : undefined,
     });
+
+    // Test 7.5: If not answerable, results/citations should be empty for public person_activity
+    if (data.answerable === false) {
+      results.push({
+        name: 'no results when not answerable (person_activity public)',
+        passed: Array.isArray(data.results) && data.results.length === 0,
+        message: Array.isArray(data.results)
+          ? `results.length = ${data.results.length}`
+          : 'results is not an array',
+      });
+      results.push({
+        name: 'no citations when not answerable (person_activity public)',
+        passed: Array.isArray(citations) && citations.length === 0,
+        message: `citations.length = ${citations.length}`,
+      });
+    }
 
     // Test 8: If answerable=false, answerability_reason should not be 'sufficient_evidence'
     if (data.answerable === false) {
