@@ -29,6 +29,20 @@ This guide covers deployment of the KOI Processor to production environments.
 
 ## Production Deployment
 
+## Indexing Hygiene Guardrail
+
+To prevent accidental double-indexing of derived crawl artifacts (e.g., crawl dumps committed to GitHub), run:
+
+```bash
+# Uses POSTGRES_URL if set; falls back to local default
+python3 scripts/check_indexing_hygiene.py
+```
+
+Exit codes:
+- `0` = no violations
+- `1` = violations found (see printed patterns + sample RIDs)
+- `2` = could not run the check (e.g., DB connection failure)
+
 ### 1. Server Setup
 
 ```bash
