@@ -28,6 +28,11 @@ import {
   type WarningCode,
   type ToolTraceEntry,
   type AsOfMetadata,
+  type QueryIntent,
+  type SourcePolicy,
+  type AnswerabilityReason,
+  type ProfileDebug,
+  type DerivedResultMetadata,
   generateRequestId,
   getKoiAsOfMetadata,
   summarizeParams,
@@ -387,6 +392,409 @@ function buildPrivacyFilter(isAuthenticated: boolean, tableAlias: string = 'm'):
   }
   // Unauthenticated users only see public data
   return ` AND (${tableAlias}.is_private = FALSE OR ${tableAlias}.is_private IS NULL)`;
+}
+
+// =============================================================================
+// Intent-Aware Retrieval Profile (Session KOI - "mention ≠ evidence" MVP)
+// =============================================================================
+
+/**
+ * Retrieval profile configuration
+ * Controls filtering and ranking behavior based on intent
+ */
+interface RetrievalProfile {
+  profile_name: string;
+  profile_version: string;
+  recency_window_default: number;  // months
+  recency_window_fallback: number; // months
+  min_candidates_before_fallback: number;
+  excluded_source_kinds: Array<DerivedResultMetadata['source_kind']>;
+  excluded_doc_kinds: Array<DerivedResultMetadata['doc_kind']>;
+  excluded_repos: string[];
+  require_activity_predicate: boolean;
+}
+
+/**
+ * Activity predicate patterns for person_activity intent
+ * These indicate actual work/activity rather than just identity mentions
+ */
+const ACTIVITY_PREDICATES = [
+  'working on',
+  'currently working on',
+  'leading',
+  'leads',
+  'focusing on',
+  'announced',
+  'released',
+  'launched',
+  'published',
+  'presented',
+  'authored',
+  'co-founded',
+  'founded',
+  'joined',
+  'appointed',
+  'elected',
+  'proposal',
+  'roadmap',
+  'working group',
+  'initiative',
+];
+
+const PERSON_ACTIVITY_STOPWORDS = new Set([
+  'what',
+  "what's",
+  'whats',
+  'is',
+  'are',
+  'was',
+  'were',
+  'who',
+  'currently',
+  'now',
+  'today',
+  'working',
+  'on',
+  'doing',
+  'tell',
+  'me',
+  'about',
+  'the',
+  'a',
+  'an',
+  'of',
+  'and',
+  'or',
+  'to',
+  'for',
+  'in',
+  'at',
+  'with',
+  'from',
+  'their',
+  'his',
+  'her',
+  'they',
+  'he',
+  'she',
+]);
+
+function extractSubjectTokens(question: string): string[] {
+  return question
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map(t => t.trim())
+    .filter(Boolean)
+    .filter(t => !PERSON_ACTIVITY_STOPWORDS.has(t))
+    .slice(0, 6);
+}
+
+function splitIntoSentences(text: string): string[] {
+  return text
+    .split(/[\n\r]+|[.!?]+/g)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Build a retrieval profile based on intent and effective policy
+ */
+function buildRetrievalProfile(intent: QueryIntent, effectivePolicy: SourcePolicy): RetrievalProfile {
+  // Default profile for general queries
+  const baseProfile: RetrievalProfile = {
+    profile_name: 'general_v1',
+    profile_version: '1.0.0',
+    recency_window_default: 0,  // no recency filter
+    recency_window_fallback: 0,
+    min_candidates_before_fallback: 0,
+    excluded_source_kinds: [],
+    excluded_doc_kinds: [],
+    excluded_repos: [],
+    require_activity_predicate: false,
+  };
+
+  if (intent === 'person_activity') {
+    if (effectivePolicy === 'public') {
+      return {
+        profile_name: 'person_activity_public_v1',
+        profile_version: '1.0.0',
+        recency_window_default: 12,  // 12 months
+        recency_window_fallback: 24, // 24 months if < 3 candidates
+        min_candidates_before_fallback: 3,
+        excluded_source_kinds: ['notion'],  // Internal planning docs
+        excluded_doc_kinds: ['code', 'plan', 'dump'],  // Low-evidence artifacts
+        excluded_repos: ['koi-sensors'],  // Internal infrastructure
+        require_activity_predicate: true,
+      };
+    } else {
+      // internal_ok allows more sources
+      return {
+        profile_name: 'person_activity_internal_v1',
+        profile_version: '1.0.0',
+        recency_window_default: 12,
+        recency_window_fallback: 24,
+        min_candidates_before_fallback: 3,
+        excluded_source_kinds: [],
+        excluded_doc_kinds: ['dump'],  // Still exclude raw dumps
+        excluded_repos: [],
+        require_activity_predicate: true,
+      };
+    }
+  }
+
+  return baseProfile;
+}
+
+/**
+ * Infer derived metadata from a search result
+ * Used for source hygiene filtering
+ */
+function inferResultMetadata(result: any): DerivedResultMetadata {
+  const url = (result.metadata?.url || '').toLowerCase();
+  const rid = (result.rid || '').toLowerCase();
+  const source = (result.source || '').toLowerCase();
+
+  // Infer source_kind from URL or source field
+  let source_kind: DerivedResultMetadata['source_kind'] = 'unknown';
+  if (url.includes('forum.regen.network') || url.includes('discourse') || source.includes('forum')) {
+    source_kind = 'forum';
+  } else if (url.includes('github.com')) {
+    source_kind = 'github';
+  } else if (url.includes('notion.') || source.includes('notion')) {
+    source_kind = 'notion';
+  } else if (url.includes('docs.') || url.includes('/docs/') || source.includes('docs')) {
+    source_kind = 'docs';
+  } else if (url.startsWith('http')) {
+    source_kind = 'web';
+  }
+
+  // Infer doc_kind from URL path/extension
+  let doc_kind: DerivedResultMetadata['doc_kind'] = 'unknown';
+  if (url.match(/\.(ts|js|py|go|rs|sol)$/i) || url.includes('/blob/') && (url.includes('/x/') || url.includes('/src/'))) {
+    doc_kind = 'code';
+  } else if (url.includes('/storage/') || url.includes('_dump') || rid.includes('_storage_') || rid.includes('_dump')) {
+    doc_kind = 'dump';
+  } else if (url.includes('/plan') || url.includes('roadmap') || url.includes('/internal/')) {
+    doc_kind = 'plan';
+  } else if (url.endsWith('.md') || url.includes('/docs/')) {
+    doc_kind = 'markdown';
+  } else if (source_kind === 'forum' || url.includes('/t/') || url.includes('/topic/')) {
+    doc_kind = 'discussion';
+  } else if (source_kind === 'web') {
+    doc_kind = 'article';
+  }
+
+  // Extract repo from GitHub URL
+  let repo: string | undefined = undefined;
+  const repoMatch = url.match(/github\.com\/[^\/]+\/([^\/]+)/);
+  if (repoMatch) {
+    repo = repoMatch[1].replace(/\.git$/, '');
+  }
+
+  // Infer visibility (conservative: unknown = internal for fail-closed)
+  let visibility: DerivedResultMetadata['visibility'] = 'unknown';
+  if (source_kind === 'forum' || source_kind === 'docs' || source_kind === 'web') {
+    visibility = 'public';
+  } else if (source_kind === 'github' && !url.includes('/internal/') && !url.includes('/private/')) {
+    // Assume public GitHub unless path suggests otherwise
+    visibility = 'public';
+  } else if (source_kind === 'notion') {
+    visibility = 'internal';
+  }
+
+  // Try to extract published_at from metadata
+  let published_at: string | undefined = undefined;
+  const metadataDate = result.metadata?.published_at || result.metadata?.date || result.metadata?.created_at;
+  if (metadataDate) {
+    // Normalize to ISO 8601
+    try {
+      const date = new Date(metadataDate);
+      if (!isNaN(date.getTime())) {
+        published_at = date.toISOString();
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  return { source_kind, doc_kind, repo, visibility, published_at };
+}
+
+/**
+ * Check if result content contains activity-bearing language
+ */
+function hasActivityPredicate(content: string, subjectTokens: string[]): boolean {
+  if (!content) return false;
+  const subject = (subjectTokens || []).filter(Boolean);
+  if (subject.length === 0) return false;
+
+  const sentences = splitIntoSentences(content.toLowerCase());
+  return sentences.some(sentence =>
+    subject.some(t => sentence.includes(t)) &&
+    ACTIVITY_PREDICATES.some(pred => sentence.includes(pred))
+  );
+}
+
+/**
+ * Apply retrieval profile filtering to search results
+ * Returns filtered results and profile debug info
+ */
+function applyRetrievalProfile(
+  results: any[],
+  profile: RetrievalProfile,
+  effectivePolicy: SourcePolicy,
+  warnings: WarningCode[],
+  subjectTokens: string[]
+): {
+  filteredResults: any[];
+  profileDebug: ProfileDebug;
+  answerable: boolean;
+  answerabilityReason: AnswerabilityReason;
+  evidenceSummary?: string;
+} {
+  const candidatesTotal = results.length;
+  let recencyWindowUsed = profile.recency_window_default;
+  const now = new Date();
+
+  // Annotate all results with derived metadata
+  const annotatedResults = results.map(r => ({
+    ...r,
+    _derived: inferResultMetadata(r),
+  }));
+
+  // Phase 1: Apply source hygiene filters
+  let filtered = annotatedResults.filter(r => {
+    const derived = r._derived as DerivedResultMetadata;
+
+    // Fail-closed: if visibility unknown and policy is public, treat as internal
+    if (effectivePolicy === 'public' && derived.visibility === 'unknown') {
+      return false;
+    }
+    if (effectivePolicy === 'public' && derived.visibility === 'internal') {
+      return false;
+    }
+
+    // Exclude based on source_kind
+    if (derived.source_kind && profile.excluded_source_kinds.includes(derived.source_kind)) {
+      return false;
+    }
+
+    // Exclude based on doc_kind
+    if (derived.doc_kind && profile.excluded_doc_kinds.includes(derived.doc_kind)) {
+      return false;
+    }
+
+    // Exclude based on repo
+    if (derived.repo && profile.excluded_repos.includes(derived.repo)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  // Phase 2: Apply recency filter (if configured)
+  if (profile.recency_window_default > 0) {
+    const cutoffDate = new Date(now);
+    cutoffDate.setMonth(cutoffDate.getMonth() - profile.recency_window_default);
+
+    const recentResults = filtered.filter(r => {
+      const derived = r._derived as DerivedResultMetadata;
+      if (!derived.published_at) return false;  // Undated = out of window for person_activity
+      const publishedDate = new Date(derived.published_at);
+      return publishedDate >= cutoffDate;
+    });
+
+    // Check if we need to expand the recency window
+    if (recentResults.length < profile.min_candidates_before_fallback && profile.recency_window_fallback > 0) {
+      const fallbackCutoff = new Date(now);
+      fallbackCutoff.setMonth(fallbackCutoff.getMonth() - profile.recency_window_fallback);
+      recencyWindowUsed = profile.recency_window_fallback;
+      warnings.push('recency_window_expanded');
+
+      filtered = filtered.filter(r => {
+        const derived = r._derived as DerivedResultMetadata;
+        if (!derived.published_at) return false;
+        const publishedDate = new Date(derived.published_at);
+        return publishedDate >= fallbackCutoff;
+      });
+    } else {
+      filtered = recentResults;
+    }
+  }
+
+  // Phase 3: Check answerability
+  let answerable = true;
+  let answerabilityReason: AnswerabilityReason = 'sufficient_evidence';
+  let evidenceSummary: string | undefined = undefined;
+
+  if (filtered.length === 0) {
+    answerable = false;
+    // Determine why we have no results
+    const hadCandidates = candidatesTotal > 0;
+    const allUndated = annotatedResults.every(r => !(r._derived as DerivedResultMetadata).published_at);
+
+    if (!hadCandidates) {
+      answerabilityReason = 'insufficient_candidates';
+    } else if (profile.recency_window_default > 0 && allUndated) {
+      answerabilityReason = 'no_dated_sources';
+    } else if (profile.recency_window_default > 0) {
+      answerabilityReason = 'no_recent_sources';
+    } else {
+      answerabilityReason = 'policy_filtered_all_sources';
+    }
+  } else if (profile.require_activity_predicate) {
+    // Check if any remaining results have activity predicates
+    const withActivity = filtered.filter(r => hasActivityPredicate(r.content, subjectTokens));
+    if (withActivity.length === 0) {
+      answerable = false;
+      answerabilityReason = 'sources_only_identity_mentions';
+    } else {
+      // Build evidence summary from activity-bearing results
+      evidenceSummary = `Found ${withActivity.length} source(s) with activity indicators`;
+      // For person_activity, only return activity-bearing results to prevent "mention ≠ evidence" citations.
+      filtered = withActivity;
+    }
+  }
+
+  // Build profile debug info
+  const profileDebug: ProfileDebug = {
+    profile_name: profile.profile_name,
+    profile_version: profile.profile_version,
+    effective_policy: effectivePolicy,
+    recency_window_used: recencyWindowUsed,
+    candidates_total: candidatesTotal,
+    candidates_filtered: candidatesTotal - filtered.length,
+    candidates_kept: filtered.length,
+  };
+
+  return {
+    filteredResults: filtered,
+    profileDebug,
+    answerable,
+    answerabilityReason,
+    evidenceSummary,
+  };
+}
+
+/**
+ * Compute effective source policy
+ * effective_policy = min(requested, allowed) with ordering public < internal_ok
+ */
+function computeEffectivePolicy(
+  requestedPolicy: SourcePolicy,
+  isAuthenticated: boolean,
+  warnings: WarningCode[]
+): SourcePolicy {
+  const allowedPolicy: SourcePolicy = isAuthenticated ? 'internal_ok' : 'public';
+
+  // If requested is more permissive than allowed, downgrade
+  if (requestedPolicy === 'internal_ok' && allowedPolicy === 'public') {
+    warnings.push('source_policy_downgraded');
+    return 'public';
+  }
+
+  return requestedPolicy;
 }
 
 // Get 1-hop neighbors from koi_relationships for graph expansion
@@ -1747,7 +2155,10 @@ app.post('/api/koi/query', async (req, res) => {
       agent_id = 'koi-interface',
       limit = 10,
       filters = {},
-      graph_context: requestGraphContext = false  // Week 13: GraphRAG body field
+      graph_context: requestGraphContext = false,  // Week 13: GraphRAG body field
+      // Session KOI: Intent-aware retrieval profile fields
+      intent: requestedIntent = 'general' as QueryIntent,
+      source_policy: requestedSourcePolicy = 'public' as SourcePolicy,
     } = req.body;
 
     // Accept either 'question' or 'query' parameter (question takes precedence)
@@ -1765,6 +2176,14 @@ app.post('/api/koi/query', async (req, res) => {
       return res.status(400).json(envelope);
     }
 
+    // Validate intent enum
+    const validIntents: QueryIntent[] = ['general', 'person_activity', 'person_bio', 'concept_explain', 'technical_howto', 'code_navigation'];
+    const intent: QueryIntent = validIntents.includes(requestedIntent) ? requestedIntent : 'general';
+
+    // Validate source_policy enum
+    const validPolicies: SourcePolicy[] = ['public', 'internal_ok'];
+    const sourcePolicy: SourcePolicy = validPolicies.includes(requestedSourcePolicy) ? requestedSourcePolicy : 'public';
+
     const startTime = Date.now();
 
     // Session D1: Initialize tool trace and warnings
@@ -1780,6 +2199,10 @@ app.post('/api/koi/query', async (req, res) => {
     const authenticatedEmail = await validateSessionToken(sessionToken);
     const isAuthenticated = !!authenticatedEmail;
     const privacyFilter = buildPrivacyFilter(isAuthenticated);
+
+    // Session KOI: Compute effective policy and build retrieval profile
+    const effectivePolicy = computeEffectivePolicy(sourcePolicy, isAuthenticated, warnings);
+    const retrievalProfile = buildRetrievalProfile(intent, effectivePolicy);
 
     // Log auth status for debugging (gated to avoid log volume/PII)
     if (process.env.DEBUG_AUTH) {
@@ -2069,7 +2492,32 @@ app.post('/api/koi/query', async (req, res) => {
     }
 
     // Filter out derived artifacts (e.g., crawl dumps committed to GitHub) to avoid double-indexing + dead links
-    const userResults = fusedResults.filter(r => !shouldExcludeKoiResultSource(r.rid, r.metadata?.url));
+    const preProfileResults = fusedResults.filter(r => !shouldExcludeKoiResultSource(r.rid, r.metadata?.url));
+
+    // Session KOI: Apply intent-aware retrieval profile filtering
+    let userResults = preProfileResults;
+    let profileDebug: ProfileDebug = {
+      profile_name: retrievalProfile.profile_name,
+      profile_version: retrievalProfile.profile_version,
+      effective_policy: effectivePolicy,
+      recency_window_used: 0,
+      candidates_total: preProfileResults.length,
+      candidates_filtered: 0,
+      candidates_kept: preProfileResults.length,
+    };
+    let answerable = true;
+    let answerabilityReason: AnswerabilityReason = 'sufficient_evidence';
+    let evidenceSummary: string | undefined = undefined;
+
+    if (intent !== 'general') {
+      const subjectTokens = intent === 'person_activity' ? extractSubjectTokens(question) : [];
+      const profiled = applyRetrievalProfile(preProfileResults, retrievalProfile, effectivePolicy, warnings, subjectTokens);
+      userResults = profiled.filteredResults;
+      profileDebug = profiled.profileDebug;
+      answerable = profiled.answerable;
+      answerabilityReason = profiled.answerabilityReason;
+      evidenceSummary = profiled.evidenceSummary;
+    }
 
     // Format response data
     const responseData: any = {
@@ -2085,8 +2533,17 @@ app.post('/api/koi/query', async (req, res) => {
         source: r.source,
         rid: r.rid,
         metadata: r.metadata || {}
-      }))
+      })),
+      // Session KOI: Add answerability and profile debug
+      answerable,
+      answerability_reason: answerabilityReason,
+      profile_debug: profileDebug,
     };
+
+    // Add evidence summary if available
+    if (evidenceSummary) {
+      responseData.evidence_summary = evidenceSummary;
+    }
 
     // Add graph context if available
     if (graphContext) {

@@ -52,7 +52,64 @@ export type WarningCode =
   | 'stale_data'
   | 'extraction_triggered'
   | 'privacy_filtered'
-  | 'graph_context_unavailable';
+  | 'graph_context_unavailable'
+  | 'recency_window_expanded'
+  | 'source_policy_downgraded';
+
+/**
+ * Intent enum for retrieval profile selection
+ * Controls how results are filtered and ranked
+ */
+export type QueryIntent =
+  | 'general'
+  | 'person_activity'
+  | 'person_bio'
+  | 'concept_explain'
+  | 'technical_howto'
+  | 'code_navigation';
+
+/**
+ * Source policy for controlling visibility of internal documents
+ * public = only public sources, internal_ok = allow internal if authenticated
+ */
+export type SourcePolicy = 'public' | 'internal_ok';
+
+/**
+ * Answerability reason codes
+ */
+export type AnswerabilityReason =
+  | 'sufficient_evidence'
+  | 'no_recent_sources'
+  | 'no_dated_sources'
+  | 'sources_only_identity_mentions'
+  | 'policy_filtered_all_sources'
+  | 'ambiguous_entity'
+  | 'insufficient_candidates';
+
+/**
+ * Profile debug information for observability
+ */
+export interface ProfileDebug {
+  profile_name: string;
+  profile_version: string;
+  effective_policy: SourcePolicy;
+  recency_window_used: number;  // months
+  candidates_total: number;
+  candidates_filtered: number;
+  candidates_kept: number;
+}
+
+/**
+ * Derived metadata for a search result
+ * Inferred at query time from result metadata
+ */
+export interface DerivedResultMetadata {
+  source_kind?: 'forum' | 'web' | 'github' | 'notion' | 'docs' | 'unknown';
+  doc_kind?: 'code' | 'plan' | 'dump' | 'markdown' | 'discussion' | 'article' | 'unknown';
+  repo?: string;
+  visibility: 'public' | 'internal' | 'unknown';
+  published_at?: string;  // ISO 8601
+}
 
 /**
  * Tool trace entry for provenance tracking
