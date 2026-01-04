@@ -64,7 +64,7 @@ type RidParsed = {
 
 function parseForumPostRid(rid: string): RidParsed | null {
   // Example: regen.forum-post:forum.regen.network_565_post_3
-  const match = rid.match(/^regen\.forum-post:([^_]+)_(\d+)_post_(\d+)(?:$|_)/);
+  const match = rid.match(/^regen\.forum-post:([^_]+)_(\d+)_post_(\d+)(?:$|[#_])/);
   if (!match) return null;
   const host = match[1].trim().toLowerCase();
   const topicId = Number.parseInt(match[2], 10);
@@ -280,4 +280,3 @@ main().catch(err => {
   console.error('Fatal:', err);
   process.exit(1);
 });
-
