@@ -557,6 +557,8 @@ function inferResultMetadata(result: any): DerivedResultMetadata {
   const author =
     typeof result.metadata?.author === 'string'
       ? result.metadata.author
+      : typeof result.metadata?.author_username === 'string'
+        ? result.metadata.author_username
       : typeof result.metadata?.document_author === 'string'
         ? result.metadata.document_author
         : undefined;
@@ -1612,31 +1614,31 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         WHERE entity_name_lower = ANY($1)
         LIMIT 50
       ),
-      entity_memories AS (
-        SELECT
-          l.chunk_rid,
-          l.document_rid,
-          array_agg(DISTINCT l.entity_name) as entities_matched,
+	      entity_memories AS (
+	        SELECT
+	          l.chunk_rid,
+	          l.document_rid,
+	          array_agg(DISTINCT l.entity_name) as entities_matched,
           COUNT(DISTINCT l.entity_name_lower) as entity_count,
           MAX(me.entity_length) as max_entity_length
         FROM koi_entity_chunk_links l
         JOIN matched_entities me ON l.entity_name_lower = me.entity_name_lower
         GROUP BY l.chunk_rid, l.document_rid
-      ),
+	      ),
 	      with_source AS (
 	        SELECT
 	          m.rid,
 	          m.content->>'text' as content,
 	          m.metadata->>'source' as source,
 	          m.metadata->>'url' as url,
-	          m.content->'document'->>'author' as author,
+	          COALESCE(m.content->'document'->>'author', m.metadata->>'author', m.metadata->>'author_username') as author,
 	          em.entities_matched,
 	          em.entity_count,
 	          em.max_entity_length,
 	          m.published_at,
-          CASE
-            WHEN m.rid LIKE 'orn:web.page:%' THEN 'web'
-            WHEN m.rid LIKE 'regen.github:%' THEN 'github'
+	          CASE
+	            WHEN m.rid LIKE 'orn:web.page:%' THEN 'web'
+	            WHEN m.rid LIKE 'regen.github:%' THEN 'github'
             WHEN m.rid LIKE 'regen.gitlab:%' THEN 'gitlab'
             ELSE 'other'
           END as source_type,
@@ -1647,12 +1649,12 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
             WHEN m.rid LIKE 'orn:web.page:guides.regen.network/%' THEN 'guides'
             ELSE NULL
           END as web_domain
-        FROM entity_memories em
-        JOIN koi_memories m ON m.id::text = em.chunk_rid
-        WHERE m.superseded_at IS NULL
-          AND m.content->>'text' IS NOT NULL
-          ${privacyFilter}
-      ),
+	        FROM entity_memories em
+	        JOIN koi_memories m ON m.id::text = em.chunk_rid
+	        WHERE m.superseded_at IS NULL
+	          AND m.content->>'text' IS NOT NULL
+	          ${privacyFilter}
+	      ),
       non_web_ranked AS (
         SELECT *, ROW_NUMBER() OVER (
           PARTITION BY source_type ORDER BY max_entity_length DESC, entity_count DESC
@@ -1817,7 +1819,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
 	          m.content->>'text' as content,
 	          m.metadata->>'source' as source,
 	          m.metadata->>'url' as url,
-	          m.content->'document'->>'author' as author,
+		          COALESCE(m.content->'document'->>'author', m.metadata->>'author', m.metadata->>'author_username') as author,
 	          0.5 as similarity,
 	          m.published_at
 	        FROM koi_memories m
@@ -1836,22 +1838,22 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       params.push(topK);
       const results = await pool.query(fallbackQuery, params);
       
-	      return results.rows.map(row => ({
-	        id: row.rid,
-	        content: row.content.substring(0, 200) + "...",
-	        similarity: parseFloat(row.similarity),
-	        score: parseFloat(row.similarity),
-	        source: 'vector' as const,
-	        metadata: {
-	          rid: row.rid,
-	          source: row.source,
-	          url: typeof row.url === 'string' ? row.url.trim() : row.url,
-	          author: row.author || null,
-	          similarity: parseFloat(row.similarity),
-	          published_at: row.published_at || null
-	        },
-	        rid: row.rid
-	      }));
+      return results.rows.map(row => ({
+        id: row.rid,
+        content: row.content.substring(0, 200) + "...",
+        similarity: parseFloat(row.similarity),
+        score: parseFloat(row.similarity),
+        source: 'vector' as const,
+        metadata: {
+          rid: row.rid,
+          source: row.source,
+          url: typeof row.url === 'string' ? row.url.trim() : row.url,
+          author: row.author || null,
+          similarity: parseFloat(row.similarity),
+          published_at: row.published_at || null
+        },
+        rid: row.rid
+      }));
     }
 
     const bgeData = await bgeResponse.json();
@@ -1882,7 +1884,7 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
 	          m.content->>'text' as content,
 	          m.metadata->>'source' as source,
 	          m.metadata->>'url' as url,
-	          m.content->'document'->>'author' as author,
+		          COALESCE(m.content->'document'->>'author', m.metadata->>'author', m.metadata->>'author_username') as author,
 	          e.dim_1024 <=> $1::vector as distance,
 	          1 - (e.dim_1024 <=> $1::vector) as similarity,
 	          m.published_at
@@ -1917,22 +1919,22 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
     params.push(topK);
     const results = await pool.query(searchQuery, params);
 
-	    return results.rows.map(row => ({
-	      id: row.rid,
-	      content: row.content.substring(0, 200) + "...",
-	      similarity: parseFloat(row.similarity),
-	      score: parseFloat(row.similarity),
-	      source: 'vector' as const,
-	      metadata: {
-	        rid: row.rid,
-	        source: row.source,
-	        url: typeof row.url === 'string' ? row.url.trim() : row.url,
-	        author: row.author || null,
-	        similarity: parseFloat(row.similarity),
-	        published_at: row.published_at || null
-	      },
-	      rid: row.rid
-	    }));
+    return results.rows.map(row => ({
+      id: row.rid,
+      content: row.content.substring(0, 200) + "...",
+      similarity: parseFloat(row.similarity),
+      score: parseFloat(row.similarity),
+      source: 'vector' as const,
+      metadata: {
+        rid: row.rid,
+        source: row.source,
+        url: typeof row.url === 'string' ? row.url.trim() : row.url,
+        author: row.author || null,
+        similarity: parseFloat(row.similarity),
+        published_at: row.published_at || null
+      },
+      rid: row.rid
+    }));
   } catch (error) {
     console.error('Semantic search error:', error);
     return [];
@@ -1954,7 +1956,7 @@ async function performAuthorSearch(authorTokens: string[], monthsBack: number, t
         m.content->>'text' as content,
         m.metadata->>'source' as source,
         m.metadata->>'url' as url,
-        m.content->'document'->>'author' as author,
+        COALESCE(m.content->'document'->>'author', m.metadata->>'author', m.metadata->>'author_username') as author,
         m.published_at
       FROM koi_memories m
       WHERE m.superseded_at IS NULL
@@ -1963,7 +1965,7 @@ async function performAuthorSearch(authorTokens: string[], monthsBack: number, t
         AND m.published_at IS NOT NULL
         AND m.published_at >= $1::timestamptz
         AND m.rid LIKE 'regen.forum-post:%'
-        AND lower(COALESCE(m.content->'document'->>'author', '')) LIKE ANY($2)
+        AND lower(COALESCE(m.content->'document'->>'author', m.metadata->>'author', m.metadata->>'author_username', '')) LIKE ANY($2)
         ${privacyFilter}
       ORDER BY m.published_at DESC
       LIMIT $3
