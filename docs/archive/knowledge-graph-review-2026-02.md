@@ -1,8 +1,8 @@
 # Regen Network Knowledge Graph Quality Review - Cycle 2026-02
 
 **Started:** 2026-01-03
-**Last Updated:** 2026-01-03
-**Status:** Planning — define intent-aware retrieval + source hygiene workstream
+**Last Updated:** 2026-01-04
+**Status:** Execution — retrieval profiles shipped; plan authored-entity graph links
 **Graph URL:** https://regen.gaiaai.xyz/graph
 **Server:** ssh darren@202.61.196.119
 **Primary Repo:** koi-processor
@@ -150,6 +150,38 @@ Minimum bar for `answerable=true` should be testable:
 1. At least one citation excerpt includes an activity predicate (working on / leading / announced / building / proposal / etc.), AND
 2. The evidence is within the recency window used, AND
 3. Prefer evidence where the person is the actor/author (post author / PR author) vs being merely mentioned (when that metadata exists).
+
+### Workstream D — Author Entities + Authorship Edges in the Graph (High Leverage)
+
+**Problem:**
+Authors are currently stored as strings in `koi_memories.metadata` (e.g., `author`, `author_username`, `author_id`) and are queryable in Postgres, but they are **not modeled as `PERSON` entities** in the knowledge graph and are **not linked** to the content they created (no `authored`/`posted_by` edges in the RDF graph).
+
+This creates a gap:
+- ✅ Postgres: can query authored content (e.g., “all Discourse posts by `Gregory_Regen`”).
+- ❌ Graph (Fuseki): cannot query/traverse authorship (e.g., SPARQL `?person :authored ?post`), and can’t unify identities across sensors.
+
+**Goal:**
+Make authorship graph-queryable and deduplicatable across sources, without leaking internal/private corpora.
+
+**MVP scope (recommended order):**
+1. **Forum (Discourse) authorship edges**
+   - Create/ensure a `PERSON` entity for each Discourse author (keyed by stable identifiers like `forum_host + user_id` and/or `author_username`).
+   - Add an authorship relationship between the person and the content (choose one canonical predicate direction and stick to it):
+     - Option A: `PERSON --authored--> PUBLICATION`
+     - Option B: `PUBLICATION --posted_by--> PERSON`
+   - Only emit these edges for `visibility=public` sources.
+2. Expand to other public sources where authors are meaningful:
+   - GitHub: `doc_kind=issue|pr|release_note` (prefer metadata about authorship; avoid raw code as activity evidence).
+   - Social: Twitter/other public posts where username is stable.
+
+**Backfill note (prerequisite for Discourse MVP):**
+Older Discourse posts ingested via the semantic bridge may be missing author fields. Use the prod-safe backfill to populate `metadata.author*`:
+- `koi-processor/scripts/backfill-discourse-authors.ts` (allowlisted Discourse API only)
+
+**Benefits:**
+- SPARQL queries like “find all posts authored by X”, “who are the most active authors in the last N months”, “which orgs are authors associated with”, etc.
+- Cross-source identity resolution (Discourse username ↔ Twitter handle ↔ Notion user) via canonical entity merges.
+- Cleaner `person_activity` answers: authored edges become first-class evidence instead of heuristic-only metadata matching.
 
 ### Workstream B — Corpus Hygiene (Medium Priority)
 
