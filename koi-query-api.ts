@@ -554,6 +554,12 @@ function inferResultMetadata(result: any): DerivedResultMetadata {
   const url = (result.metadata?.url || '').toLowerCase();
   const rid = (result.rid || '').toLowerCase();
   const source = (result.source || '').toLowerCase();
+  const author =
+    typeof result.metadata?.author === 'string'
+      ? result.metadata.author
+      : typeof result.metadata?.document_author === 'string'
+        ? result.metadata.document_author
+        : undefined;
 
   // Infer source_kind from URL or source field
   let source_kind: DerivedResultMetadata['source_kind'] = 'unknown';
@@ -618,7 +624,7 @@ function inferResultMetadata(result: any): DerivedResultMetadata {
     }
   }
 
-  return { source_kind, doc_kind, repo, visibility, published_at };
+  return { source_kind, doc_kind, repo, visibility, published_at, author };
 }
 
 /**
@@ -634,6 +640,24 @@ function hasActivityPredicate(content: string, subjectTokens: string[]): boolean
     subject.some(t => sentence.includes(t)) &&
     ACTIVITY_PREDICATES.some(pred => sentence.includes(pred))
   );
+}
+
+function hasAuthorMatch(author: string | undefined, subjectTokens: string[]): boolean {
+  if (!author) return false;
+  const subject = (subjectTokens || []).filter(Boolean);
+  if (subject.length === 0) return false;
+  const authorLower = author.toLowerCase();
+  return subject.some(t => authorLower.includes(t));
+}
+
+function isActivityEvidence(result: any, subjectTokens: string[]): boolean {
+  if (hasActivityPredicate(result.content, subjectTokens)) return true;
+  const derived = result._derived as DerivedResultMetadata | undefined;
+  if (!derived) return false;
+  // For MVP, only treat authored forum posts as activity evidence.
+  // We can expand to GitHub PR/issue authorship later once doc_kind granularity improves.
+  if (derived.source_kind !== 'forum' || derived.doc_kind !== 'discussion') return false;
+  return hasAuthorMatch(derived.author, subjectTokens);
 }
 
 /**
@@ -748,7 +772,12 @@ function applyRetrievalProfile(
     }
   } else if (profile.require_activity_predicate) {
     // Check if any remaining results have activity predicates
-    const withActivity = filtered.filter(r => hasActivityPredicate(r.content, subjectTokens));
+    const predicateCount = filtered.filter(r => hasActivityPredicate(r.content, subjectTokens)).length;
+    const authoredCount = filtered.filter(r => {
+      const derived = r._derived as DerivedResultMetadata;
+      return derived.source_kind === 'forum' && derived.doc_kind === 'discussion' && hasAuthorMatch(derived.author, subjectTokens);
+    }).length;
+    const withActivity = filtered.filter(r => isActivityEvidence(r, subjectTokens));
     if (withActivity.length === 0) {
       answerable = false;
       answerabilityReason = 'sources_only_identity_mentions';
@@ -761,7 +790,7 @@ function applyRetrievalProfile(
       }
     } else {
       // Build evidence summary from activity-bearing results
-      evidenceSummary = `Found ${withActivity.length} source(s) with activity indicators`;
+      evidenceSummary = `Found ${withActivity.length} activity-bearing source(s) (predicate=${predicateCount}, authored=${authoredCount})`;
       // For person_activity, only return activity-bearing results to prevent "mention ≠ evidence" citations.
       resultsToReturn = withActivity;
     }
@@ -1594,16 +1623,17 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         JOIN matched_entities me ON l.entity_name_lower = me.entity_name_lower
         GROUP BY l.chunk_rid, l.document_rid
       ),
-      with_source AS (
-        SELECT
-          m.rid,
-          m.content->>'text' as content,
-          m.metadata->>'source' as source,
-          m.metadata->>'url' as url,
-          em.entities_matched,
-          em.entity_count,
-          em.max_entity_length,
-          m.published_at,
+	      with_source AS (
+	        SELECT
+	          m.rid,
+	          m.content->>'text' as content,
+	          m.metadata->>'source' as source,
+	          m.metadata->>'url' as url,
+	          m.content->'document'->>'author' as author,
+	          em.entities_matched,
+	          em.entity_count,
+	          em.max_entity_length,
+	          m.published_at,
           CASE
             WHEN m.rid LIKE 'orn:web.page:%' THEN 'web'
             WHEN m.rid LIKE 'regen.github:%' THEN 'github'
@@ -1639,15 +1669,15 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
         SELECT *, ROW_NUMBER() OVER (ORDER BY domain_rank, web_domain) as source_rank
         FROM web_domain_ranked WHERE domain_rank <= 10
       ),
-      combined AS (
-        SELECT rid, content, source, url, entities_matched, entity_count,
-               max_entity_length, published_at
-        FROM non_web_ranked WHERE source_rank <= 25
-        UNION ALL
-        SELECT rid, content, source, url, entities_matched, entity_count,
-               max_entity_length, published_at
-        FROM web_diverse WHERE source_rank <= 50
-      ),
+	      combined AS (
+	        SELECT rid, content, source, url, author, entities_matched, entity_count,
+	               max_entity_length, published_at
+	        FROM non_web_ranked WHERE source_rank <= 25
+	        UNION ALL
+	        SELECT rid, content, source, url, author, entities_matched, entity_count,
+	               max_entity_length, published_at
+	        FROM web_diverse WHERE source_rank <= 50
+	      ),
       -- Deduplicate by content hash to remove duplicates from multiple sensor runs
       deduplicated AS (
         SELECT *,
@@ -1657,13 +1687,13 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
           ) as content_rank
         FROM combined
       )
-      SELECT rid, content, source, url, entities_matched, entity_count,
-             max_entity_length, published_at
-      FROM deduplicated
-      WHERE content_rank = 1
-      ORDER BY max_entity_length DESC
-      LIMIT $2
-    `;
+	      SELECT rid, content, source, url, author, entities_matched, entity_count,
+	             max_entity_length, published_at
+	      FROM deduplicated
+	      WHERE content_rank = 1
+	      ORDER BY max_entity_length DESC
+	      LIMIT $2
+	    `;
 
     const results = await pool.query(entityQuery, [finalPatterns, topK]);
 
@@ -1735,16 +1765,17 @@ async function performEntitySearch(query: string, topK: number = 20, privacyFilt
       similarity: parseInt(row.entity_count) / maxCount,
       score: parseInt(row.entity_count) / maxCount,
       source: 'graph' as const,
-      metadata: {
-        rid: row.rid,
-        source: row.source,
-        url: typeof row.url === 'string' ? row.url.trim() : row.url,
-        entities_matched: row.entities_matched,
-        entity_count: parseInt(row.entity_count),
-        published_at: row.published_at || null
-      },
-      rid: row.rid
-    }));
+	      metadata: {
+	        rid: row.rid,
+	        source: row.source,
+	        url: typeof row.url === 'string' ? row.url.trim() : row.url,
+	        author: row.author || null,
+	        entities_matched: row.entities_matched,
+	        entity_count: parseInt(row.entity_count),
+	        published_at: row.published_at || null
+	      },
+	      rid: row.rid
+	    }));
 
   } catch (error) {
     console.error('[EntitySearch] Error:', error);
@@ -1780,16 +1811,17 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       const whereDate = dateClauses.length
         ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
         : '';
-      const fallbackQuery = `
-        SELECT
-          m.rid,
-          m.content->>'text' as content,
-          m.metadata->>'source' as source,
-          m.metadata->>'url' as url,
-          0.5 as similarity,
-          m.published_at
-        FROM koi_memories m
-        WHERE
+	      const fallbackQuery = `
+	        SELECT
+	          m.rid,
+	          m.content->>'text' as content,
+	          m.metadata->>'source' as source,
+	          m.metadata->>'url' as url,
+	          m.content->'document'->>'author' as author,
+	          0.5 as similarity,
+	          m.published_at
+	        FROM koi_memories m
+	        WHERE
           m.content->>'text' IS NOT NULL
           AND LENGTH(m.content->>'text') > 50
         AND m.superseded_at IS NULL
@@ -1804,21 +1836,22 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       params.push(topK);
       const results = await pool.query(fallbackQuery, params);
       
-      return results.rows.map(row => ({
-        id: row.rid,
-        content: row.content.substring(0, 200) + "...",
-        similarity: parseFloat(row.similarity),
-        score: parseFloat(row.similarity),
-        source: 'vector' as const,
-        metadata: {
-          rid: row.rid,
-          source: row.source,
-          url: typeof row.url === 'string' ? row.url.trim() : row.url,
-          similarity: parseFloat(row.similarity),
-          published_at: row.published_at || null
-        },
-        rid: row.rid
-      }));
+	      return results.rows.map(row => ({
+	        id: row.rid,
+	        content: row.content.substring(0, 200) + "...",
+	        similarity: parseFloat(row.similarity),
+	        score: parseFloat(row.similarity),
+	        source: 'vector' as const,
+	        metadata: {
+	          rid: row.rid,
+	          source: row.source,
+	          url: typeof row.url === 'string' ? row.url.trim() : row.url,
+	          author: row.author || null,
+	          similarity: parseFloat(row.similarity),
+	          published_at: row.published_at || null
+	        },
+	        rid: row.rid
+	      }));
     }
 
     const bgeData = await bgeResponse.json();
@@ -1842,17 +1875,18 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
       ? ` AND (${dateClauses.join(' AND ')}${filters?.include_undated ? ' OR m.published_at IS NULL' : ''})`
       : '';
 
-    const searchQuery = `
-      WITH vector_results AS (
-        SELECT
-          m.rid,
-          m.content->>'text' as content,
-          m.metadata->>'source' as source,
-          m.metadata->>'url' as url,
-          e.dim_1024 <=> $1::vector as distance,
-          1 - (e.dim_1024 <=> $1::vector) as similarity,
-          m.published_at
-        FROM koi_memories m
+	    const searchQuery = `
+	      WITH vector_results AS (
+	        SELECT
+	          m.rid,
+	          m.content->>'text' as content,
+	          m.metadata->>'source' as source,
+	          m.metadata->>'url' as url,
+	          m.content->'document'->>'author' as author,
+	          e.dim_1024 <=> $1::vector as distance,
+	          1 - (e.dim_1024 <=> $1::vector) as similarity,
+	          m.published_at
+	        FROM koi_memories m
         JOIN koi_embeddings e ON e.memory_id = m.id
         WHERE
           e.dim_1024 IS NOT NULL
@@ -1873,33 +1907,86 @@ async function performSemanticSearch(query: string, topK: number = 10, filters?:
           ) as content_rank
         FROM vector_results
       )
-      SELECT rid, content, source, url, distance, similarity, published_at
-      FROM deduplicated
-      WHERE content_rank = 1
-      ORDER BY similarity DESC
-      LIMIT $${params.length + 1}
-    `;
+	      SELECT rid, content, source, url, author, distance, similarity, published_at
+	      FROM deduplicated
+	      WHERE content_rank = 1
+	      ORDER BY similarity DESC
+	      LIMIT $${params.length + 1}
+	    `;
 
     params.push(topK);
     const results = await pool.query(searchQuery, params);
 
-    return results.rows.map(row => ({
+	    return results.rows.map(row => ({
+	      id: row.rid,
+	      content: row.content.substring(0, 200) + "...",
+	      similarity: parseFloat(row.similarity),
+	      score: parseFloat(row.similarity),
+	      source: 'vector' as const,
+	      metadata: {
+	        rid: row.rid,
+	        source: row.source,
+	        url: typeof row.url === 'string' ? row.url.trim() : row.url,
+	        author: row.author || null,
+	        similarity: parseFloat(row.similarity),
+	        published_at: row.published_at || null
+	      },
+	      rid: row.rid
+	    }));
+  } catch (error) {
+    console.error('Semantic search error:', error);
+    return [];
+  }
+}
+
+async function performAuthorSearch(authorTokens: string[], monthsBack: number, topK: number, privacyFilter: string = '') {
+  try {
+    const tokens = (authorTokens || []).map(t => t.toLowerCase()).filter(t => t.length >= 3);
+    if (tokens.length === 0) return [];
+
+    const patterns = tokens.map(t => `%${t}%`);
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - Math.max(0, monthsBack));
+
+    const query = `
+      SELECT
+        m.rid,
+        m.content->>'text' as content,
+        m.metadata->>'source' as source,
+        m.metadata->>'url' as url,
+        m.content->'document'->>'author' as author,
+        m.published_at
+      FROM koi_memories m
+      WHERE m.superseded_at IS NULL
+        AND m.content->>'text' IS NOT NULL
+        AND LENGTH(m.content->>'text') > 50
+        AND m.published_at IS NOT NULL
+        AND m.published_at >= $1::timestamptz
+        AND m.rid LIKE 'regen.forum-post:%'
+        AND lower(COALESCE(m.content->'document'->>'author', '')) LIKE ANY($2)
+        ${privacyFilter}
+      ORDER BY m.published_at DESC
+      LIMIT $3
+    `;
+
+    const result = await pool.query(query, [cutoff.toISOString(), patterns, topK]);
+    return result.rows.map((row: any) => ({
       id: row.rid,
-      content: row.content.substring(0, 200) + "...",
-      similarity: parseFloat(row.similarity),
-      score: parseFloat(row.similarity),
-      source: 'vector' as const,
+      content: (row.content?.substring(0, 200) || '') + (row.content?.length > 200 ? "..." : ""),
+      similarity: 0.55,
+      score: 0.55,
+      source: 'author' as const,
       metadata: {
         rid: row.rid,
         source: row.source,
         url: typeof row.url === 'string' ? row.url.trim() : row.url,
-        similarity: parseFloat(row.similarity),
-        published_at: row.published_at || null
+        author: row.author,
+        published_at: row.published_at || null,
       },
-      rid: row.rid
+      rid: row.rid,
     }));
   } catch (error) {
-    console.error('Semantic search error:', error);
+    console.error('Author search error:', error);
     return [];
   }
 }
@@ -2501,8 +2588,33 @@ app.post('/api/koi/query', async (req, res) => {
       warnings.push('privacy_filtered');
     }
 
+    // For person_activity, augment candidates with authored forum posts.
+    // This catches strong evidence where the person authored relevant content but their name is not in the body text.
+    let mergedResults = fusedResults;
+    if (intent === 'person_activity') {
+      const authorTokens = extractSubjectTokens(question);
+      const monthsBack = Math.max(0, retrievalProfile.recency_window_fallback || retrievalProfile.recency_window_default || 12);
+      const authored = await performAuthorSearch(authorTokens, monthsBack, 50, privacyFilter);
+      if (authored.length > 0) {
+        toolTrace.push({
+          tool: 'author_search',
+          params_summary: summarizeParams({ author_tokens: authorTokens, months_back: monthsBack, limit: 50 }),
+          timestamp: new Date().toISOString(),
+          data_source: 'koi-derived',
+        });
+      }
+      const seen = new Set<string>(mergedResults.map(r => r.rid));
+      mergedResults = [...mergedResults];
+      for (const r of authored) {
+        if (!r?.rid) continue;
+        if (seen.has(r.rid)) continue;
+        mergedResults.push(r);
+        seen.add(r.rid);
+      }
+    }
+
     // Filter out derived artifacts (e.g., crawl dumps committed to GitHub) to avoid double-indexing + dead links
-    const preProfileResults = fusedResults.filter(r => !shouldExcludeKoiResultSource(r.rid, r.metadata?.url));
+    const preProfileResults = mergedResults.filter(r => !shouldExcludeKoiResultSource(r.rid, r.metadata?.url));
 
     // Session KOI: Apply intent-aware retrieval profile filtering
     let userResults = preProfileResults;

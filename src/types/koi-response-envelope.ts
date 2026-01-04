@@ -109,6 +109,7 @@ export interface DerivedResultMetadata {
   repo?: string;
   visibility: 'public' | 'internal' | 'unknown';
   published_at?: string;  // ISO 8601
+  author?: string;
 }
 
 /**

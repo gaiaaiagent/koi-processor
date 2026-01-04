@@ -101,6 +101,7 @@ For `person_activity`, apply **evidence gating** and downrank “mere mention”
     - If fewer than 3 candidates remain, expand to 24 months and return a warning + `recency_window_used=24mo`.
     - If `published_at` is missing, treat the document as out-of-window for `person_activity`; if all candidates are undated, return `answerable=false` with reason `no_dated_sources`.
 - Prefer sources with activity-bearing evidence (e.g., “working on”, “leading”, “proposal”, “roadmap”, “announced”, “released”).
+- Also treat **authored-by-person** forum posts as activity evidence (within the recency window), even if the person’s full name is not present in the body text (retrieve via `author` metadata / sensor-provided username).
 - Downrank/omit documents that only support identity disambiguation (alias tables, index manifests, test fixtures) unless the user asked for identity resolution.
 - Prefer public, human-facing URLs (forum threads/posts, registry pages, blogs) over internal/infrastructure repos.
 

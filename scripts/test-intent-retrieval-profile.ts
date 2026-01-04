@@ -188,6 +188,30 @@ async function testPersonActivityQuery(): Promise<TestResult[]> {
       });
     }
 
+    // Test 7.6: If answerable=true, require at least one result and one citation
+    if (data.answerable === true) {
+      results.push({
+        name: 'has results when answerable (person_activity)',
+        passed: Array.isArray(data.results) && data.results.length > 0,
+        message: Array.isArray(data.results)
+          ? `results.length = ${data.results.length}`
+          : 'results is not an array',
+      });
+      results.push({
+        name: 'has citations when answerable (person_activity)',
+        passed: Array.isArray(citations) && citations.length > 0,
+        message: `citations.length = ${citations.length}`,
+      });
+
+      const forumCitations = citations.filter((c: any) => typeof c.url === 'string' && c.url.includes('forum.regen.network'));
+      results.push({
+        name: 'includes forum evidence when answerable (person_activity)',
+        passed: forumCitations.length > 0,
+        message: `forum citations = ${forumCitations.length}`,
+        details: forumCitations.length > 0 ? { sample: forumCitations.slice(0, 2) } : undefined,
+      });
+    }
+
     // Test 8: If answerable=false, answerability_reason should not be 'sufficient_evidence'
     if (data.answerable === false) {
       results.push({
