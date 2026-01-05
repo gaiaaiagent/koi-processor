@@ -95,7 +95,7 @@ check_service() {
         return 0
     else
         echo -e "${RED}✗${NC} $name: FAILED (HTTP $response)"
-        send_alert "$name" "Service not responding. HTTP status: $response" "critical"
+        send_alert "$name" "Service not responding. HTTP status: $response" "warning"
         return 1
     fi
 }
