@@ -4858,7 +4858,8 @@ app.get('/api/koi/health', async (req, res) => {
 // Start server
 
 // Statistics endpoint
-app.get('/api/koi/stats', async (req, res) => {
+// INTERNAL ONLY: Requires X-Internal-API-Key header
+app.get('/api/koi/stats', requireInternalApiKey, async (req, res) => {
   try {
     // Total documents
     const totalResult = await pool.query('SELECT COUNT(*) as total FROM koi_memories');
