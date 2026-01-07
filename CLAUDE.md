@@ -267,5 +267,29 @@ set -a; source .env; set +a
 
 ---
 
-**Last Updated**: 2026-01-02
+## Intent Auto-Detection (2026-01-07)
+
+**Status**: ✅ Deployed
+
+**Purpose**: Automatically detect query intent from natural language patterns when clients don't explicitly specify an intent.
+
+**How it works**:
+1. When `/api/koi/query` receives `intent: 'general'` (or no intent), `autoDetectIntent()` analyzes the question
+2. Pattern matching detects person_activity, person_bio, technical_howto, concept_explain
+3. If a pattern matches, the detected intent is used instead of 'general'
+4. Response includes `intent` and `intent_auto_detected: true/false`
+
+**Patterns detected**:
+- **person_activity**: "what is X working on", "what has X done"
+- **person_bio**: "who is X", "tell me about X"
+- **technical_howto**: "how do I...", "how does X work"
+- **concept_explain**: "what is X" (non-person), "explain X"
+
+**Key Function**: `autoDetectIntent()` in `koi-query-api.ts`
+
+**Also in this update**: Author search expanded from forum-only to all sources (Notion, Discord, etc.)
+
+---
+
+**Last Updated**: 2026-01-07
 **Phase**: Complete - All major milestones achieved

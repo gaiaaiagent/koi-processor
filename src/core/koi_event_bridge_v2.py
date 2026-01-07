@@ -54,6 +54,16 @@ KG_EXTRACTION_ENABLED = os.getenv('KG_EXTRACTION_ENABLED', 'false').lower() == '
 # Global connection pool (shared across all requests)
 db_pool: Optional[asyncpg.Pool] = None
 
+# Embedding metrics for monitoring
+embedding_metrics = {
+    "total_attempts": 0,
+    "successful": 0,
+    "failed": 0,
+    "last_failure_time": None,
+    "last_failure_reason": None,
+    "consecutive_failures": 0
+}
+
 # Pydantic models - KOI Protocol compliant
 class KOIManifest(BaseModel):
     rid: str
@@ -88,8 +98,11 @@ class ProcessingResult(BaseModel):
     error: Optional[str] = None
 
 # Helper functions
-async def generate_embedding_bge(text: str) -> List[float]:
-    """Generate BGE embedding via API"""
+async def generate_embedding_bge(text: str, rid: str = None) -> List[float]:
+    """Generate BGE embedding via API with metrics tracking"""
+    global embedding_metrics
+    embedding_metrics["total_attempts"] += 1
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.post(
@@ -102,15 +115,34 @@ async def generate_embedding_bge(text: str) -> List[float]:
                     BGE_API_URL,
                     json={"input": text}
                 )
-            
+
             if response.status_code == 200:
                 result = response.json()
-                return result.get("embedding", [])
+                embedding = result.get("embedding", [])
+                if embedding:
+                    embedding_metrics["successful"] += 1
+                    embedding_metrics["consecutive_failures"] = 0
+                    return embedding
+                else:
+                    embedding_metrics["failed"] += 1
+                    embedding_metrics["consecutive_failures"] += 1
+                    embedding_metrics["last_failure_time"] = datetime.now(tz=timezone.utc).isoformat()
+                    embedding_metrics["last_failure_reason"] = "Empty embedding returned"
+                    logger.warning(f"BGE API returned empty embedding for RID: {rid}")
+                    return []
             else:
-                logger.warning(f"BGE API error: {response.status_code}")
+                embedding_metrics["failed"] += 1
+                embedding_metrics["consecutive_failures"] += 1
+                embedding_metrics["last_failure_time"] = datetime.now(tz=timezone.utc).isoformat()
+                embedding_metrics["last_failure_reason"] = f"HTTP {response.status_code}"
+                logger.warning(f"BGE API error {response.status_code} for RID: {rid}")
                 return []
         except Exception as e:
-            logger.error(f"Error calling BGE API: {e}")
+            embedding_metrics["failed"] += 1
+            embedding_metrics["consecutive_failures"] += 1
+            embedding_metrics["last_failure_time"] = datetime.now(tz=timezone.utc).isoformat()
+            embedding_metrics["last_failure_reason"] = str(e)
+            logger.error(f"Error calling BGE API for RID {rid}: {e}")
             return []
 
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
@@ -705,7 +737,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
 
                 # Generate and store embedding
                 embedding_start = time.time()
-                embedding = await generate_embedding_bge(chunk)
+                embedding = await generate_embedding_bge(chunk, rid=chunk_rid)
                 if embedding and await store_embedding(conn, memory_id, embedding):
                     embeddings_created += 1
                     embedding_time_ms = int((time.time() - embedding_start) * 1000)
@@ -931,6 +963,20 @@ async def get_stats():
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/embedding-metrics")
+async def get_embedding_metrics():
+    """Get embedding generation metrics for monitoring"""
+    global embedding_metrics
+    success_rate = (
+        embedding_metrics["successful"] / embedding_metrics["total_attempts"] * 100
+        if embedding_metrics["total_attempts"] > 0 else 0
+    )
+    return {
+        **embedding_metrics,
+        "success_rate_percent": round(success_rate, 2),
+        "alert": embedding_metrics["consecutive_failures"] >= 10
+    }
 
 # Application lifecycle - manage connection pool
 @app.on_event("startup")

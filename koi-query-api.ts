@@ -498,6 +498,82 @@ function splitIntoSentences(text: string): string[] {
 }
 
 /**
+ * Auto-detect query intent from natural language patterns.
+ * Used when client doesn't specify intent (defaults to 'general').
+ * Returns the detected intent or 'general' if no pattern matches.
+ *
+ * This allows simple clients (like MCP) to benefit from intent-aware
+ * retrieval without needing to implement their own intent detection.
+ * Sophisticated clients (like custom GPTs) can still override by
+ * explicitly passing an intent parameter.
+ */
+function autoDetectIntent(question: string): QueryIntent {
+  const q = (question || '').toLowerCase();
+
+  // Person activity patterns: "what is X working on", "what is X doing", etc.
+  const personActivityPatterns = [
+    /what\s+(?:is|are)\s+\w+\s+(?:working\s+on|doing|focusing\s+on|leading)/i,
+    /what\s+(?:is|are)\s+\w+\s+\w+\s+(?:working\s+on|doing|focusing\s+on|leading)/i,  // "what is Gregory Landua working on"
+    /what\s+(?:has|have)\s+\w+\s+(?:been\s+working\s+on|done|accomplished|achieved)/i,
+    /what\s+projects?\s+(?:is|are)\s+\w+/i,
+    /what\s+(?:is|are)\s+\w+(?:\s+\w+)?\s+(?:involved\s+in|contributing\s+to)/i,
+    /tell\s+me\s+(?:what|about)\s+\w+(?:\s+\w+)?\s+(?:is|are)\s+(?:working|doing)/i,
+  ];
+
+  for (const pattern of personActivityPatterns) {
+    if (pattern.test(question)) {
+      return 'person_activity';
+    }
+  }
+
+  // Person bio patterns: "who is X", "tell me about X"
+  const personBioPatterns = [
+    /^who\s+is\s+\w+/i,
+    /^tell\s+me\s+about\s+\w+(?:\s+\w+)?$/i,  // Simple "tell me about X" (not "tell me about what X is doing")
+    /^what\s+(?:do\s+you\s+know\s+about|can\s+you\s+tell\s+me\s+about)\s+\w+/i,
+  ];
+
+  for (const pattern of personBioPatterns) {
+    if (pattern.test(question)) {
+      return 'person_bio';
+    }
+  }
+
+  // Technical howto patterns
+  const technicalPatterns = [
+    /^how\s+(?:do\s+i|can\s+i|to)\s+/i,
+    /^how\s+does\s+\w+\s+work/i,
+    /^what\s+(?:is|are)\s+the\s+(?:steps?|process|procedure)\s+(?:to|for)/i,
+  ];
+
+  for (const pattern of technicalPatterns) {
+    if (pattern.test(question)) {
+      return 'technical_howto';
+    }
+  }
+
+  // Concept explanation patterns
+  const conceptPatterns = [
+    /^what\s+(?:is|are)\s+(?:a\s+|an\s+|the\s+)?(?!.*(?:working|doing|leading))/i,  // "what is X" but NOT "what is X working on"
+    /^explain\s+/i,
+    /^define\s+/i,
+  ];
+
+  // Only match concept patterns if they don't look like person queries
+  const looksLikePerson = /\b[A-Z][a-z]+\s+[A-Z][a-z]+\b/.test(question);  // Has capitalized name pattern
+
+  if (!looksLikePerson) {
+    for (const pattern of conceptPatterns) {
+      if (pattern.test(question)) {
+        return 'concept_explain';
+      }
+    }
+  }
+
+  return 'general';
+}
+
+/**
  * Build a retrieval profile based on intent and effective policy
  */
 function buildRetrievalProfile(intent: QueryIntent, effectivePolicy: SourcePolicy): RetrievalProfile {
@@ -1964,7 +2040,6 @@ async function performAuthorSearch(authorTokens: string[], monthsBack: number, t
         AND LENGTH(m.content->>'text') > 50
         AND m.published_at IS NOT NULL
         AND m.published_at >= $1::timestamptz
-        AND m.rid LIKE 'regen.forum-post:%'
         AND lower(COALESCE(m.content->'document'->>'author', m.metadata->>'author', m.metadata->>'author_username', '')) LIKE ANY($2)
         ${privacyFilter}
       ORDER BY m.published_at DESC
@@ -2277,7 +2352,20 @@ app.post('/api/koi/query', async (req, res) => {
 
     // Validate intent enum
     const validIntents: QueryIntent[] = ['general', 'person_activity', 'person_bio', 'concept_explain', 'technical_howto', 'code_navigation'];
-    const intent: QueryIntent = validIntents.includes(requestedIntent) ? requestedIntent : 'general';
+    let intent: QueryIntent = validIntents.includes(requestedIntent) ? requestedIntent : 'general';
+
+    // Auto-detect intent when client uses default 'general'
+    // This allows simple clients (like MCP) to benefit from intent-aware retrieval
+    // Sophisticated clients can still override by explicitly passing an intent
+    let intentAutoDetected = false;
+    if (intent === 'general') {
+      const detectedIntent = autoDetectIntent(question);
+      if (detectedIntent !== 'general') {
+        intent = detectedIntent;
+        intentAutoDetected = true;
+        console.log(`[Query] Auto-detected intent: ${intent} for query: "${question.substring(0, 60)}..."`);
+      }
+    }
 
     // Validate source_policy enum
     const validPolicies: SourcePolicy[] = ['public', 'internal_ok'];
@@ -2662,6 +2750,9 @@ app.post('/api/koi/query', async (req, res) => {
       answerable,
       answerability_reason: answerabilityReason,
       profile_debug: profileDebug,
+      // Intent detection metadata
+      intent,
+      intent_auto_detected: intentAutoDetected,
     };
 
     // Add evidence summary if available
