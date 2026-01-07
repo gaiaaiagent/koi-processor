@@ -4244,6 +4244,7 @@ app.get('/api/koi/entity/documents', async (req, res) => {
       resolved_entity_type: resolved.entity_type,
       document_count: documents.length,
       documents: documents,
+      is_authenticated: isAuthenticated,
     });
 
   } catch (error) {
@@ -4858,9 +4859,21 @@ app.get('/api/koi/health', async (req, res) => {
 // Start server
 
 // Statistics endpoint
-// INTERNAL ONLY: Requires X-Internal-API-Key header
-app.get('/api/koi/stats', requireInternalApiKey, async (req, res) => {
+// Requires session token authentication (same as other endpoints)
+app.get('/api/koi/stats', async (req, res) => {
   try {
+    // Extract and validate session token
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const authenticatedEmail = await validateSessionToken(sessionToken);
+
+    if (!authenticatedEmail) {
+      return res.status(401).json({
+        error: 'Authentication required',
+        message: 'Please authenticate using the regen_koi_authenticate tool first'
+      });
+    }
+
     // Total documents
     const totalResult = await pool.query('SELECT COUNT(*) as total FROM koi_memories');
     const total = parseInt(totalResult.rows[0].total);
