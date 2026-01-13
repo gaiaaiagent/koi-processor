@@ -5,6 +5,16 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.6] - 2026-01-13
+
+### Added
+- **Feedback API** - New endpoint for collecting user feedback from MCP sessions
+  - POST /api/koi/feedback: Submit feedback with rating, category, notes
+  - GET /api/koi/feedback: Retrieve feedback with filtering
+  - Database table: user_feedback with indexes and summary view
+  - Categories: success, partial, bug, suggestion, question, other
+  - Captures session context (tool stats, errors) for debugging
+
 ## [3.1.5] - 2026-01-02
 
 ### Fixed

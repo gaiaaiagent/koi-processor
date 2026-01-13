@@ -293,3 +293,64 @@ set -a; source .env; set +a
 
 **Last Updated**: 2026-01-07
 **Phase**: Complete - All major milestones achieved
+
+---
+
+## Feedback API (2026-01-13)
+
+**Status**: ✅ Deployed
+
+**Purpose**: Collect user feedback about KOI MCP experience directly from Claude Code sessions.
+
+**Endpoints**:
+-  - Submit feedback
+-  - Retrieve feedback (with filters)
+
+**Database**:
+- Table:  (eliza database)
+- View:  for analytics
+
+**Request Format**:
+```json
+{
+  "rating": 5,
+  "category": "success",
+  "notes": "Found exactly what I needed",
+  "task_description": "optional task context",
+  "session_context": {"tool_stats": {...}},
+  "user_email": "optional",
+  "client_version": "optional"
+}
+```
+
+**Categories**: success, partial, bug, suggestion, question, other
+
+**Key Function**: Feedback handler in  (lines 5417-5568)
+
+---
+
+**Last Updated**: 2026-01-13
+
+---
+
+## Feedback API (2026-01-13)
+
+**Status**: Deployed
+
+**Purpose**: Collect user feedback about KOI MCP experience directly from Claude Code sessions.
+
+**Endpoints**:
+- POST /api/koi/feedback - Submit feedback
+- GET /api/koi/feedback - Retrieve feedback (with filters)
+
+**Database**:
+- Table: user_feedback (eliza database)
+- View: feedback_summary for analytics
+
+**Categories**: success, partial, bug, suggestion, question, other
+
+**Key Function**: Feedback handler in koi-query-api.ts (lines 5417-5568)
+
+---
+
+**Last Updated**: 2026-01-13
