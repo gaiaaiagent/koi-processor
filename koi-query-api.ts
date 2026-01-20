@@ -2911,8 +2911,9 @@ const DEFAULT_TYPE_PRIORITY: Record<string, number> = {
   'KEEPER': 0,
 };
 
-// Polysemy-aware entity resolution endpoint
+// Polysemy-aware entity resolution endpoint with ledger entity support
 // GET /api/koi/entity/resolve?label=...&type_hint=...&limit=5
+// Supports: normalized_text match, ledger_id exact match, aliases JSONB containment
 app.get('/api/koi/entity/resolve', async (req, res) => {
   try {
     const label = (req.query.label as string || '').trim();
@@ -2928,7 +2929,13 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
       return res.status(400).json({ error: 'label parameter is required' });
     }
 
-    // Query for entity variants matching the label or canonical aliases
+    // Prepare alias lookup key (for JSONB containment)
+    const aliasLookupKey = JSON.stringify([label.toLowerCase()]);
+
+    // Query for entity variants matching:
+    // 1. ledger_id exact match (e.g., "C02", "C02-003") - highest priority for ledger entities
+    // 2. normalized_text exact match - standard KOI resolution
+    // 3. aliases JSONB containment - fuzzy alias matching
     const query = `
       WITH entity_matches AS (
         SELECT
@@ -2937,9 +2944,24 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
           entity_type,
           normalized_text,
           occurrence_count,
-          fuseki_uri
+          fuseki_uri,
+          ledger_id,
+          metadata_iri,
+          admin_address,
+          aliases,
+          jurisdiction,
+          class_id,
+          source,
+          CASE
+            WHEN UPPER(ledger_id) = UPPER($2) THEN 'ledger_id'
+            WHEN LOWER(TRIM(normalized_text)) = ANY($1) THEN 'normalized_text'
+            WHEN aliases @> $3::jsonb THEN 'alias'
+            ELSE 'unknown'
+          END as match_type
         FROM entity_registry
-        WHERE LOWER(TRIM(normalized_text)) = ANY($1)
+        WHERE UPPER(ledger_id) = UPPER($2)
+           OR LOWER(TRIM(normalized_text)) = ANY($1)
+           OR (aliases IS NOT NULL AND aliases @> $3::jsonb)
       ),
       rel_counts AS (
         SELECT
@@ -2964,13 +2986,29 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         e.normalized_text,
         e.occurrence_count,
         e.fuseki_uri,
+        e.ledger_id,
+        e.metadata_iri,
+        e.admin_address,
+        e.aliases,
+        e.jurisdiction,
+        e.class_id,
+        e.source,
+        e.match_type,
         r.relationship_count
       FROM entity_matches e
       JOIN rel_counts r ON e.id = r.id
-      ORDER BY e.occurrence_count DESC, r.relationship_count DESC
+      ORDER BY
+        CASE e.match_type
+          WHEN 'ledger_id' THEN 1
+          WHEN 'normalized_text' THEN 2
+          WHEN 'alias' THEN 3
+          ELSE 4
+        END,
+        e.occurrence_count DESC,
+        r.relationship_count DESC
     `;
 
-    const result = await pool.query(query, [lookupKeys]);
+    const result = await pool.query(query, [lookupKeys, label, aliasLookupKey]);
     const variants = result.rows;
 
     if (variants.length === 0) {
@@ -2985,7 +3023,7 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
       });
     }
 
-    // Compute scores for all variants
+    // Compute scores for all variants (ledger entities get priority)
     const scoredVariants = variants.map(v => {
       const occScore = parseInt(v.occurrence_count) * 1000;
       const relScore = parseInt(v.relationship_count) * 100;
@@ -2999,6 +3037,15 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         `type_pri=${typePriority}`
       ];
 
+      // Boost for match type (ledger_id is highest priority)
+      if (v.match_type === 'ledger_id') {
+        totalScore += 100000;
+        reasons.push('ledger_id_match=+100k');
+      } else if (v.match_type === 'alias') {
+        totalScore += 25000;
+        reasons.push('alias_match=+25k');
+      }
+
       // Boost if matches type hint
       if (typeHint && v.entity_type.toUpperCase() === typeHint) {
         totalScore += 50000;
@@ -3011,6 +3058,15 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         entity_type: v.entity_type,
         occurrence_count: parseInt(v.occurrence_count),
         relationship_count: parseInt(v.relationship_count),
+        match_type: v.match_type,
+        // Include ledger-specific fields when present
+        ledger_id: v.ledger_id || null,
+        metadata_iri: v.metadata_iri || null,
+        admin_address: v.admin_address || null,
+        aliases: v.aliases || null,
+        jurisdiction: v.jurisdiction || null,
+        class_id: v.class_id || null,
+        source: v.source || null,
         score: totalScore,
         score_breakdown: reasons.join(', ')
       };
@@ -3029,7 +3085,11 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
 
     // Determine resolution method
     let resolutionMethod = 'highest_combined_score';
-    if (typeHint && winner.entity_type.toUpperCase() === typeHint) {
+    if (winner.match_type === 'ledger_id') {
+      resolutionMethod = 'ledger_id_exact_match';
+    } else if (winner.match_type === 'alias') {
+      resolutionMethod = 'alias_match';
+    } else if (typeHint && winner.entity_type.toUpperCase() === typeHint) {
       resolutionMethod = 'type_hint_match';
     } else {
       const totalOcc = scoredVariants.reduce((sum, v) => sum + v.occurrence_count, 0);

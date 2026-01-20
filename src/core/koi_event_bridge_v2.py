@@ -50,6 +50,14 @@ DB_URL = os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:543
 BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
 USE_ISOLATED_TABLES = os.getenv('USE_ISOLATED_TABLES', 'true').lower() == 'true'
 KG_EXTRACTION_ENABLED = os.getenv('KG_EXTRACTION_ENABLED', 'false').lower() == 'true'
+LEDGER_ENTITY_INDEXING_ENABLED = os.getenv('LEDGER_ENTITY_INDEXING_ENABLED', 'true').lower() == 'true'
+
+# Ledger entity RID prefixes for entity_registry indexing
+LEDGER_ENTITY_PREFIXES = [
+    'orn:regen.credit_class:',
+    'orn:regen.project:',
+    'orn:regen.organization:',
+]
 
 # Global connection pool (shared across all requests)
 db_pool: Optional[asyncpg.Pool] = None
@@ -129,6 +137,104 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
         start += (chunk_size - overlap)
     
     return chunks
+
+def is_ledger_entity_rid(rid: str) -> bool:
+    """Check if a RID is a ledger entity that should go to entity_registry"""
+    return any(rid.startswith(prefix) for prefix in LEDGER_ENTITY_PREFIXES)
+
+async def handle_ledger_entity_event(conn: asyncpg.Connection, event) -> bool:
+    """
+    Handle ledger entity events by upserting to entity_registry.
+
+    Ledger entities (credit classes, projects, organizations) are indexed
+    for automated entity resolution by the MCP server.
+
+    Args:
+        conn: Database connection
+        event: KOI event with bundle containing entity data
+
+    Returns:
+        True if entity was successfully indexed, False otherwise
+    """
+    if not LEDGER_ENTITY_INDEXING_ENABLED:
+        return False
+
+    if not event.bundle:
+        return False
+
+    rid = event.bundle.rid
+    if not is_ledger_entity_rid(rid):
+        return False
+
+    try:
+        contents = event.bundle.contents
+        metadata = event.bundle.manifest.metadata or {}
+
+        # Extract entity data from bundle
+        entity_type = contents.get('entity_type') or metadata.get('entity_type')
+        entity_text = contents.get('name') or contents.get('id') or rid.split(':')[-1]
+        ledger_id = contents.get('id') or metadata.get('ledger_id')
+        metadata_iri = contents.get('metadata_iri') or metadata.get('metadata_iri')
+        admin_address = contents.get('admin') or metadata.get('admin_address')
+        aliases = contents.get('aliases', [])
+        jurisdiction = contents.get('jurisdiction') or metadata.get('jurisdiction')
+        class_id = contents.get('class_id') or metadata.get('class_id')
+
+        # Normalize text for matching
+        normalized_text = entity_text.lower().strip() if entity_text else rid.split(':')[-1].lower()
+
+        # Create fuseki URI for this entity
+        fuseki_uri = f"https://regen.network/entity/{rid.replace(':', '/')}"
+
+        # Upsert to entity_registry
+        # We need to handle the embedding - for now, use a placeholder embedding
+        # The entity resolution API will use exact/fuzzy matching, not semantic
+        await conn.execute("""
+            INSERT INTO entity_registry (
+                fuseki_uri, entity_text, entity_type, normalized_text,
+                ledger_id, metadata_iri, admin_address, aliases,
+                jurisdiction, class_id, source, metadata, embedding
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'regen_ledger',
+                $11::jsonb, (SELECT embedding FROM entity_registry LIMIT 1)
+            )
+            ON CONFLICT (normalized_text, entity_type) DO UPDATE SET
+                entity_text = EXCLUDED.entity_text,
+                ledger_id = EXCLUDED.ledger_id,
+                metadata_iri = EXCLUDED.metadata_iri,
+                admin_address = EXCLUDED.admin_address,
+                aliases = EXCLUDED.aliases,
+                jurisdiction = EXCLUDED.jurisdiction,
+                class_id = EXCLUDED.class_id,
+                source = 'regen_ledger',
+                last_seen_at = NOW(),
+                occurrence_count = entity_registry.occurrence_count + 1,
+                metadata = entity_registry.metadata || EXCLUDED.metadata
+        """,
+            fuseki_uri,
+            entity_text,
+            entity_type,
+            normalized_text,
+            ledger_id,
+            metadata_iri,
+            admin_address,
+            json.dumps(aliases) if isinstance(aliases, list) else aliases,
+            jurisdiction,
+            class_id,
+            json.dumps({
+                'rid': rid,
+                'source_node': event.source_node,
+                'timestamp': event.timestamp,
+                'description': contents.get('description'),
+            })
+        )
+
+        logger.info(f"Indexed ledger entity to entity_registry: {rid} ({entity_type}: {entity_text})")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error indexing ledger entity {rid}: {e}", exc_info=True)
+        return False
 
 async def extract_text_from_bundle(bundle: KOIBundle) -> str:
     """Extract text content from KOI bundle"""
@@ -460,6 +566,23 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
     try:
         # Use global connection pool instead of creating new one
         async with db_pool.acquire() as conn:
+            # Handle ledger entity events (credit classes, projects, organizations)
+            # These are indexed to entity_registry for automated entity resolution
+            if event.bundle and is_ledger_entity_rid(event.bundle.rid):
+                entity_indexed = await handle_ledger_entity_event(conn, event)
+                if entity_indexed:
+                    # Ledger entities are lightweight - return success after indexing
+                    # They don't need full content processing/chunking/embedding
+                    return ProcessingResult(
+                        success=True,
+                        rid=event.bundle.rid,
+                        cid=f"cid:sha256:{event.bundle.manifest.content_hash}",
+                        chunks_created=0,
+                        embeddings_created=0,
+                        version=1,
+                        error="Ledger entity indexed to entity_registry"
+                    )
+
             # Extract URL if this is a web page
             source_url = None
             if event.bundle and event.bundle.manifest.metadata:
