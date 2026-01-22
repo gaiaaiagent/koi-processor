@@ -56,10 +56,12 @@ app.add_middleware(
 # Configuration
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://darrenzal:@localhost:5432/personal_koi')
 KOI_MODE = os.getenv('KOI_MODE', 'personal')
-BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-ada-002')
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 
 # Semantic similarity thresholds by entity type (Tier 2)
+# Same as production entity_resolver.py
 SEMANTIC_THRESHOLDS = {
     'Person': 0.92,
     'Organization': 0.95,
@@ -72,7 +74,8 @@ SEMANTIC_THRESHOLDS = {
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
-bge_available: bool = False
+openai_available: bool = False
+openai_client: Optional[Any] = None
 
 
 # =============================================================================
@@ -124,58 +127,33 @@ class IngestResponse(BaseModel):
 
 
 # =============================================================================
-# BGE Embedding Service
+# OpenAI Embedding Service (same as production entity_resolver.py)
 # =============================================================================
 
 async def generate_embedding(text: str) -> Optional[List[float]]:
-    """Generate BGE embedding via API"""
-    if not bge_available or not ENABLE_SEMANTIC_MATCHING:
+    """Generate embedding using OpenAI API (same as production)"""
+    if not openai_available or not ENABLE_SEMANTIC_MATCHING or not openai_client:
         return None
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            # Normalize text before embedding (same as entity_resolver.py)
-            normalized = normalize_entity_text(text)
-
-            response = await client.post(
-                BGE_API_URL,
-                json={"text": normalized}
-            )
-            if response.status_code != 200:
-                # Try with "input" field (some BGE servers use this)
-                response = await client.post(
-                    BGE_API_URL,
-                    json={"input": normalized}
-                )
-
-            if response.status_code == 200:
-                result = response.json()
-                embedding = result.get("embedding", [])
-                if embedding:
-                    return embedding
-                # Try alternative response format
-                if "embeddings" in result and len(result["embeddings"]) > 0:
-                    return result["embeddings"][0]
-            else:
-                logger.warning(f"BGE API error: {response.status_code}")
-                return None
-        except Exception as e:
-            logger.warning(f"Error calling BGE API: {e}")
-            return None
-
-
-async def check_bge_availability() -> bool:
-    """Check if BGE server is available"""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(BGE_API_URL.replace('/encode', '/health'))
-            if response.status_code == 200:
-                return True
-            # Try a test embedding
-            response = await client.post(BGE_API_URL, json={"text": "test"})
-            return response.status_code == 200
-    except Exception:
-        return False
+        # Normalize text before embedding (same as entity_resolver.py)
+        normalized = normalize_entity_text(text)
+
+        # Use asyncio.to_thread for sync OpenAI call
+        response = await asyncio.to_thread(
+            openai_client.embeddings.create,
+            model=EMBEDDING_MODEL,
+            input=normalized
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.warning(f"Error generating OpenAI embedding: {e}")
+        return None
+
+
+def check_openai_availability() -> bool:
+    """Check if OpenAI API key is configured"""
+    return bool(OPENAI_API_KEY)
 
 
 # =============================================================================
@@ -336,8 +314,8 @@ async def resolve_entity(
             confidence=best_score
         ), False
 
-    # Tier 2: Semantic match (BGE embeddings + pgvector)
-    if bge_available and ENABLE_SEMANTIC_MATCHING:
+    # Tier 2: Semantic match (OpenAI embeddings + pgvector)
+    if openai_available and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
             semantic_threshold = SEMANTIC_THRESHOLDS.get(entity.type, 0.93)
@@ -420,7 +398,7 @@ async def store_new_entity(
 
     # Generate embedding for new entity (enables future Tier 2 matching)
     embedding = None
-    if bge_available and ENABLE_SEMANTIC_MATCHING:
+    if openai_available and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
             logger.info(f"Generated embedding for new entity: {entity.name}")
@@ -466,8 +444,8 @@ async def store_new_entity(
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database connection pool and check BGE availability"""
-    global db_pool, bge_available
+    """Initialize database connection pool and OpenAI client"""
+    global db_pool, openai_available, openai_client
     try:
         db_pool = await asyncpg.create_pool(
             DB_URL,
@@ -481,13 +459,22 @@ async def startup():
         async with db_pool.acquire() as conn:
             await ensure_schema(conn)
 
-        # Check BGE server availability
-        bge_available = await check_bge_availability()
-        if bge_available:
-            logger.info(f"BGE embedding server available at {BGE_API_URL}")
-            logger.info("Tier 2 semantic matching: ENABLED")
+        # Initialize OpenAI client if API key is available
+        openai_available = check_openai_availability()
+        if openai_available:
+            try:
+                from openai import OpenAI
+                openai_client = OpenAI(api_key=OPENAI_API_KEY)
+                logger.info(f"OpenAI client initialized (model: {EMBEDDING_MODEL})")
+                logger.info("Tier 2 semantic matching: ENABLED")
+            except ImportError:
+                logger.warning("OpenAI package not installed. Run: pip install openai")
+                openai_available = False
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI client: {e}")
+                openai_available = False
         else:
-            logger.warning(f"BGE embedding server not available at {BGE_API_URL}")
+            logger.warning("OPENAI_API_KEY not set")
             logger.info("Tier 2 semantic matching: DISABLED (falling back to fuzzy matching)")
 
     except Exception as e:
@@ -521,7 +508,7 @@ async def ensure_schema(conn: asyncpg.Connection):
             source TEXT DEFAULT 'personal-vault',
             first_seen_rid TEXT,
             metadata JSONB,
-            embedding vector(1024),
+            embedding vector(1536),
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         )
@@ -564,12 +551,13 @@ async def health_check():
             "status": "healthy",
             "mode": KOI_MODE,
             "database": "connected",
-            "bge_available": bge_available,
-            "semantic_matching": bge_available and ENABLE_SEMANTIC_MATCHING,
+            "openai_available": openai_available,
+            "embedding_model": EMBEDDING_MODEL if openai_available else None,
+            "semantic_matching": openai_available and ENABLE_SEMANTIC_MATCHING,
             "resolution_tiers": {
                 "tier1_exact": True,
                 "tier1x_fuzzy": True,
-                "tier2_semantic": bge_available and ENABLE_SEMANTIC_MATCHING,
+                "tier2_semantic": openai_available and ENABLE_SEMANTIC_MATCHING,
                 "tier3_create": True
             }
         }
