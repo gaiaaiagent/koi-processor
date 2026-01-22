@@ -86,3 +86,4 @@ exports/
 .local-backup/
 *.log.*
 *.gz
+config/personal.env
