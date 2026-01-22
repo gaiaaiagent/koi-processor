@@ -2887,6 +2887,273 @@ app.get('/api/koi/auth/status', async (req, res) => {
   }
 });
 
+// =============================================================================
+// User Profile Endpoints (Teaching Mode)
+// Stores user experience level and preferences for personalized responses
+// =============================================================================
+
+const FUSEKI_URL = process.env.FUSEKI_URL || 'http://localhost:3030';
+const FUSEKI_DATASET = process.env.FUSEKI_DATASET || 'koi';
+
+// Default preferences by experience level
+const DEFAULT_PREFERENCES_BY_LEVEL: Record<string, object> = {
+  junior: { explain_before_code: true, verbosity: 'detailed', show_examples: true },
+  mid: { explain_before_code: true, verbosity: 'balanced', show_examples: true },
+  senior: { explain_before_code: false, verbosity: 'concise', show_examples: false },
+  staff: { explain_before_code: false, verbosity: 'concise', show_examples: false },
+  principal: { explain_before_code: false, verbosity: 'concise', show_examples: false },
+};
+
+// Helper to query SPARQL endpoint
+async function sparqlQuery(query: string): Promise<any> {
+  try {
+    const response = await fetch(`${FUSEKI_URL}/${FUSEKI_DATASET}/sparql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sparql-query',
+        'Accept': 'application/sparql-results+json',
+      },
+      body: query,
+    });
+    if (!response.ok) {
+      console.error(`[SPARQL] Query failed: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[SPARQL] Query error:', error);
+    return null;
+  }
+}
+
+// Helper to insert triples via SPARQL UPDATE
+async function sparqlUpdate(updateQuery: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${FUSEKI_URL}/${FUSEKI_DATASET}/update`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sparql-update',
+      },
+      body: updateQuery,
+    });
+    if (!response.ok) {
+      console.error(`[SPARQL] Update failed: ${response.status} ${response.statusText}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('[SPARQL] Update error:', error);
+    return false;
+  }
+}
+
+// Helper to get Jena relationships for a user
+async function getJenaRelationships(email: string): Promise<{
+  manages: string[];
+  works_on: string[];
+  learning: string[];
+}> {
+  const personUri = `<https://regen.network/person/${encodeURIComponent(email)}>`;
+
+  const query = `
+    PREFIX regen: <https://regen.network/ontology/>
+
+    SELECT ?predicate ?object WHERE {
+      ${personUri} ?predicate ?object .
+      FILTER(?predicate IN (regen:manages, regen:works_on, regen:learning))
+    }
+  `;
+
+  const result = await sparqlQuery(query);
+  const relationships = { manages: [] as string[], works_on: [] as string[], learning: [] as string[] };
+
+  if (result?.results?.bindings) {
+    for (const binding of result.results.bindings) {
+      const pred = binding.predicate?.value || '';
+      const obj = binding.object?.value || '';
+
+      if (pred.endsWith('manages')) {
+        relationships.manages.push(obj);
+      } else if (pred.endsWith('works_on')) {
+        relationships.works_on.push(obj);
+      } else if (pred.endsWith('learning')) {
+        relationships.learning.push(obj);
+      }
+    }
+  }
+
+  return relationships;
+}
+
+// Helper to sync profile relationships to Jena
+async function syncProfileToJena(email: string, managedBy?: string): Promise<boolean> {
+  const personUri = `<https://regen.network/person/${encodeURIComponent(email)}>`;
+
+  // Build update query - delete old :manages relationships and insert new ones
+  let updateQuery = `
+    PREFIX regen: <https://regen.network/ontology/>
+
+    DELETE WHERE {
+      ?manager regen:manages ${personUri} .
+    }
+  `;
+
+  if (managedBy) {
+    const managerUri = `<https://regen.network/person/${encodeURIComponent(managedBy)}>`;
+    updateQuery += `
+    ;
+    INSERT DATA {
+      ${managerUri} regen:manages ${personUri} .
+    }
+    `;
+  }
+
+  return await sparqlUpdate(updateQuery);
+}
+
+// GET /api/koi/user/profile - Get current user's profile
+app.get('/api/koi/user/profile', async (req, res) => {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  try {
+    // Authenticate user via session token
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const userEmail = await validateSessionToken(sessionToken);
+
+    if (!userEmail) {
+      const koiError: KoiError = {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required. Please authenticate first.',
+        retryable: false,
+      };
+      return res.status(401).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Get profile from PostgreSQL
+    const result = await pool.query(
+      `SELECT id, email, experience_level, role, preferences, managed_by, created_at, updated_at
+       FROM user_profiles
+       WHERE email = $1`,
+      [userEmail]
+    );
+
+    let profile: any;
+
+    if (result.rows.length === 0) {
+      // Return default profile for new users
+      const defaultLevel = 'mid';
+      profile = {
+        email: userEmail,
+        experience_level: defaultLevel,
+        role: null,
+        preferences: DEFAULT_PREFERENCES_BY_LEVEL[defaultLevel],
+        managed_by: null,
+        is_new: true,
+      };
+    } else {
+      profile = result.rows[0];
+      profile.is_new = false;
+    }
+
+    // Enrich with Jena relationships
+    const relationships = await getJenaRelationships(userEmail);
+    profile.relationships = relationships;
+
+    console.log(`[UserProfile] Retrieved profile for ${userEmail}`);
+
+    return res.json(createSuccessEnvelope(requestId, profile));
+  } catch (error) {
+    console.error('[UserProfile] Error getting profile:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
+// PUT /api/koi/user/profile - Update user's profile
+app.put('/api/koi/user/profile', async (req, res) => {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  try {
+    // Authenticate user via session token
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const userEmail = await validateSessionToken(sessionToken);
+
+    if (!userEmail) {
+      const koiError: KoiError = {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required. Please authenticate first.',
+        retryable: false,
+      };
+      return res.status(401).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    const { experience_level, role, preferences, managed_by } = req.body;
+
+    // Validate experience_level if provided
+    const validLevels = ['junior', 'mid', 'senior', 'staff', 'principal'];
+    if (experience_level && !validLevels.includes(experience_level)) {
+      const koiError: KoiError = {
+        code: 'INVALID_INPUT',
+        message: `Invalid experience_level. Must be one of: ${validLevels.join(', ')}`,
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Merge preferences with defaults based on experience level
+    const level = experience_level || 'mid';
+    const mergedPreferences = {
+      ...DEFAULT_PREFERENCES_BY_LEVEL[level],
+      ...(preferences || {}),
+    };
+
+    // Upsert profile in PostgreSQL
+    const result = await pool.query(
+      `INSERT INTO user_profiles (email, experience_level, role, preferences, managed_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email) DO UPDATE SET
+         experience_level = COALESCE(EXCLUDED.experience_level, user_profiles.experience_level),
+         role = COALESCE(EXCLUDED.role, user_profiles.role),
+         preferences = COALESCE(EXCLUDED.preferences, user_profiles.preferences),
+         managed_by = EXCLUDED.managed_by,
+         updated_at = NOW()
+       RETURNING id, email, experience_level, role, preferences, managed_by, created_at, updated_at`,
+      [userEmail, level, role || null, JSON.stringify(mergedPreferences), managed_by || null]
+    );
+
+    const profile = result.rows[0];
+
+    // Sync to Jena (async, don't wait)
+    syncProfileToJena(userEmail, managed_by).catch(err => {
+      console.error('[UserProfile] Failed to sync to Jena:', err);
+    });
+
+    // Enrich with Jena relationships
+    const relationships = await getJenaRelationships(userEmail);
+    profile.relationships = relationships;
+
+    console.log(`[UserProfile] Updated profile for ${userEmail}: level=${level}`);
+
+    return res.json(createSuccessEnvelope(requestId, profile));
+  } catch (error) {
+    console.error('[UserProfile] Error updating profile:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
 // Default type priority (higher = more preferred) - matches Python polysemy_resolver.py
 const DEFAULT_TYPE_PRIORITY: Record<string, number> = {
   'TECHNOLOGY': 100,
