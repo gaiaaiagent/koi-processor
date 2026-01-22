@@ -11,12 +11,19 @@ and performs:
 2. Canonical URI assignment
 3. Storage in PostgreSQL with pgvector embeddings
 4. Returns resolved entities with URIs for vault linking
+
+Entity Resolution Tiers:
+- Tier 1: Exact match (normalized text, B-Tree index)
+- Tier 1.x: Fuzzy string match (Jaro-Winkler similarity)
+- Tier 2: Semantic match (BGE embeddings + pgvector HNSW)
+- Tier 3: Create new entity with deterministic URI
 """
 
 import os
 import asyncio
 import asyncpg
 import hashlib
+import httpx
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import FastAPI, HTTPException
@@ -49,9 +56,23 @@ app.add_middleware(
 # Configuration
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://darrenzal:@localhost:5432/personal_koi')
 KOI_MODE = os.getenv('KOI_MODE', 'personal')
+BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
+ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
+
+# Semantic similarity thresholds by entity type (Tier 2)
+SEMANTIC_THRESHOLDS = {
+    'Person': 0.92,
+    'Organization': 0.95,
+    'Project': 0.93,
+    'Location': 0.95,
+    'Concept': 0.90,
+    'Event': 0.94,
+    'Technology': 0.93,
+}
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
+bge_available: bool = False
 
 
 # =============================================================================
@@ -100,6 +121,61 @@ class IngestResponse(BaseModel):
     canonical_entities: List[CanonicalEntity]
     receipt_rid: str
     stats: Dict[str, int]
+
+
+# =============================================================================
+# BGE Embedding Service
+# =============================================================================
+
+async def generate_embedding(text: str) -> Optional[List[float]]:
+    """Generate BGE embedding via API"""
+    if not bge_available or not ENABLE_SEMANTIC_MATCHING:
+        return None
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            # Normalize text before embedding (same as entity_resolver.py)
+            normalized = normalize_entity_text(text)
+
+            response = await client.post(
+                BGE_API_URL,
+                json={"text": normalized}
+            )
+            if response.status_code != 200:
+                # Try with "input" field (some BGE servers use this)
+                response = await client.post(
+                    BGE_API_URL,
+                    json={"input": normalized}
+                )
+
+            if response.status_code == 200:
+                result = response.json()
+                embedding = result.get("embedding", [])
+                if embedding:
+                    return embedding
+                # Try alternative response format
+                if "embeddings" in result and len(result["embeddings"]) > 0:
+                    return result["embeddings"][0]
+            else:
+                logger.warning(f"BGE API error: {response.status_code}")
+                return None
+        except Exception as e:
+            logger.warning(f"Error calling BGE API: {e}")
+            return None
+
+
+async def check_bge_availability() -> bool:
+    """Check if BGE server is available"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(BGE_API_URL.replace('/encode', '/health'))
+            if response.status_code == 200:
+                return True
+            # Try a test embedding
+            response = await client.post(BGE_API_URL, json={"text": "test"})
+            return response.status_code == 200
+    except Exception:
+        return False
 
 
 # =============================================================================
@@ -260,6 +336,47 @@ async def resolve_entity(
             confidence=best_score
         ), False
 
+    # Tier 2: Semantic match (BGE embeddings + pgvector)
+    if bge_available and ENABLE_SEMANTIC_MATCHING:
+        embedding = await generate_embedding(entity.name)
+        if embedding:
+            semantic_threshold = SEMANTIC_THRESHOLDS.get(entity.type, 0.93)
+
+            # Query for semantic matches using pgvector cosine similarity
+            if entity.type:
+                semantic_match = await conn.fetchrow("""
+                    SELECT id, fuseki_uri, entity_text, entity_type,
+                           1 - (embedding <=> $1::vector) AS similarity
+                    FROM entity_registry
+                    WHERE embedding IS NOT NULL
+                      AND entity_type = $2
+                      AND 1 - (embedding <=> $1::vector) > $3
+                    ORDER BY similarity DESC
+                    LIMIT 1
+                """, str(embedding), entity.type, semantic_threshold)
+            else:
+                semantic_match = await conn.fetchrow("""
+                    SELECT id, fuseki_uri, entity_text, entity_type,
+                           1 - (embedding <=> $1::vector) AS similarity
+                    FROM entity_registry
+                    WHERE embedding IS NOT NULL
+                      AND 1 - (embedding <=> $1::vector) > $2
+                    ORDER BY similarity DESC
+                    LIMIT 1
+                """, str(embedding), semantic_threshold)
+
+            if semantic_match:
+                logger.info(f"Tier 2 semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
+                           f"(similarity: {semantic_match['similarity']:.3f})")
+                return CanonicalEntity(
+                    name=semantic_match['entity_text'],
+                    uri=semantic_match['fuseki_uri'],
+                    type=semantic_match['entity_type'] or entity.type,
+                    is_new=False,
+                    merged_with=entity.name if semantic_match['entity_text'] != entity.name else None,
+                    confidence=float(semantic_match['similarity'])
+                ), False
+
     # Tier 3: Create new entity
     new_uri = generate_entity_uri(entity.name, entity.type)
 
@@ -291,32 +408,56 @@ async def store_new_entity(
     canonical: CanonicalEntity,
     document_rid: str
 ) -> None:
-    """Store a new entity in the registry"""
+    """Store a new entity in the registry with embedding"""
     normalized = normalize_entity_text(entity.name)
 
-    # For now, skip embedding - we'll add it when we integrate with BGE
-    # The entity resolution uses exact/fuzzy matching, not semantic
     import json as json_module
     metadata = json_module.dumps({
         'mentions': entity.mentions,
         'context': entity.context,
         'confidence': entity.confidence
     })
-    await conn.execute("""
-        INSERT INTO entity_registry (
-            fuseki_uri, entity_text, entity_type, normalized_text,
-            source, first_seen_rid, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-        ON CONFLICT (fuseki_uri) DO NOTHING
-    """,
-        canonical.uri,
-        entity.name,
-        entity.type,
-        normalized,
-        'personal-vault',
-        document_rid,
-        metadata
-    )
+
+    # Generate embedding for new entity (enables future Tier 2 matching)
+    embedding = None
+    if bge_available and ENABLE_SEMANTIC_MATCHING:
+        embedding = await generate_embedding(entity.name)
+        if embedding:
+            logger.info(f"Generated embedding for new entity: {entity.name}")
+
+    if embedding:
+        await conn.execute("""
+            INSERT INTO entity_registry (
+                fuseki_uri, entity_text, entity_type, normalized_text,
+                source, first_seen_rid, metadata, embedding
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector)
+            ON CONFLICT (fuseki_uri) DO NOTHING
+        """,
+            canonical.uri,
+            entity.name,
+            entity.type,
+            normalized,
+            'personal-vault',
+            document_rid,
+            metadata,
+            str(embedding)
+        )
+    else:
+        await conn.execute("""
+            INSERT INTO entity_registry (
+                fuseki_uri, entity_text, entity_type, normalized_text,
+                source, first_seen_rid, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            ON CONFLICT (fuseki_uri) DO NOTHING
+        """,
+            canonical.uri,
+            entity.name,
+            entity.type,
+            normalized,
+            'personal-vault',
+            document_rid,
+            metadata
+        )
 
 
 # =============================================================================
@@ -325,8 +466,8 @@ async def store_new_entity(
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database connection pool"""
-    global db_pool
+    """Initialize database connection pool and check BGE availability"""
+    global db_pool, bge_available
     try:
         db_pool = await asyncpg.create_pool(
             DB_URL,
@@ -339,6 +480,15 @@ async def startup():
         # Ensure schema exists
         async with db_pool.acquire() as conn:
             await ensure_schema(conn)
+
+        # Check BGE server availability
+        bge_available = await check_bge_availability()
+        if bge_available:
+            logger.info(f"BGE embedding server available at {BGE_API_URL}")
+            logger.info("Tier 2 semantic matching: ENABLED")
+        else:
+            logger.warning(f"BGE embedding server not available at {BGE_API_URL}")
+            logger.info("Tier 2 semantic matching: DISABLED (falling back to fuzzy matching)")
 
     except Exception as e:
         logger.error(f"Failed to connect to database: {e}")
@@ -413,7 +563,15 @@ async def health_check():
         return {
             "status": "healthy",
             "mode": KOI_MODE,
-            "database": "connected"
+            "database": "connected",
+            "bge_available": bge_available,
+            "semantic_matching": bge_available and ENABLE_SEMANTIC_MATCHING,
+            "resolution_tiers": {
+                "tier1_exact": True,
+                "tier1x_fuzzy": True,
+                "tier2_semantic": bge_available and ENABLE_SEMANTIC_MATCHING,
+                "tier3_create": True
+            }
         }
     except Exception as e:
         return JSONResponse(
