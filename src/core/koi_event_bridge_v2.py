@@ -50,6 +50,41 @@ DB_URL = os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:543
 BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
 USE_ISOLATED_TABLES = os.getenv('USE_ISOLATED_TABLES', 'true').lower() == 'true'
 KG_EXTRACTION_ENABLED = os.getenv('KG_EXTRACTION_ENABLED', 'false').lower() == 'true'
+# Code file extensions that should skip KG extraction (still get embeddings for search)
+CODE_FILE_EXTENSIONS = {
+    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',  # JavaScript/TypeScript
+    '.py', '.pyi', '.pyx',  # Python
+    '.go', '.rs', '.rb', '.php',  # Other languages
+    '.java', '.kt', '.scala', '.groovy',  # JVM languages
+    '.c', '.cpp', '.cc', '.h', '.hpp',  # C/C++
+    '.cs', '.fs',  # .NET
+    '.swift', '.m', '.mm',  # Apple
+    '.sol',  # Solidity
+    '.sh', '.bash', '.zsh',  # Shell
+    '.sql', '.graphql',  # Query languages
+    '.proto',  # Protocol buffers
+}
+
+def should_skip_kg_extraction(metadata: dict) -> bool:
+    """Check if KG extraction should be skipped for this content.
+    
+    Returns True for code files where semantic entity extraction
+    provides little value. These files are still chunked and embedded
+    for code search - just not processed for KG entities/statements.
+    """
+    source_type = metadata.get('source_type', '')
+    file_type = metadata.get('file_type', '')
+    
+    if source_type == 'github':
+        # Allow markdown and documentation files
+        if file_type in {'.md', '.mdx', '.rst', '.txt'}:
+            return False
+        # Skip code files
+        if file_type in CODE_FILE_EXTENSIONS:
+            return True
+    
+    return False
+
 
 # Global connection pool (shared across all requests)
 db_pool: Optional[asyncpg.Pool] = None
@@ -726,7 +761,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
 
             # Trigger KG extraction on the full document (not chunks)
             # Only extract from NEW or UPDATE events with sufficient content
-            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100:
+            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100 and not should_skip_kg_extraction(event.bundle.manifest.metadata):
                 # Build metadata for KG extraction
                 kg_metadata = {
                     'source_url': source_url or event.bundle.manifest.metadata.get('url'),
