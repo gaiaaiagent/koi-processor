@@ -18,10 +18,11 @@ import sys
 import argparse
 import asyncio
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime, timezone
 import hashlib
 import time
+from collections import defaultdict
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "core"))
@@ -145,6 +146,8 @@ async def load_entities_batch(
                     "receiver_type": escape_cypher(entity.receiver_type or ""),
                     "extraction_method": entity.extraction_method,
                     "extraction_run_id": extraction_run_id,
+                    "module_name": escape_cypher(getattr(entity, 'module_name', '') or ""),
+                    "module_path": escape_cypher(entity.module_path or ""),
                 }
 
                 stmt = f"""CREATE (:{label} {{
@@ -162,7 +165,9 @@ async def load_entities_batch(
                     docstring: '{props['docstring']}',
                     receiver_type: '{props['receiver_type']}',
                     extraction_method: '{props['extraction_method']}',
-                    extraction_run_id: '{props['extraction_run_id']}'
+                    extraction_run_id: '{props['extraction_run_id']}',
+                    module_name: '{props['module_name']}',
+                    module_path: '{props['module_path']}'
                 }})"""
                 create_statements.append(stmt)
 
@@ -210,6 +215,8 @@ async def load_entity_single(
         "repo": entity.repo,
         "signature": escape_cypher(entity.signature[:500] if entity.signature else ""),
         "extraction_run_id": extraction_run_id,
+        "module_name": escape_cypher(getattr(entity, 'module_name', '') or ""),
+        "module_path": escape_cypher(entity.module_path or ""),
     }
 
     query = f"""
@@ -219,7 +226,10 @@ async def load_entity_single(
             name: '{props['name']}',
             repo: '{props['repo']}',
             file_path: '{props['file_path']}',
-            line_start: {props['line_start']}
+            line_start: {props['line_start']},
+            language: '{props['language']}',
+            module_name: '{props['module_name']}',
+            module_path: '{props['module_path']}'
         }})
     $$) as (result agtype);
     """
@@ -228,16 +238,25 @@ async def load_entity_single(
     return True
 
 
-async def load_entity_id_map(conn: asyncpg.Connection) -> Tuple[Dict[str, int], Dict[str, List[int]]]:
-    """Pre-load entity_id -> graph_id and name -> graph_ids mappings for fast edge creation"""
+async def load_entity_id_map(conn: asyncpg.Connection) -> Dict[str, Any]:
+    """
+    Pre-load entity mappings for fast edge creation.
+    
+    Returns a dict with multiple lookup strategies:
+    - id_map: entity_id -> graph_id (unique)
+    - name_map: name -> list of graph_ids (can have duplicates)
+    - method_map: ReceiverType.MethodName -> graph_id (for Go/Python methods)
+    - bare_name_map: just the function/method name -> graph_ids (for fallback matching)
+    """
     logger.info("  Pre-loading entity ID mappings...")
 
-    # Get all entities with their graph IDs
+    # Get all entities with their graph IDs and additional fields for method matching
     query = f"""
     SELECT * FROM cypher('{STAGING_GRAPH}', $$
         MATCH (n)
-        RETURN n.entity_id as entity_id, n.name as name, id(n) as graph_id
-    $$) as (entity_id agtype, name agtype, graph_id agtype);
+        RETURN n.entity_id as entity_id, n.name as name, n.entity_type as entity_type, 
+               n.receiver_type as receiver_type, id(n) as graph_id
+    $$) as (entity_id agtype, name agtype, entity_type agtype, receiver_type agtype, graph_id agtype);
     """
 
     rows = await conn.fetch(query)
@@ -245,20 +264,82 @@ async def load_entity_id_map(conn: asyncpg.Connection) -> Tuple[Dict[str, int], 
     # entity_id -> graph_id (unique)
     id_map = {}
     # name -> list of graph_ids (can have duplicates)
-    name_map = {}
+    name_map = defaultdict(list)
+    # ReceiverType.MethodName -> graph_id (for method calls)
+    method_map = {}
+    # bare function/method name -> list of graph_ids (for fallback)
+    bare_name_map = defaultdict(list)
 
     for row in rows:
         entity_id = str(row['entity_id']).strip('"')
         name = str(row['name']).strip('"')
+        entity_type = str(row['entity_type']).strip('"') if row['entity_type'] else ''
+        receiver_type = str(row['receiver_type']).strip('"') if row['receiver_type'] else ''
         graph_id = int(str(row['graph_id']))
 
         id_map[entity_id] = graph_id
-        if name not in name_map:
-            name_map[name] = []
         name_map[name].append(graph_id)
+        
+        # Build method_map for Go/Python methods: ReceiverType.MethodName -> graph_id
+        if entity_type in ('Method', 'Handler') and receiver_type:
+            qualified_name = f"{receiver_type}.{name}"
+            method_map[qualified_name] = graph_id
+            # Also track pointer receiver variant (*Type.Method)
+            method_map[f"*{receiver_type}.{name}"] = graph_id
+        
+        # Build bare_name_map for functions and methods
+        if entity_type in ('Function', 'Method', 'Handler'):
+            bare_name_map[name].append(graph_id)
 
-    logger.info(f"  Loaded {len(id_map)} entity IDs, {len(name_map)} unique names")
-    return id_map, name_map
+    logger.info(f"  Loaded {len(id_map)} entity IDs, {len(name_map)} unique names, "
+                f"{len(method_map)} method mappings, {len(bare_name_map)} bare names")
+    
+    return {
+        'id_map': id_map,
+        'name_map': dict(name_map),
+        'method_map': method_map,
+        'bare_name_map': dict(bare_name_map),
+    }
+
+
+def resolve_call_target(to_entity_id: str, maps: Dict[str, Any]) -> Optional[int]:
+    """
+    Try multiple strategies to resolve a CALLS edge target to a graph_id.
+    
+    Strategies (in order):
+    1. Exact entity_id match
+    2. Exact name match
+    3. Method map match (ReceiverType.MethodName)
+    4. Bare name match (just the function name after the dot)
+    
+    Returns graph_id if found, None otherwise.
+    """
+    id_map = maps['id_map']
+    name_map = maps['name_map']
+    method_map = maps['method_map']
+    bare_name_map = maps['bare_name_map']
+    
+    # Strategy 1: Exact entity_id match
+    if to_entity_id in id_map:
+        return id_map[to_entity_id]
+    
+    # Strategy 2: Exact name match
+    if to_entity_id in name_map:
+        return name_map[to_entity_id][0]
+    
+    # Strategy 3: Method map match (for calls like Type.Method)
+    if to_entity_id in method_map:
+        return method_map[to_entity_id]
+    
+    # Strategy 4: Bare name match (for calls like pkg.Function or var.Method)
+    # Extract the name after the last dot
+    if '.' in to_entity_id:
+        bare_name = to_entity_id.split('.')[-1]
+        if bare_name in bare_name_map:
+            # Return first match - could be ambiguous but better than nothing
+            return bare_name_map[bare_name][0]
+    
+    return None
 
 
 async def load_edges_batch(
@@ -266,13 +347,16 @@ async def load_edges_batch(
     edges: List[CodeEdge],
     extraction_run_id: str
 ) -> Tuple[int, int]:
-    """Load edges using optimized batch approach with pre-loaded IDs"""
+    """Load edges using optimized batch approach with enhanced call resolution"""
     success = 0
     failed = 0
     skipped = 0
+    skipped_reasons = defaultdict(int)
 
-    # Pre-load entity mappings (this is the key optimization!)
-    id_map, name_map = await load_entity_id_map(conn)
+    # Pre-load entity mappings with enhanced method resolution
+    maps = await load_entity_id_map(conn)
+    id_map = maps['id_map']
+    name_map = maps['name_map']
 
     # Group edges by type for reporting
     edges_by_type = {}
@@ -282,66 +366,94 @@ async def load_edges_batch(
     for edge_type, type_edges in edges_by_type.items():
         logger.info(f"  Loading {len(type_edges)} {edge_type} edges...")
 
-        # Process in larger batches since we're using graph IDs
-        edge_batch_size = 50  # Smaller batches for edge creation
+        # Process in batches
+        edge_batch_size = 500
 
         for batch_start in range(0, len(type_edges), edge_batch_size):
             batch = type_edges[batch_start:batch_start + edge_batch_size]
 
-            # Build batch of edge creates using graph IDs
-            create_statements = []
+            # Build batch of valid edges for SQL insert
+            valid_edges = []
             for edge in batch:
                 source_gid = id_map.get(edge.from_entity_id)
-                target_gids = name_map.get(edge.to_entity_id, [])
-
+                
                 if source_gid is None:
                     skipped += 1
+                    skipped_reasons['source_not_found'] += 1
                     continue
+                
+                # Use enhanced resolution for CALLS edges
+                if edge_type == 'CALLS':
+                    target_gid = resolve_call_target(edge.to_entity_id, maps)
+                else:
+                    # For other edge types, use simple id_map then name_map lookup
+                    target_gid = id_map.get(edge.to_entity_id)
+                    if target_gid is None:
+                        target_gids = name_map.get(edge.to_entity_id, [])
+                        if target_gids:
+                            target_gid = target_gids[0]
 
-                if not target_gids:
+                if target_gid is None:
                     skipped += 1
+                    # Track which targets couldn't be resolved
+                    if '.' in edge.to_entity_id:
+                        prefix = edge.to_entity_id.split('.')[0]
+                        skipped_reasons[f'external:{prefix}'] += 1
+                    else:
+                        skipped_reasons['target_not_found'] += 1
                     continue
 
-                # Create edge to first matching target (by name)
-                target_gid = target_gids[0]
+                valid_edges.append({
+                    "start_id": source_gid,
+                    "end_id": target_gid,
+                    "edge_id": edge.edge_id,
+                    "line_number": edge.line_number,
+                })
 
-                stmt = f"""
-                    MATCH (a) WHERE id(a) = {source_gid}
-                    MATCH (b) WHERE id(b) = {target_gid}
-                    CREATE (a)-[:{edge_type} {{
-                        edge_id: '{edge.edge_id}',
-                        line_number: {edge.line_number},
-                        extraction_run_id: '{extraction_run_id}'
-                    }}]->(b)
-                """
-                create_statements.append(stmt)
-
-            if create_statements:
+            # Use direct SQL batch insert for speed
+            if valid_edges:
                 try:
-                    # Execute batch
-                    batch_query = f"""
-                    SELECT * FROM cypher('{STAGING_GRAPH}', $$
-                        {' '.join(create_statements)}
-                    $$) as (result agtype);
-                    """
-                    await conn.execute(batch_query)
-                    success += len(create_statements)
+                    # Build multi-row INSERT
+                    values = []
+                    for e in valid_edges:
+                        edge_id_escaped = str(e["edge_id"]).replace("'", "''")
+                        props = f'{{"edge_id": "{edge_id_escaped}", "line_number": {e["line_number"]}, "extraction_run_id": "{extraction_run_id}"}}'
+                        values.append(f"(graphid_in('{e['start_id']}'), graphid_in('{e['end_id']}'), '{props}'::agtype)")
+                    
+                    if values:
+                        insert_sql = f"""
+                            INSERT INTO {STAGING_GRAPH}."{edge_type}" (start_id, end_id, properties)
+                            VALUES {', '.join(values)}
+                            ON CONFLICT DO NOTHING
+                        """
+                        await conn.execute(insert_sql)
+                        success += len(values)
                 except Exception as e:
-                    # If batch fails, try individual edges
-                    for stmt in create_statements:
+                    # Fall back to Cypher if SQL fails (e.g., edge type doesn't exist)
+                    logger.debug(f"SQL insert failed for {edge_type}, using Cypher: {e}")
+                    for ve in valid_edges:
                         try:
-                            single_query = f"""
+                            query = f"""
                             SELECT * FROM cypher('{STAGING_GRAPH}', $$
-                                {stmt}
-                            $$) as (result agtype);
+                                MATCH (a) WHERE id(a) = {ve['start_id']}
+                                MATCH (b) WHERE id(b) = {ve['end_id']}
+                                CREATE (a)-[:{edge_type} {{edge_id: '{ve['edge_id']}', line_number: {ve['line_number']}, extraction_run_id: '{extraction_run_id}'}}]->(b)
+                            $$) as (r agtype);
                             """
-                            await conn.execute(single_query)
+                            await conn.execute(query)
                             success += 1
                         except:
                             failed += 1
 
             if (batch_start + edge_batch_size) % 5000 == 0 or batch_start + edge_batch_size >= len(type_edges):
                 logger.info(f"    Processed {min(batch_start + edge_batch_size, len(type_edges))}/{len(type_edges)} {edge_type} edges (success: {success}, skipped: {skipped})...")
+
+    # Log skip reasons
+    if skipped_reasons:
+        logger.info(f"  Skipped edge breakdown (top 15):")
+        sorted_reasons = sorted(skipped_reasons.items(), key=lambda x: -x[1])[:15]
+        for reason, count in sorted_reasons:
+            logger.info(f"    {reason}: {count}")
 
     logger.info(f"  Edge loading complete: {success} success, {failed} failed, {skipped} skipped (no matching nodes)")
     return success, failed
@@ -381,6 +493,8 @@ async def extract_repository(
         f for f in files
         if "vendor" not in str(f)
         and "node_modules" not in str(f)
+        and "venv" not in str(f)
+        and ".venv" not in str(f)
         and not str(f).endswith("_test.go")
         and ".git" not in str(f)
     ]
@@ -460,6 +574,15 @@ async def main():
 
     logger.info("Entity breakdown:")
     for t, c in sorted(by_type.items(), key=lambda x: -x[1]):
+        logger.info(f"  {t}: {c}")
+
+    # Edge breakdown
+    edge_by_type = {}
+    for e in edges:
+        edge_by_type[e.edge_type] = edge_by_type.get(e.edge_type, 0) + 1
+    
+    logger.info("Edge breakdown (extracted):")
+    for t, c in sorted(edge_by_type.items(), key=lambda x: -x[1]):
         logger.info(f"  {t}: {c}")
 
     if args.dry_run:

@@ -1,0 +1,29 @@
+[Unit]
+Description=KOI GitHub Webhook Handler - Code Graph Trigger
+Documentation=https://github.com/gaiaaiagent/koi-processor
+After=network.target postgresql.service
+OnFailure=koi-service-alert@webhook.service
+
+[Service]
+Type=simple
+User=darren
+Group=gaia-devs
+WorkingDirectory=/opt/projects/koi-processor
+Environment=PYTHONPATH=/opt/projects/koi-processor
+EnvironmentFile=/opt/projects/koi-processor/.env
+ExecStart=/opt/projects/koi-processor/venv/bin/python3 -m uvicorn api.github_webhook:app --host 0.0.0.0 --port 8360
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=koi-webhook
+
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

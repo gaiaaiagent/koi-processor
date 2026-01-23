@@ -32,7 +32,7 @@ class CodeEntity:
     """Represents an extracted code entity"""
     entity_id: str           # Deterministic hash ID
     name: str
-    entity_type: str         # Function, Struct, Interface, Method, Class, Keeper, Message
+    entity_type: str         # Function, Struct, Interface, Method, Class, Keeper, Message, Module, File
     file_path: str
     line_start: int
     line_end: int
@@ -44,6 +44,8 @@ class CodeEntity:
     docstring: str = ""
     receiver_type: str = ""   # For methods (Go)
     extraction_method: str = "tree_sitter"
+    module_name: str = ""     # Module/package this entity belongs to
+    module_path: str = ""     # Full module path (for BELONGS_TO edges)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -138,14 +140,50 @@ class TreeSitterExtractor:
         # Extract package name
         package_name = self._get_go_package(root, source)
 
+        # Calculate module path from file_path and package name
+        # For Go, module path is typically the directory path
+        # e.g., x/ecocredit/base/keeper.go -> x/ecocredit/base
+        import os
+        dir_path = os.path.dirname(file_path)
+        module_path = f"{repo}/{dir_path}" if dir_path else repo
+
+        # Create Module entity for Go package
+        if package_name:
+            module_entity = self._create_go_module_entity(
+                package_name, dir_path, file_path, repo, root, source
+            )
+            entities.append(module_entity)
+
+        # Create File entity
+        file_entity = self._create_file_entity(file_path, repo, "go", content, package_name, module_path)
+        entities.append(file_entity)
+
+        # Create BELONGS_TO edge from File to Module
+        if package_name:
+            module_id = generate_entity_id(repo, dir_path, package_name, "module")
+            belongs_to_edge = CodeEdge(
+                edge_id=generate_edge_id(file_entity.entity_id, module_id, "BELONGS_TO"),
+                from_entity_id=file_entity.entity_id,
+                to_entity_id=module_id,
+                edge_type="BELONGS_TO",
+                file_path=file_path,
+                line_number=1,
+            )
+            edges.append(belongs_to_edge)
+
         # Extract imports
         imports = self._extract_go_imports(root, source, file_path, repo)
+        for imp in imports:
+            imp.module_name = package_name
+            imp.module_path = module_path
         entities.extend(imports)
 
         # Extract type declarations (structs, interfaces)
         for node in self._find_nodes_by_type(root, "type_declaration"):
             entity = self._extract_go_type(node, source, file_path, repo)
             if entity:
+                entity.module_name = package_name
+                entity.module_path = module_path
                 entities.append(entity)
                 entity_map[entity.name] = entity
 
@@ -153,6 +191,8 @@ class TreeSitterExtractor:
         for node in self._find_nodes_by_type(root, "function_declaration"):
             entity = self._extract_go_function(node, source, file_path, repo)
             if entity:
+                entity.module_name = package_name
+                entity.module_path = module_path
                 entities.append(entity)
                 entity_map[entity.name] = entity
 
@@ -164,6 +204,8 @@ class TreeSitterExtractor:
         for node in self._find_nodes_by_type(root, "method_declaration"):
             entity = self._extract_go_method(node, source, file_path, repo)
             if entity:
+                entity.module_name = package_name
+                entity.module_path = module_path
                 entities.append(entity)
                 # Use receiver.method as key
                 method_key = f"{entity.receiver_type}.{entity.name}"
@@ -174,6 +216,77 @@ class TreeSitterExtractor:
                 edges.extend(calls)
 
         return entities, edges
+
+    def _create_go_module_entity(
+        self,
+        package_name: str,
+        dir_path: str,
+        file_path: str,
+        repo: str,
+        root: Node,
+        source: bytes
+    ) -> CodeEntity:
+        """Create a Module entity for a Go package"""
+        import os
+
+        # Get package clause location
+        line_start = 1
+        line_end = 1
+        for node in root.children:
+            if node.type == "package_clause":
+                line_start = node.start_point[0] + 1
+                line_end = node.end_point[0] + 1
+                break
+
+        # Full module path for uniqueness
+        module_path = f"{repo}/{dir_path}" if dir_path else repo
+
+        return CodeEntity(
+            entity_id=generate_entity_id(repo, dir_path, package_name, "module"),
+            name=package_name,
+            entity_type="Module",
+            file_path=dir_path or ".",  # Module represents directory
+            line_start=line_start,
+            line_end=line_end,
+            language="go",
+            repo=repo,
+            signature=f"package {package_name}",
+            docstring=f"Go package in {dir_path or 'root'}",
+            module_name=package_name,
+            module_path=module_path,
+        )
+
+    def _create_file_entity(
+        self,
+        file_path: str,
+        repo: str,
+        language: str,
+        content: str,
+        module_name: str = "",
+        module_path: str = ""
+    ) -> CodeEntity:
+        """Create a File entity"""
+        import os
+        import hashlib
+
+        file_name = os.path.basename(file_path)
+        line_count = content.count('\n') + 1
+        file_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+
+        return CodeEntity(
+            entity_id=generate_entity_id(repo, file_path, file_name, "file"),
+            name=file_name,
+            entity_type="File",
+            file_path=file_path,
+            line_start=1,
+            line_end=line_count,
+            language=language,
+            repo=repo,
+            signature=f"{file_path} ({line_count} lines)",
+            docstring=f"hash:{file_hash}",
+            module_name=module_name,
+            module_path=module_path,
+        )
 
     def _get_go_package(self, root: Node, source: bytes) -> str:
         """Get Go package name"""
@@ -521,6 +634,8 @@ class TreeSitterExtractor:
         repo: str
     ) -> Tuple[List[CodeEntity], List[CodeEdge]]:
         """Extract entities and edges from Python code"""
+        import os
+
         entities = []
         edges = []
 
@@ -528,28 +643,140 @@ class TreeSitterExtractor:
         root = tree.root_node
         source = content.encode()
 
+        # Calculate Python module name from file path
+        # e.g., src/core/extractor.py -> src.core.extractor
+        # or __init__.py -> parent directory name
+        dir_path = os.path.dirname(file_path)
+        file_name = os.path.basename(file_path)
+
+        if file_name == "__init__.py":
+            # Package init file - module name is the directory
+            module_name = os.path.basename(dir_path) if dir_path else repo
+        else:
+            # Regular module - use file name without extension
+            module_name = os.path.splitext(file_name)[0]
+
+        # Full module path (dotted notation)
+        if dir_path:
+            module_path = dir_path.replace(os.sep, ".").replace("/", ".")
+            full_module_path = f"{module_path}.{module_name}" if module_name != os.path.basename(dir_path) else module_path
+        else:
+            full_module_path = module_name
+
+        # Create Module entity for Python module
+        module_entity = self._create_python_module_entity(
+            module_name, dir_path, file_path, repo, content, full_module_path
+        )
+        entities.append(module_entity)
+
+        # Create File entity
+        file_entity = self._create_file_entity(file_path, repo, "python", content, module_name, full_module_path)
+        entities.append(file_entity)
+
+        # Create BELONGS_TO edge from File to Module
+        belongs_to_edge = CodeEdge(
+            edge_id=generate_edge_id(file_entity.entity_id, module_entity.entity_id, "BELONGS_TO"),
+            from_entity_id=file_entity.entity_id,
+            to_entity_id=module_entity.entity_id,
+            edge_type="BELONGS_TO",
+            file_path=file_path,
+            line_number=1,
+        )
+        edges.append(belongs_to_edge)
+
         # Extract imports
         for node in self._find_nodes_by_type(root, "import_statement"):
-            entities.extend(self._extract_python_import(node, source, file_path, repo))
+            imports = self._extract_python_import(node, source, file_path, repo)
+            for imp in imports:
+                imp.module_name = module_name
+                imp.module_path = full_module_path
+            entities.extend(imports)
         for node in self._find_nodes_by_type(root, "import_from_statement"):
-            entities.extend(self._extract_python_import(node, source, file_path, repo))
+            imports = self._extract_python_import(node, source, file_path, repo)
+            for imp in imports:
+                imp.module_name = module_name
+                imp.module_path = full_module_path
+            entities.extend(imports)
 
         # Extract classes
         for node in self._find_nodes_by_type(root, "class_definition"):
             entity = self._extract_python_class(node, source, file_path, repo)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
 
         # Extract functions
         for node in self._find_nodes_by_type(root, "function_definition"):
             entity = self._extract_python_function(node, source, file_path, repo)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
                 # Extract calls
                 calls = self._extract_python_calls(node, source, file_path, repo, entity)
                 edges.extend(calls)
 
         return entities, edges
+
+    def _create_python_module_entity(
+        self,
+        module_name: str,
+        dir_path: str,
+        file_path: str,
+        repo: str,
+        content: str,
+        full_module_path: str
+    ) -> CodeEntity:
+        """Create a Module entity for a Python module"""
+        import os
+
+        file_name = os.path.basename(file_path)
+        is_package = file_name == "__init__.py"
+
+        # Get module docstring if available
+        docstring = ""
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                # Found potential docstring
+                quote = '"""' if stripped.startswith('"""') else "'''"
+                if stripped.count(quote) >= 2:
+                    # Single line docstring
+                    docstring = stripped.strip(quote).strip()
+                else:
+                    # Multi-line docstring
+                    docstring_lines = [stripped.lstrip(quote)]
+                    for j in range(i + 1, min(i + 20, len(lines))):
+                        if quote in lines[j]:
+                            docstring_lines.append(lines[j].split(quote)[0])
+                            break
+                        docstring_lines.append(lines[j])
+                    docstring = " ".join(docstring_lines).strip()
+                break
+            elif stripped and not stripped.startswith('#'):
+                # Non-empty, non-comment line before docstring
+                break
+
+        # Truncate docstring
+        if len(docstring) > 200:
+            docstring = docstring[:200] + "..."
+
+        return CodeEntity(
+            entity_id=generate_entity_id(repo, file_path, module_name, "module"),
+            name=module_name,
+            entity_type="Module",
+            file_path=file_path,
+            line_start=1,
+            line_end=1,
+            language="python",
+            repo=repo,
+            signature=f"module {full_module_path}" + (" (package)" if is_package else ""),
+            docstring=docstring,
+            module_name=module_name,
+            module_path=full_module_path,
+        )
 
     def _extract_python_import(
         self,
@@ -749,6 +976,8 @@ class TreeSitterExtractor:
         language: str
     ) -> Tuple[List[CodeEntity], List[CodeEdge]]:
         """Extract entities and edges from TypeScript/JavaScript code"""
+        import os
+
         entities = []
         edges = []
 
@@ -757,37 +986,138 @@ class TreeSitterExtractor:
         root = tree.root_node
         source = content.encode()
 
+        # Calculate TypeScript/JS module from file path
+        # e.g., components/Button.tsx -> components/Button
+        dir_path = os.path.dirname(file_path)
+        file_name = os.path.basename(file_path)
+
+        # Module name is file name without extension
+        module_name = os.path.splitext(file_name)[0]
+        if module_name == "index":
+            # index files represent the directory
+            module_name = os.path.basename(dir_path) if dir_path else repo
+
+        # Full module path (using / for JS/TS conventions)
+        if dir_path:
+            full_module_path = f"{dir_path}/{module_name}"
+        else:
+            full_module_path = module_name
+
+        # Create Module entity
+        module_entity = self._create_ts_module_entity(
+            module_name, dir_path, file_path, repo, content, full_module_path, language
+        )
+        entities.append(module_entity)
+
+        # Create File entity
+        file_entity = self._create_file_entity(file_path, repo, language, content, module_name, full_module_path)
+        entities.append(file_entity)
+
+        # Create BELONGS_TO edge from File to Module
+        belongs_to_edge = CodeEdge(
+            edge_id=generate_edge_id(file_entity.entity_id, module_entity.entity_id, "BELONGS_TO"),
+            from_entity_id=file_entity.entity_id,
+            to_entity_id=module_entity.entity_id,
+            edge_type="BELONGS_TO",
+            file_path=file_path,
+            line_number=1,
+        )
+        edges.append(belongs_to_edge)
+
         # Extract imports
         for node in self._find_nodes_by_type(root, "import_statement"):
             entity = self._extract_ts_import(node, source, file_path, repo, language)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
 
         # Extract classes
         for node in self._find_nodes_by_type(root, "class_declaration"):
             entity = self._extract_ts_class(node, source, file_path, repo, language)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
 
         # Extract interfaces
         for node in self._find_nodes_by_type(root, "interface_declaration"):
             entity = self._extract_ts_interface(node, source, file_path, repo, language)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
 
         # Extract functions
         for node in self._find_nodes_by_type(root, "function_declaration"):
             entity = self._extract_ts_function(node, source, file_path, repo, language)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
 
         # Extract arrow functions (const foo = () => {})
         for node in self._find_nodes_by_type(root, "lexical_declaration"):
             entity = self._extract_ts_arrow_function(node, source, file_path, repo, language)
             if entity:
+                entity.module_name = module_name
+                entity.module_path = full_module_path
                 entities.append(entity)
 
         return entities, edges
+
+    def _create_ts_module_entity(
+        self,
+        module_name: str,
+        dir_path: str,
+        file_path: str,
+        repo: str,
+        content: str,
+        full_module_path: str,
+        language: str
+    ) -> CodeEntity:
+        """Create a Module entity for a TypeScript/JavaScript module"""
+        import os
+
+        file_name = os.path.basename(file_path)
+        is_index = module_name == "index" or file_name.startswith("index.")
+
+        # Try to extract JSDoc comment at top of file
+        docstring = ""
+        lines = content.split('\n')
+        if lines and lines[0].strip().startswith('/**'):
+            # Found JSDoc at start
+            docstring_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith('/**'):
+                    docstring_lines.append(stripped.lstrip('/**').strip())
+                elif stripped.startswith('*/'):
+                    break
+                elif stripped.startswith('*'):
+                    docstring_lines.append(stripped.lstrip('* ').strip())
+                else:
+                    docstring_lines.append(stripped)
+            docstring = " ".join(docstring_lines).strip()
+
+        # Truncate docstring
+        if len(docstring) > 200:
+            docstring = docstring[:200] + "..."
+
+        return CodeEntity(
+            entity_id=generate_entity_id(repo, file_path, module_name, "module"),
+            name=module_name,
+            entity_type="Module",
+            file_path=file_path,
+            line_start=1,
+            line_end=1,
+            language=language,
+            repo=repo,
+            signature=f"module {full_module_path}" + (" (index)" if is_index else ""),
+            docstring=docstring,
+            module_name=module_name,
+            module_path=full_module_path,
+        )
 
     def _extract_ts_import(
         self,
