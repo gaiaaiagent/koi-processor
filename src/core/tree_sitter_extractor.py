@@ -6,6 +6,7 @@ Supports:
 - Go: functions, structs, interfaces, methods, imports
 - TypeScript: functions, classes, interfaces, imports
 - Python: functions, classes, imports
+- Proto: messages, services, RPCs, enums (regex-based, for Cosmos SDK cross-language linking)
 
 Phase 1 Goals:
 - Extract entities with full metadata (signature, params, return type)
@@ -13,9 +14,17 @@ Phase 1 Goals:
 - Extract IMPORTS edges (module dependencies)
 - Extract IMPLEMENTS edges (interface implementations)
 - Deterministic node IDs for idempotent extraction
+
+Proto Support (for Cosmos SDK / Regen Network):
+- ProtoMessage: message definitions (e.g., MsgCreateBatch)
+- ProtoService: service definitions (e.g., Msg, Query)
+- ProtoRPC: RPC method definitions
+- ProtoEnum: enum definitions
+- Enables cross-language linking: proto -> Go structs, TypeScript types
 """
 
 import hashlib
+import re
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from loguru import logger
@@ -32,7 +41,8 @@ class CodeEntity:
     """Represents an extracted code entity"""
     entity_id: str           # Deterministic hash ID
     name: str
-    entity_type: str         # Function, Struct, Interface, Method, Class, Keeper, Message, Module, File
+    entity_type: str         # Function, Struct, Interface, Method, Class, Keeper, Message, Module, File,
+                             # ProtoMessage, ProtoService, ProtoRPC, ProtoEnum
     file_path: str
     line_start: int
     line_end: int
@@ -53,11 +63,19 @@ class CodeEntity:
 
 @dataclass
 class CodeEdge:
-    """Represents a relationship between entities"""
+    """Represents a relationship between entities
+
+    Edge types:
+    - CALLS: Function/method calls another function/method
+    - IMPORTS: File/module imports another module
+    - IMPLEMENTS: Struct/class implements an interface
+    - BELONGS_TO: File belongs to a module/package
+    - CONTAINS: File/Module contains a Function, Class, or Method
+    """
     edge_id: str             # Deterministic hash ID
     from_entity_id: str
     to_entity_id: str
-    edge_type: str           # CALLS, IMPORTS, IMPLEMENTS
+    edge_type: str           # CALLS, IMPORTS, IMPLEMENTS, BELONGS_TO, CONTAINS
     file_path: str
     line_number: int
 
@@ -114,6 +132,8 @@ class TreeSitterExtractor:
             return self._extract_python(content, file_path, repo)
         elif language in ("typescript", "javascript", "tsx"):
             return self._extract_typescript(content, file_path, repo, language)
+        elif language == "proto":
+            return self._extract_proto(content, file_path, repo)
         else:
             logger.warning(f"Unsupported language: {language}")
             return [], []
@@ -187,6 +207,17 @@ class TreeSitterExtractor:
                 entities.append(entity)
                 entity_map[entity.name] = entity
 
+                # Create CONTAINS edge from File to type (Struct/Interface/Keeper/Message/Query)
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
+
         # Extract function declarations
         for node in self._find_nodes_by_type(root, "function_declaration"):
             entity = self._extract_go_function(node, source, file_path, repo)
@@ -195,6 +226,17 @@ class TreeSitterExtractor:
                 entity.module_path = module_path
                 entities.append(entity)
                 entity_map[entity.name] = entity
+
+                # Create CONTAINS edge from File to Function
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
 
                 # Extract CALLS edges from function body
                 calls = self._extract_go_calls(node, source, file_path, repo, entity)
@@ -210,6 +252,17 @@ class TreeSitterExtractor:
                 # Use receiver.method as key
                 method_key = f"{entity.receiver_type}.{entity.name}"
                 entity_map[method_key] = entity
+
+                # Create CONTAINS edge from File to Method
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
 
                 # Extract CALLS edges from method body
                 calls = self._extract_go_calls(node, source, file_path, repo, entity)
@@ -706,6 +759,17 @@ class TreeSitterExtractor:
                 entity.module_path = full_module_path
                 entities.append(entity)
 
+                # Create CONTAINS edge from File to Class
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
+
         # Extract functions
         for node in self._find_nodes_by_type(root, "function_definition"):
             entity = self._extract_python_function(node, source, file_path, repo)
@@ -713,6 +777,18 @@ class TreeSitterExtractor:
                 entity.module_name = module_name
                 entity.module_path = full_module_path
                 entities.append(entity)
+
+                # Create CONTAINS edge from File to Function
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
+
                 # Extract calls
                 calls = self._extract_python_calls(node, source, file_path, repo, entity)
                 edges.extend(calls)
@@ -1040,6 +1116,17 @@ class TreeSitterExtractor:
                 entity.module_path = full_module_path
                 entities.append(entity)
 
+                # Create CONTAINS edge from File to Class
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
+
         # Extract interfaces
         for node in self._find_nodes_by_type(root, "interface_declaration"):
             entity = self._extract_ts_interface(node, source, file_path, repo, language)
@@ -1047,6 +1134,17 @@ class TreeSitterExtractor:
                 entity.module_name = module_name
                 entity.module_path = full_module_path
                 entities.append(entity)
+
+                # Create CONTAINS edge from File to Interface
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
 
         # Extract functions
         for node in self._find_nodes_by_type(root, "function_declaration"):
@@ -1056,6 +1154,17 @@ class TreeSitterExtractor:
                 entity.module_path = full_module_path
                 entities.append(entity)
 
+                # Create CONTAINS edge from File to Function
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
+
         # Extract arrow functions (const foo = () => {})
         for node in self._find_nodes_by_type(root, "lexical_declaration"):
             entity = self._extract_ts_arrow_function(node, source, file_path, repo, language)
@@ -1063,6 +1172,17 @@ class TreeSitterExtractor:
                 entity.module_name = module_name
                 entity.module_path = full_module_path
                 entities.append(entity)
+
+                # Create CONTAINS edge from File to arrow Function
+                contains_edge = CodeEdge(
+                    edge_id=generate_edge_id(file_entity.entity_id, entity.entity_id, "CONTAINS"),
+                    from_entity_id=file_entity.entity_id,
+                    to_entity_id=entity.entity_id,
+                    edge_type="CONTAINS",
+                    file_path=file_path,
+                    line_number=entity.line_start,
+                )
+                edges.append(contains_edge)
 
         return entities, edges
 
@@ -1330,6 +1450,522 @@ class TreeSitterExtractor:
 
         return ""
 
+    # ============= PROTO EXTRACTION =============
+
+    def _extract_proto(
+        self,
+        content: str,
+        file_path: str,
+        repo: str
+    ) -> Tuple[List[CodeEntity], List[CodeEdge]]:
+        """
+        Extract entities and edges from Protocol Buffer (.proto) files.
+
+        Uses regex-based parsing since tree-sitter-proto is not commonly available.
+        Extracts:
+        - ProtoMessage: message definitions (e.g., MsgCreateBatch)
+        - ProtoService: service definitions (e.g., Msg, Query)
+        - ProtoRPC: RPC method definitions within services
+        - ProtoEnum: enum definitions
+
+        This enables cross-language linking for Cosmos SDK which heavily uses proto
+        definitions that generate Go, Python, and TypeScript code.
+        """
+        import os
+
+        entities = []
+        edges = []
+
+        lines = content.split('\n')
+
+        # Extract package name
+        package_name = self._extract_proto_package(content)
+
+        # Calculate module path from file_path
+        dir_path = os.path.dirname(file_path)
+        module_path = f"{repo}/{dir_path}" if dir_path else repo
+
+        # Create Module entity for the proto package
+        if package_name:
+            module_entity = CodeEntity(
+                entity_id=generate_entity_id(repo, dir_path, package_name, "proto_module"),
+                name=package_name,
+                entity_type="Module",
+                file_path=file_path,
+                line_start=1,
+                line_end=1,
+                language="proto",
+                repo=repo,
+                signature=f"package {package_name}",
+                docstring=f"Protocol Buffer package: {package_name}",
+                module_name=package_name,
+                module_path=module_path,
+            )
+            entities.append(module_entity)
+
+        # Create File entity
+        file_entity = self._create_file_entity(file_path, repo, "proto", content, package_name or "", module_path)
+        entities.append(file_entity)
+
+        # Create BELONGS_TO edge from File to Module
+        if package_name:
+            module_id = generate_entity_id(repo, dir_path, package_name, "proto_module")
+            belongs_to_edge = CodeEdge(
+                edge_id=generate_edge_id(file_entity.entity_id, module_id, "BELONGS_TO"),
+                from_entity_id=file_entity.entity_id,
+                to_entity_id=module_id,
+                edge_type="BELONGS_TO",
+                file_path=file_path,
+                line_number=1,
+            )
+            edges.append(belongs_to_edge)
+
+        # Extract messages
+        message_entities, message_edges = self._extract_proto_messages(content, lines, file_path, repo, package_name, module_path)
+        entities.extend(message_entities)
+        edges.extend(message_edges)
+
+        # Extract services and RPCs
+        service_entities, service_edges = self._extract_proto_services(content, lines, file_path, repo, package_name, module_path)
+        entities.extend(service_entities)
+        edges.extend(service_edges)
+
+        # Extract enums
+        enum_entities = self._extract_proto_enums(content, lines, file_path, repo, package_name, module_path)
+        entities.extend(enum_entities)
+
+        return entities, edges
+
+    def _extract_proto_package(self, content: str) -> str:
+        """Extract package name from proto file"""
+        # Match: package regen.ecocredit.v1;
+        match = re.search(r'^\s*package\s+([\w.]+)\s*;', content, re.MULTILINE)
+        if match:
+            return match.group(1)
+        return ""
+
+    def _extract_proto_messages(
+        self,
+        content: str,
+        lines: List[str],
+        file_path: str,
+        repo: str,
+        package_name: str,
+        module_path: str
+    ) -> Tuple[List[CodeEntity], List[CodeEdge]]:
+        """
+        Extract message definitions from proto file.
+
+        Matches patterns like:
+        - message MsgCreateBatch { ... }
+        - message MsgCreateBatchResponse { ... }
+        """
+        entities = []
+        edges = []
+
+        # Regex to find message definitions with their position
+        # Handles comments above the message
+        message_pattern = re.compile(
+            r'(?:(?:^//[^\n]*\n)*)?'  # Optional leading comments
+            r'^\s*message\s+(\w+)\s*\{',
+            re.MULTILINE
+        )
+
+        for match in message_pattern.finditer(content):
+            name = match.group(1)
+            start_pos = match.start()
+
+            # Calculate line number
+            line_start = content[:start_pos].count('\n') + 1
+
+            # Find the closing brace to get line_end
+            # Simple brace matching (handles nested braces)
+            line_end = self._find_closing_brace_line(content, match.end() - 1, line_start)
+
+            # Get the comment/docstring above (if any)
+            docstring = self._get_proto_comment(lines, line_start - 1)
+
+            # Get the full message definition for signature
+            signature = self._get_proto_block_signature(lines, line_start - 1, line_end - 1, "message", name)
+
+            # Determine entity subtype based on naming conventions
+            entity_type = "ProtoMessage"
+
+            entity = CodeEntity(
+                entity_id=generate_entity_id(repo, file_path, name, "proto_message"),
+                name=name,
+                entity_type=entity_type,
+                file_path=file_path,
+                line_start=line_start,
+                line_end=line_end,
+                language="proto",
+                repo=repo,
+                signature=signature,
+                docstring=docstring,
+                module_name=package_name,
+                module_path=module_path,
+            )
+            entities.append(entity)
+
+            # Extract fields and create edges to referenced types
+            field_edges = self._extract_proto_message_fields(content, match.end() - 1, line_start, entity, file_path, repo)
+            edges.extend(field_edges)
+
+        return entities, edges
+
+    def _extract_proto_services(
+        self,
+        content: str,
+        lines: List[str],
+        file_path: str,
+        repo: str,
+        package_name: str,
+        module_path: str
+    ) -> Tuple[List[CodeEntity], List[CodeEdge]]:
+        """
+        Extract service definitions and their RPC methods from proto file.
+
+        Matches patterns like:
+        - service Msg { ... }
+        - service Query { ... }
+        - rpc CreateBatch(MsgCreateBatch) returns (MsgCreateBatchResponse);
+        """
+        entities = []
+        edges = []
+
+        # Find service definitions
+        service_pattern = re.compile(
+            r'(?:(?:^//[^\n]*\n)*)?'  # Optional leading comments
+            r'^\s*service\s+(\w+)\s*\{',
+            re.MULTILINE
+        )
+
+        for service_match in service_pattern.finditer(content):
+            service_name = service_match.group(1)
+            start_pos = service_match.start()
+
+            # Calculate line numbers
+            line_start = content[:start_pos].count('\n') + 1
+            line_end = self._find_closing_brace_line(content, service_match.end() - 1, line_start)
+
+            # Get docstring
+            docstring = self._get_proto_comment(lines, line_start - 1)
+
+            # Get signature
+            signature = self._get_proto_block_signature(lines, line_start - 1, line_end - 1, "service", service_name)
+
+            service_entity = CodeEntity(
+                entity_id=generate_entity_id(repo, file_path, service_name, "proto_service"),
+                name=service_name,
+                entity_type="ProtoService",
+                file_path=file_path,
+                line_start=line_start,
+                line_end=line_end,
+                language="proto",
+                repo=repo,
+                signature=signature,
+                docstring=docstring,
+                module_name=package_name,
+                module_path=module_path,
+            )
+            entities.append(service_entity)
+
+            # Extract RPCs within this service
+            # Get the service body content
+            service_body_start = service_match.end()
+            service_body_end = self._find_closing_brace_pos(content, service_match.end() - 1)
+            service_body = content[service_body_start:service_body_end]
+
+            rpc_entities, rpc_edges = self._extract_proto_rpcs(
+                service_body,
+                service_body_start,
+                lines,
+                file_path,
+                repo,
+                service_entity,
+                package_name,
+                module_path,
+                content
+            )
+            entities.extend(rpc_entities)
+            edges.extend(rpc_edges)
+
+        return entities, edges
+
+    def _extract_proto_rpcs(
+        self,
+        service_body: str,
+        body_start_pos: int,
+        lines: List[str],
+        file_path: str,
+        repo: str,
+        service_entity: CodeEntity,
+        package_name: str,
+        module_path: str,
+        full_content: str
+    ) -> Tuple[List[CodeEntity], List[CodeEdge]]:
+        """Extract RPC definitions from a service body"""
+        entities = []
+        edges = []
+
+        # RPC pattern: rpc MethodName(RequestType) returns (ResponseType) { ... } or ;
+        rpc_pattern = re.compile(
+            r'(?:(?://[^\n]*\n\s*)*)?'  # Optional leading comments
+            r'rpc\s+(\w+)\s*\(\s*(\w+)\s*\)\s*returns\s*\(\s*(\w+)\s*\)',
+            re.MULTILINE
+        )
+
+        for rpc_match in rpc_pattern.finditer(service_body):
+            rpc_name = rpc_match.group(1)
+            request_type = rpc_match.group(2)
+            response_type = rpc_match.group(3)
+
+            # Calculate absolute position and line number
+            abs_pos = body_start_pos + rpc_match.start()
+            line_start = full_content[:abs_pos].count('\n') + 1
+
+            # RPC is typically single line or few lines
+            line_end = line_start + rpc_match.group(0).count('\n')
+
+            # Get docstring
+            docstring = self._get_proto_comment(lines, line_start - 1)
+
+            # Build signature
+            signature = f"rpc {rpc_name}({request_type}) returns ({response_type})"
+
+            rpc_entity = CodeEntity(
+                entity_id=generate_entity_id(repo, file_path, f"{service_entity.name}.{rpc_name}", "proto_rpc"),
+                name=rpc_name,
+                entity_type="ProtoRPC",
+                file_path=file_path,
+                line_start=line_start,
+                line_end=line_end,
+                language="proto",
+                repo=repo,
+                signature=signature,
+                params=request_type,
+                return_type=response_type,
+                docstring=docstring,
+                receiver_type=service_entity.name,  # Use receiver_type to store service name
+                module_name=package_name,
+                module_path=module_path,
+            )
+            entities.append(rpc_entity)
+
+            # Create BELONGS_TO edge from RPC to Service
+            belongs_edge = CodeEdge(
+                edge_id=generate_edge_id(rpc_entity.entity_id, service_entity.entity_id, "BELONGS_TO"),
+                from_entity_id=rpc_entity.entity_id,
+                to_entity_id=service_entity.entity_id,
+                edge_type="BELONGS_TO",
+                file_path=file_path,
+                line_number=line_start,
+            )
+            edges.append(belongs_edge)
+
+            # Create USES edges to request/response message types
+            # These will be resolved later when linking across entities
+            uses_request_edge = CodeEdge(
+                edge_id=generate_edge_id(rpc_entity.entity_id, request_type, "USES"),
+                from_entity_id=rpc_entity.entity_id,
+                to_entity_id=request_type,  # Will be resolved to actual entity ID later
+                edge_type="USES",
+                file_path=file_path,
+                line_number=line_start,
+            )
+            edges.append(uses_request_edge)
+
+            uses_response_edge = CodeEdge(
+                edge_id=generate_edge_id(rpc_entity.entity_id, response_type, "USES"),
+                from_entity_id=rpc_entity.entity_id,
+                to_entity_id=response_type,  # Will be resolved to actual entity ID later
+                edge_type="USES",
+                file_path=file_path,
+                line_number=line_start,
+            )
+            edges.append(uses_response_edge)
+
+        return entities, edges
+
+    def _extract_proto_enums(
+        self,
+        content: str,
+        lines: List[str],
+        file_path: str,
+        repo: str,
+        package_name: str,
+        module_path: str
+    ) -> List[CodeEntity]:
+        """Extract enum definitions from proto file"""
+        entities = []
+
+        # Enum pattern: enum EnumName { ... }
+        enum_pattern = re.compile(
+            r'(?:(?:^//[^\n]*\n)*)?'  # Optional leading comments
+            r'^\s*enum\s+(\w+)\s*\{',
+            re.MULTILINE
+        )
+
+        for match in enum_pattern.finditer(content):
+            name = match.group(1)
+            start_pos = match.start()
+
+            line_start = content[:start_pos].count('\n') + 1
+            line_end = self._find_closing_brace_line(content, match.end() - 1, line_start)
+
+            docstring = self._get_proto_comment(lines, line_start - 1)
+            signature = self._get_proto_block_signature(lines, line_start - 1, line_end - 1, "enum", name)
+
+            entity = CodeEntity(
+                entity_id=generate_entity_id(repo, file_path, name, "proto_enum"),
+                name=name,
+                entity_type="ProtoEnum",
+                file_path=file_path,
+                line_start=line_start,
+                line_end=line_end,
+                language="proto",
+                repo=repo,
+                signature=signature,
+                docstring=docstring,
+                module_name=package_name,
+                module_path=module_path,
+            )
+            entities.append(entity)
+
+        return entities
+
+    def _extract_proto_message_fields(
+        self,
+        content: str,
+        brace_pos: int,
+        line_start: int,
+        message_entity: CodeEntity,
+        file_path: str,
+        repo: str
+    ) -> List[CodeEdge]:
+        """
+        Extract field references from a message body.
+        Creates USES edges to referenced message types.
+        """
+        edges = []
+
+        # Find the message body
+        end_pos = self._find_closing_brace_pos(content, brace_pos)
+        if end_pos == -1:
+            return edges
+
+        body = content[brace_pos + 1:end_pos]
+
+        # Field pattern: [repeated] TypeName field_name = N;
+        # Also matches: map<KeyType, ValueType> field_name = N;
+        field_pattern = re.compile(
+            r'(?:repeated\s+)?'  # Optional repeated
+            r'(?:map<\s*\w+\s*,\s*(\w+)\s*>|(\w+))'  # Type (map or simple)
+            r'\s+\w+\s*=',  # field_name =
+            re.MULTILINE
+        )
+
+        seen_types = set()
+        for field_match in field_pattern.finditer(body):
+            # Get the type (either from map value type or simple type)
+            field_type = field_match.group(1) or field_match.group(2)
+
+            # Skip primitive types
+            primitive_types = {
+                'string', 'bytes', 'bool', 'int32', 'int64', 'uint32', 'uint64',
+                'sint32', 'sint64', 'fixed32', 'fixed64', 'sfixed32', 'sfixed64',
+                'float', 'double', 'google', 'any'  # google.protobuf types handled separately
+            }
+
+            if field_type.lower() in primitive_types:
+                continue
+
+            # Avoid duplicate edges
+            if field_type in seen_types:
+                continue
+            seen_types.add(field_type)
+
+            # Create USES edge to the referenced type
+            edge = CodeEdge(
+                edge_id=generate_edge_id(message_entity.entity_id, field_type, "USES"),
+                from_entity_id=message_entity.entity_id,
+                to_entity_id=field_type,  # Will be resolved later
+                edge_type="USES",
+                file_path=file_path,
+                line_number=line_start,
+            )
+            edges.append(edge)
+
+        return edges
+
+    def _find_closing_brace_line(self, content: str, start_pos: int, start_line: int) -> int:
+        """Find the line number of the closing brace for a block"""
+        end_pos = self._find_closing_brace_pos(content, start_pos)
+        if end_pos == -1:
+            return start_line
+        return content[:end_pos + 1].count('\n') + 1
+
+    def _find_closing_brace_pos(self, content: str, start_pos: int) -> int:
+        """Find the position of the closing brace for a block, handling nesting"""
+        brace_count = 1
+        pos = start_pos + 1
+
+        while pos < len(content) and brace_count > 0:
+            if content[pos] == '{':
+                brace_count += 1
+            elif content[pos] == '}':
+                brace_count -= 1
+            pos += 1
+
+        return pos - 1 if brace_count == 0 else -1
+
+    def _get_proto_comment(self, lines: List[str], target_line_idx: int) -> str:
+        """Get comment(s) above a proto definition"""
+        comments = []
+        idx = target_line_idx - 1
+
+        while idx >= 0:
+            line = lines[idx].strip()
+            if line.startswith('//'):
+                comment_text = line.lstrip('/ ').strip()
+                comments.insert(0, comment_text)
+                idx -= 1
+            elif line == '':
+                # Skip empty lines
+                idx -= 1
+            else:
+                break
+
+        return ' '.join(comments)
+
+    def _get_proto_block_signature(
+        self,
+        lines: List[str],
+        start_idx: int,
+        end_idx: int,
+        block_type: str,
+        name: str
+    ) -> str:
+        """Get a compact signature for a proto block"""
+        if start_idx < 0 or start_idx >= len(lines):
+            return f"{block_type} {name}"
+
+        # Get first line with the definition
+        first_line = lines[start_idx].strip()
+
+        # If it's a short block (single line or few lines), include more
+        if end_idx - start_idx <= 5:
+            block_lines = [lines[i].strip() for i in range(start_idx, min(end_idx + 1, len(lines)))]
+            signature = ' '.join(block_lines)
+            # Normalize whitespace
+            signature = ' '.join(signature.split())
+            if len(signature) > 300:
+                signature = signature[:300] + "..."
+            return signature
+
+        # For longer blocks, just return first line
+        return first_line
+
 
 # ============= TESTING =============
 
@@ -1380,6 +2016,99 @@ func (k Keeper) CreateBatch(ctx context.Context, msg *MsgCreateBatch) (*MsgCreat
         if e.docstring:
             print(f"    Docstring: {e.docstring[:50]}...")
 
-    print(f"\nExtracted {len(edges)} CALLS edges:")
+    print(f"\nExtracted {len(edges)} edges:")
     for edge in edges:
-        print(f"  - {edge.from_entity_id[:8]}... CALLS {edge.to_entity_id} (line {edge.line_number})")
+        print(f"  - {edge.edge_type}: {edge.from_entity_id[:8]}... -> {edge.to_entity_id[:16] if len(edge.to_entity_id) > 16 else edge.to_entity_id} (line {edge.line_number})")
+
+    # Count edge types
+    edge_types = {}
+    for edge in edges:
+        edge_types[edge.edge_type] = edge_types.get(edge.edge_type, 0) + 1
+    print(f"\nEdge type summary: {edge_types}")
+
+    # Test Proto extraction
+    proto_code = '''
+syntax = "proto3";
+
+package regen.ecocredit.v1;
+
+option go_package = "github.com/regen-network/regen-ledger/api/regen/ecocredit/v1";
+
+import "cosmos/base/v1beta1/coin.proto";
+import "google/protobuf/timestamp.proto";
+
+// BatchIssuance represents a credit batch issuance
+message BatchIssuance {
+  string recipient = 1;
+  string tradable_amount = 2;
+  string retired_amount = 3;
+  string retirement_jurisdiction = 4;
+}
+
+// MsgCreateBatch is the Msg/CreateBatch request type.
+message MsgCreateBatch {
+  string issuer = 1;
+  string project_id = 2;
+  repeated BatchIssuance issuance = 3;
+  string metadata = 4;
+  google.protobuf.Timestamp start_date = 5;
+  google.protobuf.Timestamp end_date = 6;
+  bool open = 7;
+  string origin_tx = 8;
+}
+
+// MsgCreateBatchResponse is the Msg/CreateBatch response type.
+message MsgCreateBatchResponse {
+  string batch_denom = 1;
+}
+
+// BatchState represents the state of a credit batch
+enum BatchState {
+  BATCH_STATE_UNSPECIFIED = 0;
+  BATCH_STATE_OPEN = 1;
+  BATCH_STATE_SEALED = 2;
+}
+
+// Msg is the regen.ecocredit.v1 Msg service.
+service Msg {
+  // CreateBatch creates a new credit batch.
+  rpc CreateBatch(MsgCreateBatch) returns (MsgCreateBatchResponse);
+
+  // Send sends credits from one account to another.
+  rpc Send(MsgSend) returns (MsgSendResponse);
+}
+
+// Query is the regen.ecocredit.v1 Query service.
+service Query {
+  // Batches queries all credit batches.
+  rpc Batches(QueryBatchesRequest) returns (QueryBatchesResponse);
+}
+'''
+
+    print("\n\n=== Testing Proto Extraction ===")
+    proto_entities, proto_edges = extractor.extract("proto", proto_code, "proto/regen/ecocredit/v1/tx.proto", "regen-ledger")
+
+    print(f"\nExtracted {len(proto_entities)} entities:")
+    for e in proto_entities:
+        print(f"  - {e.entity_type}: {e.name} (lines {e.line_start}-{e.line_end})")
+        if e.receiver_type:
+            print(f"    Service: {e.receiver_type}")
+        if e.params:
+            print(f"    Request: {e.params}, Response: {e.return_type}")
+
+    print(f"\nExtracted {len(proto_edges)} edges:")
+    for edge in proto_edges:
+        to_display = edge.to_entity_id[:16] if len(edge.to_entity_id) > 16 else edge.to_entity_id
+        print(f"  - {edge.edge_type}: {edge.from_entity_id[:8]}... -> {to_display}")
+
+    # Count entity types
+    entity_types = {}
+    for e in proto_entities:
+        entity_types[e.entity_type] = entity_types.get(e.entity_type, 0) + 1
+    print(f"\nEntity type summary: {entity_types}")
+
+    # Count edge types
+    proto_edge_types = {}
+    for edge in proto_edges:
+        proto_edge_types[edge.edge_type] = proto_edge_types.get(edge.edge_type, 0) + 1
+    print(f"Edge type summary: {proto_edge_types}")
