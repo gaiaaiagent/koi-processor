@@ -65,22 +65,44 @@ CODE_FILE_EXTENSIONS = {
     '.proto',  # Protocol buffers
 }
 
-def should_skip_kg_extraction(metadata: dict) -> bool:
+def should_skip_kg_extraction(metadata: dict, rid: str = '') -> bool:
     """Check if KG extraction should be skipped for this content.
     
     Returns True for code files where semantic entity extraction
     provides little value. These files are still chunked and embedded
     for code search - just not processed for KG entities/statements.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     source_type = metadata.get('source_type', '')
     file_type = metadata.get('file_type', '')
     
-    if source_type == 'github':
+    # Also detect file extension from RID (more reliable)
+    rid_extension = ''
+    if rid:
+        # Extract extension from RID like regen.github:github_repo_path_file.py
+        import re
+        ext_match = re.search(r'\.(\w+)(?:#|$)', rid)
+        if ext_match:
+            rid_extension = '.' + ext_match.group(1)
+    
+    # Check if it's a github source (from metadata or RID pattern)
+    is_github = source_type == 'github' or 'github' in rid.lower()
+    
+    logger.info(f"[KG Filter] rid={rid[-50:]}, source_type={source_type}, file_type={file_type}, rid_ext={rid_extension}, is_github={is_github}")
+    
+    if is_github:
+        # Use file_type from metadata, or fall back to RID extension
+        ext = file_type or rid_extension
+        
         # Allow markdown and documentation files
-        if file_type in {'.md', '.mdx', '.rst', '.txt'}:
+        if ext in {'.md', '.mdx', '.rst', '.txt'}:
+            logger.info(f"[KG Filter] ALLOW doc file: {ext}")
             return False
         # Skip code files
-        if file_type in CODE_FILE_EXTENSIONS:
+        if ext in CODE_FILE_EXTENSIONS:
+            logger.info(f"[KG Filter] SKIP code file: {ext}")
             return True
     
     return False
@@ -761,7 +783,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
 
             # Trigger KG extraction on the full document (not chunks)
             # Only extract from NEW or UPDATE events with sufficient content
-            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100 and not should_skip_kg_extraction(event.bundle.manifest.metadata):
+            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100 and not should_skip_kg_extraction(event.bundle.manifest.metadata, event.bundle.rid):
                 # Build metadata for KG extraction
                 kg_metadata = {
                     'source_url': source_url or event.bundle.manifest.metadata.get('url'),
