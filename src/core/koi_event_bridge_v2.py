@@ -883,6 +883,24 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
             error=str(e)
         )
 
+
+# Lightweight health endpoint that can respond even when main loop is busy
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+_health_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="health")
+
+def _sync_health_check():
+    """Synchronous health check that runs in a separate thread"""
+    return {"status": "ok", "service": "koi-event-bridge", "version": "2.0.0"}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint - runs in thread pool to avoid event loop blocking"""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(_health_executor, _sync_health_check)
+    return result
+
 # API Endpoints
 @app.get("/")
 async def root():

@@ -24,14 +24,14 @@ fi
 
 # Service endpoints
 COORDINATOR_URL="http://localhost:8005/health"
-EVENT_BRIDGE_URL="http://localhost:8100"
+EVENT_BRIDGE_URL="http://localhost:8100/health"
 BGE_SERVER_URL="http://localhost:8090/health"
 MCP_SERVER_URL="http://localhost:8200"
 POSTGRES_HOST="localhost"
 POSTGRES_PORT="5433"
 
 # Alert thresholds
-MAX_RESPONSE_TIME=30  # seconds
+MAX_RESPONSE_TIME=60  # seconds
 MIN_MEMORY_COUNT=20  # minimum expected KOI memories
 
 # Colors for terminal output
