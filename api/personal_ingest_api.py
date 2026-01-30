@@ -26,12 +26,35 @@ import hashlib
 import httpx
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
+from enum import Enum
+from dataclasses import dataclass
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import logging
 import uuid
+from metaphone import doublemetaphone
+
+# Import vault relationship parser
+from api.vault_parser import (
+    sync_vault_relationships,
+    resolve_pending_relationships,
+    get_entity_relationships,
+    check_relationship_exists,
+    SYMMETRIC_PREDICATES,
+)
+
+# Import schema loader
+from api.entity_schema import (
+    get_entity_schemas,
+    get_schema_for_type,
+    get_schema_version,
+    reload_entity_schemas,
+    get_first_significant_token,
+    get_phonetic_enabled_types,
+    EntityTypeConfig,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -60,17 +83,10 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-ada-002')
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 
-# Semantic similarity thresholds by entity type (Tier 2)
-# Same as production entity_resolver.py
-SEMANTIC_THRESHOLDS = {
-    'Person': 0.92,
-    'Organization': 0.95,
-    'Project': 0.93,
-    'Location': 0.95,
-    'Concept': 0.90,
-    'Event': 0.94,
-    'Technology': 0.93,
-}
+# DEPRECATED: These are now loaded from vault schemas via entity_schema.py
+# Kept as fallback comments for reference
+# SEMANTIC_THRESHOLDS = loaded from schema.semantic_threshold
+# SIMILARITY_THRESHOLDS = loaded from schema.similarity_threshold
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
@@ -99,6 +115,16 @@ class ExtractedRelationship(BaseModel):
     confidence: float = 0.9
 
 
+class ResolutionContext(BaseModel):
+    """Context for entity resolution disambiguation"""
+    associated_people: Optional[List[str]] = None
+    project: Optional[str] = None           # Meeting project name for relationship matching
+    organizations: Optional[List[str]] = None  # Mentioned organizations for relationship matching
+    topics: Optional[List[str]] = None      # Topics for future use
+    associated_orgs: Optional[List[str]] = None  # Deprecated: use organizations instead
+    source_text: Optional[str] = None  # Reserved for future use
+
+
 class IngestRequest(BaseModel):
     """Request to ingest extracted entities"""
     document_rid: str  # e.g., "vault:notes/salish-sea-herring"
@@ -106,6 +132,7 @@ class IngestRequest(BaseModel):
     entities: List[ExtractedEntity]
     relationships: List[ExtractedRelationship] = []
     source: str = "obsidian-vault"
+    context: Optional[ResolutionContext] = None  # For contextual entity resolution
 
 
 class CanonicalEntity(BaseModel):
@@ -124,6 +151,46 @@ class IngestResponse(BaseModel):
     canonical_entities: List[CanonicalEntity]
     receipt_rid: str
     stats: Dict[str, int]
+
+
+class RegisterEntityRequest(BaseModel):
+    """Request to register a vault entity"""
+    vault_rid: str  # e.g., "orn:obsidian.entity:Notes/Person/clare-attwell"
+    vault_path: str  # e.g., "People/Clare Attwell.md"
+    entity_type: str  # Person, Organization, etc.
+    name: str
+    properties: Dict[str, Any] = {}
+    frontmatter: Optional[Dict[str, Any]] = None  # YAML frontmatter for relationship extraction
+    content_hash: str
+
+
+class RegisterEntityResponse(BaseModel):
+    """Response from register-entity endpoint"""
+    success: bool
+    canonical_uri: str
+    is_new: bool
+    vault_rid: str
+    merged_with: Optional[str] = None
+
+
+class VaultEntityMapping(BaseModel):
+    """Mapping between vault RID and canonical entity"""
+    vault_rid: str
+    vault_path: str
+    canonical_uri: str
+    entity_type: str
+    name: str
+    sync_status: str  # linked, local_only, pending_sync, conflict
+    content_hash: str
+    last_synced: str
+
+
+class ResolveRequest(BaseModel):
+    """Request to resolve an entity with optional context"""
+    label: str
+    type_hint: Optional[str] = None
+    limit: int = 5
+    context: Optional[ResolutionContext] = None
 
 
 # =============================================================================
@@ -170,6 +237,25 @@ def normalize_entity_text(text: str) -> str:
         .replace('  ', ' ')
         .lstrip('@')
     )
+
+
+def get_phonetic_code(text: str) -> Optional[str]:
+    """
+    Get Double Metaphone code for first token of text.
+
+    Uses first token only to handle cases like "Mihal" vs "Mehul Sangham"
+    where full-name comparison would fail but first-token matches.
+    """
+    if not text:
+        return None
+    first_token = text.split()[0]
+    codes = doublemetaphone(first_token)
+    return codes[0] if codes[0] else codes[1]  # Primary or secondary
+
+
+def phonetic_codes_match(code1: Optional[str], code2: Optional[str]) -> bool:
+    """Check if two phonetic codes match (both must be non-empty)."""
+    return bool(code1 and code2 and code1 == code2)
 
 
 def jaro_winkler_similarity(s1: str, s2: str) -> float:
@@ -233,27 +319,251 @@ def jaro_winkler_similarity(s1: str, s2: str) -> float:
     return jaro + prefix_len * 0.1 * (1 - jaro)
 
 
-# Type-specific similarity thresholds
-SIMILARITY_THRESHOLDS = {
-    'Person': 0.92,
-    'Organization': 0.85,
-    'Location': 0.80,
-    'Project': 0.80,
-    'Concept': 0.75,
-}
+# DEPRECATED: Similarity thresholds now loaded from schema
+# See entity_schema.py get_schema_for_type() for schema-driven thresholds
+
+# Token overlap constants (not type-specific, just thresholds)
+MIN_TOKEN_OVERLAP_RATIO = 0.5  # At least 50% of shorter entity's tokens must match
+MIN_TOKEN_OVERLAP_COUNT = 2    # At least 2 tokens must match (for 2+ token entities)
+
+
+def compute_token_overlap(text1: str, text2: str) -> Tuple[float, int]:
+    """
+    Compute token (word) overlap between two texts.
+
+    Returns: (overlap_ratio, overlap_count)
+    - overlap_ratio: proportion of shorter text's tokens found in longer text
+    - overlap_count: number of matching tokens
+    """
+    tokens1 = set(text1.lower().split())
+    tokens2 = set(text2.lower().split())
+
+    # Find intersection
+    overlap = tokens1 & tokens2
+    overlap_count = len(overlap)
+
+    # Compute ratio based on shorter text
+    shorter_len = min(len(tokens1), len(tokens2))
+    if shorter_len == 0:
+        return 0.0, 0
+
+    overlap_ratio = overlap_count / shorter_len
+    return overlap_ratio, overlap_count
+
+
+def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool:
+    """
+    Check if two texts pass the token overlap requirement.
+
+    For types with require_token_overlap=True in schema:
+    - At least MIN_TOKEN_OVERLAP_RATIO of shorter text's tokens match
+    - At least MIN_TOKEN_OVERLAP_COUNT tokens match (for multi-word entities)
+
+    Types with require_token_overlap=False bypass this check.
+    """
+    # Get schema-driven config
+    schema = get_schema_for_type(entity_type)
+    if not schema.require_token_overlap:
+        return True  # Schema says bypass this check
+
+    overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
+
+    # For single-word entities, just use Jaro-Winkler
+    tokens1 = text1.lower().split()
+    tokens2 = text2.lower().split()
+    if len(tokens1) == 1 or len(tokens2) == 1:
+        return True
+
+    # For multi-word entities, require token overlap
+    if overlap_ratio < MIN_TOKEN_OVERLAP_RATIO:
+        return False
+
+    if overlap_count < MIN_TOKEN_OVERLAP_COUNT:
+        return False
+
+    return True
+
+
+# =============================================================================
+# Relationship-Aware Context Relevance
+# =============================================================================
+
+class RelevanceSignal(Enum):
+    """Signal from relationship-based context relevance check."""
+    POSITIVE = "positive"      # Has relevant relationship
+    NEGATIVE = "negative"      # Candidate HAS relationships, but NONE are relevant
+    UNKNOWN = "unknown"        # Candidate has no relationships (data incomplete)
+
+
+@dataclass
+class RelevanceResult:
+    """Result of context relevance check."""
+    signal: RelevanceSignal
+    score: float
+    details: str
+
+
+# Predicates that connect people to projects (not affiliated_with which is person→org)
+PROJECT_RELEVANCE_PREDICATES = ('involves_person', 'founded', 'has_founder', 'attended')
+
+
+async def resolve_entity_to_uri(
+    conn: asyncpg.Connection,
+    entity_name: str,
+    entity_type: Optional[str] = None
+) -> Optional[str]:
+    """
+    Resolve an entity name to its canonical URI.
+
+    Args:
+        conn: Database connection
+        entity_name: Entity name to resolve
+        entity_type: Optional type filter
+
+    Returns:
+        Canonical URI or None if not found
+    """
+    normalized = normalize_entity_text(entity_name)
+    if entity_type:
+        return await conn.fetchval("""
+            SELECT fuseki_uri FROM entity_registry
+            WHERE normalized_text = $1 AND entity_type = $2
+            LIMIT 1
+        """, normalized, entity_type)
+    else:
+        return await conn.fetchval("""
+            SELECT fuseki_uri FROM entity_registry
+            WHERE normalized_text = $1
+            LIMIT 1
+        """, normalized)
+
+
+async def check_context_relevance(
+    conn: asyncpg.Connection,
+    candidate_uri: str,
+    context: ResolutionContext
+) -> RelevanceResult:
+    """
+    Check if candidate has relationships relevant to the resolution context.
+
+    Returns:
+    - POSITIVE: Candidate is connected to project/orgs (boost score)
+    - NEGATIVE: Candidate has relationships, but none are relevant (penalize)
+    - UNKNOWN: Candidate has no relationships (no penalty - data incomplete)
+    """
+    # First, check if candidate has ANY relationships
+    has_any_relationships = await conn.fetchval("""
+        SELECT EXISTS(
+            SELECT 1 FROM entity_relationships
+            WHERE subject_uri = $1 OR object_uri = $1
+        )
+    """, candidate_uri)
+
+    if not has_any_relationships:
+        # No relationships = data incomplete, don't penalize
+        return RelevanceResult(RelevanceSignal.UNKNOWN, 0.0, "no relationships in DB")
+
+    # Check connection to meeting's project
+    if context.project:
+        project_uri = await resolve_entity_to_uri(conn, context.project, 'Project')
+        if project_uri:
+            connected = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM entity_relationships
+                    WHERE ((subject_uri = $1 AND object_uri = $2)
+                           OR (subject_uri = $2 AND object_uri = $1))
+                    AND predicate = ANY($3)
+                )
+            """, candidate_uri, project_uri, list(PROJECT_RELEVANCE_PREDICATES))
+            if connected:
+                return RelevanceResult(RelevanceSignal.POSITIVE, 0.3, f"connected to project")
+
+    # Check connection to mentioned organizations
+    orgs = context.organizations or context.associated_orgs or []
+    if orgs:
+        for org_name in orgs:
+            org_uri = await resolve_entity_to_uri(conn, org_name, 'Organization')
+            if org_uri:
+                connected = await conn.fetchval("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM entity_relationships
+                        WHERE subject_uri = $1
+                        AND predicate = 'affiliated_with'
+                        AND object_uri = $2
+                    )
+                """, candidate_uri, org_uri)
+                if connected:
+                    return RelevanceResult(RelevanceSignal.POSITIVE, 0.2, f"affiliated with {org_name}")
+
+    # Candidate HAS relationships but NONE match context = negative signal
+    return RelevanceResult(RelevanceSignal.NEGATIVE, -0.15, "has relationships, none relevant")
+
+
+async def check_fallback_relevance(
+    conn: asyncpg.Connection,
+    candidate_uri: str,
+    context: ResolutionContext
+) -> float:
+    """
+    Fallback: Use document_entity_links when relationships are sparse.
+
+    If candidate appears in same documents as context entities, that's a weak positive signal.
+    """
+    if not context.associated_people:
+        return 0.0
+
+    # Check if candidate co-occurs with associated people in documents
+    people_uris = []
+    for person in context.associated_people:
+        uri = await resolve_entity_to_uri(conn, person, 'Person')
+        if uri:
+            people_uris.append(uri)
+
+    if not people_uris:
+        return 0.0
+
+    # Count shared documents
+    shared_docs = await conn.fetchval("""
+        SELECT COUNT(DISTINCT d1.document_rid)
+        FROM document_entity_links d1
+        JOIN document_entity_links d2 ON d1.document_rid = d2.document_rid
+        WHERE d1.entity_uri = $1
+        AND d2.entity_uri = ANY($2)
+    """, candidate_uri, people_uris)
+
+    if shared_docs and shared_docs > 0:
+        return min(shared_docs * 0.05, 0.15)  # Cap at 0.15
+
+    return 0.0
 
 
 async def resolve_entity(
     conn: asyncpg.Connection,
-    entity: ExtractedEntity
+    entity: ExtractedEntity,
+    context: Optional[ResolutionContext] = None
 ) -> Tuple[CanonicalEntity, bool]:
     """
     Resolve an entity against the knowledge base.
 
+    Resolution Tiers:
+    - Tier 1: Exact match (normalized text)
+    - Tier 1.5: Contextual co-occurrence match (all entity types with phonetic boost for Person)
+    - Tier 2a: Fuzzy match (Jaro-Winkler with token overlap check)
+    - Tier 2b: Semantic match (OpenAI embeddings + pgvector)
+    - Tier 3: Create new entity
+
+    Args:
+        conn: Database connection
+        entity: The entity to resolve
+        context: Optional disambiguation context (associated_people)
+
     Returns: (CanonicalEntity, is_new)
     """
     normalized = normalize_entity_text(entity.name)
-    threshold = SIMILARITY_THRESHOLDS.get(entity.type, 0.85)
+
+    # Get schema-driven config for this entity type
+    schema = get_schema_for_type(entity.type)
+    threshold = schema.similarity_threshold
 
     # Tier 1: Exact match (normalized text)
     if entity.type:
@@ -282,7 +592,56 @@ async def resolve_entity(
             confidence=1.0
         ), False
 
-    # Tier 2: Fuzzy match (same type)
+    # Tier 1.5: Contextual co-occurrence match (ALL entity types, with phonetic boost)
+    # Requirements:
+    # - min_context_people from schema (default: Person=1, others=2)
+    # - Two-tier threshold:
+    #   - With phonetic match: combined_score ≥0.6 (phonetic is strong evidence)
+    #   - Without phonetic match: combined_score ≥0.75 (stricter to avoid false positives)
+    if context and context.associated_people:
+        min_people = schema.min_context_people
+
+        if len(context.associated_people) >= min_people:
+            logger.info(f"Tier 1.5: Trying contextual match for '{entity.name}' ({entity.type}) "
+                       f"with {len(context.associated_people)} associated people")
+
+            contextual_candidates = await get_contextual_entity_candidates(
+                conn,
+                entity.name,
+                entity.type,
+                context.associated_people,
+                context  # Pass full context for relationship checking
+            )
+
+            if contextual_candidates:
+                best = contextual_candidates[0]
+                has_phonetic = best.get('phonetic_match', False)
+
+                # Two-tier threshold: phonetic matches get lower bar (strong evidence)
+                # Non-phonetic matches need higher score to avoid false positives
+                threshold_phonetic = 0.6      # "Quoxala" -> "Kwaxala" (same sound)
+                threshold_no_phonetic = 0.75  # Stricter: avoid "Miranda" -> "Mehul Sangham"
+
+                effective_threshold = threshold_phonetic if has_phonetic else threshold_no_phonetic
+
+                if best["combined_score"] >= effective_threshold:
+                    logger.info(f"Tier 1.5 contextual match: '{entity.name}' -> '{best['name']}' "
+                               f"(combined_score: {best['combined_score']:.3f}, "
+                               f"phonetic: {has_phonetic}, threshold: {effective_threshold})")
+                    return CanonicalEntity(
+                        name=best["name"],
+                        uri=best["uri"],
+                        type=best.get("entity_type") or entity.type,
+                        is_new=False,
+                        merged_with=entity.name if best["name"] != entity.name else None,
+                        confidence=best["combined_score"]  # Always 0-1 scale
+                    ), False
+                else:
+                    logger.info(f"Tier 1.5 contextual match REJECTED: '{entity.name}' -> '{best['name']}' "
+                               f"(score: {best['combined_score']:.3f} < threshold: {effective_threshold}, "
+                               f"phonetic: {has_phonetic})")
+
+    # Tier 2a: Fuzzy match (Jaro-Winkler with token overlap check)
     if entity.type:
         candidates = await conn.fetch("""
             SELECT id, fuseki_uri, entity_text, entity_type, normalized_text
@@ -301,6 +660,12 @@ async def resolve_entity(
     for candidate in candidates:
         score = jaro_winkler_similarity(normalized, candidate['normalized_text'])
         if score >= threshold and score > best_score:
+            # Additional check: token overlap for Organization/Project/Concept
+            overlap_ratio, overlap_count = compute_token_overlap(normalized, candidate['normalized_text'])
+            logger.info(f"Fuzzy candidate: {entity.name} vs {candidate['entity_text']} | JW={score:.3f} | overlap={overlap_count} ({overlap_ratio:.2f})")
+            if not passes_token_overlap_check(normalized, candidate['normalized_text'], entity.type):
+                logger.info(f"Fuzzy match REJECTED due to low token overlap: {entity.name} vs {candidate['entity_text']}")
+                continue
             best_score = score
             best_match = candidate
 
@@ -314,11 +679,11 @@ async def resolve_entity(
             confidence=best_score
         ), False
 
-    # Tier 2: Semantic match (OpenAI embeddings + pgvector)
+    # Tier 2b: Semantic match (OpenAI embeddings + pgvector)
     if openai_available and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
-            semantic_threshold = SEMANTIC_THRESHOLDS.get(entity.type, 0.93)
+            semantic_threshold = schema.semantic_threshold
 
             # Query for semantic matches using pgvector cosine similarity
             if entity.type:
@@ -344,7 +709,7 @@ async def resolve_entity(
                 """, str(embedding), semantic_threshold)
 
             if semantic_match:
-                logger.info(f"Tier 2 semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
+                logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
                            f"(similarity: {semantic_match['similarity']:.3f})")
                 return CanonicalEntity(
                     name=semantic_match['entity_text'],
@@ -386,7 +751,7 @@ async def store_new_entity(
     canonical: CanonicalEntity,
     document_rid: str
 ) -> None:
-    """Store a new entity in the registry with embedding"""
+    """Store a new entity in the registry with embedding and phonetic code"""
     normalized = normalize_entity_text(entity.name)
 
     import json as json_module
@@ -403,12 +768,22 @@ async def store_new_entity(
         if embedding:
             logger.info(f"Generated embedding for new entity: {entity.name}")
 
+    # Compute phonetic code for types with phonetic_matching enabled (schema-driven)
+    phonetic_code = None
+    schema = get_schema_for_type(entity.type)
+    if schema.phonetic_matching:
+        # Use first significant token (skip stopwords)
+        first_token = get_first_significant_token(normalized, schema.phonetic_stopwords)
+        phonetic_code = get_phonetic_code(first_token)
+        if phonetic_code:
+            logger.info(f"Generated phonetic code for new {entity.type}: {entity.name} -> {phonetic_code}")
+
     if embedding:
         await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
-                source, first_seen_rid, metadata, embedding
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector)
+                source, first_seen_rid, metadata, embedding, phonetic_code
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector, $9)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """,
             canonical.uri,
@@ -418,14 +793,15 @@ async def store_new_entity(
             'personal-vault',
             document_rid,
             metadata,
-            str(embedding)
+            str(embedding),
+            phonetic_code
         )
     else:
         await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
-                source, first_seen_rid, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                source, first_seen_rid, metadata, phonetic_code
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """,
             canonical.uri,
@@ -434,7 +810,8 @@ async def store_new_entity(
             normalized,
             'personal-vault',
             document_rid,
-            metadata
+            metadata,
+            phonetic_code
         )
 
 
@@ -538,7 +915,217 @@ async def ensure_schema(conn: asyncpg.Connection):
         )
     """)
 
-    logger.info("Schema verified/created")
+    # Create entity_rid_mappings table for vault entity registration
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS entity_rid_mappings (
+            id SERIAL PRIMARY KEY,
+            vault_rid TEXT UNIQUE NOT NULL,
+            vault_path TEXT NOT NULL,
+            canonical_uri TEXT NOT NULL,
+            entity_type TEXT,
+            name TEXT,
+            content_hash TEXT,
+            sync_status TEXT DEFAULT 'linked',
+            last_synced TIMESTAMP DEFAULT NOW(),
+            created_at TIMESTAMP DEFAULT NOW(),
+            CONSTRAINT valid_sync_status CHECK (
+                sync_status IN ('linked', 'local_only', 'pending_sync', 'conflict')
+            )
+        )
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_rid_mappings_canonical
+        ON entity_rid_mappings(canonical_uri)
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_rid_mappings_vault_path
+        ON entity_rid_mappings(vault_path)
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_rid_mappings_sync_status
+        ON entity_rid_mappings(sync_status)
+    """)
+
+    # Add vault_rid column to entity_registry if not exists
+    try:
+        await conn.execute("""
+            ALTER TABLE entity_registry
+            ADD COLUMN IF NOT EXISTS vault_rid TEXT
+        """)
+    except Exception:
+        pass  # Column may already exist
+
+    # ==========================================================================
+    # Entity Relationships Tables (for relationship-aware entity resolution)
+    # ==========================================================================
+
+    # Enable pg_trgm extension for fuzzy matching in pending resolution
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+
+    # Predicate allow-list (must be created first - FK target)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS allowed_predicates (
+            predicate TEXT PRIMARY KEY,
+            description TEXT,
+            subject_types TEXT[],
+            object_types TEXT[]
+        )
+    """)
+
+    # Seed with canonical predicates (idempotent)
+    await conn.execute("""
+        INSERT INTO allowed_predicates (predicate, description, subject_types, object_types) VALUES
+            ('affiliated_with', 'Person belongs to organization', ARRAY['Person'], ARRAY['Organization']),
+            ('founded', 'Person founded org/project', ARRAY['Person'], ARRAY['Organization', 'Project']),
+            ('has_founder', 'Org/project was founded by', ARRAY['Organization', 'Project'], ARRAY['Person']),
+            ('knows', 'Person knows person (symmetric)', ARRAY['Person'], ARRAY['Person']),
+            ('collaborates_with', 'Person collaborates with person (symmetric)', ARRAY['Person'], ARRAY['Person']),
+            ('involves_person', 'Project involves person', ARRAY['Project', 'Meeting'], ARRAY['Person']),
+            ('involves_organization', 'Project involves organization', ARRAY['Project'], ARRAY['Organization']),
+            ('has_project', 'Organization has project', ARRAY['Organization'], ARRAY['Project']),
+            ('attended', 'Person attended meeting', ARRAY['Person'], ARRAY['Meeting']),
+            ('located_in', 'Entity is located in place', NULL, ARRAY['Location'])
+        ON CONFLICT (predicate) DO NOTHING
+    """)
+
+    # Entity relationships table (resolved relationships)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS entity_relationships (
+            id SERIAL PRIMARY KEY,
+            subject_uri TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object_uri TEXT NOT NULL,
+            confidence FLOAT DEFAULT 1.0,
+            source TEXT DEFAULT 'vault',
+            source_rid TEXT,
+            source_field TEXT,
+            raw_value TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(subject_uri, predicate, object_uri),
+            CHECK (subject_uri != object_uri),
+            CHECK (predicate ~ '^[a-z][a-z0-9_]*$')
+        )
+    """)
+
+    # Add FK constraints if they don't exist (ignore errors if already exist)
+    try:
+        await conn.execute("""
+            ALTER TABLE entity_relationships
+            ADD CONSTRAINT fk_rel_predicate FOREIGN KEY (predicate)
+                REFERENCES allowed_predicates(predicate)
+        """)
+    except Exception:
+        pass
+
+    try:
+        await conn.execute("""
+            ALTER TABLE entity_relationships
+            ADD CONSTRAINT fk_rel_subject FOREIGN KEY (subject_uri)
+                REFERENCES entity_registry(fuseki_uri) ON DELETE CASCADE
+        """)
+    except Exception:
+        pass
+
+    try:
+        await conn.execute("""
+            ALTER TABLE entity_relationships
+            ADD CONSTRAINT fk_rel_object FOREIGN KEY (object_uri)
+                REFERENCES entity_registry(fuseki_uri) ON DELETE CASCADE
+        """)
+    except Exception:
+        pass
+
+    # Pending relationships table (unresolved targets)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_relationships (
+            id SERIAL PRIMARY KEY,
+            subject_uri TEXT,
+            object_uri TEXT,
+            predicate TEXT NOT NULL,
+            raw_unknown_label TEXT NOT NULL,
+            unknown_side TEXT NOT NULL CHECK (unknown_side IN ('subject', 'object')),
+            target_type_hint TEXT,
+            source TEXT DEFAULT 'vault',
+            source_rid TEXT,
+            source_field TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            CHECK ((subject_uri IS NOT NULL AND object_uri IS NULL) OR
+                   (subject_uri IS NULL AND object_uri IS NOT NULL)),
+            CHECK (
+                (unknown_side = 'subject' AND subject_uri IS NULL AND object_uri IS NOT NULL) OR
+                (unknown_side = 'object' AND object_uri IS NULL AND subject_uri IS NOT NULL)
+            )
+        )
+    """)
+
+    # Add unique index for pending edges (expression index)
+    try:
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_unique_edge
+            ON pending_relationships (
+                COALESCE(subject_uri, ''),
+                COALESCE(object_uri, ''),
+                predicate,
+                raw_unknown_label,
+                unknown_side
+            )
+        """)
+    except Exception:
+        pass
+
+    # Add FK constraints for pending
+    try:
+        await conn.execute("""
+            ALTER TABLE pending_relationships
+            ADD CONSTRAINT fk_pending_predicate FOREIGN KEY (predicate)
+                REFERENCES allowed_predicates(predicate)
+        """)
+    except Exception:
+        pass
+
+    try:
+        await conn.execute("""
+            ALTER TABLE pending_relationships
+            ADD CONSTRAINT fk_pending_subject FOREIGN KEY (subject_uri)
+                REFERENCES entity_registry(fuseki_uri) ON DELETE CASCADE
+        """)
+    except Exception:
+        pass
+
+    try:
+        await conn.execute("""
+            ALTER TABLE pending_relationships
+            ADD CONSTRAINT fk_pending_object FOREIGN KEY (object_uri)
+                REFERENCES entity_registry(fuseki_uri) ON DELETE CASCADE
+        """)
+    except Exception:
+        pass
+
+    # Indexes for entity_relationships
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_subject ON entity_relationships(subject_uri)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_object ON entity_relationships(object_uri)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_subject_predicate ON entity_relationships(subject_uri, predicate)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_object_predicate ON entity_relationships(object_uri, predicate)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rel_source_rid ON entity_relationships(source_rid)")
+
+    # Indexes for pending_relationships
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_unknown_label ON pending_relationships(raw_unknown_label)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_source_rid ON pending_relationships(source_rid)")
+
+    # GIN trigram index for fuzzy matching
+    try:
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pending_unknown_label_trgm
+            ON pending_relationships USING GIN (raw_unknown_label gin_trgm_ops)
+        """)
+    except Exception:
+        pass  # May fail if pg_trgm extension not available
+
+    logger.info("Schema verified/created (including relationship tables)")
 
 
 @app.get("/health")
@@ -547,6 +1134,11 @@ async def health_check():
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+
+        # Get loaded entity types from schema
+        schemas = get_entity_schemas()
+        entity_types = list(schemas.keys())
+
         return {
             "status": "healthy",
             "mode": KOI_MODE,
@@ -554,9 +1146,12 @@ async def health_check():
             "openai_available": openai_available,
             "embedding_model": EMBEDDING_MODEL if openai_available else None,
             "semantic_matching": openai_available and ENABLE_SEMANTIC_MATCHING,
+            "entity_types": entity_types,
+            "schema_version": get_schema_version(),
             "resolution_tiers": {
                 "tier1_exact": True,
                 "tier1x_fuzzy": True,
+                "tier15_contextual": True,
                 "tier2_semantic": openai_available and ENABLE_SEMANTIC_MATCHING,
                 "tier3_create": True
             }
@@ -566,6 +1161,64 @@ async def health_check():
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
         )
+
+
+@app.get("/entity-types")
+async def get_entity_types_endpoint():
+    """
+    Return entity type configs for MCP and external tools.
+
+    This is the source of truth for entity type configuration.
+    MCP and other clients should call this endpoint instead of
+    maintaining their own hardcoded type mappings.
+
+    Returns:
+        version: Schema version hash for cache invalidation
+        types: List of entity type configurations
+    """
+    schemas = get_entity_schemas()
+    return {
+        "version": get_schema_version(),
+        "types": [
+            {
+                "type_key": s.type_key,
+                "label": s.label,
+                "folder": s.folder,
+                "phonetic_matching": s.phonetic_matching,
+                "min_context_people": s.min_context_people,
+                "similarity_threshold": s.similarity_threshold,
+                "semantic_threshold": s.semantic_threshold,
+                "require_token_overlap": s.require_token_overlap,
+            }
+            for s in schemas.values()
+        ]
+    }
+
+
+@app.post("/reload-schemas")
+async def reload_schemas_endpoint(vault_path: Optional[str] = None):
+    """
+    Hot reload entity schemas from vault without restart.
+
+    This endpoint reloads schemas from the vault Ontology/ folder.
+    Use after adding or modifying schema files.
+
+    Args:
+        vault_path: Optional override for vault path (default: ~/Documents/Notes)
+
+    Returns:
+        version: New schema version hash
+        types: Updated list of entity type keys
+        phonetic_enabled: Types with phonetic matching enabled
+    """
+    schemas = reload_entity_schemas(vault_path)
+    return {
+        "success": True,
+        "version": get_schema_version(),
+        "types": list(schemas.keys()),
+        "phonetic_enabled": get_phonetic_enabled_types(),
+        "count": len(schemas)
+    }
 
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -591,7 +1244,7 @@ async def ingest_extraction(request: IngestRequest):
             for entity in request.entities:
                 try:
                     logger.info(f"Processing entity: {entity.name} ({entity.type})")
-                    canonical, is_new = await resolve_entity(conn, entity)
+                    canonical, is_new = await resolve_entity(conn, entity, request.context)
                     logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
                     canonical_entities.append(canonical)
 
@@ -669,6 +1322,86 @@ async def list_entities(
         }
 
 
+@app.get("/entity/resolve")
+async def resolve_entity_get(
+    label: str,
+    type_hint: Optional[str] = None,
+    limit: int = 5
+):
+    """
+    Resolve an entity label to canonical entity (GET - backward compatible).
+
+    Query Parameters:
+        label: Entity name to resolve
+        type_hint: Optional entity type filter
+        limit: Maximum candidates (default 5)
+
+    Returns candidates with URIs and confidence scores.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    entity = ExtractedEntity(name=label, type=type_hint or "")
+    async with db_pool.acquire() as conn:
+        canonical, is_new = await resolve_entity(conn, entity, context=None)
+
+    if canonical is None:
+        return {"candidates": [], "is_new": False}
+
+    return {
+        "candidates": [{
+            "name": canonical.name,
+            "uri": canonical.uri,
+            "type": canonical.type,
+            "confidence": canonical.confidence,
+            "merged_with": canonical.merged_with
+        }],
+        "is_new": is_new
+    }
+
+
+@app.post("/entity/resolve")
+async def resolve_entity_post(request: ResolveRequest):
+    """
+    Resolve an entity label to canonical entity with optional context (POST).
+
+    Request Body:
+        label: Entity name to resolve
+        type_hint: Optional entity type filter
+        limit: Maximum candidates (default 5)
+        context: Optional disambiguation context
+            - associated_people: List of people co-occurring with this entity
+
+    The context parameter enables Tier 1.5 contextual matching, which uses
+    co-occurrence in documents to disambiguate entities. For example:
+    - "Biocene Labs" with associated_people=["Shawn Anderson", "Darren Zal"]
+      may resolve to "Symbiocene Labs" if those people appear together in
+      documents mentioning Symbiocene Labs.
+
+    Returns candidates with URIs and confidence scores (same format as GET).
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    entity = ExtractedEntity(name=request.label, type=request.type_hint or "")
+    async with db_pool.acquire() as conn:
+        canonical, is_new = await resolve_entity(conn, entity, request.context)
+
+    if canonical is None:
+        return {"candidates": [], "is_new": False}
+
+    return {
+        "candidates": [{
+            "name": canonical.name,
+            "uri": canonical.uri,
+            "type": canonical.type,
+            "confidence": canonical.confidence,
+            "merged_with": canonical.merged_with
+        }],
+        "is_new": is_new
+    }
+
+
 @app.get("/entity/{entity_uri:path}")
 async def get_entity(entity_uri: str):
     """Get a specific entity by URI"""
@@ -728,6 +1461,1034 @@ async def get_stats():
             "by_type": {r['entity_type']: r['count'] for r in by_type},
             "recent_entities": [dict(r) for r in recent],
             "mode": KOI_MODE
+        }
+
+
+@app.post("/register-entity", response_model=RegisterEntityResponse)
+async def register_vault_entity(request: RegisterEntityRequest):
+    """
+    Register a vault entity note with the backend.
+
+    This endpoint:
+    1. Checks if entity already exists (by name + type)
+    2. Creates new or links to existing canonical entity
+    3. Stores the vault RID → canonical URI mapping
+    4. Returns canonical URI for frontmatter update
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            # Create an ExtractedEntity from the request for resolution
+            entity = ExtractedEntity(
+                name=request.name,
+                type=request.entity_type,
+                mentions=[request.name],
+                confidence=1.0,
+                context=None
+            )
+
+            # Resolve against existing entities
+            canonical, is_new = await resolve_entity(conn, entity)
+
+            if is_new:
+                # Store new entity
+                await store_new_entity(conn, entity, canonical, request.vault_rid)
+                logger.info(f"Registered new entity: {canonical.uri}")
+            else:
+                logger.info(f"Linked to existing entity: {canonical.uri}")
+
+            # Store or update RID mapping
+            await conn.execute("""
+                INSERT INTO entity_rid_mappings (
+                    vault_rid, vault_path, canonical_uri, entity_type,
+                    name, content_hash, sync_status, last_synced
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW())
+                ON CONFLICT (vault_rid) DO UPDATE SET
+                    vault_path = EXCLUDED.vault_path,
+                    canonical_uri = EXCLUDED.canonical_uri,
+                    entity_type = EXCLUDED.entity_type,
+                    name = EXCLUDED.name,
+                    content_hash = EXCLUDED.content_hash,
+                    sync_status = 'linked',
+                    last_synced = NOW()
+            """,
+                request.vault_rid,
+                request.vault_path,
+                canonical.uri,
+                request.entity_type,
+                request.name,
+                request.content_hash
+            )
+
+            # Update entity_registry with vault_rid if not set
+            await conn.execute("""
+                UPDATE entity_registry
+                SET vault_rid = $1
+                WHERE fuseki_uri = $2 AND vault_rid IS NULL
+            """, request.vault_rid, canonical.uri)
+
+            # Sync relationships from frontmatter if provided
+            rel_stats = None
+            if request.frontmatter:
+                try:
+                    rel_stats = await sync_vault_relationships(
+                        conn,
+                        request.vault_path,
+                        canonical.uri,
+                        request.frontmatter
+                    )
+                    logger.info(f"Synced relationships: {rel_stats}")
+                except Exception as e:
+                    logger.warning(f"Failed to sync relationships: {e}")
+
+            # Resolve any pending relationships that match this new entity
+            pending_promoted = 0
+            if is_new:
+                try:
+                    pending_promoted = await resolve_pending_relationships(
+                        conn,
+                        canonical.uri,
+                        request.name,
+                        request.entity_type
+                    )
+                    if pending_promoted > 0:
+                        logger.info(f"Promoted {pending_promoted} pending relationship(s)")
+                except Exception as e:
+                    logger.warning(f"Failed to resolve pending relationships: {e}")
+
+            return RegisterEntityResponse(
+                success=True,
+                canonical_uri=canonical.uri,
+                is_new=is_new,
+                vault_rid=request.vault_rid,
+                merged_with=canonical.merged_with
+            )
+
+
+@app.get("/vault-entities")
+async def list_vault_entities(
+    entity_type: Optional[str] = None,
+    sync_status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """List all vault entities registered with the backend"""
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Build query with optional filters
+        conditions = []
+        params = []
+        param_idx = 1
+
+        if entity_type:
+            conditions.append(f"entity_type = ${param_idx}")
+            params.append(entity_type)
+            param_idx += 1
+
+        if sync_status:
+            conditions.append(f"sync_status = ${param_idx}")
+            params.append(sync_status)
+            param_idx += 1
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+        # Add limit and offset
+        params.extend([limit, offset])
+
+        query = f"""
+            SELECT vault_rid, vault_path, canonical_uri, entity_type,
+                   name, sync_status, content_hash, last_synced
+            FROM entity_rid_mappings
+            {where_clause}
+            ORDER BY last_synced DESC
+            LIMIT ${param_idx} OFFSET ${param_idx + 1}
+        """
+
+        entities = await conn.fetch(query, *params)
+
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM entity_rid_mappings {where_clause}"
+        if params[:-2]:  # Exclude limit/offset for count
+            total = await conn.fetchval(count_query, *params[:-2])
+        else:
+            total = await conn.fetchval("SELECT COUNT(*) FROM entity_rid_mappings")
+
+        return {
+            "entities": [
+                {
+                    "vault_rid": e['vault_rid'],
+                    "vault_path": e['vault_path'],
+                    "canonical_uri": e['canonical_uri'],
+                    "entity_type": e['entity_type'],
+                    "name": e['name'],
+                    "sync_status": e['sync_status'],
+                    "content_hash": e['content_hash'],
+                    "last_synced": e['last_synced'].isoformat() if e['last_synced'] else None
+                }
+                for e in entities
+            ],
+            "count": total,
+            "limit": limit,
+            "offset": offset
+        }
+
+
+@app.get("/vault-entity/{vault_rid:path}")
+async def get_vault_entity(vault_rid: str):
+    """Get a specific vault entity by its RID"""
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        mapping = await conn.fetchrow("""
+            SELECT vault_rid, vault_path, canonical_uri, entity_type,
+                   name, sync_status, content_hash, last_synced, created_at
+            FROM entity_rid_mappings
+            WHERE vault_rid = $1
+        """, vault_rid)
+
+        if not mapping:
+            raise HTTPException(status_code=404, detail="Vault entity not found")
+
+        # Get the canonical entity details
+        entity = await conn.fetchrow("""
+            SELECT fuseki_uri, entity_text, entity_type, normalized_text,
+                   source, first_seen_rid, metadata, created_at
+            FROM entity_registry
+            WHERE fuseki_uri = $1
+        """, mapping['canonical_uri'])
+
+        return {
+            "mapping": {
+                "vault_rid": mapping['vault_rid'],
+                "vault_path": mapping['vault_path'],
+                "canonical_uri": mapping['canonical_uri'],
+                "entity_type": mapping['entity_type'],
+                "name": mapping['name'],
+                "sync_status": mapping['sync_status'],
+                "content_hash": mapping['content_hash'],
+                "last_synced": mapping['last_synced'].isoformat() if mapping['last_synced'] else None,
+                "created_at": mapping['created_at'].isoformat() if mapping['created_at'] else None
+            },
+            "entity": dict(entity) if entity else None
+        }
+
+
+@app.post("/resolve-to-vault")
+async def resolve_canonical_to_vault(uris: List[str]):
+    """
+    Resolve canonical URIs to vault paths for wikilink generation.
+
+    Given a list of canonical entity URIs, returns the corresponding vault paths
+    that can be used to create wikilinks like [[People/Clare Attwell]].
+
+    Example:
+        POST /resolve-to-vault
+        ["orn:personal-koi.entity:person-clare-attwell-abc123", ...]
+
+        Returns:
+        {
+            "mappings": [
+                {
+                    "canonical_uri": "orn:personal-koi.entity:person-clare-attwell-abc123",
+                    "vault_path": "People/Clare Attwell.md",
+                    "name": "Clare Attwell",
+                    "wikilink": "[[People/Clare Attwell]]"
+                }
+            ],
+            "not_found": []
+        }
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    mappings = []
+    not_found = []
+
+    async with db_pool.acquire() as conn:
+        for uri in uris:
+            row = await conn.fetchrow("""
+                SELECT vault_rid, vault_path, canonical_uri, entity_type, name
+                FROM entity_rid_mappings
+                WHERE canonical_uri = $1
+                LIMIT 1
+            """, uri)
+
+            if row:
+                # Generate wikilink from vault path
+                vault_path = row['vault_path']
+                # Remove .md extension and use as wikilink
+                wikilink_path = vault_path.replace('.md', '') if vault_path.endswith('.md') else vault_path
+
+                mappings.append({
+                    "canonical_uri": row['canonical_uri'],
+                    "vault_path": row['vault_path'],
+                    "name": row['name'],
+                    "entity_type": row['entity_type'],
+                    "wikilink": f"[[{wikilink_path}]]"
+                })
+            else:
+                not_found.append(uri)
+
+    return {
+        "mappings": mappings,
+        "not_found": not_found,
+        "resolved": len(mappings),
+        "total": len(uris)
+    }
+
+
+class ContextualCandidatesRequest(BaseModel):
+    """Request for contextual entity candidates based on meeting context"""
+    project: Optional[str] = None
+    attendees: Optional[List[str]] = None
+    topics: Optional[List[str]] = None
+    document_rid: Optional[str] = None  # Current document being processed
+    entity_types: List[str] = Field(default_factory=lambda: ["Person"])  # Entity types to return
+
+
+async def get_contextual_candidates_internal(
+    conn: asyncpg.Connection,
+    project: Optional[str] = None,
+    attendees: Optional[List[str]] = None,
+    attendee_uris: Optional[List[str]] = None,
+    topics: Optional[List[str]] = None,
+    document_rid: Optional[str] = None,
+    entity_types: Optional[List[str]] = None
+) -> dict:
+    """
+    Internal helper for finding contextual entity candidates.
+
+    Returns: {"candidates": [...], "related_documents": [...], "context_types": [...]}
+    """
+    if entity_types is None:
+        entity_types = ["Person"]
+
+    candidates = {}  # uri -> candidate info
+    related_docs = set()
+    context_types = []
+
+    # Strategy 1: Find meetings linked to the same project entity
+    if project:
+        project_normalized = project.lower().strip()
+        project_docs = await conn.fetch("""
+            SELECT DISTINCT del.document_rid
+            FROM document_entity_links del
+            JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
+            WHERE er.entity_type = 'Project'
+              AND (LOWER(er.entity_text) LIKE $1
+                   OR LOWER(er.normalized_text) LIKE $1)
+        """, f"%{project_normalized}%")
+
+        for row in project_docs:
+            related_docs.add(row['document_rid'])
+        if project_docs:
+            context_types.append("project")
+
+    # Strategy 2a: Find meetings by attendee URIs (most precise)
+    if attendee_uris:
+        uri_docs = await conn.fetch("""
+            SELECT DISTINCT document_rid
+            FROM document_entity_links
+            WHERE entity_uri = ANY($1)
+        """, attendee_uris)
+        for row in uri_docs:
+            related_docs.add(row['document_rid'])
+        if uri_docs:
+            context_types.append("attendee_uris")
+
+    # Strategy 2b: Find meetings with common attendees (by name)
+    if attendees:
+        for attendee in attendees:
+            attendee_normalized = attendee.lower().strip()
+            attendee_docs = await conn.fetch("""
+                SELECT DISTINCT del.document_rid
+                FROM document_entity_links del
+                JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
+                WHERE er.entity_type = 'Person'
+                  AND (LOWER(er.entity_text) LIKE $1
+                       OR LOWER(er.normalized_text) LIKE $1)
+            """, f"%{attendee_normalized}%")
+
+            for row in attendee_docs:
+                related_docs.add(row['document_rid'])
+        if attendees and related_docs:
+            context_types.append("attendees")
+
+    # Strategy 3: Find meetings with similar topics (linked Concept entities)
+    if topics:
+        for topic in topics:
+            topic_normalized = topic.lower().strip()
+            topic_docs = await conn.fetch("""
+                SELECT DISTINCT del.document_rid
+                FROM document_entity_links del
+                JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
+                WHERE er.entity_type = 'Concept'
+                  AND (LOWER(er.entity_text) LIKE $1
+                       OR LOWER(er.normalized_text) LIKE $1)
+            """, f"%{topic_normalized}%")
+
+            for row in topic_docs:
+                related_docs.add(row['document_rid'])
+        if topics and related_docs:
+            context_types.append("topics")
+
+    # Exclude current document from related docs
+    if document_rid and document_rid in related_docs:
+        related_docs.discard(document_rid)
+
+    # Get entities of requested types from related documents
+    if related_docs:
+        related_docs_list = list(related_docs)
+        entities = await conn.fetch("""
+            SELECT DISTINCT er.fuseki_uri, er.entity_text, er.entity_type,
+                   er.normalized_text, er.phonetic_code, del.document_rid
+            FROM entity_registry er
+            JOIN document_entity_links del ON er.fuseki_uri = del.entity_uri
+            WHERE er.entity_type = ANY($1)
+              AND del.document_rid = ANY($2)
+        """, entity_types, related_docs_list)
+
+        for entity in entities:
+            uri = entity['fuseki_uri']
+            if uri not in candidates:
+                candidates[uri] = {
+                    "name": entity['entity_text'],
+                    "uri": uri,
+                    "normalized_name": entity['normalized_text'],
+                    "entity_type": entity['entity_type'],
+                    "phonetic_code": entity['phonetic_code'],
+                    "source_documents": []
+                }
+            candidates[uri]["source_documents"].append(entity['document_rid'])
+
+    # Also include entities from vault registry (registered but not yet linked)
+    # Only for Person type to keep backward compatibility
+    if "Person" in entity_types:
+        vault_people = await conn.fetch("""
+            SELECT DISTINCT er.fuseki_uri, er.entity_text, er.normalized_text,
+                   er.phonetic_code, erm.vault_path
+            FROM entity_registry er
+            LEFT JOIN entity_rid_mappings erm ON er.fuseki_uri = erm.canonical_uri
+            WHERE er.entity_type = 'Person'
+              AND erm.vault_path IS NOT NULL
+              AND er.fuseki_uri NOT IN (
+                  SELECT entity_uri FROM document_entity_links
+              )
+            LIMIT 50
+        """)
+
+        for person in vault_people:
+            uri = person['fuseki_uri']
+            if uri not in candidates:
+                candidates[uri] = {
+                    "name": person['entity_text'],
+                    "uri": uri,
+                    "normalized_name": person['normalized_text'],
+                    "entity_type": "Person",
+                    "phonetic_code": person['phonetic_code'],
+                    "source_documents": [],
+                    "vault_path": person['vault_path']
+                }
+
+    return {
+        "candidates": list(candidates.values()),
+        "related_documents": list(related_docs),
+        "context_types": context_types
+    }
+
+
+async def get_contextual_entity_candidates(
+    conn: asyncpg.Connection,
+    label: str,
+    entity_type: str,
+    associated_people: List[str],
+    context: Optional[ResolutionContext] = None
+) -> List[dict]:
+    """
+    Find entity candidates that co-occur with given people.
+
+    Works for any entity type (Person, Organization, Project, Location, Concept).
+    Uses unified scoring formula with phonetic boost for types with phonetic_matching=true.
+    Now includes relationship-based relevance scoring when context includes project/organizations.
+
+    Args:
+        conn: Database connection
+        label: The entity label to match against
+        entity_type: Type of entity to search for
+        associated_people: List of people names that should co-occur
+        context: Optional resolution context with project/organizations for relationship checking
+
+    Returns:
+        List of scored candidate entities
+    """
+    target_normalized = normalize_entity_text(label)
+
+    # Get schema-driven config for this entity type
+    schema = get_schema_for_type(entity_type)
+
+    # Exclude self from associated_people (prevents circular context)
+    people = [
+        p.strip() for p in associated_people
+        if p.strip() and normalize_entity_text(p.strip()) != target_normalized
+    ]
+    people = list(set(people))  # Dedupe
+
+    # Cap at 10 to avoid huge ANY() lists if extraction gets noisy
+    if len(people) > 10:
+        logger.warning(f"Contextual: truncating {len(people)} associated_people to 10")
+        people = people[:10]
+
+    # Schema-driven minimum people requirements
+    min_people = schema.min_context_people
+
+    if len(people) < min_people:
+        logger.info(f"Contextual: need {min_people} associated people for {entity_type}, got {len(people)}")
+        return []
+
+    # Resolve people names to URIs
+    # For 1-person case: require UNIQUE resolution (1 URI only)
+    # For 2+ people: collect all URIs
+    resolved_uris = []
+    for person in people:
+        rows = await conn.fetch("""
+            SELECT fuseki_uri FROM entity_registry
+            WHERE entity_type = 'Person' AND normalized_text = $1
+        """, normalize_entity_text(person))
+
+        if len(people) == 1:
+            # Single associated person: require unique resolution
+            if len(rows) != 1:
+                logger.info(f"Contextual: '{person}' resolves to {len(rows)} URIs, "
+                           f"need exactly 1 for single-person context (blocking)")
+                return []  # Ambiguous or not found
+            resolved_uris.append(rows[0]['fuseki_uri'])
+        else:
+            # Multiple associated people: collect all URIs
+            for row in rows:
+                resolved_uris.append(row['fuseki_uri'])
+
+    if len(resolved_uris) < min_people:
+        logger.info(f"Contextual: resolved {len(resolved_uris)} URIs, need {min_people}")
+        return []
+
+    # Call internal helper with URIs
+    response = await get_contextual_candidates_internal(
+        conn,
+        attendee_uris=resolved_uris,
+        entity_types=[entity_type]
+    )
+
+    # Compute query's phonetic code (for types with phonetic_matching enabled)
+    query_phonetic = None
+    if schema.phonetic_matching:
+        first_token = get_first_significant_token(target_normalized, schema.phonetic_stopwords)
+        query_phonetic = get_phonetic_code(first_token)
+
+    # Score candidates
+    scored = []
+    for candidate in response.get("candidates", []):
+        candidate_normalized = candidate.get("normalized_name", normalize_entity_text(candidate["name"]))
+        name_sim = jaro_winkler_similarity(target_normalized, candidate_normalized)
+        doc_count = len(candidate.get("source_documents", []))
+
+        # Phonetic bonus for types with phonetic_matching enabled (schema-driven)
+        phonetic_bonus = 0.0
+        phonetic_match = False
+        if schema.phonetic_matching and query_phonetic:
+            candidate_phonetic = candidate.get("phonetic_code")
+            # Guard: if phonetic_code missing, compute on the fly
+            if candidate_phonetic is None:
+                candidate_first_token = get_first_significant_token(candidate_normalized, schema.phonetic_stopwords)
+                candidate_phonetic = get_phonetic_code(candidate_first_token)
+            if phonetic_codes_match(query_phonetic, candidate_phonetic):
+                phonetic_bonus = 1.0
+                phonetic_match = True
+
+        # Minimum fuzzy threshold (relaxed if phonetic match)
+        min_fuzzy = 0.4 if phonetic_bonus > 0 else 0.5
+        if name_sim >= min_fuzzy:
+            scored.append({
+                **candidate,
+                "name_similarity": name_sim,
+                "phonetic_match": phonetic_match,
+                "doc_count": doc_count
+            })
+
+    # Combined scoring (unified formula)
+    # Stable doc_score normalization: min(doc_count / 3, 1.0)
+    for c in scored:
+        doc_score = min(c["doc_count"] / 3.0, 1.0)
+        phonetic_score = 0.2 if c.get("phonetic_match") else 0.0
+
+        # Unified formula: 0.5 * fuzzy + 0.2 * phonetic + 0.3 * doc
+        c["combined_score"] = 0.5 * c["name_similarity"] + phonetic_score + 0.3 * doc_score
+
+    # Relationship-based context relevance scoring
+    # Only check if context includes project or organizations
+    if context and (context.project or context.organizations):
+        for c in scored:
+            candidate_uri = c.get("uri")
+            if not candidate_uri:
+                continue
+
+            relevance = await check_context_relevance(conn, candidate_uri, context)
+
+            if relevance.signal == RelevanceSignal.POSITIVE:
+                c["combined_score"] += relevance.score  # Boost
+                c["relevance_detail"] = relevance.details
+                logger.debug(f"Relevance POSITIVE for {c['name']}: {relevance.details}")
+
+            elif relevance.signal == RelevanceSignal.NEGATIVE:
+                # CRITICAL: Phonetic match alone is NOT enough to bypass penalty
+                # Paul→Polly is a phonetic match, but Polly has no Regen/Gaia relationships
+                # Require phonetic + high name similarity (>0.9) OR phonetic + semantic match
+                has_strong_phonetic = (
+                    c.get('phonetic_match') and
+                    c.get('name_similarity', 0) >= 0.9  # "Sean"→"Shawn" = 0.93
+                )
+
+                if not has_strong_phonetic:
+                    c["combined_score"] += relevance.score  # Penalty (negative value)
+                    c["relevance_detail"] = relevance.details
+                    logger.debug(f"Relevance NEGATIVE for {c['name']}: {relevance.details}")
+
+            elif relevance.signal == RelevanceSignal.UNKNOWN:
+                # Fallback to document co-occurrence
+                fallback = await check_fallback_relevance(conn, candidate_uri, context)
+                if fallback > 0:
+                    c["combined_score"] += fallback
+                    c["relevance_detail"] = f"doc co-occurrence (+{fallback:.2f})"
+
+    # Short-name guard with explicit bypass conditions
+    has_context = len(resolved_uris) > 0  # Context is present if we got here
+    for c in scored:
+        if len(c["name"]) < 8:
+            # Bypass guard if phonetic match (strong evidence despite short name)
+            if c.get("phonetic_match"):
+                continue  # Allow short names with phonetic match
+            # Bypass guard if: low min_context (like Person) + context present + high fuzzy
+            if schema.min_context_people == 1 and has_context and c["name_similarity"] >= 0.85:
+                continue  # Allow short names with high fuzzy + context
+            # Otherwise apply strict guard
+            if c["name_similarity"] < 0.7 or c["doc_count"] < 2:
+                c["combined_score"] = 0  # Disqualify short names with weak signals
+
+    scored = [c for c in scored if c["combined_score"] > 0]
+    scored.sort(key=lambda x: -x["combined_score"])
+
+    logger.info(f"Contextual {entity_type} candidates for '{label}': {len(scored)} candidates found")
+    for c in scored[:3]:  # Log top 3
+        phonetic_str = f", phonetic={c.get('phonetic_match', False)}" if schema.phonetic_matching else ""
+        logger.info(f"  - {c['name']}: name_sim={c['name_similarity']:.3f}, "
+                   f"docs={c['doc_count']}, combined={c['combined_score']:.3f}{phonetic_str}")
+
+    return scored[:10]
+
+
+# Backward compatibility alias
+async def get_contextual_org_candidates(
+    conn: asyncpg.Connection,
+    label: str,
+    associated_people: List[str]
+) -> List[dict]:
+    """Backward compatible wrapper - use get_contextual_entity_candidates instead."""
+    return await get_contextual_entity_candidates(conn, label, 'Organization', associated_people)
+
+
+@app.post("/get-contextual-candidates")
+async def get_contextual_candidates(request: ContextualCandidatesRequest):
+    """
+    Get contextual entity candidates based on related meetings.
+
+    This endpoint finds entities from related meetings that share:
+    - The same project
+    - Common attendees
+    - Similar topics
+
+    Use case: When processing a meeting that mentions "Sean", this endpoint
+    can return "Shawn Anderson" as a candidate if they attended other meetings
+    for the same project.
+
+    Example:
+        POST /get-contextual-candidates
+        {"project": "GLOTCHA", "attendees": ["Mehul Patel"], "entity_types": ["Person"]}
+
+        Returns:
+        {
+            "candidates": [
+                {"name": "Shawn Anderson", "uri": "orn:...", "source_documents": [...]}
+            ],
+            "related_documents": [...],
+            "context_types": ["project"]
+        }
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        result = await get_contextual_candidates_internal(
+            conn,
+            project=request.project,
+            attendees=request.attendees,
+            topics=request.topics,
+            document_rid=request.document_rid,
+            entity_types=request.entity_types
+        )
+
+    return {
+        **result,
+        "candidate_count": len(result["candidates"]),
+        "related_document_count": len(result["related_documents"])
+    }
+
+
+# =============================================================================
+# Relationship Endpoints
+# =============================================================================
+
+class SyncRelationshipsRequest(BaseModel):
+    """Request to sync relationships from a vault file"""
+    vault_path: str  # e.g., "People/Shawn Anderson.md"
+    entity_uri: str  # Canonical URI of the entity
+    frontmatter: Dict[str, Any]  # YAML frontmatter dict
+
+
+@app.post("/sync-relationships")
+async def sync_relationships_endpoint(request: SyncRelationshipsRequest):
+    """
+    Sync relationships from vault YAML frontmatter to the database.
+
+    This endpoint:
+    1. Deletes existing relationships from this file (replace-all strategy)
+    2. Parses YAML fields (affiliation, founder, knows, etc.)
+    3. Resolves targets to entity URIs
+    4. Stores resolved relationships in entity_relationships
+    5. Stores unresolved targets in pending_relationships
+
+    Use Case: Backfill relationships for existing vault entities.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            stats = await sync_vault_relationships(
+                conn,
+                request.vault_path,
+                request.entity_uri,
+                request.frontmatter
+            )
+
+    return {
+        "success": True,
+        "vault_path": request.vault_path,
+        "stats": stats
+    }
+
+
+@app.get("/relationships/{entity_uri:path}")
+async def get_relationships_endpoint(
+    entity_uri: str,
+    predicate: Optional[str] = None
+):
+    """
+    Get all relationships for an entity (both directions).
+
+    Query Parameters:
+        predicate: Optional filter by predicate (e.g., 'affiliated_with')
+
+    Returns relationships where the entity is subject or object.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        relationships = await get_entity_relationships(conn, entity_uri, predicate)
+
+        # Enrich with entity names
+        enriched = []
+        for rel in relationships:
+            # Get subject name
+            subject_row = await conn.fetchrow("""
+                SELECT entity_text, entity_type FROM entity_registry
+                WHERE fuseki_uri = $1
+            """, rel['subject_uri'])
+
+            # Get object name
+            object_row = await conn.fetchrow("""
+                SELECT entity_text, entity_type FROM entity_registry
+                WHERE fuseki_uri = $1
+            """, rel['object_uri'])
+
+            enriched.append({
+                **rel,
+                "subject_name": subject_row['entity_text'] if subject_row else None,
+                "subject_type": subject_row['entity_type'] if subject_row else None,
+                "object_name": object_row['entity_text'] if object_row else None,
+                "object_type": object_row['entity_type'] if object_row else None,
+            })
+
+    return {
+        "entity_uri": entity_uri,
+        "relationships": enriched,
+        "count": len(enriched)
+    }
+
+
+@app.get("/relationship-stats")
+async def get_relationship_stats():
+    """Get relationship statistics"""
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Total counts
+        total_relationships = await conn.fetchval("SELECT COUNT(*) FROM entity_relationships")
+        total_pending = await conn.fetchval("SELECT COUNT(*) FROM pending_relationships")
+
+        # By predicate
+        by_predicate = await conn.fetch("""
+            SELECT predicate, COUNT(*) as count
+            FROM entity_relationships
+            GROUP BY predicate
+            ORDER BY count DESC
+        """)
+
+        # Top pending (unresolved labels)
+        top_pending = await conn.fetch("""
+            SELECT raw_unknown_label, predicate, unknown_side, COUNT(*) as count
+            FROM pending_relationships
+            GROUP BY raw_unknown_label, predicate, unknown_side
+            ORDER BY count DESC
+            LIMIT 20
+        """)
+
+        return {
+            "total_relationships": total_relationships,
+            "total_pending": total_pending,
+            "by_predicate": {r['predicate']: r['count'] for r in by_predicate},
+            "top_pending": [dict(r) for r in top_pending]
+        }
+
+
+# =============================================================================
+# Session Search Endpoints (for Claude Code session memory)
+# =============================================================================
+
+class SearchSessionsRequest(BaseModel):
+    """Request to search Claude Code sessions"""
+    query: str
+    limit: int = 10
+    session_id: Optional[str] = None  # Filter to specific session
+    include_context: bool = True  # Include surrounding chunks
+
+
+class SessionSearchResult(BaseModel):
+    """A single session search result"""
+    session_id: str
+    session_rid: str
+    chunk_index: int
+    chunk_text: str
+    similarity: Optional[float] = None
+    summary: Optional[str] = None
+    first_prompt: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+@app.post("/search-sessions")
+async def search_sessions(request: SearchSessionsRequest):
+    """
+    Search Claude Code session transcripts.
+
+    Performs semantic search over indexed session chunks.
+    Returns matching chunks with session metadata.
+
+    Example:
+        POST /search-sessions
+        {"query": "entity resolution", "limit": 10}
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    results = []
+
+    async with db_pool.acquire() as conn:
+        # Check if session_chunks table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'session_chunks'
+            )
+        """)
+
+        if not table_exists:
+            return {
+                "results": [],
+                "count": 0,
+                "message": "Session chunks table not found. Run the session sensor first."
+            }
+
+        # Check if we have embeddings
+        has_embeddings = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM session_chunks WHERE embedding IS NOT NULL LIMIT 1
+            )
+        """)
+
+        if has_embeddings and openai_available and ENABLE_SEMANTIC_MATCHING:
+            # Semantic search with embeddings
+            query_embedding = await generate_embedding(request.query)
+
+            if query_embedding:
+                if request.session_id:
+                    # Search within specific session
+                    rows = await conn.fetch("""
+                        SELECT sc.session_id, sc.session_rid, sc.chunk_index,
+                               sc.chunk_text, sc.timestamp,
+                               1 - (sc.embedding <=> $1::vector) AS similarity,
+                               sil.summary, sil.first_prompt
+                        FROM session_chunks sc
+                        LEFT JOIN session_ingestion_log sil ON sc.session_id = sil.session_id
+                        WHERE sc.session_id = $2
+                          AND sc.embedding IS NOT NULL
+                        ORDER BY similarity DESC
+                        LIMIT $3
+                    """, str(query_embedding), request.session_id, request.limit)
+                else:
+                    # Search all sessions
+                    rows = await conn.fetch("""
+                        SELECT sc.session_id, sc.session_rid, sc.chunk_index,
+                               sc.chunk_text, sc.timestamp,
+                               1 - (sc.embedding <=> $1::vector) AS similarity,
+                               sil.summary, sil.first_prompt
+                        FROM session_chunks sc
+                        LEFT JOIN session_ingestion_log sil ON sc.session_id = sil.session_id
+                        WHERE sc.embedding IS NOT NULL
+                        ORDER BY similarity DESC
+                        LIMIT $2
+                    """, str(query_embedding), request.limit)
+
+                for row in rows:
+                    results.append({
+                        "session_id": row['session_id'],
+                        "session_rid": row['session_rid'],
+                        "chunk_index": row['chunk_index'],
+                        "chunk_text": row['chunk_text'][:2000],  # Limit text size
+                        "similarity": float(row['similarity']) if row['similarity'] else None,
+                        "summary": row['summary'],
+                        "first_prompt": row['first_prompt'][:200] if row['first_prompt'] else None,
+                        "timestamp": row['timestamp'].isoformat() if row['timestamp'] else None
+                    })
+        else:
+            # Fallback: text search (basic ILIKE)
+            search_pattern = f"%{request.query}%"
+
+            if request.session_id:
+                rows = await conn.fetch("""
+                    SELECT sc.session_id, sc.session_rid, sc.chunk_index,
+                           sc.chunk_text, sc.timestamp,
+                           sil.summary, sil.first_prompt
+                    FROM session_chunks sc
+                    LEFT JOIN session_ingestion_log sil ON sc.session_id = sil.session_id
+                    WHERE sc.session_id = $1
+                      AND sc.chunk_text ILIKE $2
+                    ORDER BY sc.chunk_index
+                    LIMIT $3
+                """, request.session_id, search_pattern, request.limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT sc.session_id, sc.session_rid, sc.chunk_index,
+                           sc.chunk_text, sc.timestamp,
+                           sil.summary, sil.first_prompt
+                    FROM session_chunks sc
+                    LEFT JOIN session_ingestion_log sil ON sc.session_id = sil.session_id
+                    WHERE sc.chunk_text ILIKE $1
+                    ORDER BY sil.last_ingested_at DESC, sc.chunk_index
+                    LIMIT $2
+                """, search_pattern, request.limit)
+
+            for row in rows:
+                results.append({
+                    "session_id": row['session_id'],
+                    "session_rid": row['session_rid'],
+                    "chunk_index": row['chunk_index'],
+                    "chunk_text": row['chunk_text'][:2000],
+                    "similarity": None,  # No similarity for text search
+                    "summary": row['summary'],
+                    "first_prompt": row['first_prompt'][:200] if row['first_prompt'] else None,
+                    "timestamp": row['timestamp'].isoformat() if row['timestamp'] else None
+                })
+
+    return {
+        "results": results,
+        "count": len(results),
+        "query": request.query,
+        "search_type": "semantic" if has_embeddings and openai_available else "text"
+    }
+
+
+@app.get("/session-stats")
+async def get_session_stats():
+    """Get statistics about indexed Claude Code sessions."""
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Check if tables exist
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'session_ingestion_log'
+            )
+        """)
+
+        if not table_exists:
+            return {
+                "indexed": False,
+                "message": "Session tables not found. Run the session sensor first."
+            }
+
+        total_sessions = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_ingestion_log"
+        )
+        total_chunks = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_chunks"
+        )
+        chunks_with_embeddings = await conn.fetchval(
+            "SELECT COUNT(*) FROM session_chunks WHERE embedding IS NOT NULL"
+        )
+
+        recent_sessions = await conn.fetch("""
+            SELECT session_id, summary, first_prompt, message_count, chunk_count, last_ingested_at
+            FROM session_ingestion_log
+            ORDER BY last_ingested_at DESC
+            LIMIT 5
+        """)
+
+        return {
+            "indexed": True,
+            "total_sessions": total_sessions,
+            "total_chunks": total_chunks,
+            "chunks_with_embeddings": chunks_with_embeddings,
+            "embedding_coverage": f"{(chunks_with_embeddings / total_chunks * 100):.1f}%" if total_chunks > 0 else "0%",
+            "recent_sessions": [
+                {
+                    "session_id": r['session_id'],
+                    "summary": r['summary'],
+                    "first_prompt": r['first_prompt'][:100] if r['first_prompt'] else None,
+                    "message_count": r['message_count'],
+                    "chunk_count": r['chunk_count'],
+                    "last_ingested_at": r['last_ingested_at'].isoformat() if r['last_ingested_at'] else None
+                }
+                for r in recent_sessions
+            ]
         }
 
 
