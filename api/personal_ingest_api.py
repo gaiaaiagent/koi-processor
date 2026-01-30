@@ -2492,6 +2492,159 @@ async def get_session_stats():
         }
 
 
+@app.get("/session-tools")
+async def get_session_tools(
+    tool: Optional[str] = None,
+    mcp_server: Optional[str] = None,
+    limit: int = 20
+):
+    """
+    Query sessions by tool usage.
+
+    Examples:
+        GET /session-tools?tool=Bash
+        GET /session-tools?mcp_server=personal-koi
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Check if table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'session_tool_usage'
+            )
+        """)
+
+        if not table_exists:
+            return {
+                "results": [],
+                "message": "Session tool usage table not found. Re-run sensor to extract metadata."
+            }
+
+        if tool:
+            # Find sessions using a specific tool
+            rows = await conn.fetch("""
+                SELECT stu.session_id, stu.tool_name, stu.call_count,
+                       sil.summary, sil.first_prompt, sil.last_ingested_at
+                FROM session_tool_usage stu
+                JOIN session_ingestion_log sil ON stu.session_id = sil.session_id
+                WHERE stu.tool_name ILIKE $1
+                ORDER BY stu.call_count DESC, sil.last_ingested_at DESC
+                LIMIT $2
+            """, f"%{tool}%", limit)
+        elif mcp_server:
+            # Find sessions using a specific MCP server
+            rows = await conn.fetch("""
+                SELECT stu.session_id, stu.tool_name, stu.call_count, stu.mcp_server,
+                       sil.summary, sil.first_prompt, sil.last_ingested_at
+                FROM session_tool_usage stu
+                JOIN session_ingestion_log sil ON stu.session_id = sil.session_id
+                WHERE stu.mcp_server ILIKE $1
+                ORDER BY sil.last_ingested_at DESC
+                LIMIT $2
+            """, f"%{mcp_server}%", limit)
+        else:
+            # Return overall tool usage stats
+            rows = await conn.fetch("""
+                SELECT tool_name, SUM(call_count) as total_calls,
+                       COUNT(DISTINCT session_id) as session_count,
+                       is_mcp, mcp_server
+                FROM session_tool_usage
+                GROUP BY tool_name, is_mcp, mcp_server
+                ORDER BY total_calls DESC
+                LIMIT $1
+            """, limit)
+
+            return {
+                "tool_stats": [
+                    {
+                        "tool_name": r['tool_name'],
+                        "total_calls": r['total_calls'],
+                        "session_count": r['session_count'],
+                        "is_mcp": r['is_mcp'],
+                        "mcp_server": r['mcp_server']
+                    }
+                    for r in rows
+                ]
+            }
+
+        return {
+            "results": [
+                {
+                    "session_id": r['session_id'],
+                    "tool_name": r['tool_name'],
+                    "call_count": r['call_count'],
+                    "mcp_server": r.get('mcp_server'),
+                    "summary": r['summary'],
+                    "first_prompt": r['first_prompt'][:100] if r['first_prompt'] else None,
+                    "last_ingested_at": r['last_ingested_at'].isoformat() if r['last_ingested_at'] else None
+                }
+                for r in rows
+            ],
+            "count": len(rows),
+            "filter": {"tool": tool, "mcp_server": mcp_server}
+        }
+
+
+@app.get("/session-files")
+async def get_session_files(
+    path_contains: Optional[str] = None,
+    limit: int = 20
+):
+    """
+    Query sessions by files accessed.
+
+    Examples:
+        GET /session-files?path_contains=koi-processor
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        if path_contains:
+            # Find sessions that accessed files matching pattern
+            rows = await conn.fetch("""
+                SELECT session_id, summary, first_prompt, files_accessed, last_ingested_at
+                FROM session_ingestion_log
+                WHERE files_accessed IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM unnest(files_accessed) f WHERE f ILIKE $1
+                  )
+                ORDER BY last_ingested_at DESC
+                LIMIT $2
+            """, f"%{path_contains}%", limit)
+        else:
+            # Return sessions with most files accessed
+            rows = await conn.fetch("""
+                SELECT session_id, summary, first_prompt,
+                       files_accessed, array_length(files_accessed, 1) as file_count,
+                       last_ingested_at
+                FROM session_ingestion_log
+                WHERE files_accessed IS NOT NULL
+                  AND array_length(files_accessed, 1) > 0
+                ORDER BY array_length(files_accessed, 1) DESC
+                LIMIT $1
+            """, limit)
+
+        return {
+            "results": [
+                {
+                    "session_id": r['session_id'],
+                    "summary": r['summary'],
+                    "first_prompt": r['first_prompt'][:100] if r['first_prompt'] else None,
+                    "files_accessed": r['files_accessed'][:20] if r['files_accessed'] else [],
+                    "file_count": len(r['files_accessed']) if r['files_accessed'] else 0,
+                    "last_ingested_at": r['last_ingested_at'].isoformat() if r['last_ingested_at'] else None
+                }
+                for r in rows
+            ],
+            "count": len(rows),
+            "filter": {"path_contains": path_contains}
+        }
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv('KOI_API_PORT', '8351'))
