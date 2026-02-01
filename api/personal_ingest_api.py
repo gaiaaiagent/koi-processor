@@ -1402,6 +1402,215 @@ async def resolve_entity_post(request: ResolveRequest):
     }
 
 
+# =============================================================================
+# Entity MentionedIn Endpoints (for bidirectional linking)
+# IMPORTANT: These must be defined BEFORE the generic /entity/{uri:path} route
+# =============================================================================
+
+class MentionedInDocument(BaseModel):
+    """A document that mentions an entity"""
+    vault_path: str  # NO .md extension
+    document_rid: str
+    mention_count: int
+    doc_date: Optional[str] = None
+    first_seen: str
+
+
+class MentionedInResponse(BaseModel):
+    """Response from mentioned-in endpoint"""
+    entity_uri: str
+    total_count: int
+    truncated: bool
+    documents: List[MentionedInDocument]
+
+
+class BatchMentionedInRequest(BaseModel):
+    """Request for batch mentioned-in query"""
+    uris: List[str]
+    limit_per_entity: int = 500
+
+
+class BatchMentionedInResponse(BaseModel):
+    """Response from batch mentioned-in query"""
+    results: Dict[str, MentionedInResponse]
+    total_entities: int
+
+
+def extract_date_from_vault_path(vault_path: str) -> Optional[str]:
+    """
+    Extract date from vault path if present.
+    Looks for YYYY-MM-DD pattern at start of filename.
+    """
+    import re
+    # Get filename from path
+    filename = vault_path.split('/')[-1] if '/' in vault_path else vault_path
+    # Remove .md extension if present
+    if filename.endswith('.md'):
+        filename = filename[:-3]
+    # Look for date pattern at start
+    match = re.match(r'^(\d{4}-\d{2}-\d{2})', filename)
+    return match.group(1) if match else None
+
+
+@app.get("/entity/{entity_uri:path}/mentioned-in", response_model=MentionedInResponse)
+async def get_entity_mentioned_in(
+    entity_uri: str,
+    limit: int = 500
+):
+    """
+    Get documents that mention an entity.
+
+    This endpoint queries document_entity_links to find all documents
+    that mention the given entity. Used for populating mentionedIn
+    frontmatter in entity notes.
+
+    Args:
+        entity_uri: Canonical entity URI (orn:personal-koi.entity:...)
+        limit: Maximum documents to return (default 500, high to avoid silent truncation)
+
+    Returns:
+        MentionedInResponse with sorted document list (alphabetical by vault_path)
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Query document_entity_links for documents mentioning this entity
+        rows = await conn.fetch("""
+            SELECT del.document_rid, del.mention_count, del.created_at
+            FROM document_entity_links del
+            WHERE del.entity_uri = $1
+            ORDER BY del.document_rid ASC
+            LIMIT $2
+        """, entity_uri, limit + 1)  # Fetch limit+1 to detect truncation
+
+        truncated = len(rows) > limit
+        if truncated:
+            rows = rows[:limit]
+
+        documents = []
+        for row in rows:
+            # Convert document_rid to vault_path
+            # document_rid format: "orn:obsidian.entity:Notes/..." or "vault:notes/..."
+            doc_rid = row['document_rid']
+
+            # Extract vault path from RID
+            # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:
+            if doc_rid.startswith('orn:obsidian.entity:Notes/'):
+                vault_path = doc_rid.replace('orn:obsidian.entity:Notes/', '')
+            elif doc_rid.startswith('vault:notes/'):
+                vault_path = doc_rid.replace('vault:notes/', '')
+            elif doc_rid.startswith('vault:'):
+                vault_path = doc_rid.replace('vault:', '')
+            else:
+                vault_path = doc_rid
+
+            # Remove .md extension for Obsidian wikilink format
+            if vault_path.endswith('.md'):
+                vault_path = vault_path[:-3]
+
+            # Extract date from filename if present
+            doc_date = extract_date_from_vault_path(vault_path)
+
+            documents.append(MentionedInDocument(
+                vault_path=vault_path,
+                document_rid=doc_rid,
+                mention_count=row['mention_count'] or 1,
+                doc_date=doc_date,
+                first_seen=row['created_at'].isoformat() if row['created_at'] else None
+            ))
+
+        return MentionedInResponse(
+            entity_uri=entity_uri,
+            total_count=len(documents),
+            truncated=truncated,
+            documents=documents
+        )
+
+
+@app.post("/entities/mentioned-in", response_model=BatchMentionedInResponse)
+async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
+    """
+    Batch query for documents mentioning multiple entities.
+
+    This endpoint allows efficient querying of multiple entities at once,
+    avoiding N+1 API calls when propagating mentionedIn to many entity notes.
+
+    Args:
+        uris: List of entity URIs to query
+        limit_per_entity: Maximum documents per entity (default 500)
+
+    Returns:
+        BatchMentionedInResponse with results keyed by entity URI
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    if not request.uris:
+        return BatchMentionedInResponse(results={}, total_entities=0)
+
+    results = {}
+
+    async with db_pool.acquire() as conn:
+        for entity_uri in request.uris:
+            # Query for each entity
+            rows = await conn.fetch("""
+                SELECT del.document_rid, del.mention_count, del.created_at
+                FROM document_entity_links del
+                WHERE del.entity_uri = $1
+                ORDER BY del.document_rid ASC
+                LIMIT $2
+            """, entity_uri, request.limit_per_entity + 1)
+
+            truncated = len(rows) > request.limit_per_entity
+            if truncated:
+                rows = rows[:request.limit_per_entity]
+
+            documents = []
+            for row in rows:
+                doc_rid = row['document_rid']
+
+                # Extract vault path from RID
+                # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:
+                if doc_rid.startswith('orn:obsidian.entity:Notes/'):
+                    vault_path = doc_rid.replace('orn:obsidian.entity:Notes/', '')
+                elif doc_rid.startswith('vault:notes/'):
+                    vault_path = doc_rid.replace('vault:notes/', '')
+                elif doc_rid.startswith('vault:'):
+                    vault_path = doc_rid.replace('vault:', '')
+                else:
+                    vault_path = doc_rid
+
+                if vault_path.endswith('.md'):
+                    vault_path = vault_path[:-3]
+
+                doc_date = extract_date_from_vault_path(vault_path)
+
+                documents.append(MentionedInDocument(
+                    vault_path=vault_path,
+                    document_rid=doc_rid,
+                    mention_count=row['mention_count'] or 1,
+                    doc_date=doc_date,
+                    first_seen=row['created_at'].isoformat() if row['created_at'] else None
+                ))
+
+            results[entity_uri] = MentionedInResponse(
+                entity_uri=entity_uri,
+                total_count=len(documents),
+                truncated=truncated,
+                documents=documents
+            )
+
+    return BatchMentionedInResponse(
+        results=results,
+        total_entities=len(results)
+    )
+
+
+# =============================================================================
+# Entity CRUD Endpoints
+# =============================================================================
+
 @app.get("/entity/{entity_uri:path}")
 async def get_entity(entity_uri: str):
     """Get a specific entity by URI"""
@@ -2643,6 +2852,323 @@ async def get_session_files(
             "count": len(rows),
             "filter": {"path_contains": path_contains}
         }
+
+
+# =============================================================================
+# Knowledge Base Search (Emails, Vault, etc.)
+# =============================================================================
+
+BGE_SERVER_URL = os.getenv('BGE_SERVER_URL', 'http://localhost:8091/encode')
+
+
+class SearchRequest(BaseModel):
+    """Request for knowledge base search"""
+    query: str
+    limit: int = 10
+    source: Optional[str] = None  # Filter by source: 'email', 'vault', etc.
+    include_chunks: bool = False  # Also search chunk-level embeddings
+
+
+class SearchResult(BaseModel):
+    """Single search result"""
+    rid: str
+    title: Optional[str] = None
+    content_preview: str
+    similarity: float
+    source: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+async def get_bge_embedding(text: str) -> Optional[List[float]]:
+    """Get embedding from local BGE server."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                BGE_SERVER_URL,
+                json={"text": text}
+            )
+            if response.status_code == 200:
+                return response.json().get("embedding")
+            else:
+                logger.warning(f"BGE server error: {response.status_code}")
+                return None
+    except Exception as e:
+        logger.error(f"BGE embedding error: {e}")
+        return None
+
+
+@app.post("/search")
+async def search_knowledge_base(request: SearchRequest):
+    """
+    Search the personal knowledge base (emails, vault notes, etc.).
+
+    Performs semantic search using BGE embeddings over koi_memories.
+
+    Args:
+        query: Search query text
+        limit: Max results (default 10)
+        source: Filter by source ('email', 'vault', etc.)
+        include_chunks: Also search chunk-level embeddings
+
+    Example:
+        POST /search
+        {"query": "hackathon ethereum", "limit": 10, "source": "email"}
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # Generate query embedding using BGE
+    query_embedding = await get_bge_embedding(request.query)
+
+    results = []
+    search_type = "text"  # fallback
+
+    async with db_pool.acquire() as conn:
+        if query_embedding:
+            search_type = "semantic"
+            embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+
+            # Build query with optional source filter
+            if request.source == 'email':
+                source_filter = "AND m.source_sensor = 'email-sensor'"
+            elif request.source == 'vault':
+                source_filter = "AND m.source_sensor = 'obsidian-sensor'"
+            elif request.source:
+                source_filter = f"AND m.source_sensor = '{request.source}'"
+            else:
+                source_filter = ""
+
+            # Search doc-level embeddings
+            query = f"""
+                SELECT
+                    m.rid,
+                    m.content->>'title' as title,
+                    LEFT(m.content->>'text', 500) as content_preview,
+                    1 - (e.dim_1024 <=> $1::vector) as similarity,
+                    m.source_sensor,
+                    m.metadata,
+                    m.created_at
+                FROM koi_memories m
+                JOIN koi_embeddings e ON e.memory_id = m.id
+                WHERE e.dim_1024 IS NOT NULL
+                {source_filter}
+                ORDER BY e.dim_1024 <=> $1::vector
+                LIMIT $2
+            """
+
+            rows = await conn.fetch(query, embedding_str, request.limit)
+
+            for row in rows:
+                # Handle metadata - asyncpg returns JSONB as dict already
+                metadata = row['metadata']
+                if metadata is None:
+                    metadata = {}
+                elif isinstance(metadata, str):
+                    import json as json_module
+                    metadata = json_module.loads(metadata)
+
+                result = {
+                    "rid": row['rid'],
+                    "title": row['title'],
+                    "content_preview": row['content_preview'],
+                    "similarity": float(row['similarity']) if row['similarity'] else 0,
+                    "source": row['source_sensor'],
+                    "metadata": metadata,
+                }
+
+                # Add email-specific metadata if available
+                if row['source_sensor'] == 'email-sensor':
+                    email_meta = await conn.fetchrow("""
+                        SELECT subject, from_name, from_address, date_sent
+                        FROM email_metadata
+                        WHERE rid = $1
+                    """, row['rid'])
+
+                    if email_meta:
+                        result['email'] = {
+                            "subject": email_meta['subject'],
+                            "from_name": email_meta['from_name'],
+                            "from_address": email_meta['from_address'],
+                            "date_sent": email_meta['date_sent'].isoformat() if email_meta['date_sent'] else None
+                        }
+
+                results.append(result)
+
+            # Optionally search chunks for more coverage
+            if request.include_chunks and len(results) < request.limit:
+                chunk_query = f"""
+                    SELECT DISTINCT ON (c.document_rid)
+                        c.document_rid as rid,
+                        m.content->>'title' as title,
+                        LEFT(c.content->>'text', 500) as content_preview,
+                        1 - (c.embedding <=> $1::vector) as similarity,
+                        m.source_sensor,
+                        m.metadata
+                    FROM koi_memory_chunks c
+                    JOIN koi_memories m ON m.rid = c.document_rid
+                    WHERE c.embedding IS NOT NULL
+                      AND c.document_rid NOT IN (SELECT rid FROM unnest($3::text[]) as rid)
+                    {source_filter.replace('m.source_sensor', 'm.source_sensor')}
+                    ORDER BY c.document_rid, c.embedding <=> $1::vector
+                    LIMIT $2
+                """
+
+                existing_rids = [r['rid'] for r in results]
+                chunk_rows = await conn.fetch(
+                    chunk_query,
+                    embedding_str,
+                    request.limit - len(results),
+                    existing_rids
+                )
+
+                for row in chunk_rows:
+                    chunk_metadata = row['metadata'] if row['metadata'] else {}
+                    results.append({
+                        "rid": row['rid'],
+                        "title": row['title'],
+                        "content_preview": row['content_preview'],
+                        "similarity": float(row['similarity']) if row['similarity'] else 0,
+                        "source": row['source_sensor'],
+                        "metadata": chunk_metadata,
+                        "matched_via": "chunk"
+                    })
+
+        else:
+            # Fallback: text search
+            search_type = "text"
+            search_pattern = f"%{request.query}%"
+
+            if request.source == 'email':
+                source_filter = "AND m.source_sensor = 'email-sensor'"
+            elif request.source:
+                source_filter = f"AND m.source_sensor = '{request.source}'"
+            else:
+                source_filter = ""
+
+            query = f"""
+                SELECT
+                    m.rid,
+                    m.content->>'title' as title,
+                    LEFT(m.content->>'text', 500) as content_preview,
+                    m.source_sensor,
+                    m.metadata,
+                    m.created_at
+                FROM koi_memories m
+                WHERE m.content->>'text' ILIKE $1
+                {source_filter}
+                ORDER BY m.created_at DESC
+                LIMIT $2
+            """
+
+            rows = await conn.fetch(query, search_pattern, request.limit)
+
+            for row in rows:
+                text_metadata = row['metadata'] if row['metadata'] else {}
+                results.append({
+                    "rid": row['rid'],
+                    "title": row['title'],
+                    "content_preview": row['content_preview'],
+                    "similarity": None,
+                    "source": row['source_sensor'],
+                    "metadata": text_metadata
+                })
+
+    return {
+        "results": results,
+        "count": len(results),
+        "query": request.query,
+        "search_type": search_type,
+        "source_filter": request.source
+    }
+
+
+@app.get("/search")
+async def search_knowledge_base_get(
+    q: str,
+    limit: int = 10,
+    source: Optional[str] = None
+):
+    """GET version of search for convenience."""
+    request = SearchRequest(query=q, limit=limit, source=source)
+    return await search_knowledge_base(request)
+
+
+# =============================================================================
+# /query Endpoint (Compatible with regen-koi-mcp)
+# =============================================================================
+
+class QueryRequest(BaseModel):
+    """Query request compatible with regen-koi-mcp format"""
+    query: Optional[str] = None
+    question: Optional[str] = None  # Alternative field name
+    limit: int = 10
+    intent: Optional[str] = None
+    source: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
+    published_from: Optional[str] = None
+    published_to: Optional[str] = None
+
+
+@app.post("/query")
+async def query_knowledge_base(request: QueryRequest):
+    """
+    Query endpoint compatible with regen-koi-mcp format.
+
+    This wraps the /search endpoint to provide compatibility with the MCP client.
+    Accepts both 'query' and 'question' parameters.
+
+    Example:
+        POST /query
+        {"query": "hackathon", "limit": 10, "source": "email"}
+    """
+    # Use query or question parameter
+    query_text = request.query or request.question or ""
+
+    if not query_text or query_text == "warmup":
+        # Return empty results for warmup or empty queries
+        return {"results": [], "count": 0, "query": query_text}
+
+    # Map source filter
+    source = request.source
+    if request.filters and request.filters.get('source'):
+        source = request.filters['source']
+
+    # Call the search endpoint
+    search_request = SearchRequest(
+        query=query_text,
+        limit=request.limit,
+        source=source,
+        include_chunks=True  # Include chunks for better coverage
+    )
+
+    search_result = await search_knowledge_base(search_request)
+
+    # Transform results to match expected format
+    results = []
+    for r in search_result.get("results", []):
+        result = {
+            "rid": r.get("rid"),
+            "title": r.get("title") or r.get("email", {}).get("subject") or "Untitled",
+            "content": r.get("content_preview", ""),
+            "similarity": r.get("similarity", 0),
+            "source": r.get("source"),
+            "url": None,  # Emails don't have URLs
+            "published_at": r.get("email", {}).get("date_sent") if r.get("email") else None,
+            "metadata": r.get("metadata", {}),
+        }
+
+        # Add email-specific fields if present
+        if r.get("email"):
+            result["email"] = r["email"]
+
+        results.append(result)
+
+    return {
+        "results": results,
+        "count": len(results),
+        "query": query_text,
+        "search_type": search_result.get("search_type", "semantic")
+    }
 
 
 if __name__ == "__main__":
