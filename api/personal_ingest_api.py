@@ -482,9 +482,9 @@ async def check_context_relevance(
                 return RelevanceResult(RelevanceSignal.POSITIVE, 0.3, f"connected to project")
 
     # Check connection to mentioned organizations
-    # Based on actual data format:
+    # Based on actual data format (verified from DB):
     #   - affiliated_with: Person (subj) → Org (obj)
-    #   - has_founder: Org (subj) → Person (obj) - from org's founders: field
+    #   - has_founder: Person (subj) → Org (obj) - from org's founders: field (parser uses 'incoming' direction)
     #   - founded: Person (subj) → Org (obj) - from person's founder: field
     #   - involves_person: Org/Project (subj) → Person (obj)
     orgs = context.organizations or context.associated_orgs or []
@@ -497,9 +497,9 @@ async def check_context_relevance(
                         SELECT 1 FROM entity_relationships
                         WHERE (
                             -- person→org predicates (person is subject)
-                            (subject_uri = $1 AND predicate IN ('affiliated_with', 'founded') AND object_uri = $2)
+                            (subject_uri = $1 AND predicate IN ('affiliated_with', 'founded', 'has_founder') AND object_uri = $2)
                             -- org→person predicates (person is object)
-                            OR (subject_uri = $2 AND predicate IN ('has_founder', 'involves_person') AND object_uri = $1)
+                            OR (subject_uri = $2 AND predicate = 'involves_person' AND object_uri = $1)
                         )
                     )
                 """, candidate_uri, org_uri)
@@ -527,21 +527,14 @@ async def check_context_relevance(
                     details=f"member of project {context.project}"
                 )
 
-            # 2-hop: Person -[affiliation/founded]→ Org -[has_project]→ Project
-            # Also check org→person direction for has_founder
+            # 2-hop: Person -[affiliation/founded/has_founder]→ Org -[has_project]→ Project
+            # All person→org predicates: person is subject, org is object
             two_hop = await conn.fetchval("""
                 SELECT EXISTS(
                     SELECT 1 FROM entity_relationships er1
                     JOIN entity_relationships er2 ON er1.object_uri = er2.subject_uri
                     WHERE er1.subject_uri = $1
-                      AND er1.predicate IN ('affiliated_with', 'founded')
-                      AND er2.predicate = 'has_project'
-                      AND er2.object_uri = $2
-                    UNION
-                    SELECT 1 FROM entity_relationships er1
-                    JOIN entity_relationships er2 ON er1.subject_uri = er2.subject_uri
-                    WHERE er1.object_uri = $1
-                      AND er1.predicate = 'has_founder'
+                      AND er1.predicate IN ('affiliated_with', 'founded', 'has_founder')
                       AND er2.predicate = 'has_project'
                       AND er2.object_uri = $2
                 )
