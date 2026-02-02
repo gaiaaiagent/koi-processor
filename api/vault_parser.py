@@ -69,6 +69,9 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
     # Location relationships
     'location': ('located_in', 'outgoing', 'Location'),
     'headquarters': ('located_in', 'outgoing', 'Location'),
+
+    # Project → Organization (parent org)
+    'parentorg': ('involves_organization', 'outgoing', 'Organization'),
 }
 
 # Symmetric predicates: when A knows B, also create B knows A

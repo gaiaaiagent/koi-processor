@@ -105,6 +105,9 @@ class ExtractedEntity(BaseModel):
     mentions: List[str] = []
     confidence: float = 0.9
     context: Optional[str] = None
+    # Per-entity context for resolution (merged with global context)
+    associated_people: Optional[List[str]] = None
+    associated_organizations: Optional[List[str]] = None
 
 
 class ExtractedRelationship(BaseModel):
@@ -479,6 +482,10 @@ async def check_context_relevance(
                 return RelevanceResult(RelevanceSignal.POSITIVE, 0.3, f"connected to project")
 
     # Check connection to mentioned organizations
+    # Based on actual data format:
+    #   - affiliated_with: Person (subj) → Org (obj)
+    #   - has_founder: Person (subj) → Org (obj)
+    #   - involves_person: Org/Project (subj) → Person (obj)
     orgs = context.organizations or context.associated_orgs or []
     if orgs:
         for org_name in orgs:
@@ -487,13 +494,56 @@ async def check_context_relevance(
                 connected = await conn.fetchval("""
                     SELECT EXISTS(
                         SELECT 1 FROM entity_relationships
-                        WHERE subject_uri = $1
-                        AND predicate = 'affiliated_with'
-                        AND object_uri = $2
+                        WHERE (
+                            -- person→org predicates (person is subject)
+                            (subject_uri = $1 AND predicate IN ('affiliated_with', 'has_founder') AND object_uri = $2)
+                            -- org→person predicates (person is object)
+                            OR (subject_uri = $2 AND predicate = 'involves_person' AND object_uri = $1)
+                        )
                     )
                 """, candidate_uri, org_uri)
                 if connected:
                     return RelevanceResult(RelevanceSignal.POSITIVE, 0.2, f"affiliated with {org_name}")
+
+    # Try 2-hop path for person → org → project chains
+    # Path: Person -[has_founder]→ Org -[has_project]→ Project
+    # Or: Project -[involves_person]→ Person (direct link to project)
+    if context.project:
+        project_uri = await resolve_entity_to_uri(conn, context.project, 'Project')
+        if project_uri:
+            # Check direct involves_person link first
+            direct_project = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM entity_relationships
+                    WHERE subject_uri = $2 AND predicate = 'involves_person' AND object_uri = $1
+                )
+            """, candidate_uri, project_uri)
+
+            if direct_project:
+                return RelevanceResult(
+                    signal=RelevanceSignal.POSITIVE,
+                    score=0.25,
+                    details=f"member of project {context.project}"
+                )
+
+            # 2-hop: Person -[has_founder]→ Org -[has_project]→ Project
+            two_hop = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM entity_relationships er1
+                    JOIN entity_relationships er2 ON er1.object_uri = er2.subject_uri
+                    WHERE er1.subject_uri = $1
+                      AND er1.predicate = 'has_founder'
+                      AND er2.predicate = 'has_project'
+                      AND er2.object_uri = $2
+                )
+            """, candidate_uri, project_uri)
+
+            if two_hop:
+                return RelevanceResult(
+                    signal=RelevanceSignal.POSITIVE,
+                    score=0.1,
+                    details=f"2-hop path via org to {context.project}"
+                )
 
     # Candidate HAS relationships but NONE match context = negative signal
     return RelevanceResult(RelevanceSignal.NEGATIVE, -0.15, "has relationships, none relevant")
@@ -1244,7 +1294,22 @@ async def ingest_extraction(request: IngestRequest):
             for entity in request.entities:
                 try:
                     logger.info(f"Processing entity: {entity.name} ({entity.type})")
-                    canonical, is_new = await resolve_entity(conn, entity, request.context)
+
+                    # Build context for this entity, merging global + per-entity (with deduplication)
+                    global_people = request.context.associated_people if request.context else []
+                    entity_people = entity.associated_people or []
+                    global_orgs = request.context.organizations if request.context else []
+                    entity_orgs = entity.associated_organizations or []
+
+                    context_for_entity = ResolutionContext(
+                        associated_people=list(set((global_people or []) + entity_people)),
+                        organizations=list(set((global_orgs or []) + entity_orgs)),
+                        project=request.context.project if request.context else None,
+                        topics=request.context.topics if request.context else []
+                    ) if (global_people or entity_people or global_orgs or entity_orgs or
+                          (request.context and request.context.project)) else request.context
+
+                    canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
                     logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
                     canonical_entities.append(canonical)
 
@@ -1739,14 +1804,16 @@ async def register_vault_entity(request: RegisterEntityRequest):
             """, request.vault_rid, canonical.uri)
 
             # Sync relationships from frontmatter if provided
+            # Accept frontmatter OR properties (for older MCP clients)
             rel_stats = None
-            if request.frontmatter:
+            frontmatter_data = request.frontmatter or request.properties
+            if frontmatter_data:
                 try:
                     rel_stats = await sync_vault_relationships(
                         conn,
                         request.vault_path,
                         canonical.uri,
-                        request.frontmatter
+                        frontmatter_data
                     )
                     logger.info(f"Synced relationships: {rel_stats}")
                 except Exception as e:
