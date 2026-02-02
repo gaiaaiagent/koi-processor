@@ -43,6 +43,26 @@ Enable bidirectional synchronization between a local Obsidian vault (YAML frontm
   - `schema-project.md`
   - `schema-workout.md`
 
+#### 4. Enhanced Contextual Entity Resolution (2026-02-02)
+- **Branch**: `feature/obsidian-kg-sync-plan`
+- **Status**: ✅ Complete
+- Multi-hop relationship-aware entity resolution:
+  - **Tier 1.5 Contextual**: Uses org/project relationships for disambiguation
+  - **Phonetic Matching**: Double Metaphone for name variants (Sean → Shawn)
+  - **2-hop Paths**: Person → affiliated_with/founded/has_founder → Org → has_project → Project
+- Per-entity context fields:
+  - `associated_people` - People mentioned alongside entity
+  - `associated_organizations` - Orgs mentioned alongside entity
+- Relationship sync from vault frontmatter:
+  - `founders` → `has_founder` (Person → Org)
+  - `affiliation` → `affiliated_with` (Person → Org)
+  - `projects` → `has_project` (Org → Project)
+  - `members` → `involves_person` (Project → Person)
+  - `parentOrg` → `involves_organization` (Project → Org)
+- **Metrics**:
+  - Relationships in DB: 3 → 112
+  - Test result: "Sean Anderson" + Symbiocene Labs → "Shawn Anderson" @ 93.4%
+
 ### Infrastructure Status
 
 | Component | Status | Notes |
