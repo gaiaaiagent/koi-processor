@@ -5055,6 +5055,299 @@ app.get('/api/koi/metadata/stats', requireInternalApiKey, async (req, res) => {
   }
 });
 
+// =============================================================================
+// Document Retrieval Endpoint (MCP-only)
+// Retrieves full document content by RID
+// =============================================================================
+
+// Minimum text length to consider direct content valid (avoid triggering fallback for stubs)
+const MIN_DIRECT_TEXT_LENGTH = 50;
+
+/**
+ * GET /api/koi/document/full
+ * Retrieve full document content by RID
+ *
+ * INTERNAL ONLY: Requires X-Internal-API-Key header
+ * Private documents also require valid Bearer token (session token)
+ *
+ * Query parameters:
+ *   rid: Document RID (can be base doc or chunk RID)
+ *
+ * Response (success):
+ *   {
+ *     document: { rid, title, url, source, published_at, content_source },
+ *     content: "Full document text...",
+ *     char_count, word_count,
+ *     missing_chunk_indices: [2, 4],  // if gaps detected
+ *     fallback_reason: "empty_text" | "short_text" | null,
+ *     warnings: ["fallback_used", "partial_results"]
+ *   }
+ */
+app.get('/api/koi/document/full', requireInternalApiKey, async (req, res) => {
+  const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
+  const startTime = Date.now();
+
+  try {
+    const rid = req.query.rid as string;
+
+    if (!rid || typeof rid !== 'string') {
+      const koiError: KoiError = {
+        code: 'INVALID_RID',
+        message: 'Missing or invalid "rid" query parameter',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    console.log(`[Document] Fetching full document for RID: ${rid}`);
+
+    // Check for bearer token (session auth) for private doc access
+    const authHeader = req.headers['authorization'];
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const userEmail = await validateSessionToken(sessionToken);
+    const isAuthenticated = !!userEmail;
+
+    // Step 1: Normalize RID - if it's a chunk RID, look up the document RID
+    let documentRid = rid;
+    const chunkSuffixMatch = rid.match(/(:chunk_\d+|#chunk\d+)$/);
+
+    if (chunkSuffixMatch) {
+      // Try to lookup document_rid from koi_memory_chunks first
+      const chunkLookupResult = await pool.query(
+        `SELECT document_rid FROM koi_memory_chunks WHERE chunk_rid = $1`,
+        [rid]
+      );
+
+      if (chunkLookupResult.rows.length > 0) {
+        documentRid = chunkLookupResult.rows[0].document_rid;
+        console.log(`[Document] Resolved chunk RID to document: ${documentRid}`);
+      } else {
+        // Fallback: strip the chunk suffix
+        documentRid = rid.replace(/(:chunk_\d+|#chunk\d+)$/, '');
+        console.log(`[Document] Stripped chunk suffix: ${documentRid}`);
+      }
+    }
+
+    // Step 2: Query primary content from koi_memories
+    const primaryQuery = `
+      SELECT rid,
+             content->>'text' as text,
+             COALESCE(content->>'title', metadata->>'title') as title,
+             COALESCE(metadata->>'url', content->>'url') as url,
+             COALESCE(metadata->>'source', content->>'source_type') as source,
+             is_private,
+             published_at
+      FROM koi_memories
+      WHERE rid = $1 AND superseded_at IS NULL
+    `;
+    const primaryResult = await pool.query(primaryQuery, [documentRid]);
+
+    let documentRow = primaryResult.rows[0];
+    let content: string | null = null;
+    let contentSource: 'direct' | 'chunks' | 'legacy_chunks' = 'direct';
+    let fallbackReason: string | null = null;
+    const warnings: WarningCode[] = [];
+    let missingChunkIndices: number[] = [];
+
+    // Step 3: Privacy check
+    if (documentRow && documentRow.is_private === true && !isAuthenticated) {
+      // Return 404 to avoid leaking existence of private documents
+      const koiError: KoiError = {
+        code: 'DOCUMENT_NOT_FOUND',
+        message: 'No document found for the specified RID',
+        retryable: false,
+      };
+      return res.status(404).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Step 4: Check if direct text is usable
+    if (documentRow) {
+      const directText = documentRow.text;
+      if (directText && directText.trim().length >= MIN_DIRECT_TEXT_LENGTH) {
+        content = directText;
+        contentSource = 'direct';
+      } else if (directText === null) {
+        fallbackReason = 'null_text';
+      } else if (directText.trim() === '') {
+        fallbackReason = 'empty_text';
+      } else {
+        fallbackReason = 'short_text';
+      }
+    }
+
+    // Step 5: Fallback to chunk reassembly from koi_memory_chunks
+    if (!content) {
+      console.log(`[Document] Direct text not usable (${fallbackReason}), trying chunk reassembly`);
+
+      const privacyJoinFilter = isAuthenticated
+        ? ''
+        : 'AND (m.is_private IS NULL OR m.is_private = false)';
+
+      const chunkQuery = `
+        SELECT c.chunk_rid, c.chunk_index, c.content->>'text' as text,
+               c.total_chunks, c.metadata as chunk_metadata
+        FROM koi_memory_chunks c
+        JOIN koi_memories m ON m.rid = c.document_rid
+        WHERE c.document_rid = $1
+          AND m.superseded_at IS NULL
+          ${privacyJoinFilter}
+        ORDER BY c.chunk_index ASC
+      `;
+      const chunkResult = await pool.query(chunkQuery, [documentRid]);
+
+      if (chunkResult.rows.length > 0) {
+        // Reassemble chunks
+        const chunks = chunkResult.rows;
+        const chunkTexts = chunks.map(c => c.text).filter(Boolean);
+        content = chunkTexts.join('\n\n');
+        contentSource = 'chunks';
+        warnings.push('fallback_used' as WarningCode);
+
+        // Check for gaps in chunk indices
+        const totalChunks = chunks[0]?.total_chunks || (Math.max(...chunks.map(c => c.chunk_index)) + 1);
+        const presentIndices = new Set(chunks.map(c => c.chunk_index));
+        for (let i = 0; i < totalChunks; i++) {
+          if (!presentIndices.has(i)) {
+            missingChunkIndices.push(i);
+          }
+        }
+        if (missingChunkIndices.length > 0) {
+          warnings.push('partial_results' as WarningCode);
+          console.log(`[Document] Missing chunk indices: ${missingChunkIndices.join(', ')}`);
+        }
+
+        // If no documentRow exists, infer metadata from first chunk
+        if (!documentRow && chunks[0]?.chunk_metadata) {
+          const meta = chunks[0].chunk_metadata;
+          documentRow = {
+            rid: documentRid,
+            title: meta.title || null,
+            url: meta.url || null,
+            source: meta.source || null,
+            published_at: meta.published_at || null,
+            is_private: false,
+          };
+        }
+
+        console.log(`[Document] Reassembled ${chunks.length} chunks`);
+      }
+    }
+
+    // Step 6: Fallback to legacy chunks in koi_memories
+    if (!content) {
+      console.log(`[Document] No chunks found, trying legacy chunk format`);
+
+      const privacyFilter = isAuthenticated
+        ? ''
+        : 'AND (is_private IS NULL OR is_private = false)';
+
+      // Escape _ and % in documentRid for LIKE pattern
+      const escapedRid = documentRid.replace(/_/g, '\\_').replace(/%/g, '\\%');
+
+      const legacyQuery = `
+        SELECT rid, content->>'text' as text,
+               (metadata->>'chunk_index')::int as chunk_index,
+               metadata, content
+        FROM koi_memories
+        WHERE (rid LIKE $1 || ':chunk\\_%' ESCAPE '\\'
+               OR rid LIKE $1 || '#chunk%' ESCAPE '\\')
+          AND superseded_at IS NULL
+          ${privacyFilter}
+        ORDER BY chunk_index ASC NULLS LAST
+      `;
+      const legacyResult = await pool.query(legacyQuery, [escapedRid]);
+
+      if (legacyResult.rows.length > 0) {
+        const legacyChunks = legacyResult.rows;
+        const chunkTexts = legacyChunks.map(c => c.text).filter(Boolean);
+        content = chunkTexts.join('\n\n');
+        contentSource = 'legacy_chunks';
+        warnings.push('fallback_used' as WarningCode);
+
+        // Check for gaps
+        const indicesPresent = legacyChunks.map(c => c.chunk_index).filter(i => i !== null);
+        if (indicesPresent.length > 0) {
+          const maxIndex = Math.max(...indicesPresent);
+          const presentSet = new Set(indicesPresent);
+          for (let i = 0; i <= maxIndex; i++) {
+            if (!presentSet.has(i)) {
+              missingChunkIndices.push(i);
+            }
+          }
+          if (missingChunkIndices.length > 0) {
+            warnings.push('partial_results' as WarningCode);
+          }
+        }
+
+        // Infer metadata from first chunk if no documentRow
+        if (!documentRow && legacyChunks[0]) {
+          const firstChunk = legacyChunks[0];
+          const meta = firstChunk.metadata || {};
+          const cont = firstChunk.content || {};
+          documentRow = {
+            rid: documentRid,
+            title: meta.title || cont.title || null,
+            url: meta.url || cont.url || null,
+            source: meta.source || cont.source_type || null,
+            published_at: meta.published_at || null,
+            is_private: false,
+          };
+        }
+
+        console.log(`[Document] Reassembled ${legacyChunks.length} legacy chunks`);
+      }
+    }
+
+    // Step 7: No content found at all
+    if (!content) {
+      const koiError: KoiError = {
+        code: 'DOCUMENT_NOT_FOUND',
+        message: 'No document found for the specified RID',
+        retryable: false,
+      };
+      return res.status(404).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Build response
+    const charCount = content.length;
+    const wordCount = content.split(/\s+/).filter(Boolean).length;
+
+    const responseData = {
+      document: {
+        rid: documentRow?.rid || documentRid,
+        title: documentRow?.title || null,
+        url: documentRow?.url || null,
+        source: documentRow?.source || null,
+        published_at: documentRow?.published_at || null,
+        content_source: contentSource,
+      },
+      content,
+      char_count: charCount,
+      word_count: wordCount,
+      missing_chunk_indices: missingChunkIndices.length > 0 ? missingChunkIndices : undefined,
+      fallback_reason: fallbackReason,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+
+    console.log(`[Document] Retrieved ${wordCount} words via ${contentSource} in ${Date.now() - startTime}ms`);
+
+    const envelope = createSuccessEnvelope(requestId, responseData, {
+      warnings: warnings.length > 0 ? warnings : undefined,
+    });
+    envelope.data_source = 'koi-memories';
+    return res.json(envelope);
+
+  } catch (error) {
+    console.error('[Document] Full document retrieval error:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
 // Debug ping endpoint
 app.get('/api/koi/ping', (req, res) => {
   console.log('[Ping] Request received');
