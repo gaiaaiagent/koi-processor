@@ -72,6 +72,10 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
 
     # Project → Organization (parent org)
     'parentorg': ('involves_organization', 'outgoing', 'Organization'),
+
+    # Project → Person (creator - same as founder semantically)
+    'creator': ('has_founder', 'incoming', 'Person'),
+    'lead': ('involves_person', 'outgoing', 'Person'),
 }
 
 # Symmetric predicates: when A knows B, also create B knows A

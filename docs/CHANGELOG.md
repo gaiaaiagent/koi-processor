@@ -5,6 +5,29 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-02-03
+
+### Added
+- **Tier 1.1 Alias Resolution** - Entity aliases stored in vault frontmatter now resolve to canonical entities
+  - New `normalize_alias()` helper strips wikilinks and normalizes for matching
+  - Aliases stored in `entity_registry.aliases` TEXT[] column with GIN index
+  - Resolution: "Gnosis" (mentioned) → "Knowsys" (canonical) via alias match @ 100% confidence
+  - `/register-entity` now syncs aliases from frontmatter to backend
+  - Migration 036: Enforces TEXT[] type for aliases column (aligns with production DB)
+
+- **Vault Parser Predicate Mappings** - Added support for `creator` and `lead` fields
+  - `creator` → `has_founder` (incoming, Person) - same semantics as `founders`
+  - `lead` → `involves_person` (outgoing, Person)
+
+- **Schema Loading Diagnostics** - Enhanced logging for vault schema loading
+  - Logs vault path, individual schema names, and phonetic_matching status
+  - Helps debug when schemas fail to load or have unexpected settings
+
+### Fixed
+- **Entity Resolution False Positives** - "Gnosis" no longer creates duplicate entity when "Knowsys" exists with alias
+  - Root cause: Aliases in frontmatter weren't being read or matched during resolution
+  - Fix: Tier 1.1 alias matching inserted after exact match, before contextual matching
+
 ## [3.2.0] - 2026-02-02
 
 ### Added

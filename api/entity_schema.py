@@ -303,9 +303,14 @@ def get_entity_schemas() -> Dict[str, EntityTypeConfig]:
         if not _entity_schemas:
             # Try to load from default vault path
             default_vault = os.environ.get('VAULT_PATH', os.path.expanduser('~/Documents/Notes'))
+            logger.info(f"Loading entity schemas from: {default_vault}")
             _entity_schemas = load_entity_schemas(default_vault)
             _schema_version = compute_schema_version(_entity_schemas)
             logger.info(f"Loaded {len(_entity_schemas)} entity schemas (version: {_schema_version})")
+            # Log individual schema details for debugging
+            for name, schema in sorted(_entity_schemas.items()):
+                phonetic = getattr(schema, 'phonetic_matching', False)
+                logger.info(f"  {name}: phonetic_matching={phonetic}, folder={getattr(schema, 'folder', 'N/A')}")
         return _entity_schemas.copy()  # Return copy to prevent mutation
 
 

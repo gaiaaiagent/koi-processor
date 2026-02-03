@@ -20,6 +20,7 @@ Entity Resolution Tiers:
 """
 
 import os
+import re
 import asyncio
 import asyncpg
 import hashlib
@@ -240,6 +241,21 @@ def normalize_entity_text(text: str) -> str:
         .replace('  ', ' ')
         .lstrip('@')
     )
+
+
+def normalize_alias(alias: Any) -> str:
+    """
+    Strip [[...]], lowercase, trim for alias matching.
+
+    Handles wikilinks like [[People/Name|Display]] → name
+    """
+    alias = str(alias)  # Guard against non-string values
+    alias = re.sub(r'\[\[([^\]|]+)(\|[^\]]+)?\]\]', r'\1', alias)  # Strip wikilinks
+    # Extract just the name part if it's a path
+    if '/' in alias:
+        alias = alias.rsplit('/', 1)[-1]
+    alias = alias.lower().strip()
+    return alias
 
 
 def get_phonetic_code(text: str) -> Optional[str]:
@@ -642,6 +658,41 @@ async def resolve_entity(
             is_new=False,
             merged_with=entity.name if exact_match['entity_text'] != entity.name else None,
             confidence=1.0
+        ), False
+
+    # Tier 1.1: Alias match (check if input matches any registered alias)
+    # Uses normalized name to search against TEXT[] aliases column
+    normalized_name = normalize_alias(entity.name)
+
+    if entity.type:
+        alias_match = await conn.fetchrow("""
+            SELECT fuseki_uri, entity_text, entity_type, normalized_text
+            FROM entity_registry
+            WHERE entity_type = $1
+            AND $2 = ANY(aliases)
+            LIMIT 1
+        """, entity.type, normalized_name)
+    else:
+        # Type-agnostic alias lookup (when type_hint not provided)
+        # Risk: may return wrong entity if alias is reused across types
+        logger.warning(f"Type-agnostic alias lookup for '{entity.name}' - consider providing type_hint")
+        alias_match = await conn.fetchrow("""
+            SELECT fuseki_uri, entity_text, entity_type, normalized_text
+            FROM entity_registry
+            WHERE $1 = ANY(aliases)
+            LIMIT 1
+        """, normalized_name)
+
+    if alias_match:
+        # Alias match = Tier-1 exact (short-circuit, don't enter contextual pool)
+        logger.info(f"Tier 1.1 alias match: '{entity.name}' → '{alias_match['entity_text']}'")
+        return CanonicalEntity(
+            name=alias_match["entity_text"],
+            uri=alias_match["fuseki_uri"],
+            type=alias_match["entity_type"] or entity.type,
+            is_new=False,
+            merged_with=entity.name if alias_match["entity_text"] != entity.name else None,
+            confidence=1.0,
         ), False
 
     # Tier 1.5: Contextual co-occurrence match (ALL entity types, with phonetic boost)
@@ -1820,6 +1871,31 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     logger.info(f"Synced relationships: {rel_stats}")
                 except Exception as e:
                     logger.warning(f"Failed to sync relationships: {e}")
+
+                # Update aliases in entity_registry if provided in frontmatter
+                raw_aliases = frontmatter_data.get('aliases', [])
+                if raw_aliases:
+                    if isinstance(raw_aliases, str):
+                        raw_aliases = [raw_aliases]
+                    normalized_aliases = [normalize_alias(a) for a in raw_aliases if a]
+
+                    if normalized_aliases:
+                        try:
+                            # Merge with existing aliases using DISTINCT to prevent duplicates
+                            await conn.execute("""
+                                UPDATE entity_registry
+                                SET aliases = (
+                                    SELECT ARRAY(
+                                        SELECT DISTINCT unnest(
+                                            array_cat(COALESCE(aliases, '{}'), $1::TEXT[])
+                                        )
+                                    )
+                                )
+                                WHERE fuseki_uri = $2
+                            """, normalized_aliases, canonical.uri)
+                            logger.info(f"Updated aliases for {canonical.uri}: {normalized_aliases}")
+                        except Exception as e:
+                            logger.warning(f"Failed to update aliases: {e}")
 
             # Resolve any pending relationships that match this new entity
             pending_promoted = 0
