@@ -744,8 +744,15 @@ async def get_document_provenance(rid: str):
         }
 
 @app.get("/api/koi/rids")
-async def list_available_rids(limit: int = Query(default=50, le=500)):
-    """List available RIDs from the system for testing/browsing"""
+async def list_available_rids(
+    limit: int = Query(default=50, le=500),
+    source: Optional[str] = Query(default=None, description="Filter by source (e.g., 'notion', 'github', 'discourse')"),
+    context: Optional[str] = Query(default=None, description="Filter by RID context pattern"),
+    offset: int = Query(default=0, ge=0),
+    indexed_after: Optional[str] = Query(default=None, description="Only RIDs indexed after this date (YYYY-MM-DD)"),
+    indexed_before: Optional[str] = Query(default=None, description="Only RIDs indexed before this date (YYYY-MM-DD)")
+):
+    """List available RIDs from indexed documents (koi_memories)"""
 
     import asyncpg
 
@@ -760,84 +767,124 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
         )
 
         try:
-            # Get RIDs from documents, filtering out test and heartbeat data
-            doc_rids = await conn.fetch("""
+            # Build WHERE clause for filters
+            where_conditions = [
+                "rid IS NOT NULL",
+                "rid NOT LIKE '%test_%'",
+                "rid NOT LIKE '%heartbeat%'",
+                "rid NOT LIKE '%:demo:%'",
+                "(is_chunk = FALSE OR is_chunk IS NULL)"  # Only parent documents, not chunks
+            ]
+            params = []
+            param_idx = 1
+
+            if source:
+                where_conditions.append(f"source_sensor ILIKE ${param_idx}")
+                params.append(f"%{source}%")
+                param_idx += 1
+
+            if context:
+                where_conditions.append(f"rid LIKE ${param_idx}")
+                params.append(f"{context}%")
+                param_idx += 1
+
+            if indexed_after:
+                try:
+                    after_date = datetime.strptime(indexed_after, "%Y-%m-%d").date()
+                    where_conditions.append(f"created_at >= ${param_idx}")
+                    params.append(after_date)
+                    param_idx += 1
+                except ValueError:
+                    pass  # Invalid date format, skip filter
+
+            if indexed_before:
+                try:
+                    before_date = datetime.strptime(indexed_before, "%Y-%m-%d").date()
+                    # Add 1 day to include the full day
+                    from datetime import timedelta
+                    before_date = before_date + timedelta(days=1)
+                    where_conditions.append(f"created_at < ${param_idx}")
+                    params.append(before_date)
+                    param_idx += 1
+                except ValueError:
+                    pass  # Invalid date format, skip filter
+
+            where_clause = " AND ".join(where_conditions)
+
+            # Get total count for pagination
+            count_query = f"""
+                SELECT COUNT(*) FROM koi_memories
+                WHERE {where_clause}
+            """
+            total_count = await conn.fetchval(count_query, *params)
+
+            # Get RIDs from koi_memories (the main indexed documents table)
+            params_with_limit = params + [limit, offset]
+            doc_rids = await conn.fetch(f"""
                 SELECT DISTINCT
                     rid,
-                    title,
-                    metadata->>'source' as source_sensor,
-                    created_at
-                FROM koi_content
-                WHERE rid IS NOT NULL
-                    AND rid NOT LIKE '%test_%'
-                    AND rid NOT LIKE '%heartbeat%'
-                    AND rid NOT LIKE '%:demo:%'
-                    AND (title != 'Test Page' OR title IS NULL)
+                    content->>'title' as title,
+                    source_sensor,
+                    created_at,
+                    metadata->>'url' as url
+                FROM koi_memories
+                WHERE {where_clause}
                 ORDER BY created_at DESC
-                LIMIT $1
-            """, limit // 2)
+                LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """, *params_with_limit)
 
-            # Get RIDs from transformation receipts, filtering out test and heartbeat data
-            receipt_rids = await conn.fetch("""
-                SELECT DISTINCT rid, created_at FROM (
-                    SELECT DISTINCT input_rid as rid, MIN(created_at) as created_at
-                    FROM koi_transformation_receipts
-                    WHERE input_rid IS NOT NULL
-                        AND input_rid NOT LIKE '%test_%'
-                        AND input_rid NOT LIKE '%heartbeat%'
-                    GROUP BY input_rid
-
-                    UNION
-
-                    SELECT DISTINCT output_rid as rid, MIN(created_at) as created_at
-                    FROM koi_transformation_receipts
-                    WHERE output_rid IS NOT NULL
-                        AND output_rid NOT LIKE '%test_%'
-                        AND output_rid NOT LIKE '%heartbeat%'
-                    GROUP BY output_rid
-                ) AS all_rids
-                ORDER BY created_at DESC
-                LIMIT $1
-            """, limit // 2)
-
-            # Combine and format results
+            # Format results
             rids = []
-            seen = set()
+            by_context = {}
+            by_source = {}
 
             for doc in doc_rids:
-                if doc['rid'] not in seen:
-                    rids.append({
-                        "rid": doc['rid'],
-                        "title": doc['title'],
-                        "source": doc['source_sensor'],
-                        "type": "document",
-                        "created_at": doc['created_at'].isoformat() if doc['created_at'] else None
-                    })
-                    seen.add(doc['rid'])
+                rid = doc['rid']
 
-            for receipt in receipt_rids:
-                if receipt['rid'] not in seen and len(rids) < limit:
-                    rids.append({
-                        "rid": receipt['rid'],
-                        "title": None,
-                        "source": "transformation",
-                        "type": "receipt",
-                        "created_at": receipt['created_at'].isoformat() if receipt['created_at'] else None
-                    })
-                    seen.add(receipt['rid'])
+                # Extract context from RID (e.g., "orn:regen.document" from "orn:regen.document:notion/...")
+                context_part = rid.split(':')[0] if ':' in rid else 'unknown'
+                if len(rid.split(':')) > 1:
+                    context_part = ':'.join(rid.split(':')[:2])
+
+                by_context[context_part] = by_context.get(context_part, 0) + 1
+
+                # Track by source
+                src = doc['source_sensor'] or 'unknown'
+                # Simplify source (e.g., "notion-sensor-123" -> "notion")
+                src_simple = src.split('-')[0] if '-' in src else src
+                by_source[src_simple] = by_source.get(src_simple, 0) + 1
+
+                # Infer rid_type from context
+                rid_type = None
+                if 'notion' in rid.lower():
+                    rid_type = 'NotionDocument'
+                elif 'github' in rid.lower():
+                    rid_type = 'GitHubDocument'
+                elif 'discourse' in rid.lower() or 'forum' in rid.lower():
+                    rid_type = 'DiscoursePost'
+                elif 'youtube' in rid.lower():
+                    rid_type = 'YouTubeVideo'
+
+                rids.append({
+                    "rid": rid,
+                    "context": context_part,
+                    "rid_type": rid_type,
+                    "source": src_simple,
+                    "title": doc['title'] or f"Document {rid[:50]}...",
+                    "url": doc['url'],
+                    "indexed_at": doc['created_at'].isoformat() if doc['created_at'] else None
+                })
 
             return {
-                "rids": rids,
-                "count": len(rids),
-                "total_available": await conn.fetchval("""
-                    SELECT COUNT(DISTINCT rid) FROM (
-                        SELECT rid FROM koi_content WHERE rid IS NOT NULL
-                        UNION
-                        SELECT input_rid as rid FROM koi_transformation_receipts WHERE input_rid IS NOT NULL
-                        UNION
-                        SELECT output_rid as rid FROM koi_transformation_receipts WHERE output_rid IS NOT NULL
-                    ) AS all_rids
-                """)
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": offset + len(rids) < total_count
+                },
+                "by_context": by_context,
+                "by_source": by_source,
+                "rids": rids
             }
 
         finally:
@@ -847,7 +894,113 @@ async def list_available_rids(limit: int = Query(default=50, le=500)):
         logger.error(f"Error listing RIDs: {e}")
         return {
             "error": str(e),
-            "rids": []
+            "rids": [],
+            "pagination": {"total": 0, "limit": limit, "offset": offset, "has_more": False}
+        }
+
+@app.get("/api/koi/rid-lookup/{rid:path}")
+async def rid_lookup(
+    rid: str,
+    include_chunks: bool = Query(default=True, description="Include chunk documents"),
+    limit: int = Query(default=50, le=200)
+):
+    """Look up documents by exact RID match from koi_memories.
+
+    This queries the database directly by RID, unlike /query which uses semantic search.
+    Returns the base document and optionally all chunks.
+    """
+    import asyncpg
+    from urllib.parse import unquote
+
+    # URL decode the RID
+    rid = unquote(rid)
+
+    try:
+        conn = await asyncpg.connect(
+            host='localhost',
+            port=5433,
+            database='eliza',
+            user='postgres',
+            password='postgres'
+        )
+
+        try:
+            # Build query - search for exact RID or RID with chunk suffix
+            base_rid = rid.split('#')[0]  # Remove chunk suffix if present
+
+            if include_chunks:
+                # Get base doc and all chunks
+                query = """
+                    SELECT
+                        rid,
+                        content->>'title' as title,
+                        content->>'text' as text,
+                        source_sensor,
+                        created_at,
+                        metadata->>'url' as url,
+                        is_chunk,
+                        CASE
+                            WHEN rid LIKE '%#chunk%' THEN
+                                CAST(SUBSTRING(rid FROM '#chunk([0-9]+)') AS INTEGER)
+                            ELSE -1
+                        END as chunk_index
+                    FROM koi_memories
+                    WHERE rid = $1 OR rid LIKE $2
+                    ORDER BY chunk_index ASC
+                    LIMIT $3
+                """
+                params = [base_rid, f"{base_rid}#chunk%", limit]
+            else:
+                # Get only exact RID match
+                query = """
+                    SELECT
+                        rid,
+                        content->>'title' as title,
+                        content->>'text' as text,
+                        source_sensor,
+                        created_at,
+                        metadata->>'url' as url,
+                        is_chunk,
+                        -1 as chunk_index
+                    FROM koi_memories
+                    WHERE rid = $1
+                    LIMIT $2
+                """
+                params = [rid, limit]
+
+            docs = await conn.fetch(query, *params)
+
+            results = []
+            for doc in docs:
+                results.append({
+                    "rid": doc['rid'],
+                    "title": doc['title'],
+                    "content": doc['text'],
+                    "source": doc['source_sensor'],
+                    "url": doc['url'],
+                    "indexed_at": doc['created_at'].isoformat() if doc['created_at'] else None,
+                    "is_chunk": doc['is_chunk'],
+                    "chunk_index": doc['chunk_index'] if doc['chunk_index'] >= 0 else None
+                })
+
+            return {
+                "rid": rid,
+                "base_rid": base_rid,
+                "found": len(results) > 0,
+                "count": len(results),
+                "documents": results
+            }
+
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        logger.error(f"Error looking up RID {rid}: {e}")
+        return {
+            "rid": rid,
+            "found": False,
+            "error": str(e),
+            "documents": []
         }
 
 @app.get("/api/koi/cat/chain/{rid:path}")

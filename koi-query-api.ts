@@ -2740,6 +2740,7 @@ app.use('/api/koi/event-bridge/', proxyToService('http://localhost:8100'));
 app.use('/api/koi/bge/', proxyToService('http://localhost:8090'));
 app.use('/api/koi/transformations', proxyToService('http://localhost:8002'));
 app.use('/api/koi/rids', proxyToService('http://localhost:8002'));
+app.use('/api/koi/rid-lookup', proxyToService('http://localhost:8002'));
 
 // Auth status check - for MCP server to validate user authentication
 // SECURITY: Uses device_code binding to prevent IDOR attacks
@@ -3261,9 +3262,16 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         e.class_id,
         e.source,
         e.match_type,
-        r.relationship_count
+        r.relationship_count,
+        csm.source_url as canonical_source_url
       FROM entity_matches e
       JOIN rel_counts r ON e.id = r.id
+      LEFT JOIN LATERAL (
+        SELECT source_url FROM canonical_source_mappings
+        WHERE entity_uri = e.fuseki_uri AND is_canonical = true
+        ORDER BY priority DESC, updated_at DESC, source_url ASC
+        LIMIT 1
+      ) csm ON true
       ORDER BY
         CASE e.match_type
           WHEN 'ledger_id' THEN 1
@@ -3334,6 +3342,7 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         jurisdiction: v.jurisdiction || null,
         class_id: v.class_id || null,
         source: v.source || null,
+        canonical_source_url: v.canonical_source_url || null,
         score: totalScore,
         score_breakdown: reasons.join(', ')
       };
@@ -3572,9 +3581,16 @@ async function resolveQueryPolysemy(
         e.normalized_text,
         e.occurrence_count,
         e.fuseki_uri,
-        r.relationship_count
+        r.relationship_count,
+        csm.source_url as canonical_source_url
       FROM entity_matches e
       JOIN rel_counts r ON e.id = r.id
+      LEFT JOIN LATERAL (
+        SELECT source_url FROM canonical_source_mappings
+        WHERE entity_uri = e.fuseki_uri AND is_canonical = true
+        ORDER BY priority DESC, updated_at DESC, source_url ASC
+        LIMIT 1
+      ) csm ON true
       ORDER BY e.occurrence_count DESC, r.relationship_count DESC
     `;
 
@@ -5342,6 +5358,92 @@ app.get('/api/koi/document/full', requireInternalApiKey, async (req, res) => {
     const koiError: KoiError = {
       code: 'INTERNAL_ERROR',
       message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
+// =============================================================================
+// Feedback Endpoint - For MCP submit_feedback tool
+// =============================================================================
+app.post('/api/koi/feedback', async (req, res) => {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  const startTime = Date.now();
+  console.log('[Feedback] Received feedback submission');
+
+  try {
+    const { rating, category, task_description, notes, session_context, user_email, client_version } = req.body;
+
+    // Validate required fields
+    if (typeof rating !== 'number' || rating < 1 || rating > 5) {
+      const koiError: KoiError = {
+        code: 'VALIDATION_ERROR',
+        message: 'Rating must be a number between 1 and 5',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    const validCategories = ['success', 'partial', 'bug', 'suggestion', 'question', 'other'];
+    if (!category || !validCategories.includes(category)) {
+      const koiError: KoiError = {
+        code: 'VALIDATION_ERROR',
+        message: `Category must be one of: ${validCategories.join(', ')}`,
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    if (!notes || typeof notes !== 'string' || notes.trim().length === 0) {
+      const koiError: KoiError = {
+        code: 'VALIDATION_ERROR',
+        message: 'Notes field is required and cannot be empty',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Insert feedback into database
+    const result = await pool.query(
+      `INSERT INTO user_feedback (rating, category, task_description, notes, session_context, user_email, client_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, created_at`,
+      [
+        rating,
+        category,
+        task_description || null,
+        notes.trim(),
+        session_context ? JSON.stringify(session_context) : '{}',
+        user_email || 'anonymous',
+        client_version || null
+      ]
+    );
+
+    const feedbackId = result.rows[0].id;
+    const createdAt = result.rows[0].created_at;
+
+    console.log(`[Feedback] Stored feedback #${feedbackId}: rating=${rating}, category=${category}`);
+
+    const responseData = {
+      feedback_id: feedbackId,
+      rating,
+      category,
+      created_at: createdAt,
+      message: 'Thank you for your feedback!',
+    };
+
+    const envelope = createSuccessEnvelope(requestId, responseData, {});
+    envelope.data_source = 'feedback';
+    return res.status(201).json(envelope);
+
+  } catch (error) {
+    console.error('[Feedback] Error storing feedback:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Failed to store feedback',
       retryable: true,
     };
     return res.status(500).json(createErrorEnvelope(requestId, koiError));
