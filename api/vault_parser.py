@@ -76,6 +76,44 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
     # Project → Person (creator - same as founder semantically)
     'creator': ('has_founder', 'incoming', 'Person'),
     'lead': ('involves_person', 'outgoing', 'Person'),
+
+    # Phase A: Knowledge Commoning
+    'aggregatesinto': ('aggregates_into', 'outgoing', 'Pattern'),
+    'aggregates_into': ('aggregates_into', 'outgoing', 'Pattern'),
+    'patterns': ('aggregates_into', 'outgoing', 'Pattern'),
+    'suggests': ('suggests', 'outgoing', 'Practice'),
+    'suggestedby': ('suggests', 'incoming', 'Pattern'),
+    'bioregion': ('practiced_in', 'outgoing', 'Bioregion'),
+    'practicedin': ('practiced_in', 'outgoing', 'Bioregion'),
+    'practiced_in': ('practiced_in', 'outgoing', 'Bioregion'),
+    'documentedby': ('documents', 'incoming', 'CaseStudy'),
+    'documented_by': ('documents', 'incoming', 'CaseStudy'),
+    'documents': ('documents', 'outgoing', None),
+    'practices': ('aggregates_into', 'incoming', 'Practice'),
+
+    # Phase B: Discourse Graph
+    'supports': ('supports', 'outgoing', None),
+    'opposes': ('opposes', 'outgoing', None),
+    'informs': ('informs', 'outgoing', None),
+    'generates': ('generates', 'outgoing', None),
+    'implementedby': ('implemented_by', 'outgoing', 'Playbook'),
+    'implemented_by': ('implemented_by', 'outgoing', 'Playbook'),
+    'implements': ('implemented_by', 'incoming', 'Protocol'),
+    'synthesizes': ('synthesizes', 'outgoing', 'Evidence'),
+    'protocol': ('implemented_by', 'incoming', 'Protocol'),
+    'about': ('about', 'outgoing', None),
+
+    # Phase C: SKOS + Hyphal
+    'broader': ('broader', 'outgoing', 'Concept'),
+    'narrower': ('narrower', 'outgoing', 'Concept'),
+    'relatedto': ('related_to', 'outgoing', None),
+    'related_to': ('related_to', 'outgoing', None),
+    'forkedfrom': ('forked_from', 'outgoing', None),
+    'forked_from': ('forked_from', 'outgoing', None),
+    'buildson': ('builds_on', 'outgoing', None),
+    'builds_on': ('builds_on', 'outgoing', None),
+    'inspiredby': ('inspired_by', 'outgoing', None),
+    'inspired_by': ('inspired_by', 'outgoing', None),
 }
 
 # Symmetric predicates: when A knows B, also create B knows A
@@ -131,6 +169,25 @@ def parse_wikilink(value: str) -> Tuple[str, Optional[str]]:
             'locations': 'Location',
             'location': 'Location',
             'places': 'Location',
+            'concepts': 'Concept',
+            'concept': 'Concept',
+            'practices': 'Practice',
+            'practice': 'Practice',
+            'patterns': 'Pattern',
+            'pattern': 'Pattern',
+            'casestudies': 'CaseStudy',
+            'casestudy': 'CaseStudy',
+            'bioregions': 'Bioregion',
+            'bioregion': 'Bioregion',
+            'protocols': 'Protocol',
+            'protocol': 'Protocol',
+            'playbooks': 'Playbook',
+            'playbook': 'Playbook',
+            'questions': 'Question',
+            'question': 'Question',
+            'claims': 'Claim',
+            'claim': 'Claim',
+            'evidence': 'Evidence',
         }
         type_hint = folder_type_map.get(folder_lower)
     else:
