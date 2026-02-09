@@ -720,29 +720,39 @@ async def resolve_entity(
                 best = contextual_candidates[0]
                 has_phonetic = best.get('phonetic_match', False)
 
-                # Two-tier threshold: phonetic matches get lower bar (strong evidence)
-                # Non-phonetic matches need higher score to avoid false positives
-                threshold_phonetic = 0.6      # "Quoxala" -> "Kwaxala" (same sound)
-                threshold_no_phonetic = 0.75  # Stricter: avoid "Miranda" -> "Mehul Sangham"
-
-                effective_threshold = threshold_phonetic if has_phonetic else threshold_no_phonetic
-
-                if best["combined_score"] >= effective_threshold:
-                    logger.info(f"Tier 1.5 contextual match: '{entity.name}' -> '{best['name']}' "
-                               f"(combined_score: {best['combined_score']:.3f}, "
-                               f"phonetic: {has_phonetic}, threshold: {effective_threshold})")
-                    return CanonicalEntity(
-                        name=best["name"],
-                        uri=best["uri"],
-                        type=best.get("entity_type") or entity.type,
-                        is_new=False,
-                        merged_with=entity.name if best["name"] != entity.name else None,
-                        confidence=best["combined_score"]  # Always 0-1 scale
-                    ), False
+                # Token overlap guard for multi-token names (prevents "Silke Helfrich" -> "Simon Grant")
+                # If both names have 2+ tokens and share zero tokens, reject regardless of score
+                query_tokens = set(normalized.lower().split())
+                candidate_tokens = set(best.get('normalized_text', best['name']).lower().split())
+                token_overlap = query_tokens & candidate_tokens
+                if len(query_tokens) >= 2 and len(candidate_tokens) >= 2 and len(token_overlap) == 0:
+                    logger.info(f"Tier 1.5 contextual match REJECTED (zero token overlap): "
+                               f"'{entity.name}' -> '{best['name']}' "
+                               f"(tokens: {query_tokens} vs {candidate_tokens})")
                 else:
-                    logger.info(f"Tier 1.5 contextual match REJECTED: '{entity.name}' -> '{best['name']}' "
-                               f"(score: {best['combined_score']:.3f} < threshold: {effective_threshold}, "
-                               f"phonetic: {has_phonetic})")
+                    # Two-tier threshold: phonetic matches get lower bar (strong evidence)
+                    # Non-phonetic matches need higher score to avoid false positives
+                    threshold_phonetic = 0.6      # "Quoxala" -> "Kwaxala" (same sound)
+                    threshold_no_phonetic = 0.75  # Stricter: avoid "Miranda" -> "Mehul Sangham"
+
+                    effective_threshold = threshold_phonetic if has_phonetic else threshold_no_phonetic
+
+                    if best["combined_score"] >= effective_threshold:
+                        logger.info(f"Tier 1.5 contextual match: '{entity.name}' -> '{best['name']}' "
+                                   f"(combined_score: {best['combined_score']:.3f}, "
+                                   f"phonetic: {has_phonetic}, threshold: {effective_threshold})")
+                        return CanonicalEntity(
+                            name=best["name"],
+                            uri=best["uri"],
+                            type=best.get("entity_type") or entity.type,
+                            is_new=False,
+                            merged_with=entity.name if best["name"] != entity.name else None,
+                            confidence=best["combined_score"]  # Always 0-1 scale
+                        ), False
+                    else:
+                        logger.info(f"Tier 1.5 contextual match REJECTED: '{entity.name}' -> '{best['name']}' "
+                                   f"(score: {best['combined_score']:.3f} < threshold: {effective_threshold}, "
+                                   f"phonetic: {has_phonetic})")
 
     # Tier 2a: Fuzzy match (Jaro-Winkler with token overlap check)
     if entity.type:
@@ -1341,6 +1351,7 @@ async def ingest_extraction(request: IngestRequest):
     canonical_entities: List[CanonicalEntity] = []
     new_count = 0
     resolved_count = 0
+    failed_entities: List[dict] = []
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -1387,21 +1398,30 @@ async def ingest_extraction(request: IngestRequest):
                     import traceback
                     logger.error(f"Error processing entity {entity.name}: {e}")
                     logger.error(traceback.format_exc())
+                    failed_entities.append({"name": entity.name, "error": str(e)})
                     # Continue with other entities
 
     # Generate receipt RID
     receipt_rid = f"orn:personal-koi.receipt:{uuid.uuid4().hex[:16]}"
 
+    success = len(failed_entities) == 0
+    stats = {
+        "entities_processed": len(request.entities),
+        "new_entities": new_count,
+        "resolved_entities": resolved_count,
+        "relationships_processed": len(request.relationships),
+        "failed_entities": len(failed_entities),
+    }
+    if failed_entities:
+        stats["errors"] = failed_entities
+        logger.warning(f"Ingest completed with {len(failed_entities)} failures: "
+                      f"{[f['name'] for f in failed_entities]}")
+
     return IngestResponse(
-        success=True,
+        success=success,
         canonical_entities=canonical_entities,
         receipt_rid=receipt_rid,
-        stats={
-            "entities_processed": len(request.entities),
-            "new_entities": new_count,
-            "resolved_entities": resolved_count,
-            "relationships_processed": len(request.relationships)
-        }
+        stats=stats
     )
 
 
