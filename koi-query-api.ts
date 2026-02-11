@@ -2322,6 +2322,128 @@ Answer the question using the context above.`;
 });
 
 // Graph Query Endpoint - Direct Apache AGE access
+
+// =============================================================================
+// Chat Endpoint - Single-turn RAG chat for bizdev dashboards
+// =============================================================================
+
+const CLIENT_CONTEXTS: Record<string, string> = {
+  landbanking: 'The client is Landbanking Group, a Munich-based natural capital fintech. They have the Nature Equity Asset (Landler) platform measuring carbon, biodiversity, soil, water, and social dimensions. Key partner: Ritter Sport. Focus on carbon credit registration via existing C-class.',
+  renew: 'The client is Renew/RePlanet, a UK-based nature data & intelligence company. They use the Wallacea Trust v2.1 biodiversity scoring methodology across 5 taxa. Focus areas: BT01 biodiversity credits and carbon stacking opportunities.',
+};
+
+const CHAT_SYSTEM_PROMPT = `You are a Regen Network registry expert. Answer questions using ONLY the provided context from the knowledge graph. Be concise and cite sources by number [1], [2], etc.
+
+Key facts:
+- Regen Registry has 78 credit batches, 58 projects, 13 credit classes
+- Credit types: Carbon (C01-C09), Biodiversity (BT01), plus KSH01, MBS01, USS01
+- BT01 uses conservation-weighted biodiversity scoring per 10m²
+
+If the context doesn't contain enough information, say so honestly.`;
+
+app.post('/api/koi/chat', async (req, res) => {
+  try {
+    const { query, client, limit = 5 } = req.body;
+
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required' });
+    }
+
+    // Call internal RAG search
+    const ragResponse = await fetch('http://localhost:8301/api/koi/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: query, limit: limit * 2 })
+    });
+
+    if (!ragResponse.ok) {
+      return res.status(500).json({ error: 'Search failed' });
+    }
+
+    const ragData = await ragResponse.json();
+    const results = (ragData.data?.results || ragData.results || []).slice(0, limit);
+
+    if (results.length === 0) {
+      return res.json({
+        answer: 'No relevant information found in the knowledge graph for that query.',
+        sources: [],
+        model: 'none'
+      });
+    }
+
+    // Build numbered citation context
+    const contextParts: string[] = [];
+    const sources = results.map((r: any, idx: number) => {
+      const content = r.content || r.text || '';
+      const title = r.title || r.rid || 'Unknown';
+      contextParts.push(`[${idx + 1}] ${title}: ${content}`);
+      return {
+        rid: r.rid || null,
+        title,
+        excerpt: content.slice(0, 200),
+        score: r.score || r.confidence || null,
+        source: r.source || null,
+        url: r.url || null,
+      };
+    });
+
+    const context = contextParts.join('\n\n');
+
+    // Build system prompt with optional client context
+    let systemPrompt = CHAT_SYSTEM_PROMPT;
+    if (client && CLIENT_CONTEXTS[client]) {
+      systemPrompt += `\n\nClient context: ${CLIENT_CONTEXTS[client]}`;
+    }
+
+    // Call OpenAI
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      return res.json({
+        answer: 'AI synthesis not available (API key not configured). Here are the raw search results.',
+        sources,
+        model: 'none'
+      });
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openaiKey}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Question: ${query}\n\nContext:\n${context}\n\nAnswer using the context above, citing sources by number.` }
+        ],
+        temperature: 0.7,
+        max_tokens: 600
+      })
+    });
+
+    if (!openaiResponse.ok) {
+      throw new Error(`OpenAI API error: ${openaiResponse.status}`);
+    }
+
+    const openaiData = await openaiResponse.json();
+    const answer = openaiData.choices[0].message.content;
+
+    return res.json({
+      answer,
+      sources,
+      model: 'gpt-4o-mini'
+    });
+
+  } catch (error) {
+    console.error('[KOI Chat] Error:', error);
+    res.status(500).json({
+      error: 'Chat failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 // Accepts 'query_type' for specific graph operations
 // Also accepts 'query' as a natural language description (for OpenAPI compatibility)
 app.post('/api/koi/graph', async (req, res) => {
@@ -2740,6 +2862,7 @@ app.use('/api/koi/event-bridge/', proxyToService('http://localhost:8100'));
 app.use('/api/koi/bge/', proxyToService('http://localhost:8090'));
 app.use('/api/koi/transformations', proxyToService('http://localhost:8002'));
 app.use('/api/koi/rids', proxyToService('http://localhost:8002'));
+app.use('/api/koi/rid-lookup', proxyToService('http://localhost:8002'));
 
 // Auth status check - for MCP server to validate user authentication
 // SECURITY: Uses device_code binding to prevent IDOR attacks
@@ -2887,6 +3010,273 @@ app.get('/api/koi/auth/status', async (req, res) => {
   }
 });
 
+// =============================================================================
+// User Profile Endpoints (Teaching Mode)
+// Stores user experience level and preferences for personalized responses
+// =============================================================================
+
+const FUSEKI_URL = process.env.FUSEKI_URL || 'http://localhost:3030';
+const FUSEKI_DATASET = process.env.FUSEKI_DATASET || 'koi';
+
+// Default preferences by experience level
+const DEFAULT_PREFERENCES_BY_LEVEL: Record<string, object> = {
+  junior: { explain_before_code: true, verbosity: 'detailed', show_examples: true },
+  mid: { explain_before_code: true, verbosity: 'balanced', show_examples: true },
+  senior: { explain_before_code: false, verbosity: 'concise', show_examples: false },
+  staff: { explain_before_code: false, verbosity: 'concise', show_examples: false },
+  principal: { explain_before_code: false, verbosity: 'concise', show_examples: false },
+};
+
+// Helper to query SPARQL endpoint
+async function sparqlQuery(query: string): Promise<any> {
+  try {
+    const response = await fetch(`${FUSEKI_URL}/${FUSEKI_DATASET}/sparql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sparql-query',
+        'Accept': 'application/sparql-results+json',
+      },
+      body: query,
+    });
+    if (!response.ok) {
+      console.error(`[SPARQL] Query failed: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[SPARQL] Query error:', error);
+    return null;
+  }
+}
+
+// Helper to insert triples via SPARQL UPDATE
+async function sparqlUpdate(updateQuery: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${FUSEKI_URL}/${FUSEKI_DATASET}/update`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sparql-update',
+      },
+      body: updateQuery,
+    });
+    if (!response.ok) {
+      console.error(`[SPARQL] Update failed: ${response.status} ${response.statusText}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('[SPARQL] Update error:', error);
+    return false;
+  }
+}
+
+// Helper to get Jena relationships for a user
+async function getJenaRelationships(email: string): Promise<{
+  manages: string[];
+  works_on: string[];
+  learning: string[];
+}> {
+  const personUri = `<https://regen.network/person/${encodeURIComponent(email)}>`;
+
+  const query = `
+    PREFIX regen: <https://regen.network/ontology/>
+
+    SELECT ?predicate ?object WHERE {
+      ${personUri} ?predicate ?object .
+      FILTER(?predicate IN (regen:manages, regen:works_on, regen:learning))
+    }
+  `;
+
+  const result = await sparqlQuery(query);
+  const relationships = { manages: [] as string[], works_on: [] as string[], learning: [] as string[] };
+
+  if (result?.results?.bindings) {
+    for (const binding of result.results.bindings) {
+      const pred = binding.predicate?.value || '';
+      const obj = binding.object?.value || '';
+
+      if (pred.endsWith('manages')) {
+        relationships.manages.push(obj);
+      } else if (pred.endsWith('works_on')) {
+        relationships.works_on.push(obj);
+      } else if (pred.endsWith('learning')) {
+        relationships.learning.push(obj);
+      }
+    }
+  }
+
+  return relationships;
+}
+
+// Helper to sync profile relationships to Jena
+async function syncProfileToJena(email: string, managedBy?: string): Promise<boolean> {
+  const personUri = `<https://regen.network/person/${encodeURIComponent(email)}>`;
+
+  // Build update query - delete old :manages relationships and insert new ones
+  let updateQuery = `
+    PREFIX regen: <https://regen.network/ontology/>
+
+    DELETE WHERE {
+      ?manager regen:manages ${personUri} .
+    }
+  `;
+
+  if (managedBy) {
+    const managerUri = `<https://regen.network/person/${encodeURIComponent(managedBy)}>`;
+    updateQuery += `
+    ;
+    INSERT DATA {
+      ${managerUri} regen:manages ${personUri} .
+    }
+    `;
+  }
+
+  return await sparqlUpdate(updateQuery);
+}
+
+// GET /api/koi/user/profile - Get current user's profile
+app.get('/api/koi/user/profile', async (req, res) => {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  try {
+    // Authenticate user via session token
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const userEmail = await validateSessionToken(sessionToken);
+
+    if (!userEmail) {
+      const koiError: KoiError = {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required. Please authenticate first.',
+        retryable: false,
+      };
+      return res.status(401).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Get profile from PostgreSQL
+    const result = await pool.query(
+      `SELECT id, email, experience_level, role, preferences, managed_by, created_at, updated_at
+       FROM user_profiles
+       WHERE email = $1`,
+      [userEmail]
+    );
+
+    let profile: any;
+
+    if (result.rows.length === 0) {
+      // Return default profile for new users
+      const defaultLevel = 'mid';
+      profile = {
+        email: userEmail,
+        experience_level: defaultLevel,
+        role: null,
+        preferences: DEFAULT_PREFERENCES_BY_LEVEL[defaultLevel],
+        managed_by: null,
+        is_new: true,
+      };
+    } else {
+      profile = result.rows[0];
+      profile.is_new = false;
+    }
+
+    // Enrich with Jena relationships
+    const relationships = await getJenaRelationships(userEmail);
+    profile.relationships = relationships;
+
+    console.log(`[UserProfile] Retrieved profile for ${userEmail}`);
+
+    return res.json(createSuccessEnvelope(requestId, profile));
+  } catch (error) {
+    console.error('[UserProfile] Error getting profile:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
+// PUT /api/koi/user/profile - Update user's profile
+app.put('/api/koi/user/profile', async (req, res) => {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  try {
+    // Authenticate user via session token
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const userEmail = await validateSessionToken(sessionToken);
+
+    if (!userEmail) {
+      const koiError: KoiError = {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required. Please authenticate first.',
+        retryable: false,
+      };
+      return res.status(401).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    const { experience_level, role, preferences, managed_by } = req.body;
+
+    // Validate experience_level if provided
+    const validLevels = ['junior', 'mid', 'senior', 'staff', 'principal'];
+    if (experience_level && !validLevels.includes(experience_level)) {
+      const koiError: KoiError = {
+        code: 'INVALID_INPUT',
+        message: `Invalid experience_level. Must be one of: ${validLevels.join(', ')}`,
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Merge preferences with defaults based on experience level
+    const level = experience_level || 'mid';
+    const mergedPreferences = {
+      ...DEFAULT_PREFERENCES_BY_LEVEL[level],
+      ...(preferences || {}),
+    };
+
+    // Upsert profile in PostgreSQL
+    const result = await pool.query(
+      `INSERT INTO user_profiles (email, experience_level, role, preferences, managed_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email) DO UPDATE SET
+         experience_level = COALESCE(EXCLUDED.experience_level, user_profiles.experience_level),
+         role = COALESCE(EXCLUDED.role, user_profiles.role),
+         preferences = COALESCE(EXCLUDED.preferences, user_profiles.preferences),
+         managed_by = EXCLUDED.managed_by,
+         updated_at = NOW()
+       RETURNING id, email, experience_level, role, preferences, managed_by, created_at, updated_at`,
+      [userEmail, level, role || null, JSON.stringify(mergedPreferences), managed_by || null]
+    );
+
+    const profile = result.rows[0];
+
+    // Sync to Jena (async, don't wait)
+    syncProfileToJena(userEmail, managed_by).catch(err => {
+      console.error('[UserProfile] Failed to sync to Jena:', err);
+    });
+
+    // Enrich with Jena relationships
+    const relationships = await getJenaRelationships(userEmail);
+    profile.relationships = relationships;
+
+    console.log(`[UserProfile] Updated profile for ${userEmail}: level=${level}`);
+
+    return res.json(createSuccessEnvelope(requestId, profile));
+  } catch (error) {
+    console.error('[UserProfile] Error updating profile:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
 // Default type priority (higher = more preferred) - matches Python polysemy_resolver.py
 const DEFAULT_TYPE_PRIORITY: Record<string, number> = {
   'TECHNOLOGY': 100,
@@ -2911,8 +3301,9 @@ const DEFAULT_TYPE_PRIORITY: Record<string, number> = {
   'KEEPER': 0,
 };
 
-// Polysemy-aware entity resolution endpoint
+// Polysemy-aware entity resolution endpoint with ledger entity support
 // GET /api/koi/entity/resolve?label=...&type_hint=...&limit=5
+// Supports: normalized_text match, ledger_id exact match, aliases JSONB containment
 app.get('/api/koi/entity/resolve', async (req, res) => {
   try {
     const label = (req.query.label as string || '').trim();
@@ -2928,7 +3319,13 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
       return res.status(400).json({ error: 'label parameter is required' });
     }
 
-    // Query for entity variants matching the label or canonical aliases
+    // Prepare alias lookup key (for JSONB containment)
+    const aliasLookupKey = JSON.stringify([label.toLowerCase()]);
+
+    // Query for entity variants matching:
+    // 1. ledger_id exact match (e.g., "C02", "C02-003") - highest priority for ledger entities
+    // 2. normalized_text exact match - standard KOI resolution
+    // 3. aliases JSONB containment - fuzzy alias matching
     const query = `
       WITH entity_matches AS (
         SELECT
@@ -2937,9 +3334,24 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
           entity_type,
           normalized_text,
           occurrence_count,
-          fuseki_uri
+          fuseki_uri,
+          ledger_id,
+          metadata_iri,
+          admin_address,
+          aliases,
+          jurisdiction,
+          class_id,
+          source,
+          CASE
+            WHEN UPPER(ledger_id) = UPPER($2) THEN 'ledger_id'
+            WHEN LOWER(TRIM(normalized_text)) = ANY($1) THEN 'normalized_text'
+            WHEN aliases @> $3::jsonb THEN 'alias'
+            ELSE 'unknown'
+          END as match_type
         FROM entity_registry
-        WHERE LOWER(TRIM(normalized_text)) = ANY($1)
+        WHERE UPPER(ledger_id) = UPPER($2)
+           OR LOWER(TRIM(normalized_text)) = ANY($1)
+           OR (aliases IS NOT NULL AND aliases @> $3::jsonb)
       ),
       rel_counts AS (
         SELECT
@@ -2964,13 +3376,36 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         e.normalized_text,
         e.occurrence_count,
         e.fuseki_uri,
-        r.relationship_count
+        e.ledger_id,
+        e.metadata_iri,
+        e.admin_address,
+        e.aliases,
+        e.jurisdiction,
+        e.class_id,
+        e.source,
+        e.match_type,
+        r.relationship_count,
+        csm.source_url as canonical_source_url
       FROM entity_matches e
       JOIN rel_counts r ON e.id = r.id
-      ORDER BY e.occurrence_count DESC, r.relationship_count DESC
+      LEFT JOIN LATERAL (
+        SELECT source_url FROM canonical_source_mappings
+        WHERE entity_uri = e.fuseki_uri AND is_canonical = true
+        ORDER BY priority DESC, updated_at DESC, source_url ASC
+        LIMIT 1
+      ) csm ON true
+      ORDER BY
+        CASE e.match_type
+          WHEN 'ledger_id' THEN 1
+          WHEN 'normalized_text' THEN 2
+          WHEN 'alias' THEN 3
+          ELSE 4
+        END,
+        e.occurrence_count DESC,
+        r.relationship_count DESC
     `;
 
-    const result = await pool.query(query, [lookupKeys]);
+    const result = await pool.query(query, [lookupKeys, label, aliasLookupKey]);
     const variants = result.rows;
 
     if (variants.length === 0) {
@@ -2985,7 +3420,7 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
       });
     }
 
-    // Compute scores for all variants
+    // Compute scores for all variants (ledger entities get priority)
     const scoredVariants = variants.map(v => {
       const occScore = parseInt(v.occurrence_count) * 1000;
       const relScore = parseInt(v.relationship_count) * 100;
@@ -2999,6 +3434,15 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         `type_pri=${typePriority}`
       ];
 
+      // Boost for match type (ledger_id is highest priority)
+      if (v.match_type === 'ledger_id') {
+        totalScore += 100000;
+        reasons.push('ledger_id_match=+100k');
+      } else if (v.match_type === 'alias') {
+        totalScore += 25000;
+        reasons.push('alias_match=+25k');
+      }
+
       // Boost if matches type hint
       if (typeHint && v.entity_type.toUpperCase() === typeHint) {
         totalScore += 50000;
@@ -3011,6 +3455,16 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
         entity_type: v.entity_type,
         occurrence_count: parseInt(v.occurrence_count),
         relationship_count: parseInt(v.relationship_count),
+        match_type: v.match_type,
+        // Include ledger-specific fields when present
+        ledger_id: v.ledger_id || null,
+        metadata_iri: v.metadata_iri || null,
+        admin_address: v.admin_address || null,
+        aliases: v.aliases || null,
+        jurisdiction: v.jurisdiction || null,
+        class_id: v.class_id || null,
+        source: v.source || null,
+        canonical_source_url: v.canonical_source_url || null,
         score: totalScore,
         score_breakdown: reasons.join(', ')
       };
@@ -3029,7 +3483,11 @@ app.get('/api/koi/entity/resolve', async (req, res) => {
 
     // Determine resolution method
     let resolutionMethod = 'highest_combined_score';
-    if (typeHint && winner.entity_type.toUpperCase() === typeHint) {
+    if (winner.match_type === 'ledger_id') {
+      resolutionMethod = 'ledger_id_exact_match';
+    } else if (winner.match_type === 'alias') {
+      resolutionMethod = 'alias_match';
+    } else if (typeHint && winner.entity_type.toUpperCase() === typeHint) {
       resolutionMethod = 'type_hint_match';
     } else {
       const totalOcc = scoredVariants.reduce((sum, v) => sum + v.occurrence_count, 0);
@@ -3245,9 +3703,16 @@ async function resolveQueryPolysemy(
         e.normalized_text,
         e.occurrence_count,
         e.fuseki_uri,
-        r.relationship_count
+        r.relationship_count,
+        csm.source_url as canonical_source_url
       FROM entity_matches e
       JOIN rel_counts r ON e.id = r.id
+      LEFT JOIN LATERAL (
+        SELECT source_url FROM canonical_source_mappings
+        WHERE entity_uri = e.fuseki_uri AND is_canonical = true
+        ORDER BY priority DESC, updated_at DESC, source_url ASC
+        LIMIT 1
+      ) csm ON true
       ORDER BY e.occurrence_count DESC, r.relationship_count DESC
     `;
 
@@ -5015,6 +5480,92 @@ app.get('/api/koi/document/full', requireInternalApiKey, async (req, res) => {
     const koiError: KoiError = {
       code: 'INTERNAL_ERROR',
       message: error instanceof Error ? error.message : 'Unknown error',
+      retryable: true,
+    };
+    return res.status(500).json(createErrorEnvelope(requestId, koiError));
+  }
+});
+
+// =============================================================================
+// Feedback Endpoint - For MCP submit_feedback tool
+// =============================================================================
+app.post('/api/koi/feedback', async (req, res) => {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  const startTime = Date.now();
+  console.log('[Feedback] Received feedback submission');
+
+  try {
+    const { rating, category, task_description, notes, session_context, user_email, client_version } = req.body;
+
+    // Validate required fields
+    if (typeof rating !== 'number' || rating < 1 || rating > 5) {
+      const koiError: KoiError = {
+        code: 'VALIDATION_ERROR',
+        message: 'Rating must be a number between 1 and 5',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    const validCategories = ['success', 'partial', 'bug', 'suggestion', 'question', 'other'];
+    if (!category || !validCategories.includes(category)) {
+      const koiError: KoiError = {
+        code: 'VALIDATION_ERROR',
+        message: `Category must be one of: ${validCategories.join(', ')}`,
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    if (!notes || typeof notes !== 'string' || notes.trim().length === 0) {
+      const koiError: KoiError = {
+        code: 'VALIDATION_ERROR',
+        message: 'Notes field is required and cannot be empty',
+        retryable: false,
+      };
+      return res.status(400).json(createErrorEnvelope(requestId, koiError));
+    }
+
+    // Insert feedback into database
+    const result = await pool.query(
+      `INSERT INTO user_feedback (rating, category, task_description, notes, session_context, user_email, client_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, created_at`,
+      [
+        rating,
+        category,
+        task_description || null,
+        notes.trim(),
+        session_context ? JSON.stringify(session_context) : '{}',
+        user_email || 'anonymous',
+        client_version || null
+      ]
+    );
+
+    const feedbackId = result.rows[0].id;
+    const createdAt = result.rows[0].created_at;
+
+    console.log(`[Feedback] Stored feedback #${feedbackId}: rating=${rating}, category=${category}`);
+
+    const responseData = {
+      feedback_id: feedbackId,
+      rating,
+      category,
+      created_at: createdAt,
+      message: 'Thank you for your feedback!',
+    };
+
+    const envelope = createSuccessEnvelope(requestId, responseData, {});
+    envelope.data_source = 'feedback';
+    return res.status(201).json(envelope);
+
+  } catch (error) {
+    console.error('[Feedback] Error storing feedback:', error);
+    const koiError: KoiError = {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Failed to store feedback',
       retryable: true,
     };
     return res.status(500).json(createErrorEnvelope(requestId, koiError));
