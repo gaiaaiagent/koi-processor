@@ -17,6 +17,7 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 - [Usage](#usage)
 - [API Documentation](#api-documentation)
 - [Database Schema](#database-schema)
+- [Personal Sensor Integration](#personal-sensor-integration)
 - [Testing](#testing)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
@@ -742,6 +743,15 @@ Generates semantic embedding for text (currently using BGE model).
 ```
 
 ## Database Schema
+
+## Personal Sensor Integration
+
+For local personal KOI stacks, see [`docs/PERSONAL_SENSOR_INTEGRATION.md`](docs/PERSONAL_SENSOR_INTEGRATION.md).
+
+Key points:
+- Canonical source sensor IDs: `email-sensor`, `claude-sessions-sensor`
+- Required migration for email metadata: `migrations/033_email_sensor_tables.sql`
+- Session endpoints: `/search-sessions`, `/session-stats`, `/session-tools`, `/session-files`
 
 ### Isolated KOI Tables
 

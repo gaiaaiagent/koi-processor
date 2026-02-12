@@ -136,6 +136,26 @@ sensor:github-activity-sensor a koi:Sensor ;
     koi:sendsTo :coordinator ;
     dc:description "Collects comprehensive GitHub activity (commits, issues, PRs) for daily/weekly curation" .
 
+sensor:email-sensor a koi:Sensor ;
+    rdfs:label "Email Sensor" ;
+    koi:rid "koi.sensor:email-sensor" ;
+    koi:sensorType "email" ;
+    koi:endpoint "http://localhost:8351" ;
+    koi:status "active" ;
+    koi:monitors "Local Maildir (Gmail sync)" ;
+    koi:sendsTo :personal-ingest-api ;
+    dc:description "Indexes personal email content into koi_memories/email_metadata" .
+
+sensor:claude-sessions-sensor a koi:Sensor ;
+    rdfs:label "Claude Sessions Sensor" ;
+    koi:rid "koi.sensor:claude-sessions-sensor" ;
+    koi:sensorType "claude-sessions" ;
+    koi:endpoint "http://localhost:8351" ;
+    koi:status "active" ;
+    koi:monitors "~/.claude/projects" ;
+    koi:sendsTo :personal-ingest-api ;
+    dc:description "Indexes Claude Code session transcripts and metadata" .
+
 # ============================================================================
 # Processing Layer
 # ============================================================================
@@ -260,6 +280,18 @@ sensor:github-activity-sensor a koi:Sensor ;
     koi:queriesFrom :apache-jena ;
     dc:description "Provides pipeline structure and metadata" .
 
+:personal-ingest-api a koi:Service ;
+    rdfs:label "Personal Ingest API" ;
+    koi:rid "koi.infrastructure:personal-ingest-api" ;
+    koi:endpoint "http://localhost:8351" ;
+    koi:port 8351 ;
+    koi:status "active" ;
+    koi:receivesFrom sensor:email-sensor ;
+    koi:receivesFrom sensor:claude-sessions-sensor ;
+    koi:writesTo :postgresql ;
+    koi:queriedBy :mcp-server ;
+    dc:description "Personal data API for session search and email metadata lookup" .
+
 # ============================================================================
 # Agent Layer
 # ============================================================================
@@ -295,6 +327,9 @@ sensor:github-activity-sensor a koi:Sensor ;
 # 13. Apache Jena → Pipeline Metadata API (structure queries)
 # 14. MCP Server → Eliza Agents (RAG)
 # 15. PostgreSQL → Eliza Agents (direct memory access)
+# 16. Email Sensor → Personal Ingest API (personal email indexing)
+# 17. Claude Sessions Sensor → Personal Ingest API (session indexing)
+# 18. Personal Ingest API → PostgreSQL (personal memory tables)
 
 # ============================================================================
 # Additional Metadata
