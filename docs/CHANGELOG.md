@@ -5,6 +5,65 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-02-03
+
+### Added
+- **Tier 1.1 Alias Resolution** - Entity aliases stored in vault frontmatter now resolve to canonical entities
+  - New `normalize_alias()` helper strips wikilinks and normalizes for matching
+  - Aliases stored in `entity_registry.aliases` TEXT[] column with GIN index
+  - Resolution: "Gnosis" (mentioned) → "Knowsys" (canonical) via alias match @ 100% confidence
+  - `/register-entity` now syncs aliases from frontmatter to backend
+  - Migration 036: Enforces TEXT[] type for aliases column (aligns with production DB)
+
+- **Vault Parser Predicate Mappings** - Added support for `creator` and `lead` fields
+  - `creator` → `has_founder` (incoming, Person) - same semantics as `founders`
+  - `lead` → `involves_person` (outgoing, Person)
+
+- **Schema Loading Diagnostics** - Enhanced logging for vault schema loading
+  - Logs vault path, individual schema names, and phonetic_matching status
+  - Helps debug when schemas fail to load or have unexpected settings
+
+### Fixed
+- **Entity Resolution False Positives** - "Gnosis" no longer creates duplicate entity when "Knowsys" exists with alias
+  - Root cause: Aliases in frontmatter weren't being read or matched during resolution
+  - Fix: Tier 1.1 alias matching inserted after exact match, before contextual matching
+
+## [3.2.0] - 2026-02-02
+
+### Added
+- **Enhanced Contextual Entity Resolution** - Multi-hop relationship-aware resolution
+  - Per-entity `associated_people` and `associated_organizations` context fields
+  - Organization and project context for disambiguation
+  - Phonetic matching (Double Metaphone) for name variants (e.g., "Sean" → "Shawn")
+  - 2-hop resolution paths: Person → Org → Project
+  - Predicates: `affiliated_with`, `founded`, `has_founder`, `involves_person`
+  - Result: "Sean Anderson" + Symbiocene Labs context → "Shawn Anderson" @ 93.4% confidence
+
+- **Proto Support for Code Graph** - Cosmos SDK cross-language linking
+  - ProtoMessage, ProtoService, ProtoRPC, ProtoEnum entity types
+  - Enables proto → Go struct → TypeScript type linking
+  - Module hierarchy with BELONGS_TO and CONTAINS edges
+
+- **Local BGE Embedding Server** - `src/core/bge_server_local.py`
+  - Privacy-preserving embeddings using BAAI/bge-large-en-v1.5
+  - No data leaves the machine - suitable for personal KOI deployment
+
+- **GitHub Webhook Handler** - `api/github_webhook.py`
+  - Receives push events and triggers code extraction
+  - Environment-configurable paths (CODE_GRAPH_BASE_PATH, REGEN_REPOS_PATH)
+
+- **Phonetic Code Backfill** - `scripts/backfill_phonetic_codes.py`
+  - Utility to populate phonetic_code for schema-enabled entity types
+  - Supports per-type stopwords and idempotent execution
+
+### Changed
+- **Vault Parser** - Added `parentorg` predicate mapping for Project → Organization
+- **Entity Resolution** - Relationships synced from vault: 3 → 112
+
+### Fixed
+- **has_founder Direction** - Corrected to Person (subject) → Org (object)
+- **Frontmatter Sync** - Backend accepts both `frontmatter` and `properties` fields
+
 ## [3.1.5] - 2026-01-02
 
 ### Fixed
