@@ -149,12 +149,22 @@ class CanonicalEntity(BaseModel):
     confidence: float = 1.0
 
 
+class IngestStats(BaseModel):
+    """Stats from ingest operation"""
+    entities_processed: int
+    new_entities: int
+    resolved_entities: int
+    relationships_processed: int
+    failed_entities: int
+    errors: Optional[List[Dict[str, str]]] = None
+
+
 class IngestResponse(BaseModel):
     """Response from ingest endpoint"""
     success: bool
     canonical_entities: List[CanonicalEntity]
     receipt_rid: str
-    stats: Dict[str, int]
+    stats: IngestStats
 
 
 class RegisterEntityRequest(BaseModel):
@@ -378,20 +388,24 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     - At least MIN_TOKEN_OVERLAP_RATIO of shorter text's tokens match
     - At least MIN_TOKEN_OVERLAP_COUNT tokens match (for multi-word entities)
 
-    Types with require_token_overlap=False bypass this check.
+    Types with require_token_overlap=False bypass multi-word token overlap,
+    but single-word entities ALWAYS require JW >= 0.95 to prevent false merges
+    like "Microsoft" → "Miro" or "Marie" → "Marianne".
     """
-    # Get schema-driven config
-    schema = get_schema_for_type(entity_type)
-    if not schema.require_token_overlap:
-        return True  # Schema says bypass this check
-
-    overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
-
-    # For single-word entities, just use Jaro-Winkler
+    # Single-word guard applies to ALL types (before schema bypass)
+    # This catches short-name false merges regardless of entity type config
     tokens1 = text1.lower().split()
     tokens2 = text2.lower().split()
     if len(tokens1) == 1 or len(tokens2) == 1:
-        return True
+        jw = jaro_winkler_similarity(text1.lower(), text2.lower())
+        return jw >= 0.95
+
+    # Get schema-driven config for multi-word token overlap
+    schema = get_schema_for_type(entity_type)
+    if not schema.require_token_overlap:
+        return True  # Schema says bypass multi-word token overlap check
+
+    overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
 
     # For multi-word entities, require token overlap
     if overlap_ratio < MIN_TOKEN_OVERLAP_RATIO:
@@ -773,10 +787,21 @@ async def resolve_entity(
     for candidate in candidates:
         score = jaro_winkler_similarity(normalized, candidate['normalized_text'])
         if score >= threshold and score > best_score:
+            cand_norm = candidate['normalized_text']
+
+            # Length ratio guard: reject if candidate is much longer (prefix-match inflation)
+            # e.g. "regen ai" (8) vs "regen ai bd sprint scope" (24) → ratio 3.0
+            len_shorter = min(len(normalized), len(cand_norm))
+            len_longer = max(len(normalized), len(cand_norm))
+            if len_shorter > 0 and len_longer / len_shorter > 1.8 and score < 0.95:
+                logger.info(f"Fuzzy match REJECTED (length ratio {len_longer/len_shorter:.1f}x): "
+                           f"{entity.name} vs {candidate['entity_text']} | JW={score:.3f}")
+                continue
+
             # Additional check: token overlap for Organization/Project/Concept
-            overlap_ratio, overlap_count = compute_token_overlap(normalized, candidate['normalized_text'])
+            overlap_ratio, overlap_count = compute_token_overlap(normalized, cand_norm)
             logger.info(f"Fuzzy candidate: {entity.name} vs {candidate['entity_text']} | JW={score:.3f} | overlap={overlap_count} ({overlap_ratio:.2f})")
-            if not passes_token_overlap_check(normalized, candidate['normalized_text'], entity.type):
+            if not passes_token_overlap_check(normalized, cand_norm, entity.type):
                 logger.info(f"Fuzzy match REJECTED due to low token overlap: {entity.name} vs {candidate['entity_text']}")
                 continue
             best_score = score
@@ -1405,15 +1430,15 @@ async def ingest_extraction(request: IngestRequest):
     receipt_rid = f"orn:personal-koi.receipt:{uuid.uuid4().hex[:16]}"
 
     success = len(failed_entities) == 0
-    stats = {
-        "entities_processed": len(request.entities),
-        "new_entities": new_count,
-        "resolved_entities": resolved_count,
-        "relationships_processed": len(request.relationships),
-        "failed_entities": len(failed_entities),
-    }
+    stats = IngestStats(
+        entities_processed=len(request.entities),
+        new_entities=new_count,
+        resolved_entities=resolved_count,
+        relationships_processed=len(request.relationships),
+        failed_entities=len(failed_entities),
+        errors=failed_entities if failed_entities else None
+    )
     if failed_entities:
-        stats["errors"] = failed_entities
         logger.warning(f"Ingest completed with {len(failed_entities)} failures: "
                       f"{[f['name'] for f in failed_entities]}")
 
@@ -2412,6 +2437,13 @@ async def get_contextual_entity_candidates(
             if not candidate_uri:
                 continue
 
+            # Gate context boost behind name similarity floor
+            # Prevents weak name matches (e.g. "Regen Builder Lab" vs "Regen AI")
+            # from being pushed over threshold by context alone
+            min_name_sim_for_boost = 0.80 if c.get("phonetic_match") else 0.90
+            if c["name_similarity"] < min_name_sim_for_boost:
+                continue  # Skip boost for weak name matches
+
             relevance = await check_context_relevance(conn, candidate_uri, context)
 
             if relevance.signal == RelevanceSignal.POSITIVE:
@@ -2439,6 +2471,10 @@ async def get_contextual_entity_candidates(
                 if fallback > 0:
                     c["combined_score"] += fallback
                     c["relevance_detail"] = f"doc co-occurrence (+{fallback:.2f})"
+
+    # Clamp scores to valid confidence range [0, 1.0]
+    for c in scored:
+        c["combined_score"] = min(c["combined_score"], 1.0)
 
     # Short-name guard with explicit bypass conditions
     has_context = len(resolved_uris) > 0  # Context is present if we got here
