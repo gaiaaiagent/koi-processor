@@ -400,6 +400,29 @@ Extract:
 Focus on regenerative finance, ecological, and commons-oriented content.
 Return ONLY valid JSON, no additional text or markdown."""
 
+    # Append code-docstring-specific extraction guidance
+    if source_type == "code_docstring":
+        prompt += """
+
+## CODE DOCSTRING CONTEXT (source_type=code_docstring)
+
+This content is aggregated from code comments and docstrings extracted via tree-sitter.
+Each block is labeled with its entity type and name (e.g., [Function: CreateBatch]).
+
+### PRIORITIZE extracting:
+- API_MESSAGE types (MsgCreateBatch, MsgRetire, QueryBalanceRequest)
+- KEEPER names (EcocreditKeeper, BasketKeeper, BankKeeper)
+- MODULE references (x/ecocredit, x/group, x/data)
+- STANDARD references (ISO 14064, Verra VM0042, EIP-721, ICS-20)
+- TECHNOLOGY (Cosmos SDK, IBC, Tendermint, protobuf, gRPC)
+- CONCEPT (credit retirement, batch issuance, basket redemption, MRV)
+
+### DO NOT extract from code docstrings:
+- Variable names, parameter names, return type names
+- Generic programming words: returns, error, context, params, args, nil, None
+- Implementation details: loop, index, pointer, buffer, mutex
+- Test fixture names or test helper descriptions"""
+
     return prompt
 
 

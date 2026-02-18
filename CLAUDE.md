@@ -83,6 +83,10 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 - `scripts/fix007_consolidate_predicates_postgres.py` - Predicate consolidation
 - `scripts/regenerate_fuseki_graph.py` - Fuseki rebuild from PostgreSQL
 
+### Docstring Semantic Extraction
+- `scripts/extract_docstring_semantics.py` - Route code docstrings through LLM semantic extractor
+- `src/core/docstring_filter.py` - Filter/aggregate meaningful docstrings for LLM
+
 ### Code Bridge
 - `scripts/code_bridge/export_code_artifacts.py` - Populate code artifacts
 - `scripts/code_bridge/link_docs_to_code.py` - Doc-level linking
@@ -267,5 +271,31 @@ set -a; source .env; set +a
 
 ---
 
-**Last Updated**: 2026-01-02
-**Phase**: Complete - All major milestones achieved
+## Personal KOI Backend Bug Fixes (2026-02-09)
+
+**Status**: ✅ Fixed & Deployed
+
+**Bug 1 - Silent ingest failure**: `/ingest` endpoint caught INSERT exceptions silently, returning false success. Fixed by tracking `failed_entities` list and reporting in response stats with `success=False`.
+
+**Bug 2 - False entity merge (token overlap)**: "Silke Helfrich" merged with "Simon Grant" because Jaro-Winkler score (0.6398) exceeded phonetic threshold (0.6) despite zero token overlap. Fixed by adding token overlap guard: if both names have 2+ tokens and share zero tokens, reject regardless of score.
+
+**Key File**: `api/personal_ingest_api.py` (lines 723-755 for Bug 2, lines 1345-1418 for Bug 1)
+
+**Commit**: `5a0dfa7e` on `feature/obsidian-kg-sync-plan`
+
+---
+
+## BKC Ontology Entity Types (2026-02-09)
+
+**Status**: ✅ Committed
+
+Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bioregion, Protocol, Playbook, Question, Claim, Evidence. Plus 15 new predicates (knowledge commoning, discourse graph, SKOS).
+
+**Key Files**: `api/entity_schema.py`, `api/vault_parser.py`, `migrations/038_bkc_predicates.sql`
+
+**Commit**: `4649e37d` on `feature/obsidian-kg-sync-plan`
+
+---
+
+**Last Updated**: 2026-02-09
+**Phase**: Complete - All major milestones achieved + Personal KOI active development
