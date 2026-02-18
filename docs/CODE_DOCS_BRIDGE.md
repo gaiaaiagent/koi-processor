@@ -119,6 +119,20 @@ The sync is **mark/sweep** using `sync_run_id`.
    - via Postgres `koi_code_artifacts` (fast; no AGE call)
    - optionally via AGE by `(age_graph, age_id)` when available
 
+## Docstring Semantic Extraction (v3.3.0)
+
+In addition to the structural bridge above, code docstrings are now routed through the LLM semantic extraction pipeline. This closes the gap where domain knowledge in comments (references to standards, protocols, architectural concepts) was invisible to the semantic KG.
+
+**Pipeline:** `scripts/extract_docstring_semantics.py`
+1. Tree-sitter extracts entities per file (same extension filter as `load_to_staging.py`)
+2. `src/core/docstring_filter.py` filters trivial/synthetic docstrings, aggregates into 3000-char batches
+3. OpenAI extractor with domain-tuned prompt (`source_type="code_docstring"`)
+4. Quality pipeline + EntityResolver deduplication
+5. Provenance stored in `koi_code_docstring_extractions` (FK cascade to `koi_kg_extractions`)
+6. Shadow `koi_memories` rows (`source_sensor='code_docstring'`) for analytics visibility
+
+**Idempotency:** Deterministic RID from `(repo, file_path, file_hash, batch_index, prompt_version, model)`. Re-running on unchanged files is a no-op.
+
 ## Notes
 
 - Stage 6 semantic re-extraction can remain **docs-only** while still linking into the code graph through this bridge.

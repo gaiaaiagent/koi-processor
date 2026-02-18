@@ -5,6 +5,21 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-02-18
+
+### Added
+- **Docstring-to-KG Semantic Extraction** - Route tree-sitter-extracted docstrings through LLM semantic extractor
+  - New `src/core/docstring_filter.py`: Filters trivial/synthetic docstrings, aggregates into 3000-char batches
+  - New `scripts/extract_docstring_semantics.py`: Batch coordinator with idempotency, quality pipeline, entity dedup
+  - New `migrations/039_code_docstring_extractions.sql`: Provenance table with FK cascade and deterministic idempotency key
+  - Modified `src/extraction/prompt_builder.py`: Domain-tuned prompt for `code_docstring` source type
+    - Prioritizes: API_MESSAGE, KEEPER, MODULE, STANDARD, TECHNOLOGY, CONCEPT
+    - Blocks: variable names, generic programming words, implementation details
+  - Shadow `koi_memories` rows with `source_sensor='code_docstring'` for analytics visibility
+  - Full quality pipeline: ConfidenceFilter → CanonicalResolver → EntityQualityFilter → ListSplitter → OntologyNormalizer
+  - EntityResolver deduplication against existing doc-sourced entities
+  - Deterministic RIDs: `code_docstring:{repo}:{path_hash}:{file_hash}:{batch}:{prompt_ver}:{model}`
+
 ## [3.2.1] - 2026-02-03
 
 ### Added
