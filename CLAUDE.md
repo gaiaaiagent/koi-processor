@@ -83,9 +83,17 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 - `scripts/fix007_consolidate_predicates_postgres.py` - Predicate consolidation
 - `scripts/regenerate_fuseki_graph.py` - Fuseki rebuild from PostgreSQL
 
-### Docstring Semantic Extraction
+### Docstring Semantic Extraction (Production Run 2026-02-19)
 - `scripts/extract_docstring_semantics.py` - Route code docstrings through LLM semantic extractor
 - `src/core/docstring_filter.py` - Filter/aggregate meaningful docstrings for LLM
+
+| Repo | Files | Batches | Entities (raw → passed) | Relationships |
+|------|-------|---------|------------------------|---------------|
+| koi-processor | 213 | 232 | 1,402 → 1,112 | 66 |
+| regen-ledger | 306 | 935 | 10,470 → 9,396 | 169 |
+| **Total** | **519** | **1,167** | **11,872 → 10,508** | **235** |
+
+Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCESS (190), MODULE (92), KEEPER (36), CREDIT_CLASS (27)
 
 ### Code Bridge
 - `scripts/code_bridge/export_code_artifacts.py` - Populate code artifacts

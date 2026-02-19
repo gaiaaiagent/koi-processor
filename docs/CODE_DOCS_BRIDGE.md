@@ -133,6 +133,16 @@ In addition to the structural bridge above, code docstrings are now routed throu
 
 **Idempotency:** Deterministic RID from `(repo, file_path, file_hash, batch_index, prompt_version, model)`. Re-running on unchanged files is a no-op.
 
+**Production Results (2026-02-19):**
+
+| Repo | Files | Batches | Entities | Relationships |
+|------|-------|---------|----------|---------------|
+| koi-processor | 213 | 232 | 1,112 | 66 |
+| regen-ledger | 306 | 935 | 9,396 | 169 |
+| **Total** | **519** | **1,167** | **10,508** | **235** |
+
+Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCESS (190), MODULE (92), KEEPER (36), CREDIT_CLASS (27).
+
 ## Notes
 
 - Stage 6 semantic re-extraction can remain **docs-only** while still linking into the code graph through this bridge.

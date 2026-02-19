@@ -5,6 +5,17 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-02-19
+
+### Fixed
+- **extractor_version column too narrow** - Widened `koi_kg_extractions.extractor_version` from varchar(20) to varchar(50) to accommodate model names like `docstring-gpt-4.1-mini`
+
+### Production Run
+- **Docstring extraction deployed** on koi-processor (290 files) and regen-ledger (500 files)
+  - 1,167 batches, 10,508 entities persisted, 235 relationships
+  - Top types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960)
+  - Zero failures, idempotency verified on re-run
+
 ## [3.3.0] - 2026-02-18
 
 ### Added
