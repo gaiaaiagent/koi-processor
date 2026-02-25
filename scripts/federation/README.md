@@ -123,6 +123,13 @@ KOI_ADMIN_TOKEN=<local-token> \
   bash scripts/federation/smoke-vault-sync.sh
 ```
 
+Recommended gate sequence:
+1. Run `MODE=local` on node A.
+2. Run `MODE=local` on node B.
+3. Run `MODE=two-peer` from A -> B.
+4. Run `MODE=two-peer` from B -> A.
+5. Proceed only if all runs end with `FAIL: 0` and no increase in `rejected_events`.
+
 Prerequisites:
 - Migration 049 applied on both nodes
 - `VAULT_SYNC_ENABLED=true` in both nodes' `config/personal.env`

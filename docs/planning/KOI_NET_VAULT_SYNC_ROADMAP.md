@@ -35,7 +35,7 @@ Key files:
 - `api/vault_sync.py` — VaultSyncManager (scan, trigger, apply, conflict, reconcile)
 - `api/koi_net_router.py` — vault sync endpoints (configure, trigger, status)
 - `api/koi_protocol.py` — WireManifest with `extra="allow"` for extension fields
-- `migrations/049_vault_sync.sql` — vault_sync_state, vault_sync_config, vault_sync_applied_events
+- `migrations/049_vault_sync.sql` — vault_sync_state, vault_sync_peers, vault_sync_applied_events
 - `tests/test_vault_sync.py` — 17 unit tests
 - `scripts/federation/smoke-vault-sync.sh` — two-peer smoke test script
 
@@ -50,23 +50,54 @@ Definition of done (all met):
 3. Invalid payload/path attempts are rejected and logged.
 4. Re-handshake updates capabilities and vault events are delivered.
 
+## External Onboarding Gate (Shawn Readiness)
+
+Status: READY, pending final external peer run.
+
+Pre-gate evidence:
+1. Local + Dobby two-peer smoke test passed 15/15.
+2. Regression bugs found in live run were fixed (manifest extension fields, poll manifest preservation, FORGET origin_seq monotonicity).
+
+Required gate sequence before external peer production use:
+1. Run `scripts/federation/smoke-vault-sync.sh` in `MODE=local` on each node.
+2. Run `scripts/federation/smoke-vault-sync.sh` in `MODE=two-peer` local -> peer.
+3. Run `scripts/federation/smoke-vault-sync.sh` in `MODE=two-peer` peer -> local.
+4. Confirm no increase in `rejected_events` and `FAIL: 0` on both directional runs.
+5. Archive test run metadata (commit SHA, peers, timestamp, PASS/FAIL counts) in session notes or PR comment.
+
 ## Phase Sync-1.5 (Hardening)
 
 Scope:
 1. Reliability and observability improvements without changing sync semantics.
 
 Planned work:
-1. File watcher hook (low latency) plus periodic scanner (correctness backstop).
-2. Per-cycle backpressure caps (max files/events/bytes).
-3. Structured metrics and health counters:
+1. Add a low-latency watcher hook that triggers early scan cycles (scanner remains correctness backstop).
+2. Add per-cycle backpressure caps (max files/events/bytes) and explicit overflow logging.
+3. Add structured metrics and health counters:
    - queued/applied/skipped_dedup/conflicts/rejected_invalid_payload/stale_delete_ignored
-4. Reconciliation command to detect and repair drift.
-5. Better operator UX in `/koi-net/vault-sync/status`.
+4. Add reconciliation tooling and runbook:
+   - dry-run drift report
+   - optional repair mode
+5. Expand operator UX in `/koi-net/vault-sync/status`:
+   - last successful trigger time
+   - last apply time
+   - rolling counters by rejection reason
+
+Execution order:
+1. Observability first (`/status` + counters + logging consistency).
+2. Reconciliation dry-run, then repair.
+3. Backpressure controls.
+4. Watcher hook.
 
 Definition of done:
 1. Stable operation on sustained edits with bounded queue growth.
 2. Drift detection and repair path validated.
 3. Metrics visible and actionable for troubleshooting.
+
+Exit criteria to start Sync-2:
+1. Sync-1.5 checks pass for at least 7 days across two active peers.
+2. No unresolved data-loss bugs in create/update/delete/conflict flows.
+3. Reconciliation run shows zero unexplained drift on both peers.
 
 ## Phase Sync-2 (Feature Expansion)
 
