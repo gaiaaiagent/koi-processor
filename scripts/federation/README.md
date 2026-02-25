@@ -74,7 +74,7 @@ Use `--strict` to fail on warnings.
 
 Fresh DB note:
 
-- On blank hosts, `setup-node.sh` auto-sets `KOI_MIGRATION_MIN_NUM=39` when
+- On blank hosts, `setup-node.sh` auto-sets `KOI_MIGRATION_MIN_NUM=40` when
   `koi_net_events` does not exist, so federation-relevant migrations can run
   without legacy pre-federation table dependencies.
 - Override by exporting `KOI_MIGRATION_MIN_NUM` explicitly.

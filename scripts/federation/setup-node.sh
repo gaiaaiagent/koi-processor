@@ -281,7 +281,7 @@ MIGRATIONS_DIR="$KOI_PATH/migrations"
 if [[ -z "${KOI_MIGRATION_MIN_NUM:-}" ]] && command -v psql >/dev/null 2>&1; then
     HAS_KOI_NET_EVENTS=$(psql "$POSTGRES_URL" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='koi_net_events')" 2>/dev/null || echo "")
     if [[ "$HAS_KOI_NET_EVENTS" == "f" ]]; then
-        export KOI_MIGRATION_MIN_NUM=39
+        export KOI_MIGRATION_MIN_NUM=40
         log_warn "Fresh DB detected. Enabling federation migration baseline: KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
     fi
 fi
