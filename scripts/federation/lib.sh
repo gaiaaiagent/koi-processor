@@ -505,7 +505,7 @@ if min_num_raw:
         print(f'[WARN] Ignoring invalid KOI_MIGRATION_MIN_NUM={min_num_raw!r}')
         min_num = 0
 
-if count == 0 and min_num > 0:
+if min_num > 0:
     baseline_count = 0
     for mf in mig_files:
         fname = os.path.basename(mf)
@@ -516,7 +516,7 @@ if count == 0 and min_num > 0:
                 (fname,)
             )
             baseline_count += 1
-    print(f'[INFO] Federation bootstrap baseline enabled: marked {baseline_count} migrations with number < {min_num} as baseline')
+    print(f'[INFO] Federation bootstrap baseline enabled: ensured {baseline_count} migrations with number < {min_num} are marked as baseline')
     cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
     count = cur.fetchone()[0]
 
