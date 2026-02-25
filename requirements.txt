@@ -37,7 +37,7 @@ metaphone>=0.6  # Phonetic matching for entity resolution (Double Metaphone)
 # Utilities
 python-dotenv>=1.0.0
 python-dateutil==2.8.2
-typing-extensions==4.9.0
+typing-extensions>=4.12.2
 pyyaml==6.0.1
 cryptography>=42.0.0
 
