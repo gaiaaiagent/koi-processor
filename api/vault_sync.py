@@ -429,13 +429,14 @@ class VaultSyncManager:
                     self._stat_cache.pop(rel_path, None)
                     await conn.execute(
                         """UPDATE vault_sync_state
-                           SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW()
+                           SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW(),
+                               origin_seq=origin_seq+1
                            WHERE relative_path=$1""",
                         rel_path,
                     )
                     await self._queue_event(
                         "FORGET", rel_path, row["content_hash"], row["content_hash"],
-                        row["origin_seq"], None, 0, peer_node_rid,
+                        row["origin_seq"] + 1, None, 0, peer_node_rid,
                     )
 
         # Mark initial sync complete
