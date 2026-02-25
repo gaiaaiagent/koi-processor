@@ -117,14 +117,15 @@ peer_registry_add() {
     local lockfile="${PEER_REGISTRY}.lock"
     local tmpfile="${PEER_REGISTRY}.tmp.$$"
 
-    (
-        flock -w 5 200 || log_fatal "Failed to acquire peer registry lock"
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -w 5 200 || log_fatal "Failed to acquire peer registry lock"
 
-        # Check for duplicate peer_name
-        local peer_name
-        peer_name=$(echo "$entry_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['peer_name'])")
-        local existing
-        existing=$(python3 -c "
+            # Check for duplicate peer_name
+            local peer_name
+            peer_name=$(echo "$entry_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['peer_name'])")
+            local existing
+            existing=$(python3 -c "
 import json, sys
 reg = json.load(open('$PEER_REGISTRY'))
 for p in reg:
@@ -133,12 +134,12 @@ for p in reg:
         sys.exit(0)
 print('ok')
 ")
-        if [[ "$existing" == "exists" ]]; then
-            log_fatal "Peer '$peer_name' already exists in registry with status=active"
-        fi
+            if [[ "$existing" == "exists" ]]; then
+                log_fatal "Peer '$peer_name' already exists in registry with status=active"
+            fi
 
-        # Append entry
-        python3 -c "
+            # Append entry
+            python3 -c "
 import json, sys
 reg = json.load(open('$PEER_REGISTRY'))
 entry = json.loads('''$entry_json''')
@@ -146,9 +147,38 @@ reg.append(entry)
 with open('$tmpfile', 'w') as f:
     json.dump(reg, f, indent=2)
 "
-        mv "$tmpfile" "$PEER_REGISTRY"
+            mv "$tmpfile" "$PEER_REGISTRY"
 
-    ) 200>"$lockfile"
+        ) 200>"$lockfile"
+    else
+        # Portable fallback (macOS): use Python fcntl lock.
+        ENTRY_JSON="$entry_json" PEER_REGISTRY_PATH="$PEER_REGISTRY" LOCKFILE_PATH="$lockfile" python3 - <<'PY'
+import fcntl, json, os, sys
+
+entry = json.loads(os.environ["ENTRY_JSON"])
+registry = os.environ["PEER_REGISTRY_PATH"]
+lockfile = os.environ["LOCKFILE_PATH"]
+
+os.makedirs(os.path.dirname(registry), exist_ok=True)
+if not os.path.exists(registry):
+    with open(registry, "w", encoding="utf-8") as f:
+        f.write("[]")
+
+with open(lockfile, "w", encoding="utf-8") as lf:
+    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    with open(registry, "r", encoding="utf-8") as rf:
+        reg = json.load(rf)
+    for p in reg:
+        if p.get("peer_name") == entry.get("peer_name") and p.get("status") == "active":
+            print(f"Peer '{entry.get('peer_name')}' already exists in registry with status=active", file=sys.stderr)
+            sys.exit(1)
+    reg.append(entry)
+    tmp = f"{registry}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as wf:
+        json.dump(reg, wf, indent=2)
+    os.replace(tmp, registry)
+PY
+    fi
 }
 
 peer_registry_update_status() {
@@ -162,10 +192,11 @@ peer_registry_update_status() {
     local lockfile="${PEER_REGISTRY}.lock"
     local tmpfile="${PEER_REGISTRY}.tmp.$$"
 
-    (
-        flock -w 5 200 || log_fatal "Failed to acquire peer registry lock"
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -w 5 200 || log_fatal "Failed to acquire peer registry lock"
 
-        python3 -c "
+            python3 -c "
 import json, sys
 reg = json.load(open('$PEER_REGISTRY'))
 found = False
@@ -182,9 +213,47 @@ if not found:
 with open('$tmpfile', 'w') as f:
     json.dump(reg, f, indent=2)
 "
-        mv "$tmpfile" "$PEER_REGISTRY"
+            mv "$tmpfile" "$PEER_REGISTRY"
 
-    ) 200>"$lockfile"
+        ) 200>"$lockfile"
+    else
+        PEER_NAME="$peer_name" NEW_STATUS="$new_status" EXTRA_FIELD="$extra_field" EXTRA_VALUE="$extra_value" \
+        PEER_REGISTRY_PATH="$PEER_REGISTRY" LOCKFILE_PATH="$lockfile" python3 - <<'PY'
+import fcntl, json, os, sys
+
+peer_name = os.environ["PEER_NAME"]
+new_status = os.environ["NEW_STATUS"]
+extra_field = os.environ["EXTRA_FIELD"]
+extra_value = os.environ["EXTRA_VALUE"]
+registry = os.environ["PEER_REGISTRY_PATH"]
+lockfile = os.environ["LOCKFILE_PATH"]
+
+os.makedirs(os.path.dirname(registry), exist_ok=True)
+if not os.path.exists(registry):
+    with open(registry, "w", encoding="utf-8") as f:
+        f.write("[]")
+
+with open(lockfile, "w", encoding="utf-8") as lf:
+    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    with open(registry, "r", encoding="utf-8") as rf:
+        reg = json.load(rf)
+    found = False
+    for p in reg:
+        if p.get("peer_name") == peer_name:
+            p["status"] = new_status
+            if extra_field and extra_value:
+                p[extra_field] = extra_value
+            found = True
+            break
+    if not found:
+        print(f"Peer not found: {peer_name}", file=sys.stderr)
+        sys.exit(1)
+    tmp = f"{registry}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as wf:
+        json.dump(reg, wf, indent=2)
+    os.replace(tmp, registry)
+PY
+    fi
 }
 
 peer_registry_lookup() {
