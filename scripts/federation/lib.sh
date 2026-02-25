@@ -488,7 +488,8 @@ cur.execute('''
 ''')
 
 # Migration files (sorted)
-mig_files = sorted(glob.glob(os.path.join(mig_dir, '*.sql')))
+all_mig_files = sorted(glob.glob(os.path.join(mig_dir, '*.sql')))
+mig_files = all_mig_files
 
 # Baseline detection: if table was just created but schema tables exist
 cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
@@ -506,6 +507,11 @@ if min_num_raw:
         min_num = 0
 
 if min_num > 0:
+    non_numeric = [mf for mf in mig_files if not re.match(r'^\\d+', os.path.basename(mf))]
+    if non_numeric:
+        print(f'[INFO] Federation bootstrap mode: skipping {len(non_numeric)} non-numbered migrations')
+    mig_files = [mf for mf in mig_files if re.match(r'^\\d+', os.path.basename(mf))]
+
     baseline_count = 0
     for mf in mig_files:
         fname = os.path.basename(mf)
