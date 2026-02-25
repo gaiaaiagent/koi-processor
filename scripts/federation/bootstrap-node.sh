@@ -182,9 +182,15 @@ ensure_repo() {
 
 setup_python_env() {
     log_info "Setting up Python virtual environment..."
-    if [[ ! -d "$KOI_PATH/venv" ]]; then
+    if [[ -d "$KOI_PATH/venv" && ! -f "$KOI_PATH/venv/bin/activate" ]]; then
+        log_warn "Detected broken virtualenv at $KOI_PATH/venv (missing bin/activate), recreating..."
+        run_or_print "rm -rf \"$KOI_PATH/venv\""
+    fi
+    if [[ ! -f "$KOI_PATH/venv/bin/activate" ]]; then
         run_or_print "python3 -m venv \"$KOI_PATH/venv\""
     fi
+    # Ensure pip exists even on minimal python installs.
+    run_or_print "bash -lc '\"$KOI_PATH/venv/bin/python\" -m ensurepip --upgrade >/dev/null 2>&1 || true'"
     run_or_print "bash -lc 'source \"$KOI_PATH/venv/bin/activate\" && pip install -q --upgrade pip'"
     run_or_print "bash -lc 'source \"$KOI_PATH/venv/bin/activate\" && pip install -q -r \"$KOI_PATH/requirements.txt\"'"
 }
