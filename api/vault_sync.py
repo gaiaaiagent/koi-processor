@@ -775,12 +775,5 @@ class VaultSyncManager:
         """Log and count a rejected event."""
         self._rejected_counts[reason] = self._rejected_counts.get(reason, 0) + 1
         logger.warning(
-            "vault_sync: rejected event",
-            extra={
-                "reason": reason,
-                "rid": rid,
-                "source_node": source_node,
-                "event_id": event_id,
-                "detail": detail,
-            },
+            f"vault_sync: rejected event reason={reason} rid={rid} detail={detail}",
         )
