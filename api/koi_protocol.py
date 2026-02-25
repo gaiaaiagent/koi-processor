@@ -30,7 +30,9 @@ class EventType(StrEnum):
 # =============================================================================
 
 class WireManifest(BaseModel):
-    """Strict KOI-net wire manifest: {rid, timestamp, sha256_hash} only."""
+    """KOI-net wire manifest: core fields + passthrough for extension fields."""
+    model_config = ConfigDict(extra="allow")
+
     rid: str
     timestamp: str  # ISO 8601 UTC with Z suffix
     sha256_hash: str  # JCS-canonical hash via rid-lib
