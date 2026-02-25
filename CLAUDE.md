@@ -52,6 +52,30 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 | /koi (production) | 163,703 | ✅ Deployed |
 | /koi-staging | 163,703 | ✅ Deployed |
 
+## TerminusDB Graph Mirror (Phase 1, 2026-02-25)
+
+Status: code-complete and smoke-validated in local environment.
+
+Architecture:
+- PostgreSQL is authoritative.
+- `terminusdb_outbox` stores async graph-write intents in the same PG transaction.
+- `scripts/terminusdb/outbox_worker.py` drains outbox rows to TerminusDB.
+- `api/terminusdb_adapter.py` enforces schema guard (`schema_ok`) and idempotent upserts.
+
+Operational docs:
+- `scripts/terminusdb/README.md`
+- `scripts/terminusdb/smoke_phase1.sh`
+
+Critical run command pattern (for env propagation to child processes):
+```bash
+set -a; source config/personal.env; set +a
+```
+
+When schema mismatch is detected (`fuseki_uri` legacy schema), run:
+```bash
+python -m scripts.terminusdb.import_from_postgres --fresh
+```
+
 ### Code↔Docs Bridge - COMPLETE
 
 | Component | Count |

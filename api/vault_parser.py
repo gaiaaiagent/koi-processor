@@ -329,7 +329,7 @@ async def insert_relationship_with_symmetric(
         (subject_uri, predicate, object_uri, source, source_rid, source_field, raw_value)
         VALUES ($1, $2, $3, 'vault', $4, $5, $6)
         ON CONFLICT (subject_uri, predicate, object_uri) DO UPDATE
-        SET updated_at = NOW(), source_field = $5, raw_value = $6
+        SET updated_at = NOW(), source_rid = $4, source_field = $5, raw_value = $6
     """, subject_uri, predicate, object_uri, vault_path, field_key, raw_value)
 
     # Insert symmetric relationship if applicable
@@ -338,7 +338,8 @@ async def insert_relationship_with_symmetric(
             INSERT INTO entity_relationships
             (subject_uri, predicate, object_uri, source, source_rid, source_field, raw_value)
             VALUES ($1, $2, $3, 'vault', $4, $5, $6)
-            ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+            ON CONFLICT (subject_uri, predicate, object_uri) DO UPDATE
+            SET updated_at = NOW(), source_rid = $4, source_field = $5, raw_value = $6
         """, object_uri, predicate, subject_uri, vault_path, f"{field_key}_symmetric", raw_value)
 
 
@@ -430,16 +431,20 @@ async def sync_vault_relationships(
         if target_uri:
             # Target exists - insert resolved relationship
             try:
+                await conn.execute("SAVEPOINT rel_insert")
                 await insert_relationship_with_symmetric(
                     conn, subject_uri, predicate, object_uri, vault_path, field_key, raw_value
                 )
+                await conn.execute("RELEASE SAVEPOINT rel_insert")
                 stats['resolved'] += 1
             except Exception as e:
+                await conn.execute("ROLLBACK TO SAVEPOINT rel_insert")
                 logger.warning(f"Failed to insert relationship: {e}")
                 stats['skipped'] += 1
         else:
             # Target missing - store as pending
             try:
+                await conn.execute("SAVEPOINT pending_insert")
                 if direction == 'outgoing':
                     await conn.execute("""
                         INSERT INTO pending_relationships
@@ -454,8 +459,10 @@ async def sync_vault_relationships(
                         VALUES ($1, $2, $3, 'subject', $4, 'vault', $5, $6)
                         ON CONFLICT DO NOTHING
                     """, entity_uri, predicate, target_name, type_hint, vault_path, field_key)
+                await conn.execute("RELEASE SAVEPOINT pending_insert")
                 stats['pending'] += 1
             except Exception as e:
+                await conn.execute("ROLLBACK TO SAVEPOINT pending_insert")
                 logger.warning(f"Failed to insert pending relationship: {e}")
                 stats['skipped'] += 1
 

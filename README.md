@@ -12,6 +12,7 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Key Features](#key-features)
+- [Phase 1 TerminusDB Integration](#phase-1-terminusdb-integration)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -25,6 +26,21 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 ## Overview
 
 The KOI Processor is the central processing hub of the Knowledge Organization Infrastructure (KOI) ecosystem. It receives events from distributed sensors, processes content into searchable embeddings, and makes knowledge immediately available to AI agents through semantic search.
+
+## Phase 1 TerminusDB Integration
+
+Phase 1 adds an optional TerminusDB graph mirror behind an outbox pattern:
+
+- PostgreSQL remains authoritative for entity resolution and ingestion.
+- Writes enqueue outbox rows in the same PG transaction.
+- A background worker drains outbox rows to TerminusDB with retries/backoff.
+- API graph endpoints expose conflict inspection and sync health.
+
+Implementation docs and runbook:
+
+- [`scripts/terminusdb/README.md`](scripts/terminusdb/README.md)
+- [`scripts/terminusdb/smoke_phase1.sh`](scripts/terminusdb/smoke_phase1.sh)
+- [`migrations/048_terminusdb_outbox.sql`](migrations/048_terminusdb_outbox.sql)
 
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion

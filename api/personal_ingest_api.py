@@ -19,6 +19,7 @@ Entity Resolution Tiers:
 - Tier 3: Create new entity with deterministic URI
 """
 
+import json as json_module_global
 import os
 import re
 import asyncio
@@ -29,7 +30,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 from dataclasses import dataclass
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -93,6 +94,7 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-ada-002')
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes')
+TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true', '1', 'yes')
 
 # DEPRECATED: These are now loaded from vault schemas via entity_schema.py
 # Kept as fallback comments for reference
@@ -103,6 +105,7 @@ KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1',
 db_pool: Optional[asyncpg.Pool] = None
 openai_available: bool = False
 openai_client: Optional[Any] = None
+terminusdb_adapter: Optional[Any] = None  # TerminusDBAdapter instance (lazy init)
 
 
 # =============================================================================
@@ -962,6 +965,139 @@ async def store_new_entity(
             phonetic_code
         )
 
+    # Enqueue entity to TerminusDB outbox (same transaction as PG write)
+    await enqueue_outbox(conn, "entity_upsert", {
+        "fuseki_uri": canonical.uri,
+        "entity_text": entity.name,
+        "entity_type": entity.type,
+        "normalized_text": normalized,
+        "occurrence_count": 0,
+        "phonetic_code": phonetic_code or "",
+        "aliases": [],
+        "created_by": "darren-personal",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": "personal-vault",
+        "first_seen_rid": document_rid,
+    }, rid=canonical.uri, source_rid=document_rid)
+
+
+# =============================================================================
+# TerminusDB Outbox Helpers
+# =============================================================================
+
+def _build_assertion_payload(row: dict) -> dict:
+    """Build a complete Assertion payload from an entity_relationships row.
+
+    Computes assertion_hash and normalized_object_key so the outbox payload
+    matches the full Assertion schema required by TerminusDB.
+    """
+    from scripts.terminusdb.schema import (
+        compute_assertion_hash,
+        canonical_object_key,
+        serialize_object_key,
+    )
+
+    subject = row["subject_uri"]
+    predicate = row["predicate"]
+    object_uri = row["object_uri"]
+    source = row.get("source") or "personal-vault"
+    source_rid = row.get("source_rid") or ""
+    source_field = row.get("source_field") or ""
+    raw_value = row.get("raw_value") or ""
+    confidence = float(row.get("confidence") or 1.0)
+
+    ahash = compute_assertion_hash(
+        subject_uri=subject,
+        predicate=predicate,
+        object_kind="entity",
+        object_uri=object_uri,
+        literal_value="",
+        literal_datatype="",
+        literal_lang="",
+        source=source,
+        source_rid=source_rid,
+        source_field=source_field,
+        asserted_by="darren-personal",
+    )
+
+    assertion_dict = {
+        "object_kind": "entity",
+        "object_uri": object_uri,
+        "literal_value": "",
+        "literal_datatype": "",
+        "literal_lang": "",
+    }
+    norm_key = serialize_object_key(canonical_object_key(assertion_dict))
+
+    return {
+        "assertion_hash": ahash,
+        "subject_uri": subject,
+        "predicate": predicate,
+        "object_kind": "entity",
+        "object_uri": object_uri,
+        "literal_value": "",
+        "literal_datatype": "",
+        "literal_lang": "",
+        "asserted_by": "darren-personal",
+        "asserted_at": datetime.now(timezone.utc).isoformat(),
+        "confidence": confidence,
+        "source": source,
+        "source_rid": source_rid,
+        "source_field": source_field,
+        "raw_value": raw_value,
+        "status": "active",
+        "normalized_object_key": norm_key,
+    }
+
+
+async def _enqueue_relationship_outbox(
+    conn: asyncpg.Connection,
+    entity_uri: str,
+    vault_path: str,
+) -> None:
+    """After sync_vault_relationships, enqueue a retract + upserts for all current relationships."""
+    # Retract old assertions from this source file
+    await enqueue_outbox(conn, "assertion_retract", {},
+                         rid=entity_uri, source_rid=vault_path)
+
+    # Query the actual relationship rows just written by sync_vault_relationships
+    rows = await conn.fetch("""
+        SELECT subject_uri, predicate, object_uri, confidence,
+               source, source_rid, source_field, raw_value
+        FROM entity_relationships
+        WHERE source_rid = $1
+    """, vault_path)
+
+    for row in rows:
+        rel_payload = _build_assertion_payload(dict(row))
+        await enqueue_outbox(conn, "assertion_upsert", rel_payload,
+                             rid=row["subject_uri"], source_rid=vault_path)
+
+
+async def enqueue_outbox(
+    conn: asyncpg.Connection,
+    operation: str,
+    payload: dict,
+    rid: str,
+    source_rid: str = "",
+) -> bool:
+    """Enqueue an operation to the TerminusDB outbox (same transaction as PG write).
+
+    Returns True if enqueued, False if dedup skipped.
+    """
+    if not TERMINUSDB_ENABLED:
+        return False
+    payload_json = json_module_global.dumps(payload, sort_keys=True)
+    payload_hash = hashlib.sha256(
+        f"{operation}:{rid}:{payload_json}".encode()
+    ).hexdigest()
+    result = await conn.execute("""
+        INSERT INTO terminusdb_outbox (operation, payload, payload_hash, rid, source_rid)
+        VALUES ($1, $2::jsonb, $3, $4, $5)
+        ON CONFLICT (payload_hash) WHERE status IN ('pending', 'processing') DO NOTHING
+    """, operation, payload_json, payload_hash, rid, source_rid)
+    return "INSERT" in result
+
 
 # =============================================================================
 # API Endpoints
@@ -1010,6 +1146,27 @@ async def startup():
                 logger.info("KOI-net federation initialized")
             except Exception as e:
                 logger.warning(f"KOI-net federation failed to initialize: {e}")
+
+        # Initialize TerminusDB adapter (if enabled)
+        if TERMINUSDB_ENABLED:
+            global terminusdb_adapter
+            try:
+                from api.terminusdb_adapter import TerminusDBAdapter
+                terminusdb_adapter = TerminusDBAdapter(
+                    url=os.getenv('TERMINUSDB_URL', 'http://127.0.0.1:6363/'),
+                    db_name=os.getenv('TERMINUSDB_DB', 'koi_knowledge_graph'),
+                    team=os.getenv('TERMINUSDB_TEAM', 'admin'),
+                    key=os.getenv('TERMINUSDB_KEY', 'root'),
+                )
+                health = terminusdb_adapter.health()
+                if health.get("terminusdb_reachable"):
+                    logger.info(f"TerminusDB connected (schema_hash={health['schema_hash'][:12]}...)")
+                else:
+                    logger.warning(f"TerminusDB not reachable: {health.get('error', 'unknown')}")
+                    logger.info("Outbox will accumulate; worker will drain on recovery")
+            except Exception as e:
+                logger.warning(f"TerminusDB initialization failed (non-fatal): {e}")
+                terminusdb_adapter = None
 
     except Exception as e:
         logger.error(f"Failed to connect to database: {e}")
@@ -1933,6 +2090,11 @@ async def register_vault_entity(request: RegisterEntityRequest):
                         frontmatter_data
                     )
                     logger.info(f"Synced relationships: {rel_stats}")
+
+                    # Enqueue relationship changes to TerminusDB outbox
+                    if rel_stats and TERMINUSDB_ENABLED:
+                        await _enqueue_relationship_outbox(
+                            conn, canonical.uri, request.vault_path)
                 except Exception as e:
                     logger.warning(f"Failed to sync relationships: {e}")
 
@@ -2614,6 +2776,11 @@ async def sync_relationships_endpoint(request: SyncRelationshipsRequest):
                 request.entity_uri,
                 request.frontmatter
             )
+
+            # Enqueue relationship changes to TerminusDB outbox
+            if stats and TERMINUSDB_ENABLED:
+                await _enqueue_relationship_outbox(
+                    conn, request.entity_uri, request.vault_path)
 
     return {
         "success": True,
@@ -3389,6 +3556,94 @@ async def query_knowledge_base(request: QueryRequest):
         "query": query_text,
         "search_type": search_result.get("search_type", "semantic")
     }
+
+
+# =============================================================================
+# TerminusDB Graph Endpoints
+# =============================================================================
+
+GRAPH_ALLOWED_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _check_graph_auth(request: Request):
+    """Restrict /graph/* endpoints to localhost and WireGuard mesh (10.100.0.0/24)."""
+    client_host = request.client.host if request.client else None
+    if client_host in GRAPH_ALLOWED_HOSTS:
+        return
+    # Allow WireGuard mesh subnet
+    if client_host and client_host.startswith("10.100.0."):
+        return
+    raise HTTPException(status_code=403, detail="Graph endpoints restricted to local access")
+
+
+@app.get("/graph/health")
+async def graph_health(request: Request):
+    """TerminusDB connection status, schema hash, sync lag metrics."""
+    _check_graph_auth(request)
+    if not TERMINUSDB_ENABLED:
+        return {"terminusdb_enabled": False}
+
+    result = {}
+    if terminusdb_adapter:
+        result = terminusdb_adapter.health()
+    else:
+        result = {"terminusdb_reachable": False, "error": "adapter not initialized"}
+
+    # Add outbox metrics from PostgreSQL
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM terminusdb_outbox WHERE status = 'pending'")
+            dead = await conn.fetchval(
+                "SELECT COUNT(*) FROM terminusdb_outbox WHERE status = 'dead_letter'")
+            oldest = await conn.fetchval("""
+                SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))
+                FROM terminusdb_outbox WHERE status = 'pending'
+            """)
+            result["pending_outbox_count"] = pending or 0
+            result["dead_letter_count"] = dead or 0
+            result["oldest_pending_age_s"] = round(oldest, 1) if oldest else None
+
+    return result
+
+
+@app.get("/graph/conflicts")
+async def graph_conflicts(request: Request, limit: int = 50, offset: int = 0):
+    """All conflicts (grouped by subject+predicate)."""
+    _check_graph_auth(request)
+    if not TERMINUSDB_ENABLED or not terminusdb_adapter:
+        raise HTTPException(status_code=503, detail="TerminusDB not enabled")
+
+    limit = min(max(limit, 1), 500)
+    offset = max(offset, 0)
+    conflicts, total = terminusdb_adapter.get_conflicts(limit=limit, offset=offset)
+    return {"conflicts": conflicts, "total": total, "limit": limit, "offset": offset}
+
+
+@app.get("/graph/conflicts/{entity_rid:path}")
+async def graph_conflicts_for_entity(request: Request, entity_rid: str):
+    """Conflicts for a specific entity."""
+    _check_graph_auth(request)
+    if not TERMINUSDB_ENABLED or not terminusdb_adapter:
+        raise HTTPException(status_code=503, detail="TerminusDB not enabled")
+
+    conflicts, total = terminusdb_adapter.get_conflicts(entity_rid=entity_rid)
+    return {"entity_rid": entity_rid, "conflicts": conflicts, "total": total}
+
+
+@app.get("/graph/assertions/{entity_rid:path}")
+async def graph_assertions(request: Request, entity_rid: str, limit: int = 100, offset: int = 0):
+    """All assertions about an entity."""
+    _check_graph_auth(request)
+    if not TERMINUSDB_ENABLED or not terminusdb_adapter:
+        raise HTTPException(status_code=503, detail="TerminusDB not enabled")
+
+    limit = min(max(limit, 1), 500)
+    offset = max(offset, 0)
+    assertions, total = terminusdb_adapter.get_assertions(
+        entity_rid=entity_rid, limit=limit, offset=offset)
+    return {"entity_rid": entity_rid, "assertions": assertions,
+            "total": total, "limit": limit, "offset": offset}
 
 
 if __name__ == "__main__":
