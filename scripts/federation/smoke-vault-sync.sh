@@ -86,18 +86,18 @@ wait_for() {
 
 check_file_tracked() {
     local count
-    count=$(psql -tAq personal_koi -v smoke_file="'${SMOKE_FILE}'" -c "
+    count=$(psql -tAq personal_koi -c "
         SELECT COUNT(*) FROM vault_sync_state
-        WHERE relative_path = :smoke_file AND is_deleted = FALSE;
+        WHERE relative_path = '${SMOKE_FILE}' AND is_deleted = FALSE;
     ")
     [[ "$count" -ge 1 ]]
 }
 
 check_file_tombstoned() {
     local count
-    count=$(psql -tAq personal_koi -v smoke_file="'${SMOKE_FILE}'" -c "
+    count=$(psql -tAq personal_koi -c "
         SELECT COUNT(*) FROM vault_sync_state
-        WHERE relative_path = :smoke_file AND is_deleted = TRUE;
+        WHERE relative_path = '${SMOKE_FILE}' AND is_deleted = TRUE;
     ")
     [[ "$count" -ge 1 ]]
 }
@@ -153,20 +153,21 @@ else
     exit 1
 fi
 
-# Sync enabled
+# Vault sync subsystem loaded (enabled field reflects configure state, checked after step 1)
 STATUS=$(curl "${CURL_OPTS[@]}" "${BASE_URL}/koi-net/vault-sync/status")
-ENABLED=$(echo "$STATUS" | json_get "['enabled']" 2>/dev/null || echo "")
-if [[ "$ENABLED" == "True" || "$ENABLED" == "true" ]]; then
-    pass "vault sync enabled"
+REASON=$(echo "$STATUS" | json_get ".get('reason','')" 2>/dev/null || echo "")
+if [[ "$REASON" == *"not set"* ]]; then
+    fail "vault sync subsystem not loaded (VAULT_SYNC_ENABLED not set)"
+    exit 1
 else
-    fail "vault sync not enabled (got: $ENABLED)"
+    pass "vault sync subsystem loaded"
 fi
 
 # Peer RID resolution
-PEER_RID=$(psql -tAq personal_koi -v pname="'${PEER_NAME}'" -c "
+PEER_RID=$(psql -tAq personal_koi -c "
     SELECT COALESCE(
-        (SELECT node_rid FROM koi_net_peer_aliases WHERE LOWER(alias) = LOWER(:pname)),
-        (SELECT node_rid FROM koi_net_nodes WHERE LOWER(node_name) = LOWER(:pname) AND status = 'active')
+        (SELECT node_rid FROM koi_net_peer_aliases WHERE LOWER(alias) = LOWER('${PEER_NAME}')),
+        (SELECT node_rid FROM koi_net_nodes WHERE LOWER(node_name) = LOWER('${PEER_NAME}') AND status = 'active')
     );
 ")
 if [[ -n "$PEER_RID" ]]; then
@@ -181,14 +182,17 @@ LOCAL_RID=$(curl "${CURL_OPTS[@]}" "${BASE_URL}/koi-net/health" 2>/dev/null \
 
 # Edge rid_types check (scoped to peer→local edge)
 if [[ -n "$PEER_RID" ]]; then
-    EDGE_WHERE="source_node = :prid AND status = 'APPROVED'"
     if [[ -n "$LOCAL_RID" ]]; then
-        EDGE_WHERE="source_node = :prid AND target_node = :lrid AND status = 'APPROVED'"
+        RID_TYPES=$(psql -tAq personal_koi -c "
+            SELECT array_to_string(rid_types, ',') FROM koi_net_edges
+            WHERE source_node = '${PEER_RID}' AND target_node = '${LOCAL_RID}' AND status = 'APPROVED'
+            LIMIT 1;")
+    else
+        RID_TYPES=$(psql -tAq personal_koi -c "
+            SELECT array_to_string(rid_types, ',') FROM koi_net_edges
+            WHERE source_node = '${PEER_RID}' AND status = 'APPROVED'
+            LIMIT 1;")
     fi
-    RID_TYPES=$(psql -tAq personal_koi \
-        -v prid="'${PEER_RID}'" \
-        -v lrid="'${LOCAL_RID}'" \
-        -c "SELECT array_to_string(rid_types, ',') FROM koi_net_edges WHERE ${EDGE_WHERE} LIMIT 1;")
     if echo "$RID_TYPES" | grep -iq "vault-file"; then
         pass "peer edge includes Vault-file in rid_types"
     else
