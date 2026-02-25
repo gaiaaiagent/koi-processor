@@ -14,7 +14,9 @@ This is the canonical roadmap for vault sync planning.
 4. Inbox query via `GET /koi-net/shared-with-me` (including `since` datetime filter fix).
 5. Federation bootstrap scripts validated on blank-host path.
 
-## Phase Sync-1 (Current Target)
+## Phase Sync-1 — VALIDATED (2026-02-25)
+
+Status: Two-peer smoke test passes 15/15 between darren-personal and nuc-personal (Dobby).
 
 Scope:
 1. Markdown-only sync (`*.md`) for one shared folder.
@@ -29,13 +31,21 @@ Core design:
 3. Safe atomic writes (`tmp` + rename), path traversal checks, size checks.
 4. Stale delete protection (delete only when base hash matches local hash).
 
-Required prerequisites:
-1. RID type filtering normalization in event queue (`poll()` + `peek_undelivered()`).
-2. Handshake edge `rid_types` refresh on conflict for both inbound and outbound edges.
-3. `vault_sync_applied_events` dedup table and cleanup policy.
+Key files:
+- `api/vault_sync.py` — VaultSyncManager (scan, trigger, apply, conflict, reconcile)
+- `api/koi_net_router.py` — vault sync endpoints (configure, trigger, status)
+- `api/koi_protocol.py` — WireManifest with `extra="allow"` for extension fields
+- `migrations/049_vault_sync.sql` — vault_sync_state, vault_sync_config, vault_sync_applied_events
+- `tests/test_vault_sync.py` — 17 unit tests
+- `scripts/federation/smoke-vault-sync.sh` — two-peer smoke test script
 
-Definition of done:
-1. Two-peer smoke test passes: create/update/delete/rename/conflict.
+Bugs found and fixed during two-peer testing:
+1. `WireManifest` Pydantic model stripped extension fields (content_hash, relative_path) — fixed with `extra="allow"`.
+2. Poll endpoint manifest transformation rebuilt dict from scratch, dropping custom fields — fixed to preserve original fields via `dict(m)`.
+3. FORGET `origin_seq` not incrementing past NEW event — receiver's stale-event guard rejected deletes. Fixed by incrementing seq on delete.
+
+Definition of done (all met):
+1. Two-peer smoke test passes: create/update/delete/conflict — 15/15 PASS.
 2. Redelivery is idempotent (no duplicate conflict copies).
 3. Invalid payload/path attempts are rejected and logged.
 4. Re-handshake updates capabilities and vault events are delivered.

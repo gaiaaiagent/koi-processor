@@ -104,6 +104,34 @@ Migration note:
   dependencies.
 - Override by exporting `KOI_MIGRATION_MIN_NUM` explicitly.
 
+## Vault Sync Smoke Test
+
+After both peers have vault sync enabled (`VAULT_SYNC_ENABLED=true` in `config/personal.env`) and the `Shared/` folder exists, run the two-mode smoke test:
+
+```bash
+# Local mode (single node, no peer needed):
+KOI_ADMIN_TOKEN=<token> PEER_NAME=<peer-alias> \
+  bash scripts/federation/smoke-vault-sync.sh
+
+# Two-peer mode (requires SSH to peer):
+KOI_ADMIN_TOKEN=<local-token> \
+  MODE=two-peer \
+  PEER_NAME=<peer-alias> \
+  PEER_SSH=<user>@<peer-ip> \
+  PEER_VAULT_PATH=<peer-vault-path> \
+  PEER_KOI_ADMIN_TOKEN=<peer-token> \
+  bash scripts/federation/smoke-vault-sync.sh
+```
+
+Prerequisites:
+- Migration 049 applied on both nodes
+- `VAULT_SYNC_ENABLED=true` in both nodes' `config/personal.env`
+- `Shared/` folder exists in both vaults
+- Handshake refreshed so edge `rid_types` includes `Vault-file`
+- API running on both nodes
+
+The smoke test validates: configure, file create/track, peer arrival, conflict detection, delete/tombstone, peer delete propagation, and no rejected events.
+
 ## Dry Run
 
 Use `--dry-run` on bootstrap/approval/removal scripts before mutating:

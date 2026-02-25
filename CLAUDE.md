@@ -108,11 +108,26 @@ Bug fix shipped:
 
 - `GET /koi-net/shared-with-me?since=...` now binds `since` as `datetime` (previously `str`, causing asyncpg timestamptz binding 500s).
 
-## KOI-net Vault Sync Roadmap (2026-02-25)
+## KOI-net Vault Sync — Phase Sync-1 VALIDATED (2026-02-25)
 
-Canonical phased roadmap for markdown vault sync over KOI-net:
+Two-peer smoke test passes 15/15 between darren-personal and nuc-personal (Dobby).
 
-- `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
+Key files:
+- `api/vault_sync.py` — VaultSyncManager (scan, trigger, apply, conflict, reconcile)
+- `api/koi_net_router.py` — vault sync endpoints (configure, trigger, status)
+- `api/koi_protocol.py` — WireManifest with `extra="allow"` for extension fields
+- `migrations/049_vault_sync.sql` — schema (vault_sync_state, vault_sync_config, vault_sync_applied_events)
+- `tests/test_vault_sync.py` — 17 unit tests
+- `scripts/federation/smoke-vault-sync.sh` — two-peer smoke test (local + two-peer modes)
+
+Env vars: `VAULT_SYNC_ENABLED=true`, `VAULT_SYNC_FOLDER=Shared`
+
+Bugs found and fixed during live two-peer testing:
+1. `WireManifest` Pydantic model stripped extension fields — `extra="allow"`.
+2. Poll endpoint manifest transformation dropped custom fields — preserve via `dict(m)`.
+3. FORGET `origin_seq` not incrementing — stale-event guard rejected deletes.
+
+Canonical phased roadmap: `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
 
 ### Code↔Docs Bridge - COMPLETE
 
@@ -369,7 +384,7 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 ---
 
 **Last Updated**: 2026-02-25
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Phase Sync-1 validated
 
 ---
 
@@ -378,4 +393,5 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 | Session ID | Date | Scope | Key Work |
 |------------|------|-------|----------|
 | `df92b730` | 2026-02-25 | koi-processor | Phase 1 TDB smoke test: fresh import, health/outbox/auth/fail-open/idempotency/reconciliation all pass. Fixed vault_parser.py SAVEPOINT bug. Created smoke_phase1.sh. Updated README + CLAUDE.md. Committed + pushed. |
-| current | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
+| `371b493e` | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
+| current | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
