@@ -29,10 +29,10 @@ except ImportError:
 
 
 # Personal-KOI entity types this node handles
-DEFAULT_EVENT_TYPES = ["Organization", "Person", "Project", "Concept", "Location"]
+DEFAULT_EVENT_TYPES = ["Organization", "Person", "Project", "Concept", "Location", "Vault-file"]
 DEFAULT_STATE_TYPES = [
     "Organization", "Person", "Project", "Concept", "Location",
-    "Meeting",
+    "Meeting", "Vault-file",
 ]
 
 # Key storage directory

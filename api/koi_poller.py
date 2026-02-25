@@ -85,6 +85,7 @@ class KOIPoller:
         self.pipeline = pipeline
         self.use_pipeline = use_pipeline
         self.event_queue = event_queue
+        self.vault_sync = None  # Set by koi_net_router if vault sync enabled
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._backoff: Dict[str, int] = {}  # node_rid -> consecutive failures (POLL)
@@ -184,6 +185,12 @@ class KOIPoller:
             try:
                 await self._poll_all_peers()
                 await self._push_webhook_peers()
+                # Vault sync cycle (if configured)
+                if self.vault_sync:
+                    try:
+                        await self.vault_sync.run_cycle()
+                    except Exception as e:
+                        logger.error(f"Vault sync cycle error: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -632,6 +639,19 @@ class KOIPoller:
         If the event is a document share (_koi_share marker), persist to
         koi_shared_documents for the shared_with_me endpoint.
         """
+        # Vault sync events — must be first, before share handling and blanket FORGET
+        if isinstance(contents, dict) and contents.get("_vault_sync"):
+            if self.vault_sync:
+                if contents.get("_reconcile"):
+                    await self.vault_sync.apply_reconcile(contents, source_node)
+                else:
+                    await self.vault_sync.apply_event(
+                        rid, event_type, contents, manifest or {}, source_node, event_id,
+                    )
+            else:
+                logger.warning("vault_sync: received sync event but vault sync not enabled")
+            return
+
         share_meta = contents.get("_koi_share_meta", {}) if isinstance(contents, dict) else {}
         recipient_type = (
             share_meta.get("recipient_type")

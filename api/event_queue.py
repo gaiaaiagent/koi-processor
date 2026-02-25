@@ -139,7 +139,7 @@ class EventQueue:
                     # RID format: orn:koi-net.{type}:{slug}+{hash}
                     rid = row["rid"]
                     rid_type = extract_rid_type(rid)
-                    if rid_type and rid_type not in rid_types:
+                    if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
                         continue
 
                 event = {
@@ -206,7 +206,7 @@ class EventQueue:
                 if rid_types:
                     rid = row["rid"]
                     rid_type = extract_rid_type(rid)
-                    if rid_type and rid_type not in rid_types:
+                    if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
                         continue
 
                 events.append({

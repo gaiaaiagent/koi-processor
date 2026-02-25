@@ -65,6 +65,7 @@ from api.node_identity import (
     node_rid_suffix,
 )
 from api.event_queue import EventQueue
+from api.vault_sync import VaultSyncManager
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ _node_profile: Optional[NodeProfile] = None
 _event_queue: Optional[EventQueue] = None
 _db_pool: Optional[asyncpg.Pool] = None
 _poller: Optional[KOIPoller] = None
+_vault_sync: Optional[VaultSyncManager] = None
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -186,7 +188,7 @@ def _manifest_sha256_hash(manifest: Dict[str, Any], contents: Optional[Dict[str,
 
 async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
     """Initialize KOI-net subsystem. Called from app startup."""
-    global _private_key, _node_profile, _event_queue, _db_pool, _poller
+    global _private_key, _node_profile, _event_queue, _db_pool, _poller, _vault_sync
     _db_pool = pool
 
     node_name = os.getenv("KOI_NODE_NAME", "darren-personal")
@@ -218,6 +220,19 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
         event_queue=_event_queue,
     )
     await _poller.start()
+
+    # Initialize vault sync if enabled
+    vault_sync_enabled = _bool_env("VAULT_SYNC_ENABLED", False)
+    vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "~/Documents/Notes")
+    if vault_sync_enabled and vault_path:
+        _vault_sync = VaultSyncManager(
+            pool=pool,
+            node_rid=_node_profile.node_rid,
+            event_queue=_event_queue,
+            vault_path=vault_path,
+        )
+        _poller.vault_sync = _vault_sync
+        logger.info(f"Vault sync enabled (vault={vault_path})")
 
     policy = _security_policy()
     logger.info(
@@ -655,7 +670,7 @@ async def handshake(request: Request):
             INSERT INTO koi_net_edges
                 (edge_rid, source_node, target_node, edge_type, status, rid_types)
             VALUES ($1, $2, $3, 'POLL', 'APPROVED', $4)
-            ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW()
+            ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW(), rid_types = EXCLUDED.rid_types
             """,
             edge_rid_inbound,
             peer.node_rid,
@@ -670,7 +685,7 @@ async def handshake(request: Request):
             INSERT INTO koi_net_edges
                 (edge_rid, source_node, target_node, edge_type, status, rid_types)
             VALUES ($1, $2, $3, 'POLL', 'PROPOSED', $4)
-            ON CONFLICT (edge_rid) DO NOTHING
+            ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW(), rid_types = EXCLUDED.rid_types
             """,
             edge_rid_outbound,
             _node_profile.node_rid,
@@ -1706,3 +1721,66 @@ async def _resolve_recipient(conn: asyncpg.Connection, recipient: str) -> Option
             return recipient
 
     return None
+
+
+# =====================================================================
+# VAULT SYNC ENDPOINTS
+# =====================================================================
+
+
+@koi_net_router.post("/vault-sync/configure")
+async def vault_sync_configure(request: Request):
+    """Configure vault sync for a peer."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)"},
+        )
+
+    body = await request.json()
+    peer = body.get("peer")
+    shared_folder = body.get("shared_folder", "Shared")
+    enabled = body.get("enabled", True)
+
+    if not peer:
+        return JSONResponse(status_code=400, content={"error": "peer is required"})
+
+    result = await _vault_sync.configure(peer, shared_folder, enabled)
+    if "error" in result:
+        return JSONResponse(status_code=404, content=result)
+    return JSONResponse(content=result)
+
+
+@koi_net_router.get("/vault-sync/status")
+async def vault_sync_status(request: Request):
+    """Get vault sync dashboard info."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(content={"enabled": False, "reason": "VAULT_SYNC_ENABLED not set"})
+
+    status = await _vault_sync.get_status()
+    return JSONResponse(content=status)
+
+
+@koi_net_router.post("/vault-sync/trigger")
+async def vault_sync_trigger(request: Request):
+    """Force an immediate sync cycle (for testing)."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled"},
+        )
+
+    result = await _vault_sync.trigger_sync()
+    return JSONResponse(content=result)
