@@ -818,11 +818,12 @@ async def events_poll(request: Request):
         manifest = None
         if ev.get("manifest"):
             m = ev["manifest"]
-            manifest = {
-                "rid": m.get("rid", ev["rid"]),
-                "timestamp": timestamp_to_z_format(m.get("timestamp", "")),
-                "sha256_hash": _manifest_sha256_hash(m, ev.get("contents")),
-            }
+            # Preserve all original manifest fields (e.g. vault-sync content_hash,
+            # relative_path) and add/override wire-format fields.
+            manifest = dict(m)
+            manifest["rid"] = m.get("rid", ev["rid"])
+            manifest["timestamp"] = timestamp_to_z_format(m.get("timestamp", ""))
+            manifest["sha256_hash"] = _manifest_sha256_hash(m, ev.get("contents"))
         wire_events.append({
             "rid": ev["rid"],
             "event_type": ev["event_type"],
