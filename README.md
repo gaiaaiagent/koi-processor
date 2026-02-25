@@ -42,6 +42,43 @@ Implementation docs and runbook:
 - [`scripts/terminusdb/smoke_phase1.sh`](scripts/terminusdb/smoke_phase1.sh)
 - [`migrations/048_terminusdb_outbox.sql`](migrations/048_terminusdb_outbox.sql)
 
+## Graph Traversal Endpoints (Phase A)
+
+PostgreSQL recursive CTE-based graph traversal for the personal knowledge graph. Enables indirect connection discovery beyond point lookups.
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /relationships/{entity_uri}` | 1-hop relationships (now with `direction` param: `both`/`incoming`/`outgoing`) |
+| `GET /graph/neighborhood/{entity_uri}` | Multi-hop neighborhood traversal (BFS, max depth 4) |
+| `GET /graph/shortest-path?source=...&target=...` | Shortest path between two entities (BFS, max depth 8) |
+
+### Safety Caps
+
+| Cap | Default | Max |
+|-----|---------|-----|
+| `max_depth` (neighborhood) | 2 | 4 |
+| `max_depth` (shortest-path) | 6 | 8 |
+| `max_nodes` | 200 | 500 |
+| `max_edges` | 1000 | 2000 |
+| Query timeout | 5s | — |
+
+### Example Usage
+
+```bash
+# Neighborhood (2-hop)
+curl -s 'localhost:8351/graph/neighborhood/orn:personal-koi.entity:person-darren-zal-42986b9bf8c0?max_depth=2'
+
+# Shortest path
+curl -s 'localhost:8351/graph/shortest-path?source=orn:...&target=orn:...'
+
+# Directed relationships
+curl -s 'localhost:8351/relationships/orn:...?direction=outgoing'
+```
+
+Auth: Restricted to localhost and WireGuard mesh (10.100.0.0/24). Tests: `tests/test_graph_traversal.py` (21 isolated fixture tests), `tests/test_graph_traversal_smoke.py` (12 live-DB smoke tests).
+
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
 - ✅ **Version Control**: Tracks content updates with full audit trail

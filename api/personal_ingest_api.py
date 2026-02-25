@@ -27,7 +27,7 @@ import asyncpg
 import hashlib
 import httpx
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Literal, Optional, Tuple
 from enum import Enum
 from dataclasses import dataclass
 from fastapi import FastAPI, HTTPException, Request
@@ -218,6 +218,54 @@ class ResolveRequest(BaseModel):
     type_hint: Optional[str] = None
     limit: int = 5
     context: Optional[ResolutionContext] = None
+
+
+# Graph traversal response models
+
+class GraphNode(BaseModel):
+    uri: str
+    name: Optional[str] = None
+    entity_type: Optional[str] = None
+    depth: int = 0
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    predicate: str
+    confidence: float = 1.0
+
+
+class NeighborhoodResponse(BaseModel):
+    root: str
+    max_depth: int
+    direction: str
+    nodes: List[GraphNode]
+    edges: List[GraphEdge]
+    node_count: int
+    total_nodes_discovered: int
+    edge_count: int
+    total_edges_discovered: int
+    truncated: bool
+
+
+class PathStep(BaseModel):
+    from_uri: str
+    from_name: Optional[str] = None
+    predicate: str
+    direction: str
+    to_uri: str
+    to_name: Optional[str] = None
+
+
+class ShortestPathResponse(BaseModel):
+    source: str
+    target: str
+    found: bool
+    path_length: Optional[int] = None
+    direction: str
+    steps: List[PathStep]
+    nodes: List[GraphNode]
 
 
 # =============================================================================
@@ -1119,6 +1167,11 @@ async def startup():
         # Ensure schema exists
         async with db_pool.acquire() as conn:
             await ensure_schema(conn)
+
+        # Verify graph traversal indexes
+        async with db_pool.acquire() as conn:
+            from api.graph_queries import verify_indexes
+            await verify_indexes(conn)
 
         # Initialize OpenAI client if API key is available
         openai_available = check_openai_availability()
@@ -2792,21 +2845,23 @@ async def sync_relationships_endpoint(request: SyncRelationshipsRequest):
 @app.get("/relationships/{entity_uri:path}")
 async def get_relationships_endpoint(
     entity_uri: str,
-    predicate: Optional[str] = None
+    predicate: Optional[str] = None,
+    direction: Literal["incoming", "outgoing", "both"] = "both",
 ):
     """
-    Get all relationships for an entity (both directions).
+    Get all relationships for an entity.
 
     Query Parameters:
         predicate: Optional filter by predicate (e.g., 'affiliated_with')
+        direction: "both" (default), "incoming", or "outgoing"
 
-    Returns relationships where the entity is subject or object.
+    Returns relationships where the entity is subject and/or object.
     """
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
-        relationships = await get_entity_relationships(conn, entity_uri, predicate)
+        relationships = await get_entity_relationships(conn, entity_uri, predicate, direction)
 
         # Enrich with entity names
         enriched = []
@@ -3644,6 +3699,104 @@ async def graph_assertions(request: Request, entity_rid: str, limit: int = 100, 
         entity_rid=entity_rid, limit=limit, offset=offset)
     return {"entity_rid": entity_rid, "assertions": assertions,
             "total": total, "limit": limit, "offset": offset}
+
+
+# =============================================================================
+# Graph Traversal Endpoints
+# =============================================================================
+
+
+@app.get("/graph/neighborhood/{entity_uri:path}", response_model=NeighborhoodResponse)
+async def graph_neighborhood(
+    request: Request,
+    entity_uri: str,
+    max_depth: int = 2,
+    direction: Literal["incoming", "outgoing", "both"] = "both",
+    predicate: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    max_nodes: int = 200,
+    max_edges: int = 1000,
+):
+    """
+    Return the neighborhood graph around an entity via recursive traversal.
+
+    Discovers reachable nodes up to `max_depth` hops, returns nodes + edges
+    between them. Safety caps prevent runaway queries.
+
+    - **max_depth**: 1-4 (default 2, silently clamped)
+    - **direction**: which edges to traverse ("both", "incoming", "outgoing")
+    - **predicate**: only traverse edges with this predicate
+    - **entity_type**: post-filter nodes by type (root always included)
+    - **max_nodes**: cap on returned nodes (default 200, max 500)
+    - **max_edges**: cap on returned edges (default 1000, max 2000)
+
+    When truncated, `total_nodes_discovered` / `total_edges_discovered`
+    show the uncapped counts.
+    """
+    _check_graph_auth(request)
+
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Check entity exists
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM entity_registry WHERE fuseki_uri = $1)",
+            entity_uri,
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Entity not found: {entity_uri}")
+
+        from api.graph_queries import get_neighborhood
+        result = await get_neighborhood(
+            conn, entity_uri, max_depth, direction, predicate,
+            entity_type, max_nodes, max_edges,
+        )
+
+    return result
+
+
+@app.get("/graph/shortest-path", response_model=ShortestPathResponse)
+async def graph_shortest_path(
+    request: Request,
+    source: str,
+    target: str,
+    max_depth: int = 6,
+    direction: Literal["incoming", "outgoing", "both"] = "both",
+):
+    """
+    Find the shortest path between two entities via BFS.
+
+    - **source**: URI of the starting entity
+    - **target**: URI of the destination entity
+    - **max_depth**: maximum hops (1-8, default 6, silently clamped)
+    - **direction**: which edges to follow ("both", "incoming", "outgoing")
+
+    When `source == target`, returns `path_length: 0` with an empty steps list.
+
+    Each step shows the edge connecting consecutive nodes. When multiple edges
+    exist between two nodes, the highest-confidence edge is chosen (ties broken
+    alphabetically by predicate) for deterministic results.
+    """
+    _check_graph_auth(request)
+
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Check both entities exist
+        for uri, label in [(source, "source"), (target, "target")]:
+            exists = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM entity_registry WHERE fuseki_uri = $1)",
+                uri,
+            )
+            if not exists:
+                raise HTTPException(status_code=404, detail=f"{label.capitalize()} entity not found: {uri}")
+
+        from api.graph_queries import get_shortest_path
+        result = await get_shortest_path(conn, source, target, max_depth, direction)
+
+    return result
 
 
 if __name__ == "__main__":

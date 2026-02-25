@@ -567,36 +567,23 @@ async def resolve_pending_relationships(
 async def get_entity_relationships(
     conn: asyncpg.Connection,
     entity_uri: str,
-    predicate: Optional[str] = None
+    predicate: Optional[str] = None,
+    direction: str = "both",
 ) -> List[Dict[str, Any]]:
     """
-    Get all relationships for an entity (both directions).
+    Get all relationships for an entity with optional direction filter.
 
     Args:
         conn: Database connection
         entity_uri: Entity URI to lookup
         predicate: Optional predicate filter
+        direction: "both", "incoming", or "outgoing"
 
     Returns:
         List of relationship dicts
     """
-    if predicate:
-        rows = await conn.fetch("""
-            SELECT subject_uri, predicate, object_uri, confidence, source, source_rid
-            FROM entity_relationships
-            WHERE (subject_uri = $1 OR object_uri = $1)
-            AND predicate = $2
-            ORDER BY confidence DESC
-        """, entity_uri, predicate)
-    else:
-        rows = await conn.fetch("""
-            SELECT subject_uri, predicate, object_uri, confidence, source, source_rid
-            FROM entity_relationships
-            WHERE subject_uri = $1 OR object_uri = $1
-            ORDER BY predicate, confidence DESC
-        """, entity_uri)
-
-    return [dict(r) for r in rows]
+    from api.graph_queries import get_relationships_directed
+    return await get_relationships_directed(conn, entity_uri, predicate, direction)
 
 
 async def check_relationship_exists(

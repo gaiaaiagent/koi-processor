@@ -71,6 +71,26 @@ Critical run command pattern (for env propagation to child processes):
 set -a; source config/personal.env; set +a
 ```
 
+## Graph Traversal (Phase A, 2026-02-25)
+
+PostgreSQL recursive CTE-based graph traversal. No TDB dependency.
+
+Key files:
+- `api/graph_queries.py` — static SQL CTEs + async functions (neighborhood, shortest-path, directed relationships)
+- `api/personal_ingest_api.py` — endpoints + Pydantic models (`GraphNode`, `GraphEdge`, `NeighborhoodResponse`, `PathStep`, `ShortestPathResponse`)
+- `api/vault_parser.py` — `get_entity_relationships()` now delegates to `graph_queries.get_relationships_directed()`
+
+Endpoints:
+- `GET /relationships/{entity_uri:path}` — added `direction` param (backward-compatible, default `"both"`)
+- `GET /graph/neighborhood/{entity_uri:path}` — multi-hop BFS neighborhood (max_depth=4, max_nodes=500, 5s timeout)
+- `GET /graph/shortest-path?source=...&target=...` — BFS shortest path (max_depth=8, deterministic edge selection)
+
+Safety: auth guard (`_check_graph_auth`), frontier fanout guard (CTE capped at max_nodes*3), asyncpg timeout=5.0.
+
+Tests:
+- `tests/test_graph_traversal.py` — 21 isolated fixture tests (rollback transactions)
+- `tests/test_graph_traversal_smoke.py` — 12 live-DB smoke tests (requires running API)
+
 When schema mismatch is detected (`fuseki_uri` legacy schema), run:
 ```bash
 python -m scripts.terminusdb.import_from_postgres --fresh
@@ -329,5 +349,14 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
-**Last Updated**: 2026-02-09
-**Phase**: Complete - All major milestones achieved + Personal KOI active development
+**Last Updated**: 2026-02-25
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated
+
+---
+
+## Session History
+
+| Session ID | Date | Scope | Key Work |
+|------------|------|-------|----------|
+| `df92b730` | 2026-02-25 | koi-processor | Phase 1 TDB smoke test: fresh import, health/outbox/auth/fail-open/idempotency/reconciliation all pass. Fixed vault_parser.py SAVEPOINT bug. Created smoke_phase1.sh. Updated README + CLAUDE.md. Committed + pushed. |
+| current | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
