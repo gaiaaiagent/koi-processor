@@ -77,12 +77,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount KOI-net federation router (if enabled)
+if os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes'):
+    try:
+        from api.koi_net_router import koi_net_router
+        app.include_router(koi_net_router, prefix="/koi-net")
+        logging.getLogger(__name__).info("KOI-net federation router mounted")
+    except ImportError as e:
+        logging.getLogger(__name__).warning(f"KOI-net federation not available: {e}")
+
 # Configuration
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://darrenzal:@localhost:5432/personal_koi')
 KOI_MODE = os.getenv('KOI_MODE', 'personal')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-ada-002')
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
+KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes')
 
 # DEPRECATED: These are now loaded from vault schemas via entity_schema.py
 # Kept as fallback comments for reference
@@ -991,6 +1001,15 @@ async def startup():
         else:
             logger.warning("OPENAI_API_KEY not set")
             logger.info("Tier 2 semantic matching: DISABLED (falling back to fuzzy matching)")
+
+        # Initialize KOI-net federation (if enabled)
+        if KOI_NET_ENABLED:
+            try:
+                from api.koi_net_router import setup_koi_net
+                await setup_koi_net(db_pool)
+                logger.info("KOI-net federation initialized")
+            except Exception as e:
+                logger.warning(f"KOI-net federation failed to initialize: {e}")
 
     except Exception as e:
         logger.error(f"Failed to connect to database: {e}")
