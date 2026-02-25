@@ -13,6 +13,7 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 - [Architecture](#architecture)
 - [Key Features](#key-features)
 - [Phase 1 TerminusDB Integration](#phase-1-terminusdb-integration)
+- [Federation Bootstrap (Blank Host)](#federation-bootstrap-blank-host)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -78,6 +79,27 @@ curl -s 'localhost:8351/relationships/orn:...?direction=outgoing'
 ```
 
 Auth: Restricted to localhost and WireGuard mesh (10.100.0.0/24). Tests: `tests/test_graph_traversal.py` (21 isolated fixture tests), `tests/test_graph_traversal_smoke.py` (12 live-DB smoke tests).
+
+## Federation Bootstrap (Blank Host)
+
+Federation onboarding scripts now support near one-command bootstrap for new peer machines (Ubuntu/macOS), including prerequisites, DB/venv setup, join-request generation, and validation.
+
+Runbook:
+
+- [`scripts/federation/README.md`](scripts/federation/README.md)
+
+Primary bootstrap command (peer host):
+
+```bash
+cd scripts/federation
+./bootstrap-node.sh --yes <node-name> <wireguard-ip> [koi-processor-path]
+```
+
+Post-setup validation:
+
+```bash
+./validate-node.sh --expect-wg-ip <wireguard-ip> --strict
+```
 
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion

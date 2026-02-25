@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # setup-node.sh — KOI-net node setup on peer's machine
 #
-# Usage: ./setup-node.sh <node-name> <wireguard-ip> [koi-processor-path]
-# Example: ./setup-node.sh shawn-personal 10.100.0.3 /home/shawn/koi-processor
+# Usage: ./setup-node.sh [--yes] [--force] [--skip-firewall] <node-name> <wireguard-ip> [koi-processor-path]
+# Example: ./setup-node.sh --yes shawn-personal 10.100.0.3 /home/shawn/koi-processor
 #
 # Run on the peer's machine after WireGuard tunnel is verified.
 
@@ -14,9 +14,42 @@ source "$SCRIPT_DIR/lib.sh"
 # PARSE ARGS
 # ============================================
 
+NON_INTERACTIVE=false
+FORCE_OVERWRITE=false
+SKIP_FIREWALL=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --yes|-y)
+            NON_INTERACTIVE=true
+            FORCE_OVERWRITE=true
+            shift
+            ;;
+        --force)
+            FORCE_OVERWRITE=true
+            shift
+            ;;
+        --skip-firewall)
+            SKIP_FIREWALL=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--yes] [--force] [--skip-firewall] <node-name> <wireguard-ip> [koi-processor-path]"
+            echo "Example: $0 --yes shawn-personal 10.100.0.3 /home/shawn/koi-processor"
+            exit 0
+            ;;
+        --*)
+            log_fatal "Unknown option: $1"
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <node-name> <wireguard-ip> [koi-processor-path]"
-    echo "Example: $0 shawn-personal 10.100.0.3 /home/shawn/koi-processor"
+    echo "Usage: $0 [--yes] [--force] [--skip-firewall] <node-name> <wireguard-ip> [koi-processor-path]"
+    echo "Example: $0 --yes shawn-personal 10.100.0.3 /home/shawn/koi-processor"
     exit 1
 fi
 
@@ -33,6 +66,9 @@ DB_USER="${USER:-$(whoami)}"
 log_info "Setting up KOI-net node: $NODE_NAME"
 log_info "WireGuard IP: $WG_IP"
 log_info "KOI processor: $KOI_PATH"
+log_info "Non-interactive: $NON_INTERACTIVE"
+log_info "Force overwrite: $FORCE_OVERWRITE"
+log_info "Skip firewall: $SKIP_FIREWALL"
 
 # ============================================
 # STEP 1: Verify WireGuard tunnel
@@ -63,19 +99,26 @@ log_info "Step 3: Generating config/personal.env..."
 
 TEMPLATE="$SCRIPT_DIR/personal-env.template"
 TARGET="$KOI_PATH/config/personal.env"
+WRITE_ENV=true
 
 if [[ -f "$TARGET" ]]; then
     log_warn "personal.env already exists at $TARGET"
-    read -rp "Overwrite? [y/N]: " confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        log_info "Keeping existing personal.env"
-    else
+    if $FORCE_OVERWRITE; then
         cp "$TARGET" "${TARGET}.bak.$(date +%s)"
-        log_info "Backed up existing config"
+        log_info "Backed up existing config (force overwrite enabled)"
+    else
+        read -rp "Overwrite? [y/N]: " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            log_info "Keeping existing personal.env"
+            WRITE_ENV=false
+        else
+            cp "$TARGET" "${TARGET}.bak.$(date +%s)"
+            log_info "Backed up existing config"
+        fi
     fi
 fi
 
-if [[ -f "$TEMPLATE" ]]; then
+if $WRITE_ENV && [[ -f "$TEMPLATE" ]]; then
     sed \
         -e "s|{{NODE_NAME}}|$NODE_NAME|g" \
         -e "s|{{WG_IP}}|$WG_IP|g" \
@@ -85,6 +128,8 @@ if [[ -f "$TEMPLATE" ]]; then
         -e "s|{{OPENAI_API_KEY}}|REPLACE_ME_WITH_YOUR_OPENAI_API_KEY|g" \
         "$TEMPLATE" > "$TARGET"
     log_info "Generated personal.env"
+elif ! $WRITE_ENV; then
+    log_info "Skipped personal.env generation (using existing file)"
 else
     log_warn "Template not found at $TEMPLATE, skipping personal.env generation"
 fi
@@ -125,7 +170,9 @@ log_info "Step 5: Restricting API to WireGuard + loopback..."
 
 KOI_PORT="${KOI_API_PORT:-8351}"
 
-if [[ "$(uname)" == "Darwin" ]]; then
+if $SKIP_FIREWALL; then
+    log_warn "Skipping firewall setup (--skip-firewall)"
+elif [[ "$(uname)" == "Darwin" ]]; then
     # macOS: use pf (packet filter)
     PF_ANCHOR="/etc/pf.anchors/koi-net"
     PF_CONF="/etc/pf.conf"
@@ -138,7 +185,11 @@ if [[ "$(uname)" == "Darwin" ]]; then
         echo "  This requires sudo to modify /etc/pf.anchors/koi-net"
         echo "  Rules: allow port $KOI_PORT on lo0 and utun* only, block elsewhere"
         echo ""
-        read -rp "  Proceed with sudo? [y/N]: " confirm
+        if $NON_INTERACTIVE; then
+            confirm="y"
+        else
+            read -rp "  Proceed with sudo? [y/N]: " confirm
+        fi
         if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
             # Backup current state
             sudo pfctl -sa > "$STATE_DIR/pf-backup-$(date +%s).txt" 2>/dev/null || true
@@ -181,7 +232,11 @@ else
         log_info "iptables rules already exist, skipping"
     else
         log_info "Setting up Linux iptables rules for port $KOI_PORT..."
-        read -rp "  Proceed with sudo? [y/N]: " confirm
+        if $NON_INTERACTIVE; then
+            confirm="y"
+        else
+            read -rp "  Proceed with sudo? [y/N]: " confirm
+        fi
         if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
             # Backup
             sudo iptables-save > "$STATE_DIR/iptables-backup-$(date +%s).txt"
