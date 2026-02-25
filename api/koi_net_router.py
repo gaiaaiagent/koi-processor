@@ -1332,7 +1332,7 @@ async def share_document(req: ShareDocumentRequest):
 
 @koi_net_router.get("/shared-with-me")
 async def shared_with_me(
-    since: Optional[str] = None,
+    since: Optional[datetime] = None,
     from_peer: Optional[str] = None,
     limit: int = 50,
 ):
