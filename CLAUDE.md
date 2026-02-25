@@ -96,6 +96,18 @@ When schema mismatch is detected (`fuseki_uri` legacy schema), run:
 python -m scripts.terminusdb.import_from_postgres --fresh
 ```
 
+## Federation Validation Update (2026-02-25)
+
+Live peer validation completed between local Darren node and blank-slate NUC peer:
+
+- Bidirectional KOI-net edge approval and polling verified.
+- Bidirectional `/koi-net/share` smoke test verified with receipt in `/koi-net/shared-with-me`.
+- Bootstrap runbook validated on blank host path (`bootstrap-node.sh` + `setup-node.sh` + `validate-node.sh`).
+
+Bug fix shipped:
+
+- `GET /koi-net/shared-with-me?since=...` now binds `since` as `datetime` (previously `str`, causing asyncpg timestamptz binding 500s).
+
 ### Code↔Docs Bridge - COMPLETE
 
 | Component | Count |

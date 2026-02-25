@@ -101,6 +101,25 @@ Post-setup validation:
 ./validate-node.sh --expect-wg-ip <wireguard-ip> --strict
 ```
 
+Federation smoke validation (bidirectional share):
+
+```bash
+# Node A -> Node B
+curl -sS -X POST http://<node-a-wg-ip>:8351/koi-net/share \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "document_rid": "orn:personal-koi.testdoc:smoke-a-to-b-<ts>",
+    "recipient": "<peer-alias-on-node-a>",
+    "message": "smoke a->b",
+    "contents": {"title":"smoke","body":"federation test"}
+  }'
+
+# Verify on Node B (received inbox)
+curl -sS "http://<node-b-wg-ip>:8351/koi-net/shared-with-me?from_peer=<peer-alias-on-node-b>&limit=10"
+```
+
+Note: `since` on `/koi-net/shared-with-me` is ISO-8601 datetime (example: `2026-02-25T20:22:00Z`).
+
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
 - ✅ **Version Control**: Tracks content updates with full audit trail

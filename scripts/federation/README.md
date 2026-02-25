@@ -60,6 +60,31 @@ Checks include:
 
 Use `--strict` to fail on warnings.
 
+## Federation Smoke Test (Recommended)
+
+After both peers are approved and connected, run a bidirectional share smoke test.
+
+```bash
+# From peer A: queue a test share to peer B
+curl -sS -X POST http://127.0.0.1:8351/koi-net/share \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "document_rid":"orn:personal-koi.testdoc:smoke-a-to-b-<ts>",
+    "recipient":"<alias-for-peer-b>",
+    "message":"smoke a->b",
+    "contents":{"title":"smoke","body":"federation test"}
+  }'
+
+# On peer B: verify receipt
+curl -sS "http://127.0.0.1:8351/koi-net/shared-with-me?from_peer=<alias-for-peer-a>&limit=10"
+```
+
+`/koi-net/shared-with-me` supports `since` as ISO-8601 datetime:
+
+```bash
+curl -sS "http://127.0.0.1:8351/koi-net/shared-with-me?since=2026-02-25T20:22:00Z&limit=10"
+```
+
 ## Non-Interactive Setup
 
 `setup-node.sh` supports automation flags:
