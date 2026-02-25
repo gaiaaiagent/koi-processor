@@ -72,11 +72,11 @@ Use `--strict` to fail on warnings.
 - `--force`: overwrite `config/personal.env` (with backup)
 - `--skip-firewall`: leaves firewall unchanged
 
-Fresh DB note:
+Migration note:
 
-- On blank hosts, `setup-node.sh` auto-sets `KOI_MIGRATION_MIN_NUM=40` when
-  `koi_net_events` does not exist, so federation-relevant migrations can run
-  without legacy pre-federation table dependencies.
+- `setup-node.sh` defaults `KOI_MIGRATION_MIN_NUM=40` for federation setup, so
+  federation-relevant migrations run without legacy pre-federation table
+  dependencies.
 - Override by exporting `KOI_MIGRATION_MIN_NUM` explicitly.
 
 ## Dry Run

@@ -276,14 +276,11 @@ log_info "Step 6: Running pending migrations..."
 POSTGRES_URL="${POSTGRES_URL:-postgresql:///personal_koi}"
 MIGRATIONS_DIR="$KOI_PATH/migrations"
 
-# For blank hosts, skip legacy pre-federation migrations that depend on
-# historical tables not present in fresh personal installs.
-if [[ -z "${KOI_MIGRATION_MIN_NUM:-}" ]] && command -v psql >/dev/null 2>&1; then
-    HAS_KOI_NET_EVENTS=$(psql "$POSTGRES_URL" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='koi_net_events')" 2>/dev/null || echo "")
-    if [[ "$HAS_KOI_NET_EVENTS" == "f" ]]; then
-        export KOI_MIGRATION_MIN_NUM=40
-        log_warn "Fresh DB detected. Enabling federation migration baseline: KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
-    fi
+# Federation setup defaults to migration 040+ unless explicitly overridden.
+# This avoids legacy non-federation migrations that rely on historical tables.
+if [[ -z "${KOI_MIGRATION_MIN_NUM:-}" ]]; then
+    export KOI_MIGRATION_MIN_NUM=40
+    log_info "Using federation migration baseline: KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
 fi
 
 if [[ -d "$MIGRATIONS_DIR" ]]; then
