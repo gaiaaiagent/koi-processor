@@ -470,7 +470,7 @@ run_migrations() {
     ensure_python_module "psycopg2" "psycopg2-binary"
 
     python3 -c "
-import os, sys, glob, psycopg2
+import os, sys, glob, re, psycopg2
 
 pg_url = '$pg_url'
 mig_dir = '$mig_dir'
@@ -487,9 +487,39 @@ cur.execute('''
     )
 ''')
 
+# Migration files (sorted)
+mig_files = sorted(glob.glob(os.path.join(mig_dir, '*.sql')))
+
 # Baseline detection: if table was just created but schema tables exist
 cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
 count = cur.fetchone()[0]
+
+# Optional minimum migration number for federation-only bootstrap.
+# If set (e.g., KOI_MIGRATION_MIN_NUM=39), older migrations are marked baseline.
+min_num_raw = os.environ.get('KOI_MIGRATION_MIN_NUM', '').strip()
+min_num = 0
+if min_num_raw:
+    try:
+        min_num = int(min_num_raw)
+    except ValueError:
+        print(f'[WARN] Ignoring invalid KOI_MIGRATION_MIN_NUM={min_num_raw!r}')
+        min_num = 0
+
+if count == 0 and min_num > 0:
+    baseline_count = 0
+    for mf in mig_files:
+        fname = os.path.basename(mf)
+        m = re.match(r'(\\d+)', fname)
+        if m and int(m.group(1)) < min_num:
+            cur.execute(
+                \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
+                (fname,)
+            )
+            baseline_count += 1
+    print(f'[INFO] Federation bootstrap baseline enabled: marked {baseline_count} migrations with number < {min_num} as baseline')
+    cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
+    count = cur.fetchone()[0]
+
 if count == 0:
     # Check if this is a pre-tracking database
     cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='koi_net_events')\")
@@ -497,9 +527,6 @@ if count == 0:
         print('[INFO] Pre-tracking database detected, recording baseline...')
         # Only mark migrations as baseline if their target table already exists
         # This prevents marking NEW migrations (like 045) as already applied
-        import re
-        mig_files = sorted(glob.glob(os.path.join(mig_dir, '*.sql')))
-
         # First pass: find highest migration number whose CREATE TABLEs all exist
         highest_existing_num = 0
         for mf in mig_files:
@@ -567,7 +594,6 @@ cur.execute('SELECT filename FROM koi_schema_migrations')
 applied = {row[0] for row in cur.fetchall()}
 
 # Find and run pending migrations
-mig_files = sorted(glob.glob(os.path.join(mig_dir, '*.sql')))
 pending = [f for f in mig_files if os.path.basename(f) not in applied]
 
 if not pending:
