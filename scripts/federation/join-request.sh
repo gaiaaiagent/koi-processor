@@ -10,6 +10,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
+# Prefer project virtualenv Python if available.
+if [[ -f "$KOI_PROCESSOR_DIR/venv/bin/activate" ]]; then
+    # shellcheck source=/dev/null
+    source "$KOI_PROCESSOR_DIR/venv/bin/activate"
+fi
+
 # ============================================
 # PARSE ARGS
 # ============================================
