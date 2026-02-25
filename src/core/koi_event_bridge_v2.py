@@ -59,6 +59,62 @@ LEDGER_ENTITY_PREFIXES = [
     'orn:regen.organization:',
 ]
 
+# Code file extensions that should skip KG extraction (still get embeddings for search)
+CODE_FILE_EXTENSIONS = {
+    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',  # JavaScript/TypeScript
+    '.py', '.pyi', '.pyx',  # Python
+    '.go', '.rs', '.rb', '.php',  # Other languages
+    '.java', '.kt', '.scala', '.groovy',  # JVM languages
+    '.c', '.cpp', '.cc', '.h', '.hpp',  # C/C++
+    '.cs', '.fs',  # .NET
+    '.swift', '.m', '.mm',  # Apple
+    '.sol',  # Solidity
+    '.sh', '.bash', '.zsh',  # Shell
+    '.sql', '.graphql',  # Query languages
+    '.proto',  # Protocol buffers
+}
+
+def should_skip_kg_extraction(metadata: Optional[Dict[str, Any]], rid: str = '') -> bool:
+    """Check if KG extraction should be skipped for this content.
+    
+    Returns True for code files where semantic entity extraction
+    provides little value. These files are still chunked and embedded
+    for code search - just not processed for KG entities/statements.
+    """
+    metadata = metadata or {}
+
+    source_type = metadata.get('source_type', '')
+    file_type = metadata.get('file_type', '')
+    
+    # Also detect file extension from RID (more reliable)
+    rid_extension = ''
+    if rid:
+        # Extract extension from RID like regen.github:github_repo_path_file.py
+        import re
+        ext_match = re.search(r'\.(\w+)(?:#|$)', rid)
+        if ext_match:
+            rid_extension = '.' + ext_match.group(1)
+    
+    # Check if it's a github source (from metadata or RID pattern)
+    is_github = source_type == 'github' or 'github' in rid.lower()
+
+    logger.info(f"[KG Filter] rid={rid[-50:]}, source_type={source_type}, file_type={file_type}, rid_ext={rid_extension}, is_github={is_github}")
+
+    if is_github:
+        # Use file_type from metadata, or fall back to RID extension
+        ext = file_type or rid_extension
+
+        # Allow markdown and documentation files
+        if ext in {'.md', '.mdx', '.rst', '.txt'}:
+            logger.info(f"[KG Filter] ALLOW doc file: {ext}")
+            return False
+        # Skip code files
+        if ext in CODE_FILE_EXTENSIONS:
+            logger.info(f"[KG Filter] SKIP code file: {ext}")
+            return True
+
+    return False
+
 # Global connection pool (shared across all requests)
 db_pool: Optional[asyncpg.Pool] = None
 
@@ -849,7 +905,7 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
 
             # Trigger KG extraction on the full document (not chunks)
             # Only extract from NEW or UPDATE events with sufficient content
-            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100:
+            if KG_EXTRACTION_ENABLED and text_content and len(text_content) > 100 and not should_skip_kg_extraction(event.bundle.manifest.metadata, event.bundle.rid):
                 # Build metadata for KG extraction
                 kg_metadata = {
                     'source_url': source_url or event.bundle.manifest.metadata.get('url'),
@@ -948,6 +1004,24 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
             embeddings_created=0,
             error=str(e)
         )
+
+
+# Lightweight health endpoint that can respond even when main loop is busy
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+_health_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="health")
+
+def _sync_health_check():
+    """Synchronous health check that runs in a separate thread"""
+    return {"status": "ok", "service": "koi-event-bridge", "version": "2.0.0"}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint - runs in thread pool to avoid event loop blocking"""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(_health_executor, _sync_health_check)
+    return result
 
 # API Endpoints
 @app.get("/")

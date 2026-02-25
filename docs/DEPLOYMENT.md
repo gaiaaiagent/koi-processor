@@ -378,7 +378,44 @@ sudo nano /etc/logrotate.d/koi
 }
 ```
 
-### 3. Metrics (Prometheus)
+
+### 3. Event Flood Detection
+
+Monitors for abnormally high event rates that could indicate a sensor malfunction or external attack.
+
+**Systemd Service:** `koi-event-flood-monitor.service`  
+**Timer:** `koi-event-flood-monitor.timer` (runs every 5 minutes)
+
+**Thresholds:**
+- Normal: < 100 events/5min
+- Warning: 100-500 events/5min (logged)
+- Critical: > 500 events/5min (email alert)
+
+```bash
+# Check flood monitor status
+sudo systemctl status koi-event-flood-monitor.timer
+
+# View flood detection logs
+tail -f /opt/projects/koi-processor/logs/event_flood.log
+
+# Manually run flood check
+sudo /opt/projects/koi-processor/monitoring/event_flood_monitor.sh
+```
+
+**Alert Configuration:**
+
+Email alerts require:
+1. `msmtp` installed and configured (`~/.msmtprc`)
+2. `ALERT_EMAIL` set in `/opt/projects/koi-processor/.alert-config`
+
+Example `.alert-config`:
+```bash
+ALERT_EMAIL=your-email@example.com
+```
+
+**Context:** Created after the Jan 9-10, 2026 flood incident where 57,116 false CONTENT_CHANGED events were generated in 24 hours.
+
+### 4. Metrics (Prometheus)
 
 Add Prometheus metrics endpoint:
 ```python

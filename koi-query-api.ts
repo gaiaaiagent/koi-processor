@@ -2322,6 +2322,128 @@ Answer the question using the context above.`;
 });
 
 // Graph Query Endpoint - Direct Apache AGE access
+
+// =============================================================================
+// Chat Endpoint - Single-turn RAG chat for bizdev dashboards
+// =============================================================================
+
+const CLIENT_CONTEXTS: Record<string, string> = {
+  landbanking: 'The client is Landbanking Group, a Munich-based natural capital fintech. They have the Nature Equity Asset (Landler) platform measuring carbon, biodiversity, soil, water, and social dimensions. Key partner: Ritter Sport. Focus on carbon credit registration via existing C-class.',
+  renew: 'The client is Renew/RePlanet, a UK-based nature data & intelligence company. They use the Wallacea Trust v2.1 biodiversity scoring methodology across 5 taxa. Focus areas: BT01 biodiversity credits and carbon stacking opportunities.',
+};
+
+const CHAT_SYSTEM_PROMPT = `You are a Regen Network registry expert. Answer questions using ONLY the provided context from the knowledge graph. Be concise and cite sources by number [1], [2], etc.
+
+Key facts:
+- Regen Registry has 78 credit batches, 58 projects, 13 credit classes
+- Credit types: Carbon (C01-C09), Biodiversity (BT01), plus KSH01, MBS01, USS01
+- BT01 uses conservation-weighted biodiversity scoring per 10m²
+
+If the context doesn't contain enough information, say so honestly.`;
+
+app.post('/api/koi/chat', async (req, res) => {
+  try {
+    const { query, client, limit = 5 } = req.body;
+
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required' });
+    }
+
+    // Call internal RAG search
+    const ragResponse = await fetch('http://localhost:8301/api/koi/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: query, limit: limit * 2 })
+    });
+
+    if (!ragResponse.ok) {
+      return res.status(500).json({ error: 'Search failed' });
+    }
+
+    const ragData = await ragResponse.json();
+    const results = (ragData.data?.results || ragData.results || []).slice(0, limit);
+
+    if (results.length === 0) {
+      return res.json({
+        answer: 'No relevant information found in the knowledge graph for that query.',
+        sources: [],
+        model: 'none'
+      });
+    }
+
+    // Build numbered citation context
+    const contextParts: string[] = [];
+    const sources = results.map((r: any, idx: number) => {
+      const content = r.content || r.text || '';
+      const title = r.title || r.rid || 'Unknown';
+      contextParts.push(`[${idx + 1}] ${title}: ${content}`);
+      return {
+        rid: r.rid || null,
+        title,
+        excerpt: content.slice(0, 200),
+        score: r.score || r.confidence || null,
+        source: r.source || null,
+        url: r.url || null,
+      };
+    });
+
+    const context = contextParts.join('\n\n');
+
+    // Build system prompt with optional client context
+    let systemPrompt = CHAT_SYSTEM_PROMPT;
+    if (client && CLIENT_CONTEXTS[client]) {
+      systemPrompt += `\n\nClient context: ${CLIENT_CONTEXTS[client]}`;
+    }
+
+    // Call OpenAI
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      return res.json({
+        answer: 'AI synthesis not available (API key not configured). Here are the raw search results.',
+        sources,
+        model: 'none'
+      });
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openaiKey}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Question: ${query}\n\nContext:\n${context}\n\nAnswer using the context above, citing sources by number.` }
+        ],
+        temperature: 0.7,
+        max_tokens: 600
+      })
+    });
+
+    if (!openaiResponse.ok) {
+      throw new Error(`OpenAI API error: ${openaiResponse.status}`);
+    }
+
+    const openaiData = await openaiResponse.json();
+    const answer = openaiData.choices[0].message.content;
+
+    return res.json({
+      answer,
+      sources,
+      model: 'gpt-4o-mini'
+    });
+
+  } catch (error) {
+    console.error('[KOI Chat] Error:', error);
+    res.status(500).json({
+      error: 'Chat failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 // Accepts 'query_type' for specific graph operations
 // Also accepts 'query' as a natural language description (for OpenAPI compatibility)
 app.post('/api/koi/graph', async (req, res) => {

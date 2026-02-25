@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GitHub Webhook Handler for Code Graph Updates
+GitHub Webhook Handler for Code Graph Updates.
 
 Receives push events from GitHub and triggers code extraction for changed repos.
 
@@ -18,13 +18,10 @@ import sys
 import hmac
 import hashlib
 import subprocess
-import asyncio
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
 from loguru import logger
 
 # Configuration
@@ -45,14 +42,24 @@ REPO_PATHS = {
     "koi-sensors": BASE_PATH / "koi-sensors",
     "koi-research": BASE_PATH / "koi-research",
     "regen-koi-mcp": BASE_PATH / "regen-koi-mcp",
+    "personal-koi-mcp": BASE_PATH / "personal-koi-mcp",
 }
+
+TRACKED_BRANCHES = tuple(
+    branch.strip()
+    for branch in os.environ.get("WEBHOOK_TRACKED_BRANCHES", "main,master,regen-prod").split(",")
+    if branch.strip()
+)
+if not TRACKED_BRANCHES:
+    TRACKED_BRANCHES = ("main", "master", "regen-prod")
+TRACKED_REFS = {f"refs/heads/{branch}" for branch in TRACKED_BRANCHES}
 
 # Track running extractions
 running_extractions: dict[str, datetime] = {}
 
 app = FastAPI(
     title="Code Graph Webhook",
-    description="GitHub webhook handler for automatic code graph updates"
+    description="GitHub webhook handler for automatic code graph updates",
 )
 
 
@@ -68,17 +75,25 @@ def verify_signature(payload: bytes, signature: str) -> bool:
     expected = hmac.new(
         WEBHOOK_SECRET.encode(),
         payload,
-        hashlib.sha256
+        hashlib.sha256,
     ).hexdigest()
 
     return hmac.compare_digest(f"sha256={expected}", signature)
 
 
-async def run_extraction(repo_name: str, repo_path: Path):
+async def run_extraction(repo_name: str, repo_path: Path, trigger: str = "webhook"):
     """Run extraction for a single repo."""
+    if repo_name in running_extractions:
+        logger.info(f"Extraction already running for {repo_name}, skipping")
+        return
+
     try:
         running_extractions[repo_name] = datetime.now()
-        logger.info(f"Starting extraction for {repo_name}")
+        logger.info(f"Starting extraction for {repo_name} (triggered by {trigger})")
+
+        if not repo_path.exists():
+            logger.error(f"Repository path does not exist for {repo_name}: {repo_path}")
+            return
 
         # Pull latest changes
         pull_result = subprocess.run(
@@ -86,11 +101,13 @@ async def run_extraction(repo_name: str, repo_path: Path):
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=60,
         )
 
         if pull_result.returncode != 0:
-            logger.warning(f"Git pull for {repo_name} returned non-zero: {pull_result.stderr}")
+            logger.warning(
+                f"Git pull for {repo_name} returned non-zero: {pull_result.stderr.strip()}"
+            )
         else:
             logger.info(f"Git pull for {repo_name}: {pull_result.stdout.strip()}")
 
@@ -103,29 +120,30 @@ async def run_extraction(repo_name: str, repo_path: Path):
             [
                 sys.executable,
                 str(koi_processor / "scripts" / "load_to_staging.py"),
-                "--repo", repo_name,
-                "--path", str(repo_path)
+                "--repo",
+                repo_name,
+                "--path",
+                str(repo_path),
             ],
             cwd=koi_processor,
             capture_output=True,
             text=True,
             env=env,
-            timeout=600  # 10 minute timeout
+            timeout=600,
         )
 
         if extract_result.returncode != 0:
-            logger.error(f"Extraction failed for {repo_name}: {extract_result.stderr}")
+            logger.error(f"Extraction failed for {repo_name}: {extract_result.stderr.strip()}")
         else:
             logger.info(f"Extraction completed for {repo_name}")
-            # Log summary from output
             for line in extract_result.stdout.split("\n"):
                 if "entities" in line.lower() or "edges" in line.lower():
                     logger.info(f"  {line.strip()}")
 
     except subprocess.TimeoutExpired:
         logger.error(f"Extraction timed out for {repo_name}")
-    except Exception as e:
-        logger.error(f"Extraction error for {repo_name}: {e}")
+    except Exception as exc:
+        logger.error(f"Extraction error for {repo_name}: {exc}")
     finally:
         running_extractions.pop(repo_name, None)
 
@@ -137,70 +155,65 @@ async def root():
         "service": "code-graph-webhook",
         "status": "healthy",
         "configured_repos": list(REPO_PATHS.keys()),
-        "running_extractions": list(running_extractions.keys())
+        "running_extractions": {
+            repo: started_at.isoformat() for repo, started_at in running_extractions.items()
+        },
     }
 
 
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "running_extractions": list(running_extractions.keys()),
+    }
 
 
 @app.post("/webhook/github")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     """Handle GitHub webhook push events."""
-    # Get raw body for signature verification
     body = await request.body()
 
-    # Verify signature
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not verify_signature(body, signature):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # Parse payload
     try:
         payload = await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
 
-    # Get event type
     event_type = request.headers.get("X-GitHub-Event", "")
-
-    # Only handle push events
     if event_type != "push":
         return {"status": "ignored", "reason": f"Event type '{event_type}' not handled"}
 
-    # Get repo name from payload
     repo_full_name = payload.get("repository", {}).get("full_name", "")
     repo_name = payload.get("repository", {}).get("name", "")
     ref = payload.get("ref", "")
 
     logger.info(f"Received push event for {repo_full_name} on {ref}")
 
-    # Only process pushes to main/master branch
-    if ref not in ("refs/heads/main", "refs/heads/master"):
+    if ref not in TRACKED_REFS:
         return {
             "status": "ignored",
-            "reason": f"Branch '{ref}' not tracked (only main/master)"
+            "reason": f"Branch '{ref}' not tracked (tracked: {sorted(TRACKED_BRANCHES)})",
         }
 
-    # Check if repo is configured
     if repo_name not in REPO_PATHS:
         return {
             "status": "ignored",
-            "reason": f"Repository '{repo_name}' not configured"
+            "reason": f"Repository '{repo_name}' not configured",
         }
 
-    # Check if extraction is already running
     if repo_name in running_extractions:
         return {
             "status": "skipped",
             "reason": f"Extraction already running for {repo_name}",
-            "started_at": running_extractions[repo_name].isoformat()
+            "started_at": running_extractions[repo_name].isoformat(),
         }
 
-    # Get commit info
     commits = payload.get("commits", [])
     commit_count = len(commits)
     head_commit = payload.get("head_commit", {})
@@ -209,15 +222,16 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
     logger.info(f"Processing {commit_count} commit(s) by {pusher}: {commit_msg}")
 
-    # Schedule extraction in background
     repo_path = REPO_PATHS[repo_name]
-    background_tasks.add_task(run_extraction, repo_name, repo_path)
+    background_tasks.add_task(run_extraction, repo_name, repo_path, f"push by {pusher}")
 
     return {
         "status": "accepted",
         "repo": repo_name,
+        "ref": ref,
         "commits": commit_count,
-        "message": f"Extraction scheduled for {repo_name}"
+        "pusher": pusher,
+        "message": f"Extraction scheduled for {repo_name}",
     }
 
 
@@ -227,23 +241,23 @@ async def manual_extract(repo_name: str, background_tasks: BackgroundTasks):
     if repo_name not in REPO_PATHS:
         raise HTTPException(
             status_code=404,
-            detail=f"Repository '{repo_name}' not configured. Available: {list(REPO_PATHS.keys())}"
+            detail=f"Repository '{repo_name}' not configured. Available: {list(REPO_PATHS.keys())}",
         )
 
     if repo_name in running_extractions:
         return {
             "status": "skipped",
             "reason": f"Extraction already running for {repo_name}",
-            "started_at": running_extractions[repo_name].isoformat()
+            "started_at": running_extractions[repo_name].isoformat(),
         }
 
     repo_path = REPO_PATHS[repo_name]
-    background_tasks.add_task(run_extraction, repo_name, repo_path)
+    background_tasks.add_task(run_extraction, repo_name, repo_path, "manual trigger")
 
     return {
         "status": "accepted",
         "repo": repo_name,
-        "message": f"Manual extraction scheduled for {repo_name}"
+        "message": f"Manual extraction scheduled for {repo_name}",
     }
 
 
@@ -256,18 +270,19 @@ async def extract_all(background_tasks: BackgroundTasks):
     for repo_name, repo_path in REPO_PATHS.items():
         if repo_name in running_extractions:
             skipped.append(repo_name)
-        else:
-            background_tasks.add_task(run_extraction, repo_name, repo_path)
-            scheduled.append(repo_name)
+            continue
+        background_tasks.add_task(run_extraction, repo_name, repo_path, "extract-all")
+        scheduled.append(repo_name)
 
     return {
         "status": "accepted",
         "scheduled": scheduled,
         "skipped": skipped,
-        "message": f"Scheduled extraction for {len(scheduled)} repos"
+        "message": f"Scheduled extraction for {len(scheduled)} repos",
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8360)

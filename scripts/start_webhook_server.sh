@@ -5,13 +5,17 @@
 #   ./scripts/start_webhook_server.sh           # Foreground
 #   ./scripts/start_webhook_server.sh --daemon  # Background with nohup
 
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KOI_PROCESSOR="$(dirname "$SCRIPT_DIR")"
 
 cd "$KOI_PROCESSOR"
 
 # Activate virtual environment if it exists
-if [ -f "venv/bin/activate" ]; then
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+elif [ -f "venv/bin/activate" ]; then
     source venv/bin/activate
 fi
 
@@ -23,10 +27,13 @@ if [ -f ".env" ]; then
 fi
 
 # Set Python path
-export PYTHONPATH="$KOI_PROCESSOR:$PYTHONPATH"
+export PYTHONPATH="$KOI_PROCESSOR:${PYTHONPATH:-}"
+
+HOST="${WEBHOOK_HOST:-0.0.0.0}"
+PORT="${WEBHOOK_PORT:-8360}"
 
 # Check for daemon mode
-if [ "$1" == "--daemon" ]; then
+if [ "${1:-}" = "--daemon" ]; then
     LOG_FILE="$KOI_PROCESSOR/logs/webhook_server.log"
     mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -34,8 +41,8 @@ if [ "$1" == "--daemon" ]; then
     echo "Logs: $LOG_FILE"
 
     nohup python -m uvicorn api.github_webhook:app \
-        --host 0.0.0.0 \
-        --port 8360 \
+        --host "$HOST" \
+        --port "$PORT" \
         >> "$LOG_FILE" 2>&1 &
 
     echo "PID: $!"
@@ -45,7 +52,7 @@ else
     echo "Press Ctrl+C to stop"
 
     python -m uvicorn api.github_webhook:app \
-        --host 0.0.0.0 \
-        --port 8360 \
+        --host "$HOST" \
+        --port "$PORT" \
         --reload
 fi
