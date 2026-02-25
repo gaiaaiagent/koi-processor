@@ -14,6 +14,7 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 - [Key Features](#key-features)
 - [Phase 1 TerminusDB Integration](#phase-1-terminusdb-integration)
 - [Federation Bootstrap (Blank Host)](#federation-bootstrap-blank-host)
+- [KOI-net Vault Sync Roadmap](#koi-net-vault-sync-roadmap)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -119,6 +120,12 @@ curl -sS "http://<node-b-wg-ip>:8351/koi-net/shared-with-me?from_peer=<peer-alia
 ```
 
 Note: `since` on `/koi-net/shared-with-me` is ISO-8601 datetime (example: `2026-02-25T20:22:00Z`).
+
+## KOI-net Vault Sync Roadmap
+
+Canonical phased plan for shared markdown-folder sync over KOI-net:
+
+- [`docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`](docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md)
 
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion

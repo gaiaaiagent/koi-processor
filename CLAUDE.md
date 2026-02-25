@@ -108,6 +108,12 @@ Bug fix shipped:
 
 - `GET /koi-net/shared-with-me?since=...` now binds `since` as `datetime` (previously `str`, causing asyncpg timestamptz binding 500s).
 
+## KOI-net Vault Sync Roadmap (2026-02-25)
+
+Canonical phased roadmap for markdown vault sync over KOI-net:
+
+- `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
+
 ### Code↔Docs Bridge - COMPLETE
 
 | Component | Count |
@@ -191,6 +197,7 @@ set -a; source .env; set +a
 - `docs/HYBRID_RAG_ARCHITECTURE.md` - Technical architecture
 - `docs/CODE_DOCS_BRIDGE.md` - Code↔Docs bridge documentation
 - `docs/CHANGELOG.md` - Version history
+- `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md` - Canonical phased vault-sync plan
 - `docs/archive/knowledge-graph-review-2026-01.md` - Current cycle tracking doc
 
 ---
