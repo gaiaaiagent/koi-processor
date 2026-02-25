@@ -208,7 +208,20 @@ setup_python_env() {
     # Ensure pip exists even on minimal python installs.
     run_or_print "bash -lc '\"$KOI_PATH/venv/bin/python\" -m ensurepip --upgrade >/dev/null 2>&1 || true'"
     run_or_print "bash -lc 'source \"$KOI_PATH/venv/bin/activate\" && pip install -q --upgrade pip'"
-    run_or_print "bash -lc 'source \"$KOI_PATH/venv/bin/activate\" && pip install -q -r \"$KOI_PATH/requirements.txt\"'"
+    if $DRY_RUN; then
+        run_or_print "bash -lc 'source \"$KOI_PATH/venv/bin/activate\" && pip install -q -r \"$KOI_PATH/requirements.txt\"'"
+        return 0
+    fi
+
+    if ! bash -lc "source \"$KOI_PATH/venv/bin/activate\" && pip install -q -r \"$KOI_PATH/requirements.txt\""; then
+        local fallback_req="$KOI_PATH/scripts/federation/requirements-bootstrap.txt"
+        if [[ -f "$fallback_req" ]]; then
+            log_warn "Full requirements install failed. Falling back to federation bootstrap requirements."
+            bash -lc "source \"$KOI_PATH/venv/bin/activate\" && pip install -q -r \"$fallback_req\""
+        else
+            log_fatal "requirements install failed and fallback file missing: $fallback_req"
+        fi
+    fi
 }
 
 generate_join_request() {

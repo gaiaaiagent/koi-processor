@@ -23,6 +23,8 @@ What `bootstrap-node.sh` does:
 2. Ensures local DB role/user + `personal_koi` database exist.
 3. Clones/updates `koi-processor` and checks out a target git ref.
 4. Creates `venv` and installs `requirements.txt`.
+   - If full dependency resolution fails on a blank host, it falls back to
+     `scripts/federation/requirements-bootstrap.txt` (runtime subset).
 5. Runs `join-request.sh` (unless `--skip-join-request`).
 6. Runs `validate-node.sh` checks.
 
