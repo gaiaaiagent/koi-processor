@@ -52,6 +52,50 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 | /koi (production) | 163,703 | ✅ Deployed |
 | /koi-staging | 163,703 | ✅ Deployed |
 
+## TerminusDB Graph Mirror (Phase 1, 2026-02-25)
+
+Status: code-complete and smoke-validated in local environment.
+
+Architecture:
+- PostgreSQL is authoritative.
+- `terminusdb_outbox` stores async graph-write intents in the same PG transaction.
+- `scripts/terminusdb/outbox_worker.py` drains outbox rows to TerminusDB.
+- `api/terminusdb_adapter.py` enforces schema guard (`schema_ok`) and idempotent upserts.
+
+Operational docs:
+- `scripts/terminusdb/README.md`
+- `scripts/terminusdb/smoke_phase1.sh`
+
+Critical run command pattern (for env propagation to child processes):
+```bash
+set -a; source config/personal.env; set +a
+```
+
+## Graph Traversal (Phase A, 2026-02-25)
+
+PostgreSQL recursive CTE-based graph traversal. No TDB dependency.
+
+Key files:
+- `api/graph_queries.py` — static SQL CTEs + async functions (neighborhood, shortest-path, directed relationships)
+- `api/personal_ingest_api.py` — endpoints + Pydantic models (`GraphNode`, `GraphEdge`, `NeighborhoodResponse`, `PathStep`, `ShortestPathResponse`)
+- `api/vault_parser.py` — `get_entity_relationships()` now delegates to `graph_queries.get_relationships_directed()`
+
+Endpoints:
+- `GET /relationships/{entity_uri:path}` — added `direction` param (backward-compatible, default `"both"`)
+- `GET /graph/neighborhood/{entity_uri:path}` — multi-hop BFS neighborhood (max_depth=4, max_nodes=500, 5s timeout)
+- `GET /graph/shortest-path?source=...&target=...` — BFS shortest path (max_depth=8, deterministic edge selection)
+
+Safety: auth guard (`_check_graph_auth`), frontier fanout guard (CTE capped at max_nodes*3), asyncpg timeout=5.0.
+
+Tests:
+- `tests/test_graph_traversal.py` — 21 isolated fixture tests (rollback transactions)
+- `tests/test_graph_traversal_smoke.py` — 12 live-DB smoke tests (requires running API)
+
+When schema mismatch is detected (`fuseki_uri` legacy schema), run:
+```bash
+python -m scripts.terminusdb.import_from_postgres --fresh
+```
+
 ### Code↔Docs Bridge - COMPLETE
 
 | Component | Count |
@@ -82,6 +126,18 @@ Improving the quality of Regen Network's knowledge graph (KOI system) through:
 ### Post-Processing
 - `scripts/fix007_consolidate_predicates_postgres.py` - Predicate consolidation
 - `scripts/regenerate_fuseki_graph.py` - Fuseki rebuild from PostgreSQL
+
+### Docstring Semantic Extraction (Production Run 2026-02-19)
+- `scripts/extract_docstring_semantics.py` - Route code docstrings through LLM semantic extractor
+- `src/core/docstring_filter.py` - Filter/aggregate meaningful docstrings for LLM
+
+| Repo | Files | Batches | Entities (raw → passed) | Relationships |
+|------|-------|---------|------------------------|---------------|
+| koi-processor | 213 | 232 | 1,402 → 1,112 | 66 |
+| regen-ledger | 306 | 935 | 10,470 → 9,396 | 169 |
+| **Total** | **519** | **1,167** | **11,872 → 10,508** | **235** |
+
+Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCESS (190), MODULE (92), KEEPER (36), CREDIT_CLASS (27)
 
 ### Code Bridge
 - `scripts/code_bridge/export_code_artifacts.py` - Populate code artifacts
@@ -267,5 +323,40 @@ set -a; source .env; set +a
 
 ---
 
-**Last Updated**: 2026-01-02
-**Phase**: Complete - All major milestones achieved
+## Personal KOI Backend Bug Fixes (2026-02-09)
+
+**Status**: ✅ Fixed & Deployed
+
+**Bug 1 - Silent ingest failure**: `/ingest` endpoint caught INSERT exceptions silently, returning false success. Fixed by tracking `failed_entities` list and reporting in response stats with `success=False`.
+
+**Bug 2 - False entity merge (token overlap)**: "Silke Helfrich" merged with "Simon Grant" because Jaro-Winkler score (0.6398) exceeded phonetic threshold (0.6) despite zero token overlap. Fixed by adding token overlap guard: if both names have 2+ tokens and share zero tokens, reject regardless of score.
+
+**Key File**: `api/personal_ingest_api.py` (lines 723-755 for Bug 2, lines 1345-1418 for Bug 1)
+
+**Commit**: `5a0dfa7e` on `feature/obsidian-kg-sync-plan`
+
+---
+
+## BKC Ontology Entity Types (2026-02-09)
+
+**Status**: ✅ Committed
+
+Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bioregion, Protocol, Playbook, Question, Claim, Evidence. Plus 15 new predicates (knowledge commoning, discourse graph, SKOS).
+
+**Key Files**: `api/entity_schema.py`, `api/vault_parser.py`, `migrations/038_bkc_predicates.sql`
+
+**Commit**: `4649e37d` on `feature/obsidian-kg-sync-plan`
+
+---
+
+**Last Updated**: 2026-02-25
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated
+
+---
+
+## Session History
+
+| Session ID | Date | Scope | Key Work |
+|------------|------|-------|----------|
+| `df92b730` | 2026-02-25 | koi-processor | Phase 1 TDB smoke test: fresh import, health/outbox/auth/fail-open/idempotency/reconciliation all pass. Fixed vault_parser.py SAVEPOINT bug. Created smoke_phase1.sh. Updated README + CLAUDE.md. Committed + pushed. |
+| current | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |

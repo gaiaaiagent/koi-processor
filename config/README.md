@@ -32,3 +32,14 @@ If you're just developing and don't need Google Drive integration:
 - `dashboard_config.yaml` - Created automatically by setup.sh
 - `curator_config.yaml` - Curator settings
 - `services.json` - Service definitions
+- `personal.env.example` - Local/personal KOI config template (includes KOI-net + optional TerminusDB vars)
+
+## Local Env Loading
+
+Use this pattern when running processes that spawn child processes:
+
+```bash
+set -a; source config/personal.env; set +a
+```
+
+This safely exports all variables (including quoted values) to child processes.

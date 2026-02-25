@@ -107,14 +107,14 @@ DEFAULT_SCHEMAS = {
         label='Organization',
         folder='Organizations',
         phonetic_matching=False,  # Opt-in, not default
-        similarity_threshold=0.85
+        similarity_threshold=0.90
     ),
     'Project': EntityTypeConfig(
         type_key='Project',
         label='Project',
         folder='Projects',
         phonetic_matching=False,  # Opt-in, not default
-        similarity_threshold=0.85
+        similarity_threshold=0.90
     ),
     'Location': EntityTypeConfig(
         type_key='Location',
@@ -129,9 +129,9 @@ DEFAULT_SCHEMAS = {
         label='Concept',
         folder='Concepts',
         phonetic_matching=False,
-        similarity_threshold=0.75,
+        similarity_threshold=0.88,
         semantic_threshold=0.88,
-        require_token_overlap=False
+        require_token_overlap=True
     ),
     'Meeting': EntityTypeConfig(
         type_key='Meeting',
