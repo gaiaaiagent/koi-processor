@@ -32,7 +32,7 @@ fi
 # Personal mode overrides
 export KOI_MODE=personal
 export KOI_API_PORT=8351
-export POSTGRES_URL="postgresql://{{DB_USER}}:@localhost:5432/personal_koi"
+export POSTGRES_URL="postgresql:///personal_koi"
 
 # Generate admin token for edge approval if not already present
 KOI_STATE_DIR="${KOI_STATE_DIR:-{{STATE_DIR}}}"

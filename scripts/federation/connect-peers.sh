@@ -221,7 +221,7 @@ if [[ "$approve_outbound" == "y" || "$approve_outbound" == "Y" ]]; then
     LOCAL_NODE_RID=$(echo "$LOCAL_PROFILE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('node_rid',''))")
     OUTBOUND_EDGE_RID=$(python3 -c "
 import psycopg2, os
-pg_url = os.environ.get('POSTGRES_URL', 'postgresql://${USER}:@localhost:5432/personal_koi')
+pg_url = os.environ.get('POSTGRES_URL', 'postgresql:///personal_koi')
 conn = psycopg2.connect(pg_url)
 cur = conn.cursor()
 cur.execute('''
@@ -272,7 +272,7 @@ if [[ -n "$PEER_ALIAS" ]]; then
         # Insert alias via the API or directly
         python3 -c "
 import psycopg2, os
-pg_url = os.environ.get('POSTGRES_URL', 'postgresql://${USER}:@localhost:5432/personal_koi')
+pg_url = os.environ.get('POSTGRES_URL', 'postgresql:///personal_koi')
 conn = psycopg2.connect(pg_url)
 conn.autocommit = True
 cur = conn.cursor()

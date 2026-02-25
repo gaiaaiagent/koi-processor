@@ -135,9 +135,20 @@ install_linux_prereqs() {
         curl
         jq
     )
+    if command -v wg >/dev/null 2>&1 \
+       && command -v psql >/dev/null 2>&1 \
+       && command -v jq >/dev/null 2>&1 \
+       && command -v git >/dev/null 2>&1 \
+       && command -v curl >/dev/null 2>&1 \
+       && python3 -m venv --help >/dev/null 2>&1 \
+       && python3 -m pip --version >/dev/null 2>&1; then
+        log_info "Linux prerequisites already present; skipping apt install"
+        return 0
+    fi
+
     log_info "Installing Linux prerequisites..."
-    if ! confirm_or_exit "Install packages with sudo apt-get?"; then
-        log_fatal "Aborted by user"
+    if ! confirm_or_exit "Install missing packages with sudo apt-get?"; then
+        log_fatal "Aborted by user (missing prerequisites)"
     fi
     run_or_print "sudo apt-get update -qq"
     run_or_print "sudo apt-get install -y -qq ${packages[*]}"
@@ -156,6 +167,11 @@ install_macos_prereqs() {
 ensure_postgres() {
     log_info "Ensuring PostgreSQL role/db exist..."
     if [[ "$(uname)" == "Linux" ]]; then
+        # Fast path: already usable with local socket auth.
+        if psql -d personal_koi -Atc "SELECT 1" >/dev/null 2>&1; then
+            log_info "PostgreSQL already ready (personal_koi reachable via local socket)"
+            return 0
+        fi
         run_or_print "sudo systemctl enable --now postgresql"
         run_or_print "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\" | grep -q 1 || sudo -u postgres createuser -s '${DB_USER}'"
         run_or_print "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_database WHERE datname='personal_koi'\" | grep -q 1 || sudo -u postgres createdb -O '${DB_USER}' personal_koi"

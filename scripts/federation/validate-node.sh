@@ -137,7 +137,7 @@ else
     warn "WireGuard interface wg-koi is not up"
 fi
 
-PG_URL="${POSTGRES_URL:-postgresql://${USER:-$(whoami)}:@localhost:5432/personal_koi}"
+PG_URL="${POSTGRES_URL:-postgresql:///personal_koi}"
 if psql "$PG_URL" -Atc "SELECT 1" >/dev/null 2>&1; then
     pass "PostgreSQL reachable: personal_koi"
 else

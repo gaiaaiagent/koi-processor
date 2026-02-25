@@ -11,7 +11,7 @@ KOI_MODE=personal
 # ============================================
 # DATABASE CONFIGURATION
 # ============================================
-POSTGRES_URL=postgresql://{{DB_USER}}:@localhost:5432/personal_koi
+POSTGRES_URL=postgresql:///personal_koi
 
 # ============================================
 # KOI PIPELINE CONFIGURATION

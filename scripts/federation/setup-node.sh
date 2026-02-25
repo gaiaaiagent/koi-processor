@@ -273,7 +273,7 @@ log_info "Firewall verification will be checked after service starts"
 
 log_info "Step 6: Running pending migrations..."
 
-POSTGRES_URL="${POSTGRES_URL:-postgresql://${DB_USER}:@localhost:5432/personal_koi}"
+POSTGRES_URL="${POSTGRES_URL:-postgresql:///personal_koi}"
 MIGRATIONS_DIR="$KOI_PATH/migrations"
 
 if [[ -d "$MIGRATIONS_DIR" ]]; then
