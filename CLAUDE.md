@@ -193,6 +193,38 @@ Capability-gated endpoint groups, mounted conditionally at startup:
 - `scripts/stamp_baseline.py` — Stamp existing migrations into registry with checksum verification
 - Migration IDs are namespaced: `core:*`, `bkc:*`, `personal:*`
 
+### Commons Intake Pipeline (2026-02-26)
+
+Full intake workflow for federated knowledge contributions:
+- **State machine:** `staged → approved → ingesting → (ingested | needs_merge_review | failed)`
+- `api/commons_ingest_worker.py` — Async background worker (advisory locks, `FOR UPDATE SKIP LOCKED`, retry/backoff, stale lease reaper)
+- Entity resolution with confidence thresholds: auto-merge ≥0.95, ambiguous 0.85-0.95 → merge candidate queue
+- `COMMONS_INGEST_ENABLED=true` env var gates worker startup
+
+New endpoints (in `api/koi_net_router.py`):
+- `GET /koi-net/commons/intake` — List shares by status
+- `POST /koi-net/commons/intake/decide` — Approve/reject a staged share
+- `GET /koi-net/commons/intake/{share_id}/decisions` — Immutable decision audit trail
+- `GET /koi-net/commons/intake/{share_id}/merge-candidates` — Ambiguous entity matches
+- `POST /koi-net/commons/intake/{share_id}/resolve-merges` — Admin resolution of merge candidates
+
+New migrations:
+- `053_commons_decision_log.sql` — `koi_commons_decisions` table + expanded `intake_status` constraint
+- `054_commons_merge_candidates.sql` — `koi_commons_merge_candidates` table
+
+New env vars:
+- `COMMONS_INGEST_ENABLED` — Enable the async ingest worker (default: `false`)
+- `KOI_COMMONS_SERVICE_TOKEN` — Bearer token for remote BFF access to commons admin endpoints
+
+### Chat Endpoint (2026-02-26)
+
+`POST /chat` — RAG-powered conversational interface:
+- Semantic search over entity embeddings (pgvector)
+- Falls back to text search if no embedding available
+- Calls LLM (configurable via `CHAT_LLM_MODEL`, default: `gpt-4o-mini`) for grounded answer
+- Returns `{ answer, sources, intent }`
+- Requires `OPENAI_API_KEY`; returns 503 if unavailable
+
 ### Contract Tests
 - `tests/test_contract.py` — Behavioral contract suite (run against any profile, live server)
 - `tests/test_interop_matrix.py` — Federation interop + commons correctness gates (C1-C3)
