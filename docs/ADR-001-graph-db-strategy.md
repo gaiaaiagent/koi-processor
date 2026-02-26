@@ -229,3 +229,15 @@ Review benchmark results against all gates and promotion thresholds. Either:
 3. Run federation conflict drill (3-peer simulation)
 4. If prototyping: run Graphiti quickstart, execute benchmark queries, score against thresholds
 5. First review at 2026-03-11, monthly thereafter
+
+## Appendix A: Graphiti Decision (2026-03-04)
+
+**Decision:** _PENDING — COMMIT or DEFER_
+
+**Rationale:**
+
+- Is there a concrete agent retrieval quality question we need answered? _TBD_
+- Do we have bandwidth for ~1 day of prototype work Mar 5–8? _TBD_
+- If no to either → DEFER
+
+_To be completed by 2026-03-04._
