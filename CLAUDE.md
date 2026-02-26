@@ -225,18 +225,18 @@ New env vars:
 - Returns `{ answer, sources, intent }`
 - Requires `OPENAI_API_KEY`; returns 503 if unavailable
 
-### Pending Integration Check — GraphRAG Export (2026-02-26)
+### GraphRAG Export Validation (2026-02-26)
 
-Status: hold for viewer smoke test before merge/deploy.
+Status: validated, ready to merge/deploy.
 
-Open local diff:
-- `scripts/export_graph_hierarchy.py` — output contract changed (full format + clusters metadata), default file changed to `graphrag_hierarchy.json`, legacy `test_mode` output removed.
+Validated change:
+- `scripts/export_graph_hierarchy.py` now outputs full format (`entities`, `relationships`, `clusters`, `metadata`) to `graphrag_hierarchy.json` with hierarchical clustering and centrality fields.
 
-Acceptance criteria:
-1. Run exporter against live DB with representative entity volume.
-2. Load `GAIA/graph/GraphRAG3D_EmbeddingView.html` with generated JSON and confirm no parse/runtime errors.
-3. Verify core UI flows: search, node focus/select, relationship rendering.
-4. If pass, commit as a standalone change; if fail, add compatibility mode (or revert).
+Smoke test evidence:
+1. Export run on live production DB (`max-entities=8000`) produced `/tmp/graphrag_hierarchy_candidate.json` (7362 entities, 13567 relationships, L1=233, L2=14).
+2. Headless load test of `GAIA/graph/GraphRAG3D_EmbeddingView.html` succeeded with candidate JSON as primary dataset.
+3. Core flows verified in browser automation: entity search/select, cluster focus, relationship line rendering.
+4. No JS runtime exceptions; only expected optional-layout 404s (graphsage/force/community summary sidecar files).
 
 ### Contract Tests
 - `tests/test_contract.py` — Behavioral contract suite (run against any profile, live server)
