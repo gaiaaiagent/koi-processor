@@ -45,6 +45,7 @@ FOLDER_FALLBACKS = {
     'Question': 'Questions',
     'Claim': 'Claims',
     'Evidence': 'Evidence',
+    'Task': 'Tasks',
 }
 
 # Global default stopwords (union with per-type)
@@ -220,6 +221,15 @@ DEFAULT_SCHEMAS = {
         phonetic_matching=False,
         similarity_threshold=0.80,
         semantic_threshold=0.90,
+        require_token_overlap=True,
+    ),
+    'Task': EntityTypeConfig(
+        type_key='Task',
+        label='Task',
+        folder='Tasks',
+        phonetic_matching=False,
+        similarity_threshold=0.88,
+        semantic_threshold=0.85,
         require_token_overlap=True,
     ),
 }

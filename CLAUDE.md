@@ -166,6 +166,41 @@ Canonical phased roadmap: `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
 
 ---
 
+## Runtime Convergence (2026-02-26)
+
+This repo is the **canonical** KOI runtime. The Octo deployment repo pins a specific commit via `vendor/pin.txt` and syncs code with `vendor/sync.sh`.
+
+### Capabilities Registry
+- `api/capabilities.py` — Central registry of feature flags, loaded from env vars or named profiles (`personal`, `bkc_coordinator`, `bkc_leaf`)
+- `DEPLOYMENT_PROFILE` env var selects which features are active
+
+### Router Modules
+Capability-gated endpoint groups, mounted conditionally at startup:
+- `api/routers/graph_router.py` — `/graph/*` traversal + temporal queries (assertion history)
+- `api/routers/web_router.py` — `/web/*` content curation (BKC only)
+- `api/routers/github_router.py` — `/github/*` repo scanning (BKC only)
+- `api/routers/vault_sync_router.py` — `/koi-net/vault-sync/*` (personal only)
+- `api/routers/network_router.py` — `/network/*` coordinator aggregation (BKC coordinator only)
+
+### Startup Profiles
+- `api/profiles/personal.py` — Vault sync, TerminusDB adapter
+- `api/profiles/bkc_coordinator.py` — Pipeline handlers, web/GitHub sensors
+- `api/profiles/bkc_leaf.py` — Minimal (federation only)
+
+### Migration Governance
+- `migrations/052_koi_migrations_registry.sql` — Registry table (`migration_id`, `checksum`, `applied_at`)
+- `migrations/baselines/` — Per-database manifests (`personal_koi.json`, `octo_koi.json`, `gv_koi.json`, `fr_koi.json`)
+- `scripts/stamp_baseline.py` — Stamp existing migrations into registry with checksum verification
+- Migration IDs are namespaced: `core:*`, `bkc:*`, `personal:*`
+
+### Contract Tests
+- `tests/test_contract.py` — Behavioral contract suite (run against any profile, live server)
+- `tests/test_interop_matrix.py` — Federation interop + commons correctness gates (C1-C3)
+
+Run: `BASE_URL=http://127.0.0.1:8351 pytest tests/test_contract.py -v -m core`
+
+---
+
 ## Key Scripts
 
 ### Re-Extraction

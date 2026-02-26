@@ -78,6 +78,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Load capabilities registry
+try:
+    from api.capabilities import Capabilities
+    _caps = Capabilities.from_env()
+    logging.getLogger(__name__).info(f"Capabilities loaded (profile={_caps.deployment_profile})")
+except ImportError:
+    _caps = None
+    logging.getLogger(__name__).info("Capabilities registry not available, using legacy startup")
+
 # Mount KOI-net federation router (if enabled)
 if os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes'):
     try:
@@ -1191,6 +1200,46 @@ async def startup():
             logger.warning("OPENAI_API_KEY not set")
             logger.info("Tier 2 semantic matching: DISABLED (falling back to fuzzy matching)")
 
+        # Mount capability-gated routers (after pool init)
+        if _caps is not None:
+            # NOTE: graph_router is NOT mounted here because /graph/neighborhood
+            # and /graph/shortest-path are already defined inline on app (lines 3755, 3805).
+            # Mounting the router would create duplicate routes. The inline endpoints
+            # will be removed in a future phase when the router is fully validated.
+            # The router adds temporal endpoints (/graph/history, /graph/timeline) that
+            # don't overlap — mount only those when assertion_history is enabled.
+            if _caps.graph_queries and _caps.assertion_history:
+                try:
+                    from api.routers.graph_router import create_temporal_router
+                    app.include_router(create_temporal_router(db_pool, _caps))
+                    logger.info("Graph temporal router mounted (/graph/history, /graph/timeline)")
+                except Exception as e:
+                    logger.warning(f"Graph temporal router not mounted: {e}")
+
+            if _caps.web_sensor:
+                try:
+                    from api.routers.web_router import create_router as create_web_router
+                    app.include_router(create_web_router(db_pool, _caps))
+                    logger.info("Web router mounted")
+                except Exception as e:
+                    logger.warning(f"Web router not mounted: {e}")
+
+            if _caps.github_sensor:
+                try:
+                    from api.routers.github_router import create_router as create_github_router
+                    app.include_router(create_github_router(db_pool, _caps))
+                    logger.info("GitHub router mounted")
+                except Exception as e:
+                    logger.warning(f"GitHub router not mounted: {e}")
+
+            if _caps.coordinator_endpoints:
+                try:
+                    from api.routers.network_router import create_router as create_network_router
+                    app.include_router(create_network_router(db_pool, _caps))
+                    logger.info("Network router mounted")
+                except Exception as e:
+                    logger.warning(f"Network router not mounted: {e}")
+
         # Initialize KOI-net federation (if enabled)
         if KOI_NET_ENABLED:
             try:
@@ -1354,7 +1403,10 @@ async def ensure_schema(conn: asyncpg.Connection):
             ('involves_organization', 'Project involves organization', ARRAY['Project'], ARRAY['Organization']),
             ('has_project', 'Organization has project', ARRAY['Organization'], ARRAY['Project']),
             ('attended', 'Person attended meeting', ARRAY['Person'], ARRAY['Meeting']),
-            ('located_in', 'Entity is located in place', NULL, ARRAY['Location'])
+            ('located_in', 'Entity is located in place', NULL, ARRAY['Location']),
+            ('assigned_to', 'Task assigned to person', ARRAY['Task'], ARRAY['Person']),
+            ('belongs_to_project', 'Task belongs to project', ARRAY['Task'], ARRAY['Project']),
+            ('sourced_from', 'Task sourced from document', ARRAY['Task'], ARRAY['Meeting'])
         ON CONFLICT (predicate) DO NOTHING
     """)
 
