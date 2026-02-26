@@ -2,13 +2,17 @@
 Vault Sync Manager — bidirectional markdown sync between KOI-net peers.
 
 Phase Sync-1: two peers, poll-based (~60s), conflict copies, markdown only.
+Phase Sync-1.5: observability, backpressure, reconcile, file watcher.
+
 Reuses the existing EventQueue, poller, and signing infrastructure.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
+import json
 import logging
 import os
 import re
@@ -27,6 +31,149 @@ DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
 TOMBSTONE_CLEANUP_DAYS = 30
 DEDUP_CLEANUP_DAYS = 90
 WRITE_DEBOUNCE_MS = 500
+
+# Backpressure constants (WP3)
+MAX_FILES_PER_SCAN = int(os.getenv("VAULT_SYNC_MAX_FILES_PER_SCAN", "100"))
+MAX_BYTES_PER_SCAN = int(os.getenv("VAULT_SYNC_MAX_BYTES_PER_SCAN", str(10 * 1024 * 1024)))  # 10 MB
+MAX_EVENTS_PER_SCAN = max(1, int(os.getenv("VAULT_SYNC_MAX_EVENTS_PER_SCAN", "200")))
+DELETE_EVENT_RESERVE = int(os.getenv("VAULT_SYNC_DELETE_EVENT_RESERVE", "50"))
+DELETE_EVENT_RESERVE = max(0, min(DELETE_EVENT_RESERVE, MAX_EVENTS_PER_SCAN))
+
+# Watcher constants (WP4)
+WATCHER_DEBOUNCE_MS = int(os.getenv("VAULT_SYNC_WATCHER_DEBOUNCE_MS", "500"))
+
+# Metrics persistence
+METRICS_PERSIST_EVERY_N_SCANS = 5
+METRICS_PERSIST_EVERY_SECS = 300
+
+
+class VaultUnavailableError(Exception):
+    """Raised when vault/shared folder is not accessible."""
+    pass
+
+
+@dataclasses.dataclass
+class SyncMetrics:
+    schema_version: int = 1
+    # Scan-side
+    files_scanned: int = 0
+    events_queued: int = 0
+    bytes_queued: int = 0
+    scans_completed: int = 0
+    # Apply-side
+    events_applied: int = 0
+    events_skipped_dedup: int = 0
+    conflicts_created: int = 0
+    # Rejections (replaces _rejected_counts)
+    rejected_path_traversal: int = 0
+    rejected_oversize: int = 0
+    rejected_missing_fields: int = 0
+    rejected_invalid_type: int = 0
+    rejected_integrity_mismatch: int = 0
+    rejected_stale_event: int = 0
+    # Backpressure (WP3)
+    scans_capped: int = 0
+    # Watcher (WP4)
+    watcher_enabled: bool = False
+    watcher_events_received: int = 0
+    watcher_triggered_scans: int = 0
+    watcher_events_coalesced: int = 0
+    # Timestamps
+    last_scan_started_at: Optional[str] = None
+    last_scan_completed_at: Optional[str] = None
+    last_scan_duration_ms: int = 0
+    last_apply_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SyncMetrics":
+        if d.get("schema_version") != 1:
+            return cls()
+        fields = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in fields})
+
+
+_REJECT_FIELD_MAP = {
+    "path_traversal": "rejected_path_traversal",
+    "oversize": "rejected_oversize",
+    "missing_fields": "rejected_missing_fields",
+    "invalid_type": "rejected_invalid_type",
+    "integrity_mismatch": "rejected_integrity_mismatch",
+    "stale_event": "rejected_stale_event",
+}
+
+
+class VaultWatcher:
+    """File system watcher using watchdog — signals change_event on *.md modifications."""
+
+    def __init__(self, vault_path: Path, shared_folder: str, change_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
+        self._vault_path = vault_path
+        self._shared_folder = shared_folder
+        self._change_event = change_event
+        self._loop = loop
+        self._events_received = 0
+        self._events_coalesced = 0
+        self._debounce_handle: Optional[asyncio.TimerHandle] = None
+        self._observer = None
+
+    @property
+    def events_received(self) -> int:
+        return self._events_received
+
+    @property
+    def events_coalesced(self) -> int:
+        return self._events_coalesced
+
+    def start(self) -> bool:
+        """Start watching. Returns True on success, False if watchdog unavailable."""
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+
+            watch_dir = str(self._vault_path / self._shared_folder)
+
+            class _Handler(FileSystemEventHandler):
+                def __init__(inner_self, watcher):
+                    super().__init__()
+                    inner_self._watcher = watcher
+
+                def on_any_event(inner_self, event):
+                    if event.is_directory:
+                        return
+                    src = getattr(event, "src_path", "")
+                    if src.endswith(".md") or src.endswith(".md.tmp"):
+                        inner_self._watcher._loop.call_soon_threadsafe(inner_self._watcher._on_fs_event)
+
+            self._observer = Observer()
+            self._observer.schedule(_Handler(self), watch_dir, recursive=True)
+            self._observer.start()
+            return True
+        except (ImportError, OSError) as e:
+            logger.warning("vault_sync.watcher_unavailable reason=%s", e)
+            return False
+
+    def stop(self):
+        if self._observer:
+            self._observer.stop()
+            self._observer.join(timeout=5)
+            self._observer = None
+
+    def _on_fs_event(self):
+        """Called on the event loop thread via call_soon_threadsafe."""
+        self._events_received += 1
+        if self._debounce_handle:
+            self._debounce_handle.cancel()
+            self._events_coalesced += 1
+        self._debounce_handle = self._loop.call_later(
+            WATCHER_DEBOUNCE_MS / 1000.0,
+            self._signal,
+        )
+
+    def _signal(self):
+        self._change_event.set()
+        self._debounce_handle = None
 
 
 class VaultSyncManager:
@@ -52,15 +199,113 @@ class VaultSyncManager:
         self._last_reconcile_at: Optional[datetime] = None
         # Cache of (relative_path -> (mtime_ns, size, content_hash))
         self._stat_cache: Dict[str, Tuple[int, int, str]] = {}
-        # Rejection counters
-        self._rejected_counts: Dict[str, int] = {
-            "path_traversal": 0,
-            "oversize": 0,
-            "missing_fields": 0,
-            "invalid_type": 0,
-            "integrity_mismatch": 0,
-            "stale_event": 0,
+        # Metrics (replaces _rejected_counts)
+        self._metrics = SyncMetrics()
+        self._metrics_scans_since_persist = 0
+        self._metrics_last_persist_at: Optional[datetime] = None
+        # Concurrency lock
+        self._write_lock = asyncio.Lock()
+        # Watcher
+        self._change_event = asyncio.Event()
+        self._watcher: Optional[VaultWatcher] = None
+
+    # ------------------------------------------------------------------
+    # Backward-compat property: _rejected_counts → metrics
+    # ------------------------------------------------------------------
+
+    @property
+    def _rejected_counts(self) -> Dict[str, int]:
+        return {
+            "path_traversal": self._metrics.rejected_path_traversal,
+            "oversize": self._metrics.rejected_oversize,
+            "missing_fields": self._metrics.rejected_missing_fields,
+            "invalid_type": self._metrics.rejected_invalid_type,
+            "integrity_mismatch": self._metrics.rejected_integrity_mismatch,
+            "stale_event": self._metrics.rejected_stale_event,
         }
+
+    # ------------------------------------------------------------------
+    # Metrics persistence
+    # ------------------------------------------------------------------
+
+    async def load_metrics(self):
+        """Load persisted metrics from DB on startup."""
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT metrics_json FROM vault_sync_metrics WHERE id=1")
+                if row and row["metrics_json"]:
+                    data = row["metrics_json"]
+                    if isinstance(data, str):
+                        data = json.loads(data)
+                    self._metrics = SyncMetrics.from_dict(data)
+                    logger.info("vault_sync.metrics_loaded")
+        except Exception as e:
+            logger.warning("vault_sync.metrics_load_failed reason=%s", e)
+
+    async def persist_metrics(self):
+        """Persist metrics to DB."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO vault_sync_metrics (id, metrics_json, updated_at)
+                       VALUES (1, $1::jsonb, NOW())
+                       ON CONFLICT (id) DO UPDATE SET
+                           metrics_json = EXCLUDED.metrics_json,
+                           updated_at = NOW()""",
+                    json.dumps(self._metrics.to_dict()),
+                )
+            self._metrics_scans_since_persist = 0
+            self._metrics_last_persist_at = datetime.now(timezone.utc)
+        except Exception as e:
+            logger.warning("vault_sync.metrics_persist_failed reason=%s", e)
+
+    async def _maybe_persist_metrics(self):
+        """Persist if threshold reached."""
+        self._metrics_scans_since_persist += 1
+        now = datetime.now(timezone.utc)
+        should_persist = (
+            self._metrics_scans_since_persist >= METRICS_PERSIST_EVERY_N_SCANS
+            or self._metrics_last_persist_at is None
+            or (now - self._metrics_last_persist_at).total_seconds() >= METRICS_PERSIST_EVERY_SECS
+        )
+        if should_persist:
+            await self.persist_metrics()
+
+    # ------------------------------------------------------------------
+    # Watcher lifecycle
+    # ------------------------------------------------------------------
+
+    def start_watcher(self):
+        """Start file watcher if enabled. Fail-open."""
+        watcher_enabled = os.getenv("VAULT_SYNC_WATCHER", "true").strip().lower() in ("1", "true", "yes", "on")
+        if not watcher_enabled:
+            logger.info("vault_sync.watcher_disabled")
+            self._metrics.watcher_enabled = False
+            return
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            logger.warning("vault_sync.watcher_no_event_loop")
+            self._metrics.watcher_enabled = False
+            return
+
+        peer_config = None  # We'll use default "Shared" for watcher path
+        shared_folder = os.getenv("VAULT_SYNC_FOLDER", "Shared")
+        self._watcher = VaultWatcher(self.vault_path, shared_folder, self._change_event, loop)
+        if self._watcher.start():
+            self._metrics.watcher_enabled = True
+            logger.info("vault_sync.watcher_started path=%s/%s", self.vault_path, shared_folder)
+        else:
+            self._metrics.watcher_enabled = False
+            self._watcher = None
+
+    def stop_watcher(self):
+        """Stop file watcher."""
+        if self._watcher:
+            self._watcher.stop()
+            self._watcher = None
+            self._metrics.watcher_enabled = False
 
     # ------------------------------------------------------------------
     # Public interface (called from poller)
@@ -75,19 +320,36 @@ class VaultSyncManager:
             logger.debug("vault_sync: scan already in progress, skipping")
             return
 
+        # Check watcher signal
+        watcher_triggered = self._change_event.is_set()
+        if watcher_triggered:
+            self._change_event.clear()
+            self._metrics.watcher_triggered_scans += 1
+            if self._watcher:
+                self._metrics.watcher_events_received = self._watcher.events_received
+                self._metrics.watcher_events_coalesced = self._watcher.events_coalesced
+
         should_scan = (
-            self._last_scan_at is None
+            watcher_triggered
+            or self._last_scan_at is None
             or (now - self._last_scan_at).total_seconds() >= self.scan_interval
         )
         if should_scan:
             self._scan_in_progress = True
+            scan_start = datetime.now(timezone.utc)
+            self._metrics.last_scan_started_at = scan_start.isoformat()
             try:
                 await self._scan_async()
             except Exception as e:
-                logger.error(f"vault_sync: scan error: {e}")
+                logger.error("vault_sync.scan_error error=%s", e)
             finally:
                 self._scan_in_progress = False
                 self._last_scan_at = now
+                scan_end = datetime.now(timezone.utc)
+                self._metrics.last_scan_completed_at = scan_end.isoformat()
+                self._metrics.last_scan_duration_ms = int((scan_end - scan_start).total_seconds() * 1000)
+                self._metrics.scans_completed += 1
+                await self._maybe_persist_metrics()
 
         # Reconcile cycle
         should_reconcile = (
@@ -98,7 +360,7 @@ class VaultSyncManager:
             try:
                 await self._reconcile()
             except Exception as e:
-                logger.error(f"vault_sync: reconcile error: {e}")
+                logger.error("vault_sync.reconcile_error error=%s", e)
             finally:
                 self._last_reconcile_at = now
 
@@ -112,7 +374,7 @@ class VaultSyncManager:
         event_id: Optional[str] = None,
     ):
         """Apply an incoming vault-sync event from a peer."""
-        # Input validation
+        # Input validation (no lock needed)
         if not isinstance(contents, dict):
             self._reject("invalid_type", rid, source_node, event_id, "contents is not a dict")
             return
@@ -178,15 +440,9 @@ class VaultSyncManager:
                 source_node, event_id, rid,
             )
             if already:
-                logger.debug(f"vault_sync: duplicate event {event_id}, skipping")
+                logger.debug("vault_sync.apply_skip_dedup event_id=%s", event_id)
+                self._metrics.events_skipped_dedup += 1
                 return
-
-        # Get local state
-        async with self.pool.acquire() as conn:
-            local_row = await conn.fetchrow(
-                "SELECT * FROM vault_sync_state WHERE relative_path=$1",
-                relative_path,
-            )
 
         content_hash = manifest["content_hash"]
         base_hash = manifest.get("base_hash")
@@ -195,27 +451,40 @@ class VaultSyncManager:
         deleted = manifest.get("deleted", False)
         timestamp = manifest.get("timestamp", datetime.now(timezone.utc).isoformat())
 
-        # Stale-event guard: same origin, older or equal seq
-        if local_row and not local_row["is_deleted"]:
-            if origin_node == local_row["origin_node"] and origin_seq <= local_row["origin_seq"]:
-                self._reject("stale_event", rid, source_node, event_id,
-                             f"origin_seq {origin_seq} <= local {local_row['origin_seq']}")
+        # Mutation section — acquire lock
+        async with self._write_lock:
+            # Get local state under lock
+            async with self.pool.acquire() as conn:
+                local_row = await conn.fetchrow(
+                    "SELECT * FROM vault_sync_state WHERE relative_path=$1",
+                    relative_path,
+                )
+
+            # Stale-event guard: same origin, older or equal seq
+            if local_row and not local_row["is_deleted"]:
+                if origin_node == local_row["origin_node"] and origin_seq <= local_row["origin_seq"]:
+                    self._reject("stale_event", rid, source_node, event_id,
+                                 f"origin_seq {origin_seq} <= local {local_row['origin_seq']}")
+                    return
+
+            if event_type == "FORGET":
+                await self._apply_forget(
+                    target_path, relative_path, local_row, base_hash,
+                    origin_node, origin_seq, source_node, event_id, rid,
+                )
+            elif event_type in ("NEW", "UPDATE"):
+                await self._apply_new_or_update(
+                    target_path, relative_path, local_row, event_type,
+                    markdown, content_hash, base_hash, origin_node, origin_seq,
+                    source_node, event_id, rid, manifest_bytes, timestamp,
+                )
+            else:
+                self._reject("invalid_type", rid, source_node, event_id, f"unknown event_type: {event_type}")
                 return
 
-        if event_type == "FORGET":
-            await self._apply_forget(
-                target_path, relative_path, local_row, base_hash,
-                origin_node, origin_seq, source_node, event_id, rid,
-            )
-        elif event_type in ("NEW", "UPDATE"):
-            await self._apply_new_or_update(
-                target_path, relative_path, local_row, event_type,
-                markdown, content_hash, base_hash, origin_node, origin_seq,
-                source_node, event_id, rid, manifest_bytes, timestamp,
-            )
-        else:
-            self._reject("invalid_type", rid, source_node, event_id, f"unknown event_type: {event_type}")
-            return
+        self._metrics.events_applied += 1
+        self._metrics.last_apply_at = datetime.now(timezone.utc).isoformat()
+        logger.info("vault_sync.apply event_type=%s path=%s source=%s", event_type, relative_path, source_node)
 
     async def get_status(self) -> Dict[str, Any]:
         """Return sync dashboard info."""
@@ -239,6 +508,7 @@ class VaultSyncManager:
             "last_scan_at": self._last_scan_at.isoformat() if self._last_scan_at else None,
             "last_reconcile_at": self._last_reconcile_at.isoformat() if self._last_reconcile_at else None,
             "rejected_events": dict(self._rejected_counts),
+            "metrics": self._metrics.to_dict(),
         }
 
     async def configure(self, peer_name: str, shared_folder: str = "Shared", enabled: bool = True) -> Dict[str, Any]:
@@ -287,6 +557,192 @@ class VaultSyncManager:
         return {"triggered": True, "last_scan_at": self._last_scan_at.isoformat() if self._last_scan_at else None}
 
     # ------------------------------------------------------------------
+    # Reconciliation (WP2a detect, WP2b repair)
+    # ------------------------------------------------------------------
+
+    async def reconcile(self, mode: str = "detect", confirm: bool = False,
+                        paths: Optional[List[str]] = None, max_actions: int = 50) -> Dict[str, Any]:
+        """Detect or repair drift between DB state and filesystem.
+
+        mode="detect": read-only drift report.
+        mode="repair": queue events to fix drift (requires confirm=True).
+        """
+        peer = await self._get_peer_config()
+        if not peer or not peer.get("enabled"):
+            return {"error": "vault sync not configured or disabled"}
+
+        shared_folder = peer["shared_folder"]
+        base_dir = self.vault_path / shared_folder
+
+        # Vault root safety check
+        if not base_dir.is_dir():
+            raise VaultUnavailableError(f"shared folder not accessible: {base_dir}")
+
+        # Snapshot DB under brief lock
+        async with self._write_lock:
+            async with self.pool.acquire() as conn:
+                db_rows = await conn.fetch(
+                    "SELECT relative_path, content_hash FROM vault_sync_state WHERE is_deleted=FALSE"
+                )
+
+        # Compare against filesystem (no lock)
+        db_map = {r["relative_path"]: r["content_hash"] for r in db_rows}
+        disk_files: Dict[str, str] = {}
+        for md_file in base_dir.rglob("*.md"):
+            if md_file.is_symlink() or not md_file.is_file():
+                continue
+            try:
+                rel_path = f"{shared_folder}/{md_file.relative_to(base_dir)}"
+            except ValueError:
+                continue
+            try:
+                content = md_file.read_bytes()
+                disk_files[rel_path] = hashlib.sha256(content).hexdigest()
+            except OSError:
+                continue
+
+        missing_on_disk = []
+        hash_mismatch = []
+        missing_in_db = []
+
+        # Filter to paths if specified
+        check_paths = set(paths) if paths else None
+
+        for rel_path, db_hash in db_map.items():
+            if check_paths and rel_path not in check_paths:
+                continue
+            if rel_path not in disk_files:
+                missing_on_disk.append(rel_path)
+            elif disk_files[rel_path] != db_hash:
+                hash_mismatch.append(rel_path)
+
+        for rel_path in disk_files:
+            if check_paths and rel_path not in check_paths:
+                continue
+            if rel_path not in db_map:
+                missing_in_db.append(rel_path)
+
+        total_drift = len(missing_on_disk) + len(hash_mismatch) + len(missing_in_db)
+
+        result: Dict[str, Any] = {
+            "mode": mode,
+            "missing_on_disk": missing_on_disk,
+            "missing_in_db": missing_in_db,
+            "hash_mismatch": hash_mismatch,
+            "total_drift": total_drift,
+        }
+
+        if mode == "repair":
+            if not confirm:
+                result["repair_requires_confirm"] = True
+                return result
+
+            peer_node_rid = peer["peer_node_rid"]
+            actions_taken = 0
+            remaining = 0
+
+            # Repair missing_in_db — queue NEW events for files on disk but not in DB
+            for rel_path in missing_in_db:
+                if actions_taken >= max_actions:
+                    remaining += 1
+                    continue
+                file_path = self.vault_path / rel_path
+                try:
+                    file_bytes = file_path.read_bytes()
+                except OSError:
+                    continue
+                content_hash = hashlib.sha256(file_bytes).hexdigest()
+                size = len(file_bytes)
+                async with self._write_lock:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            """INSERT INTO vault_sync_state
+                               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
+                               VALUES ($1, $2, $3, 1, $4, NOW())
+                               ON CONFLICT (relative_path) DO UPDATE SET
+                                   content_hash = EXCLUDED.content_hash,
+                                   origin_node = EXCLUDED.origin_node,
+                                   origin_seq = 1,
+                                   file_size_bytes = EXCLUDED.file_size_bytes,
+                                   is_deleted = FALSE, deleted_at = NULL,
+                                   updated_at = NOW()""",
+                            rel_path, content_hash, self.node_rid, size,
+                        )
+                    await self._queue_event(
+                        "NEW", rel_path, content_hash, None, 1,
+                        file_bytes.decode("utf-8", errors="replace"),
+                        size, peer_node_rid,
+                    )
+                actions_taken += 1
+
+            # Repair hash_mismatch — queue UPDATE events (disk wins)
+            for rel_path in hash_mismatch:
+                if actions_taken >= max_actions:
+                    remaining += 1
+                    continue
+                file_path = self.vault_path / rel_path
+                try:
+                    file_bytes = file_path.read_bytes()
+                except OSError:
+                    continue
+                content_hash = hashlib.sha256(file_bytes).hexdigest()
+                prev_hash = db_map.get(rel_path)
+                size = len(file_bytes)
+                async with self._write_lock:
+                    async with self.pool.acquire() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT origin_node, origin_seq FROM vault_sync_state WHERE relative_path=$1",
+                            rel_path,
+                        )
+                        new_seq = (row["origin_seq"] + 1) if row and row["origin_node"] == self.node_rid else 1
+                        await conn.execute(
+                            """UPDATE vault_sync_state
+                               SET content_hash=$2, origin_node=$3, origin_seq=$4,
+                                   file_size_bytes=$5, updated_at=NOW()
+                               WHERE relative_path=$1""",
+                            rel_path, content_hash, self.node_rid, new_seq, size,
+                        )
+                    await self._queue_event(
+                        "UPDATE", rel_path, content_hash, prev_hash, new_seq,
+                        file_bytes.decode("utf-8", errors="replace"),
+                        size, peer_node_rid,
+                    )
+                actions_taken += 1
+
+            # Repair missing_on_disk — queue FORGET events
+            for rel_path in missing_on_disk:
+                if actions_taken >= max_actions:
+                    remaining += 1
+                    continue
+                prev_hash = db_map.get(rel_path)
+                async with self._write_lock:
+                    async with self.pool.acquire() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT origin_seq FROM vault_sync_state WHERE relative_path=$1",
+                            rel_path,
+                        )
+                        new_seq = (row["origin_seq"] + 1) if row else 1
+                        await conn.execute(
+                            """UPDATE vault_sync_state
+                               SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW(),
+                                   origin_seq=$2
+                               WHERE relative_path=$1""",
+                            rel_path, new_seq,
+                        )
+                    await self._queue_event(
+                        "FORGET", rel_path, prev_hash, prev_hash,
+                        new_seq, None, 0, peer_node_rid,
+                    )
+                actions_taken += 1
+
+            result["actions_taken"] = actions_taken
+            if remaining > 0:
+                result["capped"] = True
+                result["remaining"] = remaining
+
+        return result
+
+    # ------------------------------------------------------------------
     # Internal: Local scan
     # ------------------------------------------------------------------
 
@@ -302,13 +758,19 @@ class VaultSyncManager:
 
         if not base_dir.exists():
             base_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"vault_sync: created shared folder {base_dir}")
+            logger.info("vault_sync.scan_created_folder path=%s", base_dir)
 
         # Initial sync check
         is_initial = peer.get("last_full_sync_at") is None
 
-        # Glob all .md files
-        seen_paths = set()
+        # Phase 1: glob + hash (NO lock) — collect changed files
+        changed_files: List[Tuple[str, str, int, float, bytes]] = []  # (rel_path, content_hash, size, mtime, file_bytes)
+        seen_paths: set = set()
+        files_scanned = 0
+        files_changed = 0
+        bytes_this_cycle = 0
+        create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
+
         for md_file in base_dir.rglob("*.md"):
             if md_file.is_symlink():
                 continue
@@ -321,6 +783,7 @@ class VaultSyncManager:
                 continue
 
             seen_paths.add(rel_path)
+            files_scanned += 1
 
             # stat for mtime + size
             try:
@@ -333,7 +796,7 @@ class VaultSyncManager:
 
             # Size check
             if size > MAX_VAULT_FILE_BYTES:
-                logger.warning(f"vault_sync: skipping oversize file {rel_path} ({size} bytes)")
+                logger.warning("vault_sync.scan_skip_oversize path=%s bytes=%d", rel_path, size)
                 continue
 
             # Fast pre-check: skip if mtime+size unchanged
@@ -354,7 +817,7 @@ class VaultSyncManager:
             try:
                 file_bytes = md_file.read_bytes()
             except OSError as e:
-                logger.warning(f"vault_sync: cannot read {rel_path}: {e}")
+                logger.warning("vault_sync.scan_read_error path=%s error=%s", rel_path, e)
                 continue
 
             content_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -362,82 +825,123 @@ class VaultSyncManager:
             # Update stat cache
             self._stat_cache[rel_path] = (mtime_ns, size, content_hash)
 
-            # Compare against DB
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT * FROM vault_sync_state WHERE relative_path=$1",
-                    rel_path,
-                )
+            # Backpressure checks (WP3)
+            if files_changed >= MAX_FILES_PER_SCAN:
+                self._metrics.scans_capped += 1
+                logger.info("vault_sync.scan_capped reason=max_files cap=%d", MAX_FILES_PER_SCAN)
+                break
+            if bytes_this_cycle + size > MAX_BYTES_PER_SCAN:
+                self._metrics.scans_capped += 1
+                logger.info("vault_sync.scan_capped reason=max_bytes cap=%d", MAX_BYTES_PER_SCAN)
+                break
 
-                if not row:
-                    # New file
-                    await conn.execute(
-                        """INSERT INTO vault_sync_state
-                           (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
-                           VALUES ($1, $2, $3, 1, $4, $5)""",
-                        rel_path, content_hash, self.node_rid, size,
-                        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
-                    )
-                    await self._queue_event(
-                        "NEW", rel_path, content_hash, None, 1,
-                        file_bytes.decode("utf-8", errors="replace"),
-                        size, peer_node_rid,
-                    )
-                elif row["is_deleted"]:
-                    # File reappeared after deletion — treat as new
-                    await conn.execute(
-                        """UPDATE vault_sync_state
-                           SET content_hash=$2, origin_node=$3, origin_seq=1,
-                               file_size_bytes=$4, last_modified_at=$5,
-                               is_deleted=FALSE, deleted_at=NULL, updated_at=NOW()
-                           WHERE relative_path=$1""",
-                        rel_path, content_hash, self.node_rid, size,
-                        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
-                    )
-                    await self._queue_event(
-                        "NEW", rel_path, content_hash, None, 1,
-                        file_bytes.decode("utf-8", errors="replace"),
-                        size, peer_node_rid,
-                    )
-                elif row["content_hash"] != content_hash:
-                    # Modified file
-                    prev_hash = row["content_hash"]
-                    new_seq = (row["origin_seq"] + 1) if row["origin_node"] == self.node_rid else 1
-                    await conn.execute(
-                        """UPDATE vault_sync_state
-                           SET content_hash=$2, origin_node=$3, origin_seq=$4,
-                               file_size_bytes=$5, last_modified_at=$6, updated_at=NOW()
-                           WHERE relative_path=$1""",
-                        rel_path, content_hash, self.node_rid, new_seq, size,
-                        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
-                    )
-                    await self._queue_event(
-                        "UPDATE", rel_path, content_hash, prev_hash, new_seq,
-                        file_bytes.decode("utf-8", errors="replace"),
-                        size, peer_node_rid,
-                    )
+            changed_files.append((rel_path, content_hash, size, stat.st_mtime, file_bytes))
+            files_changed += 1
+            bytes_this_cycle += size
 
-        # Check for deleted files
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT relative_path, content_hash, origin_seq FROM vault_sync_state WHERE is_deleted=FALSE"
-            )
-            for row in rows:
-                if row["relative_path"] not in seen_paths:
-                    rel_path = row["relative_path"]
-                    # Remove from stat cache
-                    self._stat_cache.pop(rel_path, None)
-                    await conn.execute(
-                        """UPDATE vault_sync_state
-                           SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW(),
-                               origin_seq=origin_seq+1
-                           WHERE relative_path=$1""",
+        # Phase 2: DB mutations (lock held)
+        events_this_cycle = 0
+        async with self._write_lock:
+            for rel_path, content_hash, size, mtime, file_bytes in changed_files:
+                if events_this_cycle >= create_update_budget:
+                    self._metrics.scans_capped += 1
+                    logger.info("vault_sync.scan_capped reason=event_budget cap=%d", create_update_budget)
+                    break
+
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM vault_sync_state WHERE relative_path=$1",
                         rel_path,
                     )
-                    await self._queue_event(
-                        "FORGET", rel_path, row["content_hash"], row["content_hash"],
-                        row["origin_seq"] + 1, None, 0, peer_node_rid,
-                    )
+
+                    if not row:
+                        # New file
+                        await conn.execute(
+                            """INSERT INTO vault_sync_state
+                               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
+                               VALUES ($1, $2, $3, 1, $4, $5)""",
+                            rel_path, content_hash, self.node_rid, size,
+                            datetime.fromtimestamp(mtime, tz=timezone.utc),
+                        )
+                        await self._queue_event(
+                            "NEW", rel_path, content_hash, None, 1,
+                            file_bytes.decode("utf-8", errors="replace"),
+                            size, peer_node_rid,
+                        )
+                        events_this_cycle += 1
+                        self._metrics.events_queued += 1
+                        self._metrics.bytes_queued += size
+                    elif row["is_deleted"]:
+                        # File reappeared after deletion — treat as new
+                        await conn.execute(
+                            """UPDATE vault_sync_state
+                               SET content_hash=$2, origin_node=$3, origin_seq=1,
+                                   file_size_bytes=$4, last_modified_at=$5,
+                                   is_deleted=FALSE, deleted_at=NULL, updated_at=NOW()
+                               WHERE relative_path=$1""",
+                            rel_path, content_hash, self.node_rid, size,
+                            datetime.fromtimestamp(mtime, tz=timezone.utc),
+                        )
+                        await self._queue_event(
+                            "NEW", rel_path, content_hash, None, 1,
+                            file_bytes.decode("utf-8", errors="replace"),
+                            size, peer_node_rid,
+                        )
+                        events_this_cycle += 1
+                        self._metrics.events_queued += 1
+                        self._metrics.bytes_queued += size
+                    elif row["content_hash"] != content_hash:
+                        # Modified file
+                        prev_hash = row["content_hash"]
+                        new_seq = (row["origin_seq"] + 1) if row["origin_node"] == self.node_rid else 1
+                        await conn.execute(
+                            """UPDATE vault_sync_state
+                               SET content_hash=$2, origin_node=$3, origin_seq=$4,
+                                   file_size_bytes=$5, last_modified_at=$6, updated_at=NOW()
+                               WHERE relative_path=$1""",
+                            rel_path, content_hash, self.node_rid, new_seq, size,
+                            datetime.fromtimestamp(mtime, tz=timezone.utc),
+                        )
+                        await self._queue_event(
+                            "UPDATE", rel_path, content_hash, prev_hash, new_seq,
+                            file_bytes.decode("utf-8", errors="replace"),
+                            size, peer_node_rid,
+                        )
+                        events_this_cycle += 1
+                        self._metrics.events_queued += 1
+                        self._metrics.bytes_queued += size
+
+            # Deletion loop — uses remaining budget up to MAX_EVENTS_PER_SCAN
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT relative_path, content_hash, origin_seq FROM vault_sync_state WHERE is_deleted=FALSE"
+                )
+                for row in rows:
+                    if row["relative_path"] not in seen_paths:
+                        if events_this_cycle >= MAX_EVENTS_PER_SCAN:
+                            self._metrics.scans_capped += 1
+                            logger.info("vault_sync.scan_capped reason=event_cap_deletes total=%d", events_this_cycle)
+                            break
+                        rel_path = row["relative_path"]
+                        # Remove from stat cache
+                        self._stat_cache.pop(rel_path, None)
+                        await conn.execute(
+                            """UPDATE vault_sync_state
+                               SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW(),
+                                   origin_seq=origin_seq+1
+                               WHERE relative_path=$1""",
+                            rel_path,
+                        )
+                        await self._queue_event(
+                            "FORGET", rel_path, row["content_hash"], row["content_hash"],
+                            row["origin_seq"] + 1, None, 0, peer_node_rid,
+                        )
+                        events_this_cycle += 1
+                        self._metrics.events_queued += 1
+
+        self._metrics.files_scanned += files_scanned
+        logger.info("vault_sync.scan_complete files_changed=%d events_queued=%d duration_ms=%d",
+                     files_changed, events_this_cycle, self._metrics.last_scan_duration_ms)
 
         # Mark initial sync complete
         if is_initial:
@@ -469,6 +973,7 @@ class VaultSyncManager:
                 await self._record_applied(source_node, event_id, rid)
                 return
             # Conflict: file exists with different content
+            self._metrics.conflicts_created += 1
             await self._create_conflict_copy(target_path, relative_path, markdown, content_hash,
                                              origin_node, origin_seq, source_node, event_id, rid, file_size, timestamp)
             return
@@ -480,6 +985,7 @@ class VaultSyncManager:
             elif file_exists and local_row:
                 if not base_hash:
                     # No causal proof — treat as conflict
+                    self._metrics.conflicts_created += 1
                     await self._create_conflict_copy(target_path, relative_path, markdown, content_hash,
                                                      origin_node, origin_seq, source_node, event_id, rid, file_size, timestamp)
                     return
@@ -488,6 +994,7 @@ class VaultSyncManager:
                     pass  # Fall through to write
                 else:
                     # We also edited — conflict
+                    self._metrics.conflicts_created += 1
                     await self._create_conflict_copy(target_path, relative_path, markdown, content_hash,
                                                      origin_node, origin_seq, source_node, event_id, rid, file_size, timestamp)
                     return
@@ -524,7 +1031,6 @@ class VaultSyncManager:
             pass
 
         await self._record_applied(source_node, event_id, rid)
-        logger.info(f"vault_sync: applied {event_type} for {relative_path} from {source_node}")
 
     async def _apply_forget(
         self, target_path: Path, relative_path: str,
@@ -539,13 +1045,13 @@ class VaultSyncManager:
 
         if not base_hash:
             # No causal proof — refuse destructive action
-            logger.info(f"vault_sync: ignoring FORGET without base_hash for {relative_path}")
+            logger.info("vault_sync.apply_forget_no_base path=%s", relative_path)
             await self._record_applied(source_node, event_id, rid)
             return
 
         if local_row["content_hash"] != base_hash:
             # We edited after peer's base — stale delete, ignore
-            logger.info(f"vault_sync: ignoring stale FORGET for {relative_path} (local edited)")
+            logger.info("vault_sync.apply_forget_stale path=%s", relative_path)
             await self._record_applied(source_node, event_id, rid)
             return
 
@@ -554,7 +1060,7 @@ class VaultSyncManager:
             if target_path.exists():
                 target_path.unlink()
         except OSError as e:
-            logger.error(f"vault_sync: cannot delete {target_path}: {e}")
+            logger.error("vault_sync.delete_error path=%s error=%s", target_path, e)
 
         # Remove from stat cache
         self._stat_cache.pop(relative_path, None)
@@ -568,7 +1074,6 @@ class VaultSyncManager:
             )
 
         await self._record_applied(source_node, event_id, rid)
-        logger.info(f"vault_sync: deleted {relative_path} (FORGET from {source_node})")
 
     async def _create_conflict_copy(
         self, target_path: Path, relative_path: str,
@@ -614,10 +1119,10 @@ class VaultSyncManager:
             )
 
         await self._record_applied(source_node, event_id, rid)
-        logger.warning(f"vault_sync: conflict copy created: {conflict_rel}")
+        logger.warning("vault_sync.conflict_created path=%s", conflict_rel)
 
     # ------------------------------------------------------------------
-    # Internal: Reconciliation
+    # Internal: Reconciliation (periodic manifest exchange)
     # ------------------------------------------------------------------
 
     async def _reconcile(self):
@@ -654,7 +1159,7 @@ class VaultSyncManager:
             ttl_hours=24,
             target_node=peer["peer_node_rid"],
         )
-        logger.info(f"vault_sync: sent reconcile manifest ({len(manifest_entries)} entries)")
+        logger.info("vault_sync.reconcile_sent entries=%d", len(manifest_entries))
 
     async def apply_reconcile(self, contents: Dict[str, Any], source_node: str):
         """Process a reconcile manifest from a peer."""
@@ -680,11 +1185,11 @@ class VaultSyncManager:
 
             if not local_row:
                 # Peer has file we don't — it will arrive as a NEW event from normal scan
-                logger.debug(f"vault_sync: reconcile: peer has {rel_path}, we don't")
+                logger.debug("vault_sync.reconcile_peer_has path=%s", rel_path)
             elif local_row["is_deleted"]:
-                logger.debug(f"vault_sync: reconcile: peer has {rel_path}, we deleted it")
+                logger.debug("vault_sync.reconcile_peer_has_deleted path=%s", rel_path)
             elif local_row["content_hash"] != remote_hash:
-                logger.info(f"vault_sync: reconcile: hash mismatch for {rel_path}")
+                logger.info("vault_sync.reconcile_hash_mismatch path=%s", rel_path)
                 # Mismatch will be resolved by normal scan/event cycle
 
     # ------------------------------------------------------------------
@@ -735,7 +1240,6 @@ class VaultSyncManager:
             ttl_hours=168,  # 7 days
             target_node=peer_node_rid,
         )
-        logger.info(f"vault_sync: queued {event_type} for {relative_path}")
 
     async def _atomic_write(self, path: Path, content: str):
         """Write file atomically via tmp + rename."""
@@ -774,7 +1278,9 @@ class VaultSyncManager:
 
     def _reject(self, reason: str, rid: str, source_node: str, event_id: Optional[str], detail: str):
         """Log and count a rejected event."""
-        self._rejected_counts[reason] = self._rejected_counts.get(reason, 0) + 1
+        field = _REJECT_FIELD_MAP.get(reason)
+        if field:
+            setattr(self._metrics, field, getattr(self._metrics, field) + 1)
         logger.warning(
-            f"vault_sync: rejected event reason={reason} rid={rid} detail={detail}",
+            "vault_sync.rejected reason=%s path=%s detail=%s", reason, rid, detail,
         )

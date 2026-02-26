@@ -65,7 +65,7 @@ from api.node_identity import (
     node_rid_suffix,
 )
 from api.event_queue import EventQueue
-from api.vault_sync import VaultSyncManager
+from api.vault_sync import VaultSyncManager, VaultUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +232,8 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
             vault_path=vault_path,
         )
         _poller.vault_sync = _vault_sync
+        await _vault_sync.load_metrics()
+        _vault_sync.start_watcher()
         logger.info(f"Vault sync enabled (vault={vault_path})")
 
     policy = _security_policy()
@@ -254,6 +256,9 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
 async def shutdown_koi_net():
     """Stop poller and clean up. Called from app shutdown."""
     global _poller
+    if _vault_sync:
+        _vault_sync.stop_watcher()
+        await _vault_sync.persist_metrics()
     if _poller:
         await _poller.stop()
         _poller = None
@@ -1784,4 +1789,57 @@ async def vault_sync_trigger(request: Request):
         )
 
     result = await _vault_sync.trigger_sync()
+    return JSONResponse(content=result)
+
+
+def _bool_env_raw(name: str, default: bool = False) -> bool:
+    """Check env var as bool (standalone, no side effects)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@koi_net_router.post("/vault-sync/reconcile")
+async def vault_sync_reconcile(request: Request):
+    """Run reconciliation: detect or repair drift between DB and filesystem."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled"},
+        )
+
+    body = await request.json()
+    mode = body.get("mode", "detect")
+
+    if mode == "repair":
+        if not _bool_env_raw("VAULT_SYNC_REPAIR_ENABLED", False):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "repair mode disabled"},
+            )
+
+    if mode not in ("detect", "repair"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"invalid mode: {mode}. Use 'detect' or 'repair'."},
+        )
+
+    try:
+        result = await _vault_sync.reconcile(
+            mode=mode,
+            confirm=body.get("confirm", False),
+            paths=body.get("paths"),
+            max_actions=body.get("max_actions", 50),
+        )
+    except VaultUnavailableError as e:
+        return JSONResponse(
+            status_code=503,
+            content={"error": str(e)},
+        )
+
     return JSONResponse(content=result)

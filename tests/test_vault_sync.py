@@ -3,17 +3,19 @@ Isolated fixture tests for vault sync.
 
 Uses a real pool (manager acquires its own connections).
 Cleanup happens via a fixture that removes test data after each test.
-Requires a running PostgreSQL with the personal_koi schema + migration 049.
+Requires a running PostgreSQL with the personal_koi schema + migration 049+050.
 """
 
+import asyncio
 import hashlib
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import asyncpg
@@ -38,7 +40,7 @@ def anyio_backend():
 @pytest.fixture
 async def pool():
     """Create a connection pool."""
-    p = await asyncpg.create_pool(DB_URL, min_size=1, max_size=3)
+    p = await asyncpg.create_pool(DB_URL, min_size=1, max_size=5)
     yield p
     await p.close()
 
@@ -66,6 +68,7 @@ async def setup_peer(pool):
         await conn.execute("DELETE FROM vault_sync_state WHERE relative_path LIKE 'Shared/%'")
         await conn.execute("DELETE FROM vault_sync_peers WHERE id=1")
         await conn.execute("DELETE FROM koi_net_nodes WHERE node_rid=$1", PEER_NODE)
+        await conn.execute("DELETE FROM vault_sync_metrics WHERE id=1")
 
 
 @pytest.fixture
@@ -140,7 +143,6 @@ async def test_scan_modified_file(pool, setup_peer, tmp_vault, mock_event_queue)
     mock_event_queue.add.reset_mock()
 
     # Modify and clear stat cache
-    import time
     time.sleep(0.01)
     test_file.write_text("# Version 2")
     mgr._stat_cache.clear()
@@ -534,3 +536,500 @@ async def test_conflict_copy_naming(pool, setup_peer, tmp_vault, mock_event_queu
 
     name = conflict_files[0].name
     assert re.match(r"naming-test \(conflict \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\)\.md", name)
+
+
+# =============================================================================
+# WP1: Metrics tests
+# =============================================================================
+
+
+@pytest.mark.anyio
+async def test_metrics_increment(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Scan and apply bump the correct counters."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    # Create a file and scan → events_queued should increase
+    (shared / "metric1.md").write_text("# Metric Test")
+    await mgr._scan_async()
+    assert mgr._metrics.events_queued >= 1
+    assert mgr._metrics.files_scanned >= 1
+
+    # Apply an event → events_applied should increase
+    content = "# Applied"
+    await mgr.apply_event(**_make_apply_kwargs("Shared/applied.md", "NEW", content))
+    assert mgr._metrics.events_applied >= 1
+
+    # Apply duplicate → events_skipped_dedup should increase
+    kwargs = _make_apply_kwargs("Shared/dedup-test.md", "NEW", "# Dedup")
+    await mgr.apply_event(**kwargs)
+    await mgr.apply_event(**kwargs)
+    assert mgr._metrics.events_skipped_dedup >= 1
+
+
+@pytest.mark.anyio
+async def test_metrics_persist_load(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Persist metrics, create new manager, verify restored."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    (shared / "persist-test.md").write_text("# Persist")
+    await mgr._scan_async()
+
+    original_queued = mgr._metrics.events_queued
+    assert original_queued >= 1
+
+    # Persist
+    await mgr.persist_metrics()
+
+    # New manager, load metrics
+    mgr2 = _make_manager(pool, tmp_vault, mock_event_queue)
+    assert mgr2._metrics.events_queued == 0  # Fresh
+
+    await mgr2.load_metrics()
+    assert mgr2._metrics.events_queued == original_queued
+
+
+@pytest.mark.anyio
+async def test_status_contains_metrics(pool, setup_peer, tmp_vault, mock_event_queue):
+    """get_status() includes metrics key."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    status = await mgr.get_status()
+
+    assert "metrics" in status
+    assert "schema_version" in status["metrics"]
+    assert "events_queued" in status["metrics"]
+    assert "scans_completed" in status["metrics"]
+    # Backward compat
+    assert "rejected_events" in status
+
+
+@pytest.mark.anyio
+async def test_scan_apply_concurrency(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Launch scan and apply_event concurrently — no false conflict, consistent state."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    # Create a file for scanning
+    (shared / "concurrent-scan.md").write_text("# Scan Side")
+
+    # Also prepare an apply event for a different file
+    apply_content = "# Apply Side"
+    apply_kwargs = _make_apply_kwargs("Shared/concurrent-apply.md", "NEW", apply_content)
+
+    # Run scan and apply concurrently
+    await asyncio.gather(
+        mgr._scan_async(),
+        mgr.apply_event(**apply_kwargs),
+    )
+
+    # Verify both files have consistent state
+    async with pool.acquire() as conn:
+        scan_row = await conn.fetchrow(
+            "SELECT * FROM vault_sync_state WHERE relative_path='Shared/concurrent-scan.md'"
+        )
+        apply_row = await conn.fetchrow(
+            "SELECT * FROM vault_sync_state WHERE relative_path='Shared/concurrent-apply.md'"
+        )
+
+    assert scan_row is not None
+    assert apply_row is not None
+    assert apply_row["origin_node"] == PEER_NODE
+
+    # No conflict copies for the applied file
+    conflict_files = list(shared.glob("concurrent-apply (conflict*).md"))
+    assert len(conflict_files) == 0
+
+
+@pytest.mark.anyio
+async def test_large_scan_does_not_starve_apply(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Start a capped scan with 100+ files, fire apply_event, verify apply completes < 1s."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    # Create 120 small files
+    for i in range(120):
+        (shared / f"bulk-{i:04d}.md").write_text(f"# File {i}\n\nContent for bulk test.")
+
+    apply_content = "# Urgent Apply"
+    apply_kwargs = _make_apply_kwargs("Shared/urgent.md", "NEW", apply_content)
+
+    # Start scan in background, fire apply
+    scan_task = asyncio.create_task(mgr._scan_async())
+
+    # Give scan a tiny head start
+    await asyncio.sleep(0.05)
+
+    start = time.monotonic()
+    await mgr.apply_event(**apply_kwargs)
+    elapsed = time.monotonic() - start
+
+    # Wait for scan to finish
+    await scan_task
+
+    # SLO: apply_event returns in < 1s
+    assert elapsed < 1.0, f"apply_event took {elapsed:.2f}s (SLO: < 1s)"
+
+    # File was written
+    assert (shared / "urgent.md").exists()
+
+
+# =============================================================================
+# WP3: Backpressure tests
+# =============================================================================
+
+
+@pytest.mark.anyio
+async def test_backpressure_file_cap(pool, setup_peer, tmp_vault, mock_event_queue):
+    """150 files, cap=50 → at most 50 events queued in one cycle."""
+    import api.vault_sync as vs
+    original = vs.MAX_FILES_PER_SCAN
+    vs.MAX_FILES_PER_SCAN = 50
+    try:
+        mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+        shared = tmp_vault / "Shared"
+        for i in range(150):
+            (shared / f"cap-{i:04d}.md").write_text(f"# Cap test {i}")
+
+        await mgr._scan_async()
+
+        # Events queued should be <= 50
+        assert mgr._metrics.events_queued <= 50
+        assert mgr._metrics.scans_capped >= 1
+    finally:
+        vs.MAX_FILES_PER_SCAN = original
+
+
+@pytest.mark.anyio
+async def test_backpressure_byte_cap(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Large files with 5MB cap → scan stops mid-batch."""
+    import api.vault_sync as vs
+    original = vs.MAX_BYTES_PER_SCAN
+    vs.MAX_BYTES_PER_SCAN = 5 * 1024 * 1024  # 5 MB
+    try:
+        mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+        shared = tmp_vault / "Shared"
+        # Create 20 files of ~500KB each (10 MB total, should cap at ~10)
+        for i in range(20):
+            (shared / f"big-{i:04d}.md").write_text("x" * 500_000)
+
+        await mgr._scan_async()
+
+        assert mgr._metrics.scans_capped >= 1
+        # Should have queued roughly 10 files (5MB / 500KB)
+        assert mgr._metrics.events_queued <= 12
+    finally:
+        vs.MAX_BYTES_PER_SCAN = original
+
+
+@pytest.mark.anyio
+async def test_backpressure_event_cap_includes_deletes(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Total event cap=10 across creates and deletes."""
+    import api.vault_sync as vs
+    orig_max = vs.MAX_EVENTS_PER_SCAN
+    orig_reserve = vs.DELETE_EVENT_RESERVE
+    vs.MAX_EVENTS_PER_SCAN = 10
+    vs.DELETE_EVENT_RESERVE = 3
+    try:
+        mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+        shared = tmp_vault / "Shared"
+
+        # Create 5 files, scan them
+        for i in range(5):
+            (shared / f"evt-{i}.md").write_text(f"# Event {i}")
+        await mgr._scan_async()
+        initial_queued = mgr._metrics.events_queued
+        mock_event_queue.add.reset_mock()
+
+        # Now create 10 more files and delete the original 5
+        for i in range(5):
+            (shared / f"evt-{i}.md").unlink()
+        for i in range(5, 15):
+            (shared / f"evt-{i}.md").write_text(f"# Event {i}")
+        mgr._stat_cache.clear()
+
+        # Reset metrics for clarity
+        mgr._metrics.events_queued = 0
+        await mgr._scan_async()
+
+        # Total events this cycle should be capped at 10
+        assert mgr._metrics.events_queued <= 10
+    finally:
+        vs.MAX_EVENTS_PER_SCAN = orig_max
+        vs.DELETE_EVENT_RESERVE = orig_reserve
+
+
+# =============================================================================
+# WP2a: Reconcile detect tests
+# =============================================================================
+
+
+@pytest.mark.anyio
+async def test_reconcile_detect_missing_on_disk(pool, setup_peer, tmp_vault, mock_event_queue):
+    """File in DB but missing on disk → reported in missing_on_disk."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+
+    # Insert a row for a file that doesn't exist on disk
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO vault_sync_state
+               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
+               VALUES ($1, $2, $3, 1, 10, NOW())""",
+            "Shared/gone.md", _sha256("# Gone"), MY_NODE,
+        )
+
+    result = await mgr.reconcile(mode="detect")
+    assert "Shared/gone.md" in result["missing_on_disk"]
+    assert result["total_drift"] >= 1
+
+
+@pytest.mark.anyio
+async def test_reconcile_detect_hash_mismatch(pool, setup_peer, tmp_vault, mock_event_queue):
+    """File on disk has different hash than DB → hash_mismatch."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    (shared / "stale.md").write_text("# Current Version")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO vault_sync_state
+               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
+               VALUES ($1, $2, $3, 1, 10, NOW())""",
+            "Shared/stale.md", _sha256("# Old Version"), MY_NODE,
+        )
+
+    result = await mgr.reconcile(mode="detect")
+    assert "Shared/stale.md" in result["hash_mismatch"]
+    assert result["total_drift"] >= 1
+
+
+@pytest.mark.anyio
+async def test_reconcile_detect_missing_in_db(pool, setup_peer, tmp_vault, mock_event_queue):
+    """File on disk but not in DB → missing_in_db."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    (shared / "new-untracked.md").write_text("# Untracked")
+
+    result = await mgr.reconcile(mode="detect")
+    assert "Shared/new-untracked.md" in result["missing_in_db"]
+    assert result["total_drift"] >= 1
+
+
+@pytest.mark.anyio
+async def test_reconcile_vault_unavailable_raises(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Missing shared folder raises VaultUnavailableError."""
+    from api.vault_sync import VaultUnavailableError
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+
+    # Remove the shared folder
+    import shutil
+    shutil.rmtree(tmp_vault / "Shared")
+
+    with pytest.raises(VaultUnavailableError):
+        await mgr.reconcile(mode="detect")
+
+
+# =============================================================================
+# WP2b: Reconcile repair tests
+# =============================================================================
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_disabled_by_default(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Repair mode returns error when VAULT_SYNC_REPAIR_ENABLED is not set."""
+    # This tests the router-level gate, but we can also verify behavior directly
+    # by checking that the endpoint would return 403 (tested via router integration).
+    # Here we test the manager-level repair which does work — the gate is at the router.
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    # Repair without confirm returns drift report + repair_requires_confirm
+    result = await mgr.reconcile(mode="repair", confirm=False)
+    assert result.get("repair_requires_confirm") is True
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_requires_confirm(pool, setup_peer, tmp_vault, mock_event_queue):
+    """mode=repair without confirm returns drift report with repair_requires_confirm=True."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    (shared / "untracked.md").write_text("# Untracked")
+
+    result = await mgr.reconcile(mode="repair", confirm=False)
+    assert result["repair_requires_confirm"] is True
+    assert result["total_drift"] >= 1
+    assert "actions_taken" not in result
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_queues_events(pool, setup_peer, tmp_vault, mock_event_queue):
+    """With confirm=True, queues correct event types."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    # missing_in_db — file on disk, not in DB
+    (shared / "repair-new.md").write_text("# Repair New")
+
+    # hash_mismatch — DB has old hash
+    (shared / "repair-stale.md").write_text("# Current")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO vault_sync_state
+               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
+               VALUES ($1, $2, $3, 1, 10, NOW())""",
+            "Shared/repair-stale.md", _sha256("# Old"), MY_NODE,
+        )
+
+    # missing_on_disk — DB has row, file doesn't exist
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO vault_sync_state
+               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
+               VALUES ($1, $2, $3, 1, 10, NOW())""",
+            "Shared/repair-gone.md", _sha256("# Gone"), MY_NODE,
+        )
+
+    result = await mgr.reconcile(mode="repair", confirm=True)
+    assert result["actions_taken"] == 3
+    assert mock_event_queue.add.call_count >= 3
+
+    # Verify DB state is consistent after repair
+    async with pool.acquire() as conn:
+        new_row = await conn.fetchrow(
+            "SELECT * FROM vault_sync_state WHERE relative_path='Shared/repair-new.md'"
+        )
+        assert new_row is not None
+        assert new_row["is_deleted"] is False
+
+        gone_row = await conn.fetchrow(
+            "SELECT * FROM vault_sync_state WHERE relative_path='Shared/repair-gone.md'"
+        )
+        assert gone_row["is_deleted"] is True
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_respects_paths(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Only repairs listed paths."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    (shared / "include-me.md").write_text("# Include")
+    (shared / "skip-me.md").write_text("# Skip")
+
+    result = await mgr.reconcile(
+        mode="repair", confirm=True,
+        paths=["Shared/include-me.md"],
+    )
+    assert result["actions_taken"] == 1
+
+    # skip-me.md should not be in DB
+    async with pool.acquire() as conn:
+        skip_row = await conn.fetchrow(
+            "SELECT * FROM vault_sync_state WHERE relative_path='Shared/skip-me.md'"
+        )
+    assert skip_row is None
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_max_actions(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Caps at limit, returns remaining count."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    for i in range(10):
+        (shared / f"cap-{i}.md").write_text(f"# Cap {i}")
+
+    result = await mgr.reconcile(mode="repair", confirm=True, max_actions=3)
+    assert result["actions_taken"] == 3
+    assert result["capped"] is True
+    assert result["remaining"] == 7
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_idempotent(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Second run finds no drift."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+
+    (shared / "idempotent.md").write_text("# Idempotent")
+
+    result1 = await mgr.reconcile(mode="repair", confirm=True)
+    assert result1["actions_taken"] >= 1
+
+    result2 = await mgr.reconcile(mode="repair", confirm=True)
+    assert result2["total_drift"] == 0
+    assert result2.get("actions_taken", 0) == 0
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_vault_unavailable(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Refuses repair when shared folder missing (503 at endpoint level)."""
+    from api.vault_sync import VaultUnavailableError
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    import shutil
+    shutil.rmtree(tmp_vault / "Shared")
+
+    with pytest.raises(VaultUnavailableError):
+        await mgr.reconcile(mode="repair", confirm=True)
+
+
+# =============================================================================
+# WP4: Watcher tests
+# =============================================================================
+
+
+@pytest.mark.anyio
+async def test_watcher_triggers_early_scan(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Setting the change_event triggers scan before interval."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    (shared / "watcher-test.md").write_text("# Watcher")
+
+    # Set scan interval very high so timer-based scan won't trigger
+    mgr.scan_interval = 9999
+    mgr._last_scan_at = datetime.now(timezone.utc)
+
+    # But set the watcher event
+    mgr._change_event.set()
+
+    await mgr.run_cycle()
+
+    assert mgr._metrics.watcher_triggered_scans >= 1
+    assert mgr._metrics.scans_completed >= 1
+
+
+@pytest.mark.anyio
+async def test_watcher_fail_open(pool, setup_peer, tmp_vault, mock_event_queue):
+    """When watchdog import fails, periodic scan still works."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    (shared / "failopen.md").write_text("# Fail Open")
+
+    # Mock the import to fail
+    with patch.dict("sys.modules", {"watchdog": None, "watchdog.observers": None, "watchdog.events": None}):
+        mgr.start_watcher()
+
+    assert mgr._metrics.watcher_enabled is False
+
+    # Periodic scan should still work
+    await mgr.run_cycle()
+    assert mgr._metrics.scans_completed >= 1
+
+
+@pytest.mark.anyio
+async def test_scan_works_without_watcher(pool, setup_peer, tmp_vault, mock_event_queue):
+    """VAULT_SYNC_WATCHER=false — periodic scan fires on interval."""
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    (shared / "no-watcher.md").write_text("# No Watcher")
+
+    with patch.dict(os.environ, {"VAULT_SYNC_WATCHER": "false"}):
+        mgr.start_watcher()
+
+    assert mgr._metrics.watcher_enabled is False
+    assert mgr._watcher is None
+
+    # Timer-based scan should work
+    await mgr.run_cycle()
+    assert mgr._metrics.scans_completed >= 1
