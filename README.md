@@ -121,11 +121,45 @@ curl -sS "http://<node-b-wg-ip>:8351/koi-net/shared-with-me?from_peer=<peer-alia
 
 Note: `since` on `/koi-net/shared-with-me` is ISO-8601 datetime (example: `2026-02-25T20:22:00Z`).
 
-## KOI-net Vault Sync Roadmap
+## KOI-net Vault Sync
 
-Canonical phased plan for shared markdown-folder sync over KOI-net:
+Bidirectional markdown-folder sync between KOI-net peers. Phase Sync-1 validated (two-peer 15/15). Phase Sync-1.5 (hardening) implementation complete, 72h soak in progress.
 
-- [`docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`](docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md)
+Canonical roadmap: [`docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`](docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md)
+
+### Operational Flags
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `VAULT_SYNC_ENABLED` | false | Enable vault sync subsystem |
+| `VAULT_SYNC_FOLDER` | Shared | Subfolder within vault to sync |
+| `VAULT_SYNC_WATCHER` | true | File watcher for low-latency change detection (fails open) |
+| `VAULT_SYNC_REPAIR_ENABLED` | false | Gate for reconcile repair mode (keep disabled until post-soak) |
+| `VAULT_SYNC_MAX_FILES_PER_SCAN` | 100 | Backpressure: file cap per cycle |
+| `VAULT_SYNC_MAX_BYTES_PER_SCAN` | 10MB | Backpressure: byte cap per cycle |
+| `VAULT_SYNC_MAX_EVENTS_PER_SCAN` | 200 | Backpressure: event cap per cycle |
+| `VAULT_SYNC_DELETE_EVENT_RESERVE` | 50 | Min budget reserved for delete events |
+| `VAULT_SYNC_WATCHER_DEBOUNCE_MS` | 500 | Debounce window for editor saves |
+
+### Default-safe production settings
+
+```bash
+VAULT_SYNC_ENABLED=true
+VAULT_SYNC_FOLDER=Shared
+VAULT_SYNC_REPAIR_ENABLED=false  # enable after soak
+# All other flags at defaults
+```
+
+### Key endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/koi-net/vault-sync/status` | GET | Dashboard: metrics, pending events, rejected counts |
+| `/koi-net/vault-sync/trigger` | POST | Force immediate scan cycle |
+| `/koi-net/vault-sync/configure` | POST | Set sync peer |
+| `/koi-net/vault-sync/reconcile` | POST | Drift detection (`{"mode":"detect"}`) or repair |
+
+All vault-sync endpoints require localhost + admin token.
 
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion

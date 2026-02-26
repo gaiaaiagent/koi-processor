@@ -106,7 +106,32 @@ Migration note:
 
 ## Vault Sync Smoke Test
 
-After both peers have vault sync enabled (`VAULT_SYNC_ENABLED=true` in `config/personal.env`) and the `Shared/` folder exists, run the two-mode smoke test:
+After both peers have vault sync enabled (`VAULT_SYNC_ENABLED=true` in `config/personal.env`) and the `Shared/` folder exists, run the two-mode smoke test.
+
+### Exact commands (darren-personal ↔ nuc-personal)
+
+```bash
+# Pass 1: watcher disabled (isolate poll-based path)
+KOI_ADMIN_TOKEN=<local-token> \
+  PEER_KOI_ADMIN_TOKEN=<peer-token> \
+  VAULT_SYNC_WATCHER=false \
+  MODE=two-peer \
+  PEER_SSH=dobby@192.168.1.69 \
+  PEER_NAME=nuc-personal \
+  bash scripts/federation/smoke-vault-sync.sh
+# Expect: 15/15
+
+# Pass 2: watcher enabled (default)
+KOI_ADMIN_TOKEN=<local-token> \
+  PEER_KOI_ADMIN_TOKEN=<peer-token> \
+  MODE=two-peer \
+  PEER_SSH=dobby@192.168.1.69 \
+  PEER_NAME=nuc-personal \
+  bash scripts/federation/smoke-vault-sync.sh
+# Expect: 15/15
+```
+
+### General usage
 
 ```bash
 # Local mode (single node, no peer needed):
@@ -118,26 +143,42 @@ KOI_ADMIN_TOKEN=<local-token> \
   MODE=two-peer \
   PEER_NAME=<peer-alias> \
   PEER_SSH=<user>@<peer-ip> \
-  PEER_VAULT_PATH=<peer-vault-path> \
   PEER_KOI_ADMIN_TOKEN=<peer-token> \
   bash scripts/federation/smoke-vault-sync.sh
 ```
 
-Recommended gate sequence:
+Note: `PEER_VAULT_PATH` defaults to `~/Documents/Notes`. The tilde expands on the
+remote shell via unquoted SSH paths (fixed in `5ddd839e`).
+
+### Recommended gate sequence
+
 1. Run `MODE=local` on node A.
 2. Run `MODE=local` on node B.
 3. Run `MODE=two-peer` from A -> B.
 4. Run `MODE=two-peer` from B -> A.
 5. Proceed only if all runs end with `FAIL: 0` and no increase in `rejected_events`.
 
-Prerequisites:
-- Migration 049 applied on both nodes
+### Prerequisites
+
+- Migrations 049 + 050 applied on both nodes
 - `VAULT_SYNC_ENABLED=true` in both nodes' `config/personal.env`
+- `watchdog>=4.0.0` installed in venv
 - `Shared/` folder exists in both vaults
 - Handshake refreshed so edge `rid_types` includes `Vault-file`
 - API running on both nodes
+- Admin tokens accessible (env var or `~/.config/personal-koi/koi-state/admin_token`)
 
 The smoke test validates: configure, file create/track, peer arrival, conflict detection, delete/tombstone, peer delete propagation, and no rejected events.
+
+## Soak Monitoring
+
+Run periodic checks during the 72h soak window:
+
+```bash
+bash scripts/federation/soak-check.sh
+```
+
+Captures status + reconcile drift from both peers, appends timestamped JSONL to `/tmp/vault-sync-soak.jsonl`. See `docs/runbooks/vault-sync-soak.md` for full soak runbook.
 
 ## Dry Run
 

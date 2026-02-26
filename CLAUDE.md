@@ -117,16 +117,32 @@ Key files:
 - `api/koi_net_router.py` — vault sync endpoints (configure, trigger, status)
 - `api/koi_protocol.py` — WireManifest with `extra="allow"` for extension fields
 - `migrations/049_vault_sync.sql` — schema (vault_sync_state, vault_sync_config, vault_sync_applied_events)
-- `tests/test_vault_sync.py` — 17 unit tests
-- `scripts/federation/smoke-vault-sync.sh` — two-peer smoke test (local + two-peer modes)
+- `tests/test_vault_sync.py` — 39 unit tests (17 Sync-1 + 22 Sync-1.5)
+- `scripts/federation/smoke-vault-sync.sh` — two-peer smoke test (15 checks)
+- `scripts/federation/soak-check.sh` — periodic soak monitoring
+- `migrations/050_vault_sync_metrics.sql` — metrics persistence table
 
-Env vars: `VAULT_SYNC_ENABLED=true`, `VAULT_SYNC_FOLDER=Shared`
+Env vars: `VAULT_SYNC_ENABLED=true`, `VAULT_SYNC_FOLDER=Shared`, `VAULT_SYNC_REPAIR_ENABLED=false` (during soak)
 
 Bugs found and fixed during live two-peer testing:
 1. `WireManifest` Pydantic model stripped extension fields — `extra="allow"`.
 2. Poll endpoint manifest transformation dropped custom fields — preserve via `dict(m)`.
 3. FORGET `origin_seq` not incrementing — stale-event guard rejected deletes.
+4. Smoke test tilde expansion in SSH remote commands — unquote paths for remote `~` expansion.
 
+## KOI-net Vault Sync — Phase Sync-1.5 SOAK IN PROGRESS (2026-02-26)
+
+Implementation complete. 39/39 tests pass. Two-peer smoke 15/15 (watcher off + on).
+Runtime SHA: `5ddd839e`. Soak started 2026-02-26T04:31:19Z, go/no-go at 72h.
+
+Added in Sync-1.5:
+- SyncMetrics (23 fields, persisted to JSONB singleton table)
+- VaultWatcher (watchdog-based, debounce, fail-open)
+- Backpressure caps (file/byte/event per scan, delete reserve)
+- Reconcile endpoint (detect drift, gated repair mode)
+- Structured logging (key=value format)
+
+Soak runbook: `docs/runbooks/vault-sync-soak.md`
 Canonical phased roadmap: `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
 
 ### Code↔Docs Bridge - COMPLETE
@@ -394,4 +410,5 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 |------------|------|-------|----------|
 | `df92b730` | 2026-02-25 | koi-processor | Phase 1 TDB smoke test: fresh import, health/outbox/auth/fail-open/idempotency/reconciliation all pass. Fixed vault_parser.py SAVEPOINT bug. Created smoke_phase1.sh. Updated README + CLAUDE.md. Committed + pushed. |
 | `371b493e` | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
-| current | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
+| `17263f5c` | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
+| current | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers (SHA 5ddd839e). Fixed smoke test tilde-expansion bug. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
