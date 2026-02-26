@@ -1,0 +1,1 @@
+{"timestamp": "2026-02-26T08:56:30Z", "local": {"pending_events": "2", "scans_completed": "297", "watcher_enabled": "True", "rejected_total": "0", "reconcile_drift": "0"}, "peer": {"name": "nuc-personal", "pending_events": "0", "scans_completed": "299", "watcher_enabled": "True", "rejected_total": "0", "reconcile_drift": "0"}}
