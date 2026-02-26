@@ -86,6 +86,7 @@ _event_queue: Optional[EventQueue] = None
 _db_pool: Optional[asyncpg.Pool] = None
 _poller: Optional[KOIPoller] = None
 _vault_sync: Optional[VaultSyncManager] = None
+_commons_ingest_worker = None  # Optional[CommonsIngestWorker]
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -188,7 +189,7 @@ def _manifest_sha256_hash(manifest: Dict[str, Any], contents: Optional[Dict[str,
 
 async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
     """Initialize KOI-net subsystem. Called from app startup."""
-    global _private_key, _node_profile, _event_queue, _db_pool, _poller, _vault_sync
+    global _private_key, _node_profile, _event_queue, _db_pool, _poller, _vault_sync, _commons_ingest_worker
     _db_pool = pool
 
     node_name = os.getenv("KOI_NODE_NAME", "darren-personal")
@@ -250,12 +251,26 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
         policy["allow_b64_64"],
         policy["require_approved_edge_for_poll"],
     )
+    # Start commons ingest worker (for BKC profiles with commons intake)
+    commons_ingest_enabled = _bool_env("COMMONS_INGEST_ENABLED", False)
+    if commons_ingest_enabled:
+        try:
+            from api.commons_ingest_worker import CommonsIngestWorker
+            _commons_ingest_worker = CommonsIngestWorker(pool)
+            await _commons_ingest_worker.start()
+            logger.info("Commons ingest worker started")
+        except Exception as e:
+            logger.warning(f"Commons ingest worker failed to start: {e}")
+
     logger.info(f"KOI-net initialized: {_node_profile.node_rid}")
 
 
 async def shutdown_koi_net():
     """Stop poller and clean up. Called from app shutdown."""
-    global _poller
+    global _poller, _commons_ingest_worker
+    if _commons_ingest_worker:
+        await _commons_ingest_worker.stop()
+        _commons_ingest_worker = None
     if _vault_sync:
         _vault_sync.stop_watcher()
         await _vault_sync.persist_metrics()
@@ -592,6 +607,40 @@ def _enforce_local_admin(request: Request) -> Optional[JSONResponse]:
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer ") or auth_header[7:] != admin_token:
             return _protocol_error(401, "UNAUTHORIZED", "Invalid or missing admin token")
+    return None
+
+
+def _enforce_commons_admin(request: Request) -> Optional[JSONResponse]:
+    """Return protocol error if request is not authorized for commons admin endpoints.
+
+    Accepts:
+    - Localhost requests (same as _enforce_local_admin)
+    - Valid KOI_COMMONS_SERVICE_TOKEN bearer token (for BFF access from remote dashboard)
+
+    This guard is ONLY for /koi-net/commons/* endpoints. All other admin
+    endpoints continue using _enforce_local_admin (localhost-only).
+    """
+    client_host = request.client.host if request.client else None
+    is_localhost = client_host in ("127.0.0.1", "::1", "localhost")
+
+    # Check commons service token (scoped to commons endpoints only)
+    commons_token = os.getenv("KOI_COMMONS_SERVICE_TOKEN")
+    auth_header = request.headers.get("Authorization", "")
+    has_valid_commons_token = (
+        commons_token
+        and auth_header.startswith("Bearer ")
+        and auth_header[7:] == commons_token
+    )
+
+    if not is_localhost and not has_valid_commons_token:
+        return _protocol_error(403, "FORBIDDEN", "Endpoint requires localhost or valid commons service token")
+
+    # If localhost, also check admin token if configured (backward compat)
+    if is_localhost:
+        admin_token = _read_admin_token()
+        if admin_token:
+            if not auth_header.startswith("Bearer ") or auth_header[7:] not in (admin_token, commons_token or ""):
+                return _protocol_error(401, "UNAUTHORIZED", "Invalid or missing admin token")
     return None
 
 
@@ -1489,21 +1538,26 @@ async def shared_with_me(
 
 @koi_net_router.get("/commons/intake")
 async def commons_intake(
+    request: Request,
     status: str = "staged",
     from_peer: Optional[str] = None,
     limit: int = 50,
 ):
     """List incoming commons shares and their intake status."""
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
     if not _db_pool:
         return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
 
     normalized_status = (status or "staged").strip().lower()
-    allowed_status = {"staged", "approved", "rejected", "all"}
+    allowed_status = {"staged", "approved", "ingesting", "needs_merge_review", "ingested", "failed", "rejected", "all"}
     if normalized_status not in allowed_status:
         return _protocol_error(
             400,
             "INVALID_INTAKE_STATUS",
-            f"Invalid status '{status}'. Valid statuses: staged, approved, rejected, all",
+            f"Invalid status '{status}'. Valid: staged, approved, ingesting, needs_merge_review, ingested, failed, rejected, all",
         )
 
     async with _db_pool.acquire() as conn:
@@ -1578,8 +1632,13 @@ async def commons_intake(
 
 @koi_net_router.post("/commons/intake/decide")
 async def commons_intake_decide(request: Request):
-    """Approve/reject a staged commons share entry (localhost admin only)."""
-    auth_err = _enforce_local_admin(request)
+    """Approve/reject a staged commons share entry.
+
+    Records an immutable decision in koi_commons_decisions, then updates
+    the mutable intake_status on koi_shared_documents. On approve, status
+    becomes 'approved' (async ingest worker picks it up later).
+    """
+    auth_err = _enforce_commons_admin(request)
     if auth_err:
         return auth_err
 
@@ -1618,69 +1677,82 @@ async def commons_intake_decide(request: Request):
             "action must be 'approve' or 'reject'",
         )
 
+    # approved = async ingest worker picks it up; rejected = terminal
     next_intake_status = "approved" if action == "approve" else "rejected"
-    next_status = "ingested" if action == "approve" else "received"
 
-    async with _db_pool.acquire() as conn:
-        try:
-            if req.share_id:
-                row = await conn.fetchrow(
+    row = None
+    try:
+        async with _db_pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Update mutable status on shared document
+                if req.share_id:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE koi_shared_documents
+                        SET intake_status = $2,
+                            reviewed_at = NOW(),
+                            reviewed_by = COALESCE($3, reviewed_by),
+                            review_notes = $4
+                        WHERE id = $1
+                          AND recipient_type = 'commons'
+                          AND status != 'retracted'
+                        RETURNING id, event_id, document_rid, sender_node, intake_status, status
+                        """,
+                        req.share_id,
+                        next_intake_status,
+                        req.reviewer,
+                        req.note,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE koi_shared_documents
+                        SET intake_status = $2,
+                            reviewed_at = NOW(),
+                            reviewed_by = COALESCE($3, reviewed_by),
+                            review_notes = $4
+                        WHERE event_id = $1::UUID
+                          AND recipient_type = 'commons'
+                          AND status != 'retracted'
+                        RETURNING id, event_id, document_rid, sender_node, intake_status, status
+                        """,
+                        parsed_event_id,
+                        next_intake_status,
+                        req.reviewer,
+                        req.note,
+                    )
+
+                if not row:
+                    # No-op UPDATE — raise to trigger rollback (nothing to commit)
+                    raise ValueError("INTAKE_NOT_FOUND")
+
+                # 2. INSERT immutable decision record (audit trail)
+                await conn.execute(
                     """
-                    UPDATE koi_shared_documents
-                    SET intake_status = $2,
-                        status = $3,
-                        reviewed_at = NOW(),
-                        reviewed_by = COALESCE($4, reviewed_by),
-                        review_notes = $5
-                    WHERE id = $1
-                      AND recipient_type = 'commons'
-                      AND status != 'retracted'
-                    RETURNING id, event_id, document_rid, sender_node, intake_status, status
+                    INSERT INTO koi_commons_decisions (share_id, event_id, action, reviewer, note)
+                    VALUES ($1, $2, $3, $4, $5)
                     """,
-                    req.share_id,
-                    next_intake_status,
-                    next_status,
+                    row["id"],
+                    row["event_id"],
+                    action,
                     req.reviewer,
                     req.note,
                 )
-            else:
-                row = await conn.fetchrow(
-                    """
-                    UPDATE koi_shared_documents
-                    SET intake_status = $2,
-                        status = $3,
-                        reviewed_at = NOW(),
-                        reviewed_by = COALESCE($4, reviewed_by),
-                        review_notes = $5
-                    WHERE event_id = $1::UUID
-                      AND recipient_type = 'commons'
-                      AND status != 'retracted'
-                    RETURNING id, event_id, document_rid, sender_node, intake_status, status
-                    """,
-                    parsed_event_id,
-                    next_intake_status,
-                    next_status,
-                    req.reviewer,
-                    req.note,
-                )
-        except asyncpg.PostgresError as exc:
-            if isinstance(
-                exc,
-                (asyncpg.exceptions.UndefinedColumnError, asyncpg.exceptions.UndefinedTableError),
-            ):
-                return _protocol_error(
-                    503,
-                    "COMMONS_INTAKE_SCHEMA_MISSING",
-                    "Commons intake fields are missing. Apply migration 047_shared_documents_intake.sql",
-                )
-            raise
-
-    if not row:
-        return _protocol_error(
-            404,
-            "INTAKE_NOT_FOUND",
-            "No matching commons intake entry found",
-        )
+    except ValueError as exc:
+        if str(exc) == "INTAKE_NOT_FOUND":
+            return _protocol_error(404, "INTAKE_NOT_FOUND", "No matching commons intake entry found")
+        raise
+    except asyncpg.PostgresError as exc:
+        if isinstance(
+            exc,
+            (asyncpg.exceptions.UndefinedColumnError, asyncpg.exceptions.UndefinedTableError),
+        ):
+            return _protocol_error(
+                503,
+                "COMMONS_INTAKE_SCHEMA_MISSING",
+                "Commons intake/decision tables are missing. Apply migrations 051 + 053.",
+            )
+        raise
 
     return {
         "status": "ok",
@@ -1691,6 +1763,196 @@ async def commons_intake_decide(request: Request):
         "sender_node": row["sender_node"],
         "intake_status": row["intake_status"],
         "record_status": row["status"],
+    }
+
+
+@koi_net_router.get("/commons/intake/{share_id}/decisions")
+async def commons_intake_decisions(request: Request, share_id: int):
+    """Get the immutable decision audit trail for a commons share."""
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    async with _db_pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT id, share_id, event_id, action, reviewer, note, decided_at
+                FROM koi_commons_decisions
+                WHERE share_id = $1
+                ORDER BY decided_at ASC
+                """,
+                share_id,
+            )
+        except asyncpg.PostgresError as exc:
+            if isinstance(exc, asyncpg.exceptions.UndefinedTableError):
+                return _protocol_error(
+                    503,
+                    "COMMONS_DECISIONS_SCHEMA_MISSING",
+                    "koi_commons_decisions table missing. Apply migration 053.",
+                )
+            raise
+
+    decisions = [
+        {
+            "id": str(r["id"]),
+            "share_id": r["share_id"],
+            "event_id": str(r["event_id"]) if r["event_id"] else None,
+            "action": r["action"],
+            "reviewer": r["reviewer"],
+            "note": r["note"],
+            "decided_at": r["decided_at"].isoformat() if r["decided_at"] else None,
+        }
+        for r in rows
+    ]
+
+    return {"decisions": decisions, "count": len(decisions), "share_id": share_id}
+
+
+@koi_net_router.get("/commons/intake/{share_id}/merge-candidates")
+async def commons_merge_candidates(request: Request, share_id: int):
+    """Get merge candidates for a commons share that needs merge review."""
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, share_id, remote_entity_label, remote_entity_type,
+                       local_entity_uri, local_entity_label, confidence,
+                       resolution, resolved_by, resolved_at, created_at
+                FROM koi_commons_merge_candidates
+                WHERE share_id = $1
+                ORDER BY resolution IS NOT NULL, confidence DESC
+                """,
+                share_id,
+            )
+    except asyncpg.PostgresError as exc:
+        if isinstance(exc, asyncpg.exceptions.UndefinedTableError):
+            return _protocol_error(
+                503,
+                "MERGE_CANDIDATES_SCHEMA_MISSING",
+                "koi_commons_merge_candidates table missing. Apply migration 054.",
+            )
+        raise
+
+    candidates = [
+        {
+            "id": r["id"],
+            "share_id": r["share_id"],
+            "remote_entity_label": r["remote_entity_label"],
+            "remote_entity_type": r["remote_entity_type"],
+            "local_entity_uri": r["local_entity_uri"],
+            "local_entity_label": r["local_entity_label"],
+            "confidence": r["confidence"],
+            "resolution": r["resolution"],
+            "resolved_by": r["resolved_by"],
+            "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+    unresolved = sum(1 for c in candidates if c["resolution"] is None)
+
+    return {
+        "candidates": candidates,
+        "count": len(candidates),
+        "unresolved": unresolved,
+        "share_id": share_id,
+    }
+
+
+@koi_net_router.post("/commons/intake/{share_id}/resolve-merges")
+async def commons_resolve_merges(request: Request, share_id: int):
+    """Resolve ambiguous entity merge candidates for a commons share.
+
+    After the ingest worker sets intake_status = 'needs_merge_review',
+    an admin resolves each candidate (merge, keep_separate, cross_ref).
+    When all candidates are resolved, the share transitions to 'ingested'.
+    """
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    try:
+        raw = await request.json()
+    except Exception:
+        return _protocol_error(400, "INVALID_JSON", "Invalid JSON body")
+
+    resolutions = raw.get("resolutions", [])
+    if not resolutions:
+        return _protocol_error(400, "NO_RESOLUTIONS", "Provide a list of resolutions")
+
+    # Validate all resolutions before entering transaction
+    valid_resolutions = ("merge", "keep_separate", "cross_ref")
+    for res in resolutions:
+        resolution = res.get("resolution")
+        if resolution not in valid_resolutions:
+            return _protocol_error(
+                400, "INVALID_RESOLUTION",
+                f"resolution must be merge, keep_separate, or cross_ref (got: {resolution})",
+            )
+
+    resolved_count = 0
+    unresolved = 0
+    async with _db_pool.acquire() as conn:
+        async with conn.transaction():
+            for res in resolutions:
+                candidate_id = res.get("candidate_id")
+                resolution = res.get("resolution")
+                resolved_by = res.get("resolved_by")
+
+                updated = await conn.execute(
+                    """
+                    UPDATE koi_commons_merge_candidates
+                    SET resolution = $2, resolved_by = $3, resolved_at = NOW()
+                    WHERE id = $1 AND share_id = $4 AND resolution IS NULL
+                    """,
+                    candidate_id, resolution, resolved_by, share_id,
+                )
+                if "UPDATE 1" in updated:
+                    resolved_count += 1
+
+            # Check if all candidates are now resolved
+            unresolved = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM koi_commons_merge_candidates
+                WHERE share_id = $1 AND resolution IS NULL
+                """,
+                share_id,
+            )
+
+            share_finalized = False
+            if unresolved == 0:
+                # All resolved — transition share to ingested
+                transition_result = await conn.execute(
+                    """
+                    UPDATE koi_shared_documents
+                    SET intake_status = 'ingested'
+                    WHERE id = $1 AND intake_status = 'needs_merge_review'
+                    """,
+                    share_id,
+                )
+                share_finalized = "UPDATE 1" in transition_result
+
+    return {
+        "status": "ok",
+        "share_id": share_id,
+        "resolved_count": resolved_count,
+        "remaining_unresolved": unresolved,
+        "share_finalized": share_finalized,
     }
 
 

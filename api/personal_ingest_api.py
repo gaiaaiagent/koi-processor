@@ -3851,6 +3851,177 @@ async def graph_shortest_path(
     return result
 
 
+# =============================================================================
+# /chat Endpoint — RAG-powered conversational interface
+# =============================================================================
+
+CHAT_LLM_MODEL = os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini')
+
+
+class ChatRequest(BaseModel):
+    """Request for RAG chat."""
+    query: str
+    max_context_entities: int = Field(default=5, ge=1, le=20)
+
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    """
+    RAG chat: semantic-search the knowledge graph, build context from matched
+    entities (labels, types, descriptions, relationships), then call an LLM to
+    generate a grounded answer.
+
+    Returns ``{ answer, sources, intent }`` matching the web-dashboard
+    ChatResponse contract.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not openai_available or not openai_client:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM service not available (OpenAI key not configured)",
+        )
+
+    # ------------------------------------------------------------------
+    # 1. Semantic search over entity embeddings to find relevant entities
+    # ------------------------------------------------------------------
+    query_embedding = await generate_embedding(request.query)
+
+    sources: List[Dict[str, Any]] = []
+
+    async with db_pool.acquire() as conn:
+        if query_embedding:
+            embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+            rows = await conn.fetch("""
+                SELECT
+                    er.fuseki_uri,
+                    er.entity_text,
+                    er.entity_type,
+                    er.metadata,
+                    1 - (ee.embedding <=> $1::vector) AS similarity
+                FROM entity_registry er
+                JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
+                WHERE ee.embedding IS NOT NULL
+                ORDER BY ee.embedding <=> $1::vector
+                LIMIT $2
+            """, embedding_str, request.max_context_entities)
+        else:
+            # Fallback: text search on entity names
+            rows = await conn.fetch("""
+                SELECT
+                    fuseki_uri,
+                    entity_text,
+                    entity_type,
+                    metadata,
+                    1.0 AS similarity
+                FROM entity_registry
+                WHERE normalized_text ILIKE $1
+                ORDER BY created_at DESC
+                LIMIT $2
+            """, f"%{request.query.lower()}%", request.max_context_entities)
+
+        # Build source list and collect URIs for relationship lookup
+        entity_uris = []
+        for row in rows:
+            meta = row['metadata'] or {}
+            if isinstance(meta, str):
+                meta = json_module_global.loads(meta)
+            description = meta.get('description', '') if isinstance(meta, dict) else ''
+            sources.append({
+                "uri": row['fuseki_uri'],
+                "label": row['entity_text'],
+                "entity_type": row['entity_type'],
+                "score": round(float(row['similarity']), 4),
+                "description": description,
+            })
+            entity_uris.append(row['fuseki_uri'])
+
+        # ------------------------------------------------------------------
+        # 2. Fetch relationships for matched entities (for richer context)
+        # ------------------------------------------------------------------
+        relationships_ctx: List[str] = []
+        if entity_uris:
+            rel_rows = await conn.fetch("""
+                SELECT
+                    r.subject_uri,
+                    s.entity_text AS subject_label,
+                    r.predicate,
+                    r.object_uri,
+                    o.entity_text AS object_label
+                FROM entity_relationships r
+                LEFT JOIN entity_registry s ON s.fuseki_uri = r.subject_uri
+                LEFT JOIN entity_registry o ON o.fuseki_uri = r.object_uri
+                WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
+                LIMIT 30
+            """, entity_uris)
+            for rr in rel_rows:
+                subj = rr['subject_label'] or rr['subject_uri']
+                obj = rr['object_label'] or rr['object_uri']
+                relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+
+    # ------------------------------------------------------------------
+    # 3. Build LLM prompt with entity context
+    # ------------------------------------------------------------------
+    entity_block = "\n".join(
+        f"- {s['label']} ({s['entity_type']})"
+        + (f": {s['description']}" if s.get('description') else "")
+        for s in sources
+    ) or "(no matching entities found)"
+
+    rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
+
+    system_prompt = (
+        "You are a knowledgeable assistant for a bioregional knowledge commons. "
+        "Answer the user's question using ONLY the entity and relationship context "
+        "provided below. If the context is insufficient, say so honestly. "
+        "Be concise and cite specific entities when possible."
+    )
+
+    user_prompt = (
+        f"## Relevant Entities\n{entity_block}\n\n"
+        f"## Relationships\n{rel_block}\n\n"
+        f"## Question\n{request.query}"
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Call LLM
+    # ------------------------------------------------------------------
+    try:
+        llm_response = await asyncio.to_thread(
+            openai_client.chat.completions.create,
+            model=CHAT_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        answer = llm_response.choices[0].message.content or ""
+    except Exception as e:
+        logger.error(f"LLM call failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM call failed: {e}",
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Build intent object (lightweight classification)
+    # ------------------------------------------------------------------
+    entity_labels = [s['label'] for s in sources]
+    intent = {
+        "intent": "knowledge_query",
+        "entities": entity_labels,
+        "confidence": round(max((s['score'] for s in sources), default=0.0), 4),
+    }
+
+    return {
+        "answer": answer,
+        "sources": sources,
+        "intent": intent,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv('KOI_API_PORT', '8351'))

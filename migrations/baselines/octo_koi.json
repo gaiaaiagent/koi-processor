@@ -94,6 +94,16 @@
       "file": "052_koi_migrations_registry.sql",
       "checksum": "86c17c1b424f107522683fb06d763fb5de13cce2a42d6e85268e1c1d4deaa9f9",
       "note": "Core invariant; file sourced from canonical repo"
+    },
+    {
+      "id": "bkc:053_commons_decision_log",
+      "file": "053_commons_decision_log.sql",
+      "checksum": "0be13635869793f59bf1b0df2d69576a09e310e0d51a7194a849d26bebb06017"
+    },
+    {
+      "id": "bkc:054_commons_merge_candidates",
+      "file": "054_commons_merge_candidates.sql",
+      "checksum": "ecbe43de1328c4afd16e8433ab0a1817449036930b0cc26145ff75f936cf33e9"
     }
   ]
 }
