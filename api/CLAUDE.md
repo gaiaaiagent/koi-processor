@@ -57,4 +57,13 @@
 | #10242 | " | 🔴 | Fixed Health Endpoint Field Name in Connect-Peers Script | ~306 |
 | #10239 | 2:32 PM | 🔵 | KOI-net Protocol Message Schemas | ~297 |
 | #10236 | " | 🔵 | KOI-net Protocol Router Implementation | ~334 |
+
+### Feb 25, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #10777 | 10:21 PM | 🔵 | koi_net_router.py Manifest Handling and Vault Sync Feature Divergence | ~500 |
+| #10771 | 10:20 PM | 🔵 | koi_net_router.py Shows Major Divergence with 686 Lines of Diff | ~277 |
+| #10769 | " | 🔵 | vault_parser.py Behavioral Divergence Between RegenAI and Octo | ~446 |
+| #10430 | 11:31 AM | 🟣 | Committed Phase A graph traversal endpoints with comprehensive documentation | ~586 |
 </claude-mem-context>

@@ -31,4 +31,15 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #10252 | 3:54 PM | 🔵 | Testing Revealed Three Outstanding Issues in Federation Scripts | ~433 |
+
+### Feb 26, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #10946 | 1:12 AM | ✅ | Committed BKC migrations to canonical repository at 602aa4de | ~401 |
+| #10941 | 1:11 AM | ✅ | Integrated complete BKC migration set into canonical repository | ~449 |
+| #10937 | 1:10 AM | ✅ | Integrated BKC document-sharing migrations into canonical repository | ~406 |
+| #10934 | 1:08 AM | 🔵 | BKC document-sharing migrations exist in canonical repo with different numbering | ~458 |
+| #10931 | 1:07 AM | 🔵 | Canonical repo migrations 050-052 focus on core infrastructure, not BKC features | ~440 |
+| #10925 | 1:06 AM | 🔵 | Baseline manifests reference node-specific migration versions with distinct checksums | ~410 |
 </claude-mem-context>
