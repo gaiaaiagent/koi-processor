@@ -94,6 +94,8 @@ scripts/terminusdb/artifacts/
 
 # Federation invite bundles
 federation-invite-*/
+# Ephemeral federation join request artifacts (generated during peering)
+scripts/federation/*-join-request.txt
 
 # Claude Code auto-generated context files (keep root CLAUDE.md only)
 **/CLAUDE.md

@@ -225,6 +225,19 @@ New env vars:
 - Returns `{ answer, sources, intent }`
 - Requires `OPENAI_API_KEY`; returns 503 if unavailable
 
+### Pending Integration Check — GraphRAG Export (2026-02-26)
+
+Status: hold for viewer smoke test before merge/deploy.
+
+Open local diff:
+- `scripts/export_graph_hierarchy.py` — output contract changed (full format + clusters metadata), default file changed to `graphrag_hierarchy.json`, legacy `test_mode` output removed.
+
+Acceptance criteria:
+1. Run exporter against live DB with representative entity volume.
+2. Load `GAIA/graph/GraphRAG3D_EmbeddingView.html` with generated JSON and confirm no parse/runtime errors.
+3. Verify core UI flows: search, node focus/select, relationship rendering.
+4. If pass, commit as a standalone change; if fail, add compatibility mode (or revert).
+
 ### Contract Tests
 - `tests/test_contract.py` — Behavioral contract suite (run against any profile, live server)
 - `tests/test_interop_matrix.py` — Federation interop + commons correctness gates (C1-C3)
