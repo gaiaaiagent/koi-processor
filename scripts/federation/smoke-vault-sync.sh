@@ -117,7 +117,7 @@ cleanup() {
         rm -f "${VAULT_PATH}/${SHARED_FOLDER}/_smoke-test-${RUN_ID}"*.md
         rm -f "${VAULT_PATH}/${SHARED_FOLDER}/_smoke-conflict-${RUN_ID}"*.md
         if [[ "$MODE" == "two-peer" ]] && [[ -n "${PEER_SSH:-}" ]]; then
-            ssh "$PEER_SSH" "rm -f \"${PEER_VAULT_PATH}/${SHARED_FOLDER}\"/_smoke-test-${RUN_ID}*.md \"${PEER_VAULT_PATH}/${SHARED_FOLDER}\"/_smoke-conflict-${RUN_ID}*.md" 2>/dev/null || true
+            ssh "$PEER_SSH" "rm -f ${PEER_VAULT_PATH}/${SHARED_FOLDER}/_smoke-test-${RUN_ID}*.md ${PEER_VAULT_PATH}/${SHARED_FOLDER}/_smoke-conflict-${RUN_ID}*.md" 2>/dev/null || true
         fi
         pass "smoke test files removed"
     fi
@@ -271,8 +271,11 @@ fi
 if [[ "$MODE" == "two-peer" ]]; then
     step "5. Peer Arrival"
 
+    # Trigger peer sync so it polls events immediately rather than waiting for next cycle
+    ssh "$PEER_SSH" "${PEER_CURL} -X POST http://localhost:${API_PORT}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+
     PEER_FILE="${PEER_VAULT_PATH}/${SMOKE_FILE}"
-    if wait_for "peer file arrival" "ssh \"$PEER_SSH\" 'test -f \"${PEER_FILE}\"'" ; then
+    if wait_for "peer file arrival" "ssh \"$PEER_SSH\" 'test -f ${PEER_FILE}'" ; then
         pass "file arrived on peer"
     else
         fail "file not found on peer after ${WAIT_TIMEOUT}s"
@@ -294,7 +297,7 @@ Content A (local) — written at $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
     # Peer writes content B
-    ssh "$PEER_SSH" "mkdir -p \"${PEER_VAULT_PATH}/${SHARED_FOLDER}\" && cat > \"${PEER_VAULT_PATH}/${SMOKE_CONFLICT}\"" <<EOF
+    ssh "$PEER_SSH" "mkdir -p ${PEER_VAULT_PATH}/${SHARED_FOLDER} && cat > ${PEER_VAULT_PATH}/${SMOKE_CONFLICT}" <<EOF
 ---
 title: Conflict Test ${RUN_ID}
 ---
@@ -311,8 +314,8 @@ EOF
 
     # Poll for conflict copy on either side
     check_conflict_copy() {
-        ls "${VAULT_PATH}/${SHARED_FOLDER}/"*conflict*"${RUN_ID}"*"(conflict"* 2>/dev/null && return 0
-        ssh "$PEER_SSH" "ls \"${PEER_VAULT_PATH}/${SHARED_FOLDER}/\"*conflict*${RUN_ID}*'(conflict'* 2>/dev/null" && return 0
+        ls "${VAULT_PATH}/${SHARED_FOLDER}/"*"${RUN_ID}"*"(conflict"* 2>/dev/null && return 0
+        ssh "$PEER_SSH" "ls ${PEER_VAULT_PATH}/${SHARED_FOLDER}/*${RUN_ID}*'(conflict'* 2>/dev/null" && return 0
         return 1
     }
 
@@ -348,7 +351,7 @@ if [[ "$MODE" == "two-peer" ]]; then
     step "8. Peer Delete Propagation"
 
     PEER_FILE="${PEER_VAULT_PATH}/${SMOKE_FILE}"
-    if wait_for "peer file deletion" "ssh \"$PEER_SSH\" '! test -f \"${PEER_FILE}\"'" ; then
+    if wait_for "peer file deletion" "ssh \"$PEER_SSH\" '! test -f ${PEER_FILE}'" ; then
         pass "file removed on peer"
     else
         fail "file still exists on peer after ${WAIT_TIMEOUT}s"
