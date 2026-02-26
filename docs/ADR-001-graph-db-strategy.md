@@ -241,3 +241,38 @@ Review benchmark results against all gates and promotion thresholds. Either:
 - If no to either → DEFER
 
 _To be completed by 2026-03-04._
+
+## Appendix B: Accelerated Rollout Evidence (2026-02-26)
+
+### Soak Early Close
+
+- **Start**: `2026-02-26T04:31:19Z`
+- **Early close**: `2026-02-26T09:33:43Z` (~5h of planned 72h)
+- **Reason**: Steward-directed acceleration (4/4 samples: zero drift, zero rejections)
+- **Artifact**: `docs/soak-results/sync-1.5-soak-shortened-20260226.md`
+- **Monitoring**: Cron continues; soak gate removed as rollout blocker
+
+### FR Canary — Commons Intake E2E
+
+| Test | Result | Evidence |
+|------|--------|---------|
+| Test A (approve) | PASS | `staged → approved`, `reviewed_at=2026-02-26T09:35:37Z` |
+| Test B (reject) | PASS | `staged → rejected`, `reviewed_at=2026-02-26T09:36:49Z` |
+| Provenance fields | PASS | `recipient_type: "commons"`, `reviewed_at` populated |
+| Post-deploy commons | PASS | New code path (`e03b76c3`) stages correctly |
+
+### Staged Rollout
+
+| Node | SHA | Migrations | Health | Timestamp (UTC) |
+|------|-----|------------|--------|-----------------|
+| FR | `e03b76c3` | 18 applied | healthy | 09:41 |
+| GV | _deferred_ | — | `/health` hangs (P1 incident) | — |
+| Octo | `e03b76c3` | 18 applied | healthy | 09:54 |
+
+**GV incident**: `/health` endpoint hangs (curl timeout), but `/koi-net/events/poll` responds normally. Service is active, port listening. Pre-existing issue, not rollout-related. Deferred until health endpoint fix is deployed.
+
+**FR path-split**: Systemd drop-in applied to move FR `WorkingDirectory` from `/root/koi-processor/` to `/root/fr-koi-processor/` (separate from Octo). `ExecStart` still uses shared venv — dedicated venv is a follow-up maintenance item.
+
+### Decision State
+
+**CONTINUE PG-FIRST** — no new evidence changes the strategy. Migration governance (`koi_migrations` registry) and commons intake now deployed to 2/3 BKC nodes.
