@@ -17,6 +17,12 @@ PEER_SSH="${PEER_SSH:-dobby@192.168.1.69}"
 PEER_NAME="${PEER_NAME:-nuc-personal}"
 SOAK_LOG="${SOAK_LOG:-/tmp/vault-sync-soak.jsonl}"
 
+# Durable copy in repo (survives /tmp cleanup)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DURABLE_LOG="${PROJECT_DIR}/docs/soak-results/vault-sync-soak.jsonl"
+mkdir -p "$(dirname "$DURABLE_LOG")"
+
 # Admin tokens
 LOCAL_TOKEN="${KOI_ADMIN_TOKEN:-}"
 PEER_TOKEN="${PEER_KOI_ADMIN_TOKEN:-}"
@@ -115,6 +121,7 @@ print(json.dumps({
 }))
 ")
 echo "$RECORD" >> "$SOAK_LOG"
+echo "$RECORD" >> "$DURABLE_LOG"
 
 echo ""
 echo "--- Summary ---"

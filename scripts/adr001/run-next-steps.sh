@@ -196,7 +196,31 @@ run_step_3() {
 
     local ADR="$PROJECT_DIR/docs/ADR-001-graph-db-strategy.md"
 
-    if ! grep -q "Appendix A: Graphiti Decision" "$ADR" 2>/dev/null; then
+    if grep -q "Decision:.*COMMIT\|Decision:.*DEFER" "$ADR" 2>/dev/null; then
+        echo "  Decision already recorded in: $ADR"
+    elif [[ $(date -u +%Y%m%d) -ge 20260304 ]]; then
+        # Auto-DEFER: deadline passed with no decision
+        if grep -q "Appendix A: Graphiti Decision" "$ADR" 2>/dev/null; then
+            if sed --version 2>/dev/null | grep -q GNU; then
+                sed -i 's/\*\*Decision:\*\* _PENDING.*/\*\*Decision:\*\* DEFER (auto — deadline passed without explicit decision)/' "$ADR"
+            else
+                sed -i '' 's/\*\*Decision:\*\* _PENDING.*/\*\*Decision:\*\* DEFER (auto — deadline passed without explicit decision)/' "$ADR"
+            fi
+        else
+            cat >> "$ADR" <<'GRAPHITI_EOF'
+
+## Appendix A: Graphiti Decision (2026-03-04)
+
+**Decision:** DEFER (auto — deadline passed without explicit decision)
+
+**Rationale:**
+
+- Deadline (2026-03-04) passed without explicit COMMIT or DEFER.
+- Auto-DEFER applied per ADR-001 policy.
+GRAPHITI_EOF
+        fi
+        echo "  Auto-DEFER applied (deadline passed)"
+    elif ! grep -q "Appendix A: Graphiti Decision" "$ADR" 2>/dev/null; then
         cat >> "$ADR" <<'GRAPHITI_EOF'
 
 ## Appendix A: Graphiti Decision (2026-03-04)
