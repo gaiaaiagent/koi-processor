@@ -94,3 +94,7 @@ scripts/terminusdb/artifacts/
 
 # Federation invite bundles
 federation-invite-*/
+
+# Claude Code auto-generated context files (keep root CLAUDE.md only)
+**/CLAUDE.md
+!/CLAUDE.md
