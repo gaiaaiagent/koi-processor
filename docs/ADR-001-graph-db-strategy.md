@@ -193,7 +193,7 @@ If promotion thresholds are not met after prototype evaluation:
 
 ### Phase 1: ADR + TerminusDB Parking (this session)
 
-1. Commit ADR to `docs/planning/ADR-001-graph-db-strategy.md`
+1. Commit ADR to `docs/ADR-001-graph-db-strategy.md`
 2. Tag TerminusDB Phase 1 milestone and create parking branch
 3. Verify defaults: `TERMINUSDB_ENABLED=false` in env
 4. Monthly Terminus smoke test (or before unpark decision)
@@ -224,7 +224,7 @@ Review benchmark results against all gates and promotion thresholds. Either:
 
 ## Verification
 
-1. Commit ADR to `docs/planning/ADR-001-graph-db-strategy.md`
+1. Commit ADR to `docs/ADR-001-graph-db-strategy.md`
 2. Verify TerminusDB adapter remains behind fail-open flag (already true)
 3. Run federation conflict drill (3-peer simulation)
 4. If prototyping: run Graphiti quickstart, execute benchmark queries, score against thresholds
