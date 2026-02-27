@@ -958,7 +958,8 @@ async def store_new_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,
     canonical: CanonicalEntity,
-    document_rid: str
+    document_rid: str,
+    source: str = 'personal-vault'
 ) -> None:
     """Store a new entity in the registry with embedding and phonetic code"""
     normalized = normalize_entity_text(entity.name)
@@ -999,7 +1000,7 @@ async def store_new_entity(
             entity.name,
             entity.type,
             normalized,
-            'personal-vault',
+            source,
             document_rid,
             metadata,
             str(embedding),
@@ -1017,7 +1018,7 @@ async def store_new_entity(
             entity.name,
             entity.type,
             normalized,
-            'personal-vault',
+            source,
             document_rid,
             metadata,
             phonetic_code
@@ -1034,7 +1035,7 @@ async def store_new_entity(
         "aliases": [],
         "created_by": "darren-personal",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source": "personal-vault",
+        "source": source,
         "first_seen_rid": document_rid,
     }, rid=canonical.uri, source_rid=document_rid)
 
@@ -1659,6 +1660,7 @@ async def ingest_extraction(request: IngestRequest):
     new_count = 0
     resolved_count = 0
     failed_entities: List[dict] = []
+    entity_uri_map: Dict[str, str] = {}  # normalized_name → canonical URI
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -1683,10 +1685,11 @@ async def ingest_extraction(request: IngestRequest):
                     canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
                     logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
                     canonical_entities.append(canonical)
+                    entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
 
                     if is_new:
                         new_count += 1
-                        await store_new_entity(conn, entity, canonical, request.document_rid)
+                        await store_new_entity(conn, entity, canonical, request.document_rid, source=request.source)
                         logger.info(f"Stored new entity: {canonical.uri}")
                     else:
                         resolved_count += 1
@@ -1708,6 +1711,66 @@ async def ingest_extraction(request: IngestRequest):
                     failed_entities.append({"name": entity.name, "error": str(e)})
                     # Continue with other entities
 
+            # --- Process relationships (still inside conn.transaction()) ---
+            rel_count = 0
+            if request.relationships:
+                for rel in request.relationships:
+                    subj_key = normalize_entity_text(rel.subject)
+                    obj_key = normalize_entity_text(rel.object)
+                    subj_uri = entity_uri_map.get(subj_key)
+                    obj_uri = entity_uri_map.get(obj_key)
+
+                    # Fallback: look up pre-existing entities by exact normalized_text
+                    if not subj_uri:
+                        rows = await conn.fetch(
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
+                            subj_key)
+                        if len(rows) == 1:
+                            subj_uri = rows[0]["fuseki_uri"]
+                        elif len(rows) > 1:
+                            logger.warning(
+                                f"Ambiguous subject '{rel.subject}' in relationship "
+                                f"'{rel.subject} → {rel.predicate} → {rel.object}': "
+                                f"{len(rows)}+ matches, skipping")
+                    if not obj_uri:
+                        rows = await conn.fetch(
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
+                            obj_key)
+                        if len(rows) == 1:
+                            obj_uri = rows[0]["fuseki_uri"]
+                        elif len(rows) > 1:
+                            logger.warning(
+                                f"Ambiguous object '{rel.object}' in relationship "
+                                f"'{rel.subject} → {rel.predicate} → {rel.object}': "
+                                f"{len(rows)}+ matches, skipping")
+
+                    if not subj_uri or not obj_uri:
+                        logger.warning(
+                            f"Skipping relationship {rel.subject} → {rel.predicate} → {rel.object}: "
+                            f"subject={'found' if subj_uri else 'NOT found'}, "
+                            f"object={'found' if obj_uri else 'NOT found'}"
+                        )
+                        continue
+
+                    if subj_uri == obj_uri:
+                        logger.warning(
+                            f"Skipping self-referential relationship: {rel.subject} → {rel.predicate} → {rel.object}")
+                        continue
+
+                    try:
+                        await conn.execute("""
+                            INSERT INTO entity_relationships
+                                (subject_uri, predicate, object_uri, source, source_rid)
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+                        """, subj_uri, rel.predicate, obj_uri,
+                            request.source, request.document_rid)
+                        rel_count += 1
+                    except asyncpg.exceptions.ForeignKeyViolationError as e:
+                        logger.warning(f"Skipping relationship (FK violation): {e}")
+                    except asyncpg.exceptions.CheckViolationError as e:
+                        logger.warning(f"Skipping relationship (check violation): {e}")
+
     # Generate receipt RID
     receipt_rid = f"orn:personal-koi.receipt:{uuid.uuid4().hex[:16]}"
 
@@ -1716,7 +1779,7 @@ async def ingest_extraction(request: IngestRequest):
         entities_processed=len(request.entities),
         new_entities=new_count,
         resolved_entities=resolved_count,
-        relationships_processed=len(request.relationships),
+        relationships_processed=rel_count,
         failed_entities=len(failed_entities),
         errors=failed_entities if failed_entities else None
     )
@@ -1765,6 +1828,86 @@ async def list_entities(
             "limit": limit,
             "offset": offset
         }
+
+
+@app.api_route("/entity-search", methods=["GET", "POST"])
+async def entity_search(request: Request, query: str = None, limit: int = 20, entity_type: Optional[str] = None):
+    """Search entities by name (fuzzy text match + optional semantic).
+    GET: query params (?query=...&limit=20&entity_type=Project)
+    POST: JSON body ({"query": "...", "limit": 20, "entity_type": "Project"})
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # For POST, merge body params over query params
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            query = body.get("query", query)
+            limit = body.get("limit", limit)
+            entity_type = body.get("entity_type", entity_type)
+        except Exception:
+            pass
+
+    if not query:
+        return JSONResponse({"results": [], "count": 0})
+
+    normalized_query = normalize_entity_text(query)
+    async with db_pool.acquire() as conn:
+        # Text search: ILIKE on normalized_text
+        if entity_type:
+            rows = await conn.fetch("""
+                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases,
+                       CASE WHEN normalized_text = $1 THEN 1.0
+                            WHEN normalized_text ILIKE $2 THEN 0.9
+                            ELSE 0.7 END AS similarity
+                FROM entity_registry
+                WHERE normalized_text ILIKE $2 AND entity_type = $3
+                ORDER BY
+                    CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
+                    created_at DESC
+                LIMIT $4
+            """, normalized_query, f"%{normalized_query}%", entity_type, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases,
+                       CASE WHEN normalized_text = $1 THEN 1.0
+                            WHEN normalized_text ILIKE $2 THEN 0.9
+                            ELSE 0.7 END AS similarity
+                FROM entity_registry
+                WHERE normalized_text ILIKE $2
+                ORDER BY
+                    CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
+                    created_at DESC
+                LIMIT $3
+            """, normalized_query, f"%{normalized_query}%", limit)
+
+        # Get relationship counts for matched entities
+        uris = [r["fuseki_uri"] for r in rows]
+        rel_counts: Dict[str, int] = {}
+        if uris:
+            rel_rows = await conn.fetch("""
+                SELECT uri, COUNT(*) as cnt FROM (
+                    SELECT subject_uri AS uri FROM entity_relationships WHERE subject_uri = ANY($1)
+                    UNION ALL
+                    SELECT object_uri AS uri FROM entity_relationships WHERE object_uri = ANY($1)
+                ) sub GROUP BY uri
+            """, uris)
+            rel_counts = {r["uri"]: r["cnt"] for r in rel_rows}
+
+        results = []
+        for row in rows:
+            uri = row["fuseki_uri"]
+            results.append({
+                "fuseki_uri": uri,
+                "name": row["entity_text"],
+                "entity_type": row["entity_type"],
+                "similarity": float(row["similarity"]),
+                "aliases": list(row["aliases"] or []),
+                "relationship_count": rel_counts.get(uri, 0),
+            })
+
+    return {"results": results, "count": len(results)}
 
 
 @app.get("/entity/resolve")
@@ -3915,19 +4058,29 @@ async def chat_endpoint(request: ChatRequest):
     async with db_pool.acquire() as conn:
         if query_embedding:
             embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
-            rows = await conn.fetch("""
-                SELECT
-                    er.fuseki_uri,
-                    er.entity_text,
-                    er.entity_type,
-                    er.metadata,
-                    1 - (ee.embedding <=> $1::vector) AS similarity
-                FROM entity_registry er
-                JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
-                WHERE ee.embedding IS NOT NULL
-                ORDER BY ee.embedding <=> $1::vector
-                LIMIT $2
-            """, embedding_str, request.max_context_entities)
+            try:
+                rows = await conn.fetch("""
+                    SELECT
+                        er.fuseki_uri,
+                        er.entity_text,
+                        er.entity_type,
+                        er.metadata,
+                        1 - (ee.embedding <=> $1::vector) AS similarity
+                    FROM entity_registry er
+                    JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
+                    WHERE ee.embedding IS NOT NULL
+                    ORDER BY ee.embedding <=> $1::vector
+                    LIMIT $2
+                """, embedding_str, request.max_context_entities)
+            except asyncpg.exceptions.UndefinedTableError:
+                logger.warning("entity_embeddings table missing, falling back to text search")
+                rows = await conn.fetch("""
+                    SELECT fuseki_uri, entity_text, entity_type, metadata, 1.0 AS similarity
+                    FROM entity_registry
+                    WHERE normalized_text ILIKE $1
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                """, f"%{request.query.lower()}%", request.max_context_entities)
         else:
             # Fallback: text search on entity names
             rows = await conn.fetch("""
