@@ -481,7 +481,7 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ## Session-to-Entity Knowledge Graph Pipeline (2026-02-27)
 
-**Status**: ✅ Implemented — awaiting end-to-end verification
+**Status**: ✅ Implemented & verified — E2E tested on live session (2026-02-27)
 
 Connects Claude Code sessions to the entity knowledge graph so entity notes gain `mentionedIn` links to sessions, and sessions are discoverable by entity.
 
@@ -521,3 +521,4 @@ Connects Claude Code sessions to the entity knowledge graph so entity notes gain
 | `371b493e` | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
 | `17263f5c` | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
 | current | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers (SHA 5ddd839e). Fixed smoke test tilde-expansion bug. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
+| `2769ff91` | 2026-02-27 | koi-processor, koi-sensors, personal-koi-mcp, darren-workflow | Session-Entity Pipeline: entity extraction from sessions (gpt-4o-mini), idempotent /ingest (replace_existing + link_existing_only), search-sessions-by-entity endpoint + MCP tool, migration 055. 4 rounds code review, all fixes applied. E2E verified on live session (Indigenomics Institute resolved). |
