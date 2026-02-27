@@ -479,8 +479,37 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
-**Last Updated**: 2026-02-25
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Phase Sync-1 validated
+## Session-to-Entity Knowledge Graph Pipeline (2026-02-27)
+
+**Status**: ✅ Implemented — awaiting end-to-end verification
+
+Connects Claude Code sessions to the entity knowledge graph so entity notes gain `mentionedIn` links to sessions, and sessions are discoverable by entity.
+
+**Architecture**: Session sensor extracts entities via OpenAI `gpt-4o-mini`, calls `/ingest` with `replace_existing=True` + `link_existing_only` flag. Existing 4-tier entity resolution handles deduplication. `document_entity_links` table stores session-entity links using `claude-session:{id}` RIDs.
+
+**Key changes**:
+- `/ingest` endpoint: added `replace_existing` (atomic delete+insert) and `link_existing_only` (skip Tier 3 creation) params, backward-compatible defaults
+- `GET /search-sessions-by-entity`: read-only entity resolution (Tiers 1-2 only, no phantom entity creation)
+- `mentioned-in` endpoint: handles `claude-session:` RID prefix in display
+- Migration `055_session_schema_governance.sql`: brings session tables under migration governance
+
+**Key files**:
+- `api/personal_ingest_api.py` — `/ingest` modifications + new endpoint
+- `migrations/055_session_schema_governance.sql` — session schema governance
+
+**Known limitation**: Secret redaction regex does not handle escaped quotes inside quoted env values (e.g., `KEY='a \'quoted\' thing'`). Accepted as impractical edge case for session transcripts.
+
+**Sensor changes** (in `koi-sensors`):
+- `sensors/claude_sessions/claude_session_sensor.py` — `_redact_for_extraction()`, `_extract_entities()`, `_call_ingest()`
+- `sensors/claude_sessions/config.personal.yaml` — extraction model + chunk limit config
+
+**MCP tool** (in `personal-koi-mcp`):
+- `search_sessions_by_entity` — find sessions mentioning a person/org/project/concept
+
+---
+
+**Last Updated**: 2026-02-27
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Phase Sync-1 validated + Session-Entity pipeline implemented
 
 ---
 
