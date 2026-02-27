@@ -207,6 +207,7 @@ class RegisterEntityResponse(BaseModel):
     is_new: bool
     vault_rid: str
     merged_with: Optional[str] = None
+    collision_warning: Optional[str] = None
 
 
 class VaultEntityMapping(BaseModel):
@@ -2145,6 +2146,27 @@ async def register_vault_entity(request: RegisterEntityRequest):
             # Resolve against existing entities
             canonical, is_new = await resolve_entity(conn, entity)
 
+            # Check for URI collision with different vault file
+            collision_warning = None
+            if not is_new:
+                existing_mapping = await conn.fetchrow("""
+                    SELECT vault_path, name FROM entity_rid_mappings
+                    WHERE canonical_uri = $1 AND vault_path != $2
+                """, canonical.uri, request.vault_path)
+
+                suppress_types = {'Meeting', 'Task'}
+                suppress_paths = {'Tests/'}
+                is_suppressed = (
+                    request.entity_type in suppress_types
+                    or any(request.vault_path.startswith(p) for p in suppress_paths)
+                )
+                if existing_mapping and not is_suppressed:
+                    collision_warning = (
+                        f"URI collision: '{request.name}' ({request.vault_path}) "
+                        f"shares URI with '{existing_mapping['name']}' ({existing_mapping['vault_path']})"
+                    )
+                    logger.warning(collision_warning)
+
             if is_new:
                 # Store new entity
                 await store_new_entity(conn, entity, canonical, request.vault_rid)
@@ -2248,7 +2270,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 canonical_uri=canonical.uri,
                 is_new=is_new,
                 vault_rid=request.vault_rid,
-                merged_with=canonical.merged_with
+                merged_with=canonical.merged_with,
+                collision_warning=collision_warning
             )
 
 
