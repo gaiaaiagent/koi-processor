@@ -4074,27 +4074,47 @@ async def chat_endpoint(request: ChatRequest):
                 """, embedding_str, request.max_context_entities)
             except asyncpg.exceptions.UndefinedTableError:
                 logger.warning("entity_embeddings table missing, falling back to text search")
-                rows = await conn.fetch("""
-                    SELECT fuseki_uri, entity_text, entity_type, metadata, 1.0 AS similarity
-                    FROM entity_registry
-                    WHERE normalized_text ILIKE $1
-                    ORDER BY created_at DESC
-                    LIMIT $2
-                """, f"%{request.query.lower()}%", request.max_context_entities)
+                # Extract meaningful words (3+ chars) from query for keyword matching
+                words = [w for w in request.query.lower().split() if len(w) >= 3]
+                if words:
+                    conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+                    match_score = " + ".join(
+                        f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                        for i in range(len(words))
+                    )
+                    params = [f"%{w}%" for w in words]
+                    params.append(request.max_context_entities)
+                    rows = await conn.fetch(f"""
+                        SELECT fuseki_uri, entity_text, entity_type, metadata,
+                               ({match_score})::float / {len(words)} AS similarity
+                        FROM entity_registry
+                        WHERE {conditions}
+                        ORDER BY ({match_score}) DESC, created_at DESC
+                        LIMIT ${len(words)+1}
+                    """, *params)
+                else:
+                    rows = []
         else:
-            # Fallback: text search on entity names
-            rows = await conn.fetch("""
-                SELECT
-                    fuseki_uri,
-                    entity_text,
-                    entity_type,
-                    metadata,
-                    1.0 AS similarity
-                FROM entity_registry
-                WHERE normalized_text ILIKE $1
-                ORDER BY created_at DESC
-                LIMIT $2
-            """, f"%{request.query.lower()}%", request.max_context_entities)
+            # Fallback: text search on entity names using keyword splitting
+            words = [w for w in request.query.lower().split() if len(w) >= 3]
+            if words:
+                conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+                match_score = " + ".join(
+                    f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                    for i in range(len(words))
+                )
+                params = [f"%{w}%" for w in words]
+                params.append(request.max_context_entities)
+                rows = await conn.fetch(f"""
+                    SELECT fuseki_uri, entity_text, entity_type, metadata,
+                           ({match_score})::float / {len(words)} AS similarity
+                    FROM entity_registry
+                    WHERE {conditions}
+                    ORDER BY ({match_score}) DESC, created_at DESC
+                    LIMIT ${len(words)+1}
+                """, *params)
+            else:
+                rows = []
 
         # Build source list and collect URIs for relationship lookup
         entity_uris = []
