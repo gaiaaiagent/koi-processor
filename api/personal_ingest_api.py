@@ -4205,8 +4205,9 @@ async def chat_endpoint(request: ChatRequest):
                             "score": round(float(cr['similarity']), 4),
                             "description": (cr['chunk_text'] or "")[:200],
                         })
-            except asyncpg.exceptions.UndefinedTableError:
-                pass  # koi_memory_chunks not available on this node
+            except (asyncpg.exceptions.UndefinedTableError,
+                    asyncpg.exceptions.UndefinedColumnError):
+                pass  # koi_memory_chunks or expected columns not available
 
         # ------------------------------------------------------------------
         # 2c. Fetch web sources linked to matched entities (B1.3)
@@ -4218,7 +4219,7 @@ async def chat_endpoint(request: ChatRequest):
                     SELECT DISTINCT ON (ws.url)
                         ws.url,
                         ws.title,
-                        ws.summary
+                        ws.description
                     FROM web_submissions ws
                     JOIN document_entity_links del
                         ON del.document_rid = 'web:' || ws.rid::text
@@ -4227,20 +4228,22 @@ async def chat_endpoint(request: ChatRequest):
                     LIMIT 5
                 """, entity_uris)
                 for wr in ws_rows:
+                    desc = wr['description'] or ""
                     web_sources.append({
                         "url": wr['url'],
                         "title": wr['title'] or wr['url'],
-                        "summary": wr['summary'] or "",
+                        "summary": desc,
                     })
                     sources.append({
                         "uri": wr['url'],
                         "label": wr['title'] or wr['url'],
                         "entity_type": "WebSource",
                         "score": 0.8,
-                        "description": (wr['summary'] or "")[:200],
+                        "description": desc[:200],
                     })
-            except asyncpg.exceptions.UndefinedTableError:
-                pass  # web_submissions not available on this node
+            except (asyncpg.exceptions.UndefinedTableError,
+                    asyncpg.exceptions.UndefinedColumnError):
+                pass  # web_submissions or expected columns not available
 
     # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context

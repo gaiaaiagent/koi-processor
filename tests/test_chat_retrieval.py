@@ -162,8 +162,9 @@ class TestWebSourceContext:
         start = src.index("async def chat_endpoint")
         end = src.index("\nif __name__", start)
         chat_fn = src[start:end]
-        # Should have UndefinedTableError catch for web_submissions
+        # Should have UndefinedTableError + UndefinedColumnError catch for both
         assert chat_fn.count("UndefinedTableError") >= 2  # chunks + web
+        assert chat_fn.count("UndefinedColumnError") >= 2  # chunks + web
 
 
 # ---------------------------------------------------------------------------
