@@ -125,6 +125,13 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
     'inspired_by': ('inspired_by', 'outgoing', None),
 }
 
+# Reverse mapping: predicate → first matching field name
+# Used by llm_enricher to validate extracted predicates
+PREDICATE_TO_FIELD: Dict[str, str] = {}
+for _field, (_pred, _dir, _hint) in FIELD_TO_PREDICATE.items():
+    if _pred not in PREDICATE_TO_FIELD:
+        PREDICATE_TO_FIELD[_pred] = _field
+
 # Symmetric predicates: when A knows B, also create B knows A
 SYMMETRIC_PREDICATES = {'knows', 'collaborates_with'}
 
