@@ -495,7 +495,11 @@ def create_router(pool, caps) -> APIRouter:
             today = date.today()
 
             by_status_rows = await conn.fetch(
-                "SELECT status, COUNT(*) AS cnt FROM task_registry GROUP BY status"
+                """
+                SELECT status, COUNT(*) AS cnt FROM task_registry
+                WHERE source_type IS DISTINCT FROM 'test'
+                GROUP BY status
+                """
             )
             by_status = {r["status"]: r["cnt"] for r in by_status_rows}
 
@@ -510,6 +514,7 @@ def create_router(pool, caps) -> APIRouter:
                 SELECT COUNT(*) FROM task_registry
                 WHERE due_date < $1
                   AND status NOT IN ('done', 'cancelled')
+                  AND source_type IS DISTINCT FROM 'test'
                 """,
                 today
             )
@@ -518,6 +523,7 @@ def create_router(pool, caps) -> APIRouter:
                 SELECT COUNT(*) FROM task_registry
                 WHERE due_date = $1
                   AND status NOT IN ('done', 'cancelled')
+                  AND source_type IS DISTINCT FROM 'test'
                 """,
                 today
             )
@@ -526,6 +532,7 @@ def create_router(pool, caps) -> APIRouter:
                 SELECT COUNT(*) FROM task_registry
                 WHERE due_date BETWEEN $1 AND $1 + INTERVAL '7 days'
                   AND status NOT IN ('done', 'cancelled')
+                  AND source_type IS DISTINCT FROM 'test'
                 """,
                 today
             )

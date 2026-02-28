@@ -30,8 +30,8 @@ def make_key(suffix: str) -> str:
     return f"reg-test-{suffix}-{uuid.uuid4().hex[:6]}"
 
 
-def ingest(client, key: str, **kwargs) -> dict:
-    payload = {"taskKey": key, "title": kwargs.pop("title", "Regression test task"), **kwargs}
+def ingest(client, key: str, sourceType: str = "test", **kwargs) -> dict:
+    payload = {"taskKey": key, "title": kwargs.pop("title", "Regression test task"), "sourceType": sourceType, **kwargs}
     r = client.post("/tasks/ingest", json=payload)
     assert r.status_code == 200, f"ingest failed ({r.status_code}): {r.text}"
     return r.json()
@@ -43,7 +43,7 @@ def cleanup(client, key: str):
 
 
 def get_task(client, key: str, status_filter: str = "open,inbox,in-progress,waiting,cancelled") -> dict | None:
-    r = client.get("/tasks/", params={"status": status_filter})
+    r = client.get("/tasks/", params={"status": status_filter, "limit": 1000})
     assert r.status_code == 200, r.text
     return next((t for t in r.json() if t["task_key"] == key), None)
 
@@ -216,3 +216,29 @@ class TestOwnerNameFilter:
         r = client.get("/tasks/", params={"owner": "David Fortson"})
         assert r.status_code == 200, f"?owner=Name returned {r.status_code}: {r.text}"
         assert isinstance(r.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# Regression 4: Stats excludes source_type='test' tasks
+# ---------------------------------------------------------------------------
+
+class TestStatsExcludesTestSourceType:
+    def test_stats_does_not_count_test_source_type(self, client):
+        """Tasks with source_type='test' must not appear in /tasks/stats counts."""
+        key = make_key("stats-exclude")
+        before_waiting = client.get("/tasks/stats").json()["by_status"].get("waiting", 0)
+
+        ingest(client, key, status="waiting")
+        try:
+            # Sanity: task exists in direct query
+            direct = client.get("/tasks/", params={"source_type": "test", "status": "waiting"}).json()
+            assert any(t["task_key"] == key for t in direct), "Test task must exist via direct query"
+
+            # Assertion: stats waiting count must not have increased
+            after_waiting = client.get("/tasks/stats").json()["by_status"].get("waiting", 0)
+            assert after_waiting == before_waiting, (
+                f"stats waiting count grew {before_waiting} → {after_waiting}; "
+                "test task with source_type='test' should be excluded"
+            )
+        finally:
+            cleanup(client, key)
