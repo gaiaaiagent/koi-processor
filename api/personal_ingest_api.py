@@ -4133,27 +4133,114 @@ async def chat_endpoint(request: ChatRequest):
             entity_uris.append(row['fuseki_uri'])
 
         # ------------------------------------------------------------------
-        # 2. Fetch relationships for matched entities (for richer context)
+        # 2. Fetch 2-hop relationships for matched entities (richer context)
         # ------------------------------------------------------------------
         relationships_ctx: List[str] = []
         if entity_uris:
             rel_rows = await conn.fetch("""
-                SELECT
-                    r.subject_uri,
+                WITH RECURSIVE traverse AS (
+                    SELECT
+                        r.subject_uri, r.object_uri, r.predicate,
+                        1 AS depth
+                    FROM entity_relationships r
+                    WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
+                    UNION
+                    SELECT
+                        r2.subject_uri, r2.object_uri, r2.predicate,
+                        t.depth + 1
+                    FROM traverse t
+                    JOIN entity_relationships r2
+                        ON r2.subject_uri IN (t.subject_uri, t.object_uri)
+                        OR r2.object_uri IN (t.subject_uri, t.object_uri)
+                    WHERE t.depth < 2
+                )
+                SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
+                    t.subject_uri,
                     s.entity_text AS subject_label,
-                    r.predicate,
-                    r.object_uri,
-                    o.entity_text AS object_label
-                FROM entity_relationships r
-                LEFT JOIN entity_registry s ON s.fuseki_uri = r.subject_uri
-                LEFT JOIN entity_registry o ON o.fuseki_uri = r.object_uri
-                WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
-                LIMIT 30
+                    t.predicate,
+                    t.object_uri,
+                    o.entity_text AS object_label,
+                    t.depth
+                FROM traverse t
+                LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
+                LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+                ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
+                LIMIT 50
             """, entity_uris)
             for rr in rel_rows:
                 subj = rr['subject_label'] or rr['subject_uri']
                 obj = rr['object_label'] or rr['object_uri']
                 relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+
+        # ------------------------------------------------------------------
+        # 2b. Search document chunks for grounding text (B1.1)
+        # ------------------------------------------------------------------
+        doc_chunks: List[Dict[str, Any]] = []
+        if query_embedding:
+            try:
+                chunk_rows = await conn.fetch("""
+                    SELECT DISTINCT ON (c.document_rid)
+                        c.document_rid,
+                        m.content->>'title' AS title,
+                        LEFT(c.content->>'text', 500) AS chunk_text,
+                        1 - (c.embedding <=> $1::vector) AS similarity
+                    FROM koi_memory_chunks c
+                    JOIN koi_memories m ON m.rid = c.document_rid
+                    WHERE c.embedding IS NOT NULL
+                    ORDER BY c.document_rid, c.embedding <=> $1::vector
+                    LIMIT 5
+                """, embedding_str)
+                for cr in chunk_rows:
+                    if float(cr['similarity']) > 0.3:
+                        doc_chunks.append({
+                            "rid": cr['document_rid'],
+                            "title": cr['title'] or cr['document_rid'],
+                            "text": cr['chunk_text'] or "",
+                            "score": round(float(cr['similarity']), 4),
+                        })
+                        sources.append({
+                            "uri": cr['document_rid'],
+                            "label": cr['title'] or cr['document_rid'],
+                            "entity_type": "Document",
+                            "score": round(float(cr['similarity']), 4),
+                            "description": (cr['chunk_text'] or "")[:200],
+                        })
+            except asyncpg.exceptions.UndefinedTableError:
+                pass  # koi_memory_chunks not available on this node
+
+        # ------------------------------------------------------------------
+        # 2c. Fetch web sources linked to matched entities (B1.3)
+        # ------------------------------------------------------------------
+        web_sources: List[Dict[str, Any]] = []
+        if entity_uris:
+            try:
+                ws_rows = await conn.fetch("""
+                    SELECT DISTINCT ON (ws.url)
+                        ws.url,
+                        ws.title,
+                        ws.summary
+                    FROM web_submissions ws
+                    JOIN document_entity_links del
+                        ON del.document_rid = 'web:' || ws.rid::text
+                    WHERE del.entity_uri = ANY($1)
+                      AND ws.status IN ('ingested', 'monitoring')
+                    LIMIT 5
+                """, entity_uris)
+                for wr in ws_rows:
+                    web_sources.append({
+                        "url": wr['url'],
+                        "title": wr['title'] or wr['url'],
+                        "summary": wr['summary'] or "",
+                    })
+                    sources.append({
+                        "uri": wr['url'],
+                        "label": wr['title'] or wr['url'],
+                        "entity_type": "WebSource",
+                        "score": 0.8,
+                        "description": (wr['summary'] or "")[:200],
+                    })
+            except asyncpg.exceptions.UndefinedTableError:
+                pass  # web_submissions not available on this node
 
     # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context
@@ -4162,22 +4249,38 @@ async def chat_endpoint(request: ChatRequest):
         f"- {s['label']} ({s['entity_type']})"
         + (f": {s['description']}" if s.get('description') else "")
         for s in sources
+        if s['entity_type'] not in ('Document', 'WebSource')
     ) or "(no matching entities found)"
 
     rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
 
+    doc_block = "\n".join(
+        f"- **{d['title']}**: {d['text'][:300]}"
+        for d in doc_chunks
+    ) if doc_chunks else ""
+
+    web_block = "\n".join(
+        f"- [{w['title']}]({w['url']}): {w['summary'][:200]}"
+        for w in web_sources
+    ) if web_sources else ""
+
     system_prompt = (
-        "You are a knowledgeable assistant for a bioregional knowledge commons. "
-        "Answer the user's question using ONLY the entity and relationship context "
-        "provided below. If the context is insufficient, say so honestly. "
-        "Be concise and cite specific entities when possible."
+        "You are a knowledgeable assistant for a bioregional knowledge commons "
+        "focused on ecological stewardship, regenerative practices, and community "
+        "governance in bioregions. Answer the user's question using the entity, "
+        "relationship, document, and web source context provided below. "
+        "Cite specific entities and sources in your answer. "
+        "If the context is insufficient, say so honestly. Be concise."
     )
 
-    user_prompt = (
-        f"## Relevant Entities\n{entity_block}\n\n"
-        f"## Relationships\n{rel_block}\n\n"
-        f"## Question\n{request.query}"
-    )
+    prompt_sections = [f"## Relevant Entities\n{entity_block}"]
+    prompt_sections.append(f"## Relationships\n{rel_block}")
+    if doc_block:
+        prompt_sections.append(f"## Relevant Documents\n{doc_block}")
+    if web_block:
+        prompt_sections.append(f"## Web Sources\n{web_block}")
+    prompt_sections.append(f"## Question\n{request.query}")
+    user_prompt = "\n\n".join(prompt_sections)
 
     # ------------------------------------------------------------------
     # 4. Call LLM
