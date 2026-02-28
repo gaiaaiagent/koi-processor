@@ -1246,6 +1246,14 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"Network router not mounted: {e}")
 
+        # Task router is always mounted (no capability gate — core feature)
+        try:
+            from api.routers.task_router import create_router as create_task_router
+            app.include_router(create_task_router(db_pool, _caps), prefix="/tasks")
+            logger.info("Task router mounted (/tasks)")
+        except Exception as e:
+            logger.warning(f"Task router not mounted: {e}")
+
         # Initialize KOI-net federation (if enabled)
         if KOI_NET_ENABLED:
             try:
@@ -1549,6 +1557,46 @@ async def ensure_schema(conn: asyncpg.Connection):
         """)
     except Exception:
         pass  # May fail if pg_trgm extension not available
+
+    # ==========================================================================
+    # Task Registry (Migration 056)
+    # ==========================================================================
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS task_registry (
+            id SERIAL PRIMARY KEY,
+            task_key TEXT UNIQUE NOT NULL,
+            uuid TEXT,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'inbox'
+                CHECK (status IN ('inbox', 'open', 'in-progress', 'waiting', 'done', 'cancelled')),
+            priority TEXT DEFAULT 'medium',
+            due_date DATE,
+            start_date DATE,
+            wait_until DATE,
+            context TEXT,
+            effort TEXT,
+            owner_uri TEXT,
+            project_uri TEXT,
+            collaborator_uris TEXT[] DEFAULT '{}',
+            blocked_by TEXT[] DEFAULT '{}',
+            source_note TEXT,
+            source_type TEXT DEFAULT 'meeting',
+            vault_path TEXT,
+            tags TEXT[] DEFAULT '{}',
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            completed_at TIMESTAMP,
+            started_at TIMESTAMP,
+            triaged_at TIMESTAMP
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON task_registry(status)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_due_date ON task_registry(due_date)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_owner ON task_registry(owner_uri)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_project ON task_registry(project_uri)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_source_note ON task_registry(source_note)")
 
     logger.info("Schema verified/created (including relationship tables)")
 
