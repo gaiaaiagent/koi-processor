@@ -316,7 +316,7 @@ def main():
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="warning"
     )
 
 
