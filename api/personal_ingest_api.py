@@ -159,6 +159,8 @@ class IngestRequest(BaseModel):
     relationships: List[ExtractedRelationship] = []
     source: str = "obsidian-vault"
     context: Optional[ResolutionContext] = None  # For contextual entity resolution
+    replace_existing: bool = False  # Atomic delete+insert for idempotent reprocessing
+    link_existing_only: bool = False  # Skip Tier 3 entity creation (resolve to existing only)
 
 
 class CanonicalEntity(BaseModel):
@@ -178,6 +180,7 @@ class IngestStats(BaseModel):
     resolved_entities: int
     relationships_processed: int
     failed_entities: int
+    skipped_entities: int = 0  # Entities skipped due to link_existing_only
     errors: Optional[List[Dict[str, str]]] = None
 
 
@@ -187,6 +190,7 @@ class IngestResponse(BaseModel):
     canonical_entities: List[CanonicalEntity]
     receipt_rid: str
     stats: IngestStats
+    skipped_entities: List[str] = []  # Entity names skipped due to link_existing_only
 
 
 class RegisterEntityRequest(BaseModel):
@@ -1242,6 +1246,14 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"Network router not mounted: {e}")
 
+        # Task router is always mounted (no capability gate — core feature)
+        try:
+            from api.routers.task_router import create_router as create_task_router
+            app.include_router(create_task_router(db_pool, _caps), prefix="/tasks")
+            logger.info("Task router mounted (/tasks)")
+        except Exception as e:
+            logger.warning(f"Task router not mounted: {e}")
+
         # Initialize KOI-net federation (if enabled)
         if KOI_NET_ENABLED:
             try:
@@ -1546,6 +1558,46 @@ async def ensure_schema(conn: asyncpg.Connection):
     except Exception:
         pass  # May fail if pg_trgm extension not available
 
+    # ==========================================================================
+    # Task Registry (Migration 056)
+    # ==========================================================================
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS task_registry (
+            id SERIAL PRIMARY KEY,
+            task_key TEXT UNIQUE NOT NULL,
+            uuid TEXT,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'inbox'
+                CHECK (status IN ('inbox', 'open', 'in-progress', 'waiting', 'done', 'cancelled')),
+            priority TEXT DEFAULT 'medium',
+            due_date DATE,
+            start_date DATE,
+            wait_until DATE,
+            context TEXT,
+            effort TEXT,
+            owner_uri TEXT,
+            project_uri TEXT,
+            collaborator_uris TEXT[] DEFAULT '{}',
+            blocked_by TEXT[] DEFAULT '{}',
+            source_note TEXT,
+            source_type TEXT DEFAULT 'meeting',
+            vault_path TEXT,
+            tags TEXT[] DEFAULT '{}',
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            completed_at TIMESTAMP,
+            started_at TIMESTAMP,
+            triaged_at TIMESTAMP
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON task_registry(status)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_due_date ON task_registry(due_date)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_owner ON task_registry(owner_uri)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_project ON task_registry(project_uri)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_source_note ON task_registry(source_note)")
+
     logger.info("Schema verified/created (including relationship tables)")
 
 
@@ -1659,11 +1711,20 @@ async def ingest_extraction(request: IngestRequest):
     canonical_entities: List[CanonicalEntity] = []
     new_count = 0
     resolved_count = 0
+    skipped_count = 0
+    skipped_names: List[str] = []
     failed_entities: List[dict] = []
     entity_uri_map: Dict[str, str] = {}  # normalized_name → canonical URI
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
+            # Atomic replace: delete existing links before inserting new ones
+            if request.replace_existing:
+                await conn.execute(
+                    "DELETE FROM document_entity_links WHERE document_rid = $1",
+                    request.document_rid
+                )
+
             for entity in request.entities:
                 try:
                     logger.info(f"Processing entity: {entity.name} ({entity.type})")
@@ -1684,6 +1745,14 @@ async def ingest_extraction(request: IngestRequest):
 
                     canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
                     logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
+
+                    # link_existing_only: skip Tier 3 (new entity creation)
+                    if is_new and request.link_existing_only:
+                        skipped_count += 1
+                        skipped_names.append(entity.name)
+                        logger.info(f"Skipped unresolved entity: {entity.name} ({entity.type}) — link_existing_only=True")
+                        continue
+
                     canonical_entities.append(canonical)
                     entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
 
@@ -1781,17 +1850,22 @@ async def ingest_extraction(request: IngestRequest):
         resolved_entities=resolved_count,
         relationships_processed=rel_count,
         failed_entities=len(failed_entities),
+        skipped_entities=skipped_count,
         errors=failed_entities if failed_entities else None
     )
     if failed_entities:
         logger.warning(f"Ingest completed with {len(failed_entities)} failures: "
                       f"{[f['name'] for f in failed_entities]}")
+    if skipped_names:
+        logger.info(f"Ingest skipped {skipped_count} unresolved entities (link_existing_only): "
+                   f"{skipped_names}")
 
     return IngestResponse(
         success=success,
         canonical_entities=canonical_entities,
         receipt_rid=receipt_rid,
-        stats=stats
+        stats=stats,
+        skipped_entities=skipped_names
     )
 
 
@@ -2083,8 +2157,11 @@ async def get_entity_mentioned_in(
             doc_rid = row['document_rid']
 
             # Extract vault path from RID
-            # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:
-            if doc_rid.startswith('orn:obsidian.entity:Notes/'):
+            # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:, claude-session:
+            if doc_rid.startswith('claude-session:'):
+                session_id = doc_rid.replace('claude-session:', '')
+                vault_path = f"Claude Session: {session_id[:8]}..."
+            elif doc_rid.startswith('orn:obsidian.entity:Notes/'):
                 vault_path = doc_rid.replace('orn:obsidian.entity:Notes/', '')
             elif doc_rid.startswith('vault:notes/'):
                 vault_path = doc_rid.replace('vault:notes/', '')
@@ -3511,6 +3588,140 @@ async def get_session_files(
             ],
             "count": len(rows),
             "filter": {"path_contains": path_contains}
+        }
+
+
+# =============================================================================
+# Session-Entity Queries
+# =============================================================================
+
+
+@app.get("/search-sessions-by-entity")
+async def search_sessions_by_entity(
+    entity_uri: Optional[str] = None,
+    entity_name: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    limit: int = 10
+):
+    """
+    Find sessions that mention a specific entity.
+
+    Query by URI (exact) or by name (read-only resolution, Tiers 1-2 only).
+    Does NOT create new entities — uses strict matching to avoid false positives.
+
+    Examples:
+        GET /search-sessions-by-entity?entity_name=Darren%20Zal
+        GET /search-sessions-by-entity?entity_uri=orn:personal-koi.entity:person-darren-zal-...
+        GET /search-sessions-by-entity?entity_name=IndigenomicsAI&entity_type=Organization
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    if not entity_uri and not entity_name:
+        raise HTTPException(status_code=400, detail="Provide entity_uri or entity_name")
+
+    async with db_pool.acquire() as conn:
+        resolved_uri = entity_uri
+
+        if not resolved_uri and entity_name:
+            # Read-only resolution: exact + fuzzy only (no Tier 3 creation)
+            normalized = normalize_entity_text(entity_name)
+
+            # Tier 1: Exact match
+            if entity_type:
+                match = await conn.fetchrow("""
+                    SELECT fuseki_uri, entity_text FROM entity_registry
+                    WHERE normalized_text = $1 AND entity_type = $2
+                    LIMIT 1
+                """, normalized, entity_type)
+            else:
+                match = await conn.fetchrow("""
+                    SELECT fuseki_uri, entity_text FROM entity_registry
+                    WHERE normalized_text = $1
+                    LIMIT 1
+                """, normalized)
+
+            if not match:
+                # Tier 1.1: Alias match (uses normalize_alias for wikilink/path stripping)
+                normalized_alias = normalize_alias(entity_name)
+                if entity_type:
+                    match = await conn.fetchrow("""
+                        SELECT fuseki_uri, entity_text FROM entity_registry
+                        WHERE entity_type = $1 AND $2 = ANY(aliases)
+                        LIMIT 1
+                    """, entity_type, normalized_alias)
+                else:
+                    match = await conn.fetchrow("""
+                        SELECT fuseki_uri, entity_text FROM entity_registry
+                        WHERE $1 = ANY(aliases)
+                        LIMIT 1
+                    """, normalized_alias)
+
+            if not match:
+                # Tier 2a: Fuzzy match (Jaro-Winkler, strict threshold)
+                if entity_type:
+                    candidates = await conn.fetch("""
+                        SELECT fuseki_uri, entity_text, normalized_text
+                        FROM entity_registry WHERE entity_type = $1
+                    """, entity_type)
+                else:
+                    candidates = await conn.fetch("""
+                        SELECT fuseki_uri, entity_text, normalized_text
+                        FROM entity_registry
+                    """)
+
+                best_match = None
+                best_score = 0.0
+                for cand in candidates:
+                    score = jaro_winkler_similarity(normalized, cand['normalized_text'])
+                    if score >= 0.92 and score > best_score:
+                        if passes_token_overlap_check(normalized, cand['normalized_text'], entity_type or 'Person'):
+                            best_score = score
+                            best_match = cand
+
+                if best_match:
+                    match = best_match
+
+            if not match:
+                return {
+                    "entity_found": False,
+                    "entity_name": entity_name,
+                    "sessions": [],
+                    "count": 0
+                }
+
+            resolved_uri = match['fuseki_uri']
+
+        # Query sessions linked to this entity
+        rows = await conn.fetch("""
+            SELECT DISTINCT s.session_id, s.summary, s.first_prompt,
+                   s.created_at, s.last_ingested_at,
+                   del.mention_count, del.context
+            FROM document_entity_links del
+            JOIN session_ingestion_log s
+              ON del.document_rid = 'claude-session:' || s.session_id
+            WHERE del.entity_uri = $1
+            ORDER BY s.last_ingested_at DESC
+            LIMIT $2
+        """, resolved_uri, limit)
+
+        return {
+            "entity_found": True,
+            "entity_uri": resolved_uri,
+            "entity_name": entity_name,
+            "sessions": [
+                {
+                    "session_id": r['session_id'],
+                    "summary": r['summary'],
+                    "first_prompt": r['first_prompt'][:200] if r['first_prompt'] else None,
+                    "created_at": r['created_at'].isoformat() if r['created_at'] else None,
+                    "last_ingested_at": r['last_ingested_at'].isoformat() if r['last_ingested_at'] else None,
+                    "mention_count": r['mention_count'] or 1,
+                    "context": r['context']
+                }
+                for r in rows
+            ],
+            "count": len(rows)
         }
 
 

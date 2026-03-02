@@ -479,8 +479,59 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
-**Last Updated**: 2026-02-25
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Phase Sync-1 validated
+## Session-to-Entity Knowledge Graph Pipeline (2026-02-27)
+
+**Status**: ✅ Implemented & verified — E2E tested on live session (2026-02-27)
+
+Connects Claude Code sessions to the entity knowledge graph so entity notes gain `mentionedIn` links to sessions, and sessions are discoverable by entity.
+
+**Architecture**: Session sensor extracts entities via OpenAI `gpt-4o-mini`, calls `/ingest` with `replace_existing=True` + `link_existing_only` flag. Existing 4-tier entity resolution handles deduplication. `document_entity_links` table stores session-entity links using `claude-session:{id}` RIDs.
+
+**Key changes**:
+- `/ingest` endpoint: added `replace_existing` (atomic delete+insert) and `link_existing_only` (skip Tier 3 creation) params, backward-compatible defaults
+- `GET /search-sessions-by-entity`: read-only entity resolution (Tiers 1-2 only, no phantom entity creation)
+- `mentioned-in` endpoint: handles `claude-session:` RID prefix in display
+- Migration `055_session_schema_governance.sql`: brings session tables under migration governance
+
+**Key files**:
+- `api/personal_ingest_api.py` — `/ingest` modifications + new endpoint
+- `migrations/055_session_schema_governance.sql` — session schema governance
+
+**Known limitation**: Secret redaction regex does not handle escaped quotes inside quoted env values (e.g., `KEY='a \'quoted\' thing'`). Accepted as impractical edge case for session transcripts.
+
+**Sensor changes** (in `koi-sensors`):
+- `sensors/claude_sessions/claude_session_sensor.py` — `_redact_for_extraction()`, `_extract_entities()`, `_call_ingest()`
+- `sensors/claude_sessions/config.personal.yaml` — extraction model + chunk limit config
+
+**MCP tool** (in `personal-koi-mcp`):
+- `search_sessions_by_entity` — find sessions mentioning a person/org/project/concept
+
+---
+
+## Task Registry (Migration 056, 2026-02-28)
+
+**Status**: ✅ Implemented, deployed, backfilled (123 tasks)
+
+Dedicated `task_registry` table replacing the fragmented `/register-entity` approach (which caused 127 vault files vs 98 entity mappings vs 71 entity records with incorrect semantic merges).
+
+**New router**: `api/routers/task_router.py` — always-mounted (no capability gate):
+- `POST /tasks/ingest` — upsert by `task_key`; partial payloads preserve existing `status`/`priority` via `CASE WHEN $4 IS NULL THEN existing ELSE $4 END` (COALESCE on EXCLUDED doesn't work — EXCLUDED is never NULL after VALUES applies defaults)
+- `GET /tasks/` — filtered list (status, owner name/URI, project name/URI, dates, source)
+- `PATCH /tasks/{task_key}` — partial update; uses `model_fields_set` to distinguish absent vs explicit-null for date clearing; timestamps use `datetime.now(timezone.utc).replace(tzinfo=None)` (asyncpg rejects tz-aware into TIMESTAMP columns)
+- `GET /tasks/stats` — aggregate counts; doubles as readiness probe
+
+**Writers converged**: `write-tasks.py` → `/tasks/ingest`; `meeting-notes` Step 6.5c → `/tasks/ingest`; `/tasks` skill syncs on `add`/`done`/`update`.
+
+**Readiness probe**: all task writers check `/tasks/stats` (not `/health`) to confirm router is mounted before writing.
+
+**Backfill**: `scripts/task-agent/backfill-tasks-to-backend.py`
+
+**Regression tests**: `tests/test_task_registry.py` — 8 tests covering partial ingest, PATCH date clearing, owner name filter
+
+**Known V2 gap**: `entity_relationships` FK to `entity_registry` prevents writing task→person/project graph edges without ghost entity rows. Deferred.
+
+**Last Updated**: 2026-02-28
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Phase Sync-1 validated + Session-Entity pipeline implemented + Task Registry live
 
 ---
 
@@ -492,3 +543,5 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 | `371b493e` | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
 | `17263f5c` | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
 | current | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers (SHA 5ddd839e). Fixed smoke test tilde-expansion bug. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
+| `2769ff91` | 2026-02-27 | koi-processor, koi-sensors, personal-koi-mcp, darren-workflow | Session-Entity Pipeline: entity extraction from sessions (gpt-4o-mini), idempotent /ingest (replace_existing + link_existing_only), search-sessions-by-entity endpoint + MCP tool, migration 055. 4 rounds code review, all fixes applied. E2E verified on live session (Indigenomics Institute resolved). |
+| current | 2026-02-28 | koi-processor, darren-workflow | Task Registry (migration 056): task_router.py with POST /tasks/ingest, GET /tasks/, PATCH, GET /stats. Converged write-tasks.py + meeting-notes SKILL.md + tasks SKILL.md onto /tasks/ingest. Backfilled 123 vault tasks. 3 code review rounds: fixed tz-aware datetime 500, ingest status regression (CASE WHEN $4 IS NULL), date clearing via model_fields_set. 8 regression tests added. |
