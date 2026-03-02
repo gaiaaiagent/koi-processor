@@ -1247,12 +1247,10 @@ async def startup():
                     logger.warning(f"Network router not mounted: {e}")
 
         # Task router is always mounted (no capability gate — core feature)
-        try:
-            from api.routers.task_router import create_router as create_task_router
-            app.include_router(create_task_router(db_pool, _caps), prefix="/tasks")
-            logger.info("Task router mounted (/tasks)")
-        except Exception as e:
-            logger.warning(f"Task router not mounted: {e}")
+        # fail-fast: startup event raises if import fails
+        from api.routers.task_router import create_router as create_task_router
+        app.include_router(create_task_router(db_pool, _caps), prefix="/tasks")
+        logger.info("Task router mounted (/tasks)")
 
         # Initialize KOI-net federation (if enabled)
         if KOI_NET_ENABLED:
