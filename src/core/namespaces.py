@@ -20,6 +20,10 @@ PROV = Namespace("http://www.w3.org/ns/prov#")
 SCHEMA = Namespace("http://schema.org/")
 DC = Namespace("http://purl.org/dc/elements/1.1/")
 
+# regen-data-standards namespaces (WS3: namespace alignment)
+RFS = Namespace("https://framework.regen.network/schema/")
+RFT = Namespace("https://framework.regen.network/taxonomy/")
+
 # Source-specific namespaces (all HTTPS)
 DISCOURSE = Namespace("https://regen.network/koi/discourse#")
 TWITTER = Namespace("https://regen.network/koi/twitter#")

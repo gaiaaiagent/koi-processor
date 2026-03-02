@@ -131,6 +131,22 @@ class OntologyNormalizerModule(PostProcessingModule):
         'MATERIAL': 'MATERIAL',
         'RESOURCE': 'MATERIAL',
         'SUBSTANCE': 'MATERIAL',
+
+        # ====================================================================
+        # WS3: regen-data-standards type aliases
+        # ====================================================================
+        'AGENT': 'AGENT',
+        'WORK_ORDER': 'WORK_ORDER',
+        'WORKORDER': 'WORK_ORDER',
+        'PROJECTINFO': 'PROJECT',
+        'CREDITPROJECTINFO': 'PROJECT',
+        'CREDITCLASSINFO': 'CREDIT_CLASS',
+        'CARBONCREDITCLASSINFO': 'CREDIT_CLASS',
+        'VOICECOUNCILSESSION': 'EVENT',
+        'COHERENCECHECK': 'PROCESS',
+        'GOVERNANCEDECISION': 'GOVERNANCE_PROPOSAL',
+        'GOVERNANCEPROCESS': 'PROCESS',
+        'GOVERNANCESTAGE': 'PROCESS',
     }
 
     # Default predicate mappings (source -> canonical)
@@ -234,13 +250,31 @@ class OntologyNormalizerModule(PostProcessingModule):
 
         return context
 
+    # Prefixes to strip from entity types (WS3: regen-data-standards alignment)
+    _TYPE_PREFIXES = [
+        'https://framework.regen.network/schema/',
+        'https://framework.regen.network/taxonomy/',
+        'https://regen.network/koi#',
+        'rfs:',
+        'rft:',
+        'koi:',
+        'schema:',
+    ]
+
     def _normalize_type(self, entity_type: str) -> str:
         """Normalize an entity type."""
         if not entity_type:
             return entity_type
 
+        # Strip known namespace prefixes and full URIs (WS3)
+        cleaned = entity_type.strip()
+        for prefix in self._TYPE_PREFIXES:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):]
+                break
+
         # Clean and uppercase for lookup
-        clean_type = entity_type.strip().upper().replace(' ', '_')
+        clean_type = cleaned.upper().replace(' ', '_')
 
         # Check if mapping exists
         if clean_type in self._type_lookup:

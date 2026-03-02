@@ -12,11 +12,13 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Key Features](#key-features)
+- [Phase 1 TerminusDB Integration](#phase-1-terminusdb-integration)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [API Documentation](#api-documentation)
 - [Database Schema](#database-schema)
+- [Personal Sensor Integration](#personal-sensor-integration)
 - [Testing](#testing)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
@@ -24,6 +26,58 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 ## Overview
 
 The KOI Processor is the central processing hub of the Knowledge Organization Infrastructure (KOI) ecosystem. It receives events from distributed sensors, processes content into searchable embeddings, and makes knowledge immediately available to AI agents through semantic search.
+
+## Phase 1 TerminusDB Integration
+
+Phase 1 adds an optional TerminusDB graph mirror behind an outbox pattern:
+
+- PostgreSQL remains authoritative for entity resolution and ingestion.
+- Writes enqueue outbox rows in the same PG transaction.
+- A background worker drains outbox rows to TerminusDB with retries/backoff.
+- API graph endpoints expose conflict inspection and sync health.
+
+Implementation docs and runbook:
+
+- [`scripts/terminusdb/README.md`](scripts/terminusdb/README.md)
+- [`scripts/terminusdb/smoke_phase1.sh`](scripts/terminusdb/smoke_phase1.sh)
+- [`migrations/048_terminusdb_outbox.sql`](migrations/048_terminusdb_outbox.sql)
+
+## Graph Traversal Endpoints (Phase A)
+
+PostgreSQL recursive CTE-based graph traversal for the personal knowledge graph. Enables indirect connection discovery beyond point lookups.
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /relationships/{entity_uri}` | 1-hop relationships (now with `direction` param: `both`/`incoming`/`outgoing`) |
+| `GET /graph/neighborhood/{entity_uri}` | Multi-hop neighborhood traversal (BFS, max depth 4) |
+| `GET /graph/shortest-path?source=...&target=...` | Shortest path between two entities (BFS, max depth 8) |
+
+### Safety Caps
+
+| Cap | Default | Max |
+|-----|---------|-----|
+| `max_depth` (neighborhood) | 2 | 4 |
+| `max_depth` (shortest-path) | 6 | 8 |
+| `max_nodes` | 200 | 500 |
+| `max_edges` | 1000 | 2000 |
+| Query timeout | 5s | — |
+
+### Example Usage
+
+```bash
+# Neighborhood (2-hop)
+curl -s 'localhost:8351/graph/neighborhood/orn:personal-koi.entity:person-darren-zal-42986b9bf8c0?max_depth=2'
+
+# Shortest path
+curl -s 'localhost:8351/graph/shortest-path?source=orn:...&target=orn:...'
+
+# Directed relationships
+curl -s 'localhost:8351/relationships/orn:...?direction=outgoing'
+```
+
+Auth: Restricted to localhost and WireGuard mesh (10.100.0.0/24). Tests: `tests/test_graph_traversal.py` (21 isolated fixture tests), `tests/test_graph_traversal_smoke.py` (12 live-DB smoke tests).
 
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
@@ -742,6 +796,15 @@ Generates semantic embedding for text (currently using BGE model).
 ```
 
 ## Database Schema
+
+## Personal Sensor Integration
+
+For local personal KOI stacks, see [`docs/PERSONAL_SENSOR_INTEGRATION.md`](docs/PERSONAL_SENSOR_INTEGRATION.md).
+
+Key points:
+- Canonical source sensor IDs: `email-sensor`, `claude-sessions-sensor`
+- Required migration for email metadata: `migrations/033_email_sensor_tables.sql`
+- Session endpoints: `/search-sessions`, `/session-stats`, `/session-tools`, `/session-files`
 
 ### Isolated KOI Tables
 

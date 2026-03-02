@@ -48,6 +48,10 @@ ALL_CANONICAL_TYPES: Set[str] = {
     "STANDARD",    # Standards/specifications (ISO, Verra)
     "PROCESS",     # Business/technical processes
     "MATERIAL",    # Physical materials/resources
+
+    # WS3: Agentic governance types (regen-data-standards alignment)
+    "AGENT",       # Autonomous/semi-autonomous software agents
+    "WORK_ORDER",  # Discrete units of work from governance processes
 }
 
 # ============================================================================
@@ -83,6 +87,10 @@ LLM_ALLOWED_TYPES: Set[str] = {
     "STANDARD",
     "PROCESS",
     "MATERIAL",
+
+    # WS3: Agentic governance types
+    "AGENT",
+    "WORK_ORDER",
 }
 
 # ============================================================================
@@ -228,6 +236,20 @@ TYPE_ALIASES_TO_CANONICAL: Dict[str, str] = {
     # MATERIAL aliases
     "RESOURCE": "MATERIAL",
     "SUBSTANCE": "MATERIAL",
+
+    # ========================================================================
+    # WS3: regen-data-standards type aliases
+    # ========================================================================
+    "PROJECTINFO": "PROJECT",
+    "CREDITPROJECTINFO": "PROJECT",
+    "CREDITCLASSINFO": "CREDIT_CLASS",
+    "CARBONCREDITCLASSINFO": "CREDIT_CLASS",
+    "WORKORDER": "WORK_ORDER",
+    "VOICECOUNCILSESSION": "EVENT",
+    "COHERENCECHECK": "PROCESS",
+    "GOVERNANCEDECISION": "GOVERNANCE_PROPOSAL",
+    "GOVERNANCEPROCESS": "PROCESS",
+    "GOVERNANCESTAGE": "PROCESS",
 }
 
 # ============================================================================
@@ -363,6 +385,10 @@ def get_canonical_description(entity_type: str) -> str:
         "STANDARD": "Standards and specifications (ISO, Verra, etc.)",
         "PROCESS": "Business and technical processes",
         "MATERIAL": "Physical materials and resources",
+
+        # WS3: Agentic governance types
+        "AGENT": "Autonomous/semi-autonomous software agents",
+        "WORK_ORDER": "Discrete units of work from governance processes",
     }
     return descriptions.get(entity_type.upper(), "Unknown entity type")
 

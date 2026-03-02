@@ -42,6 +42,7 @@ build/
 # Test files and temporary (except tests/ directory)
 test_*.py
 !tests/test_*.py
+!scripts/terminusdb/test_*.py
 *_test.py
 *_fixed.py
 debug_*.py
@@ -86,3 +87,10 @@ exports/
 .local-backup/
 *.log.*
 *.gz
+config/personal.env
+
+# TerminusDB phase artifacts
+scripts/terminusdb/artifacts/
+
+# Federation invite bundles
+federation-invite-*/

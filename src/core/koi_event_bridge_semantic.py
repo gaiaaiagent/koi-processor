@@ -289,9 +289,12 @@ async def extract_and_chunk_content(
         
     except Exception as e:
         logger.error(f"Error in semantic extraction pipeline: {e}")
-        # Fall back to basic chunking
-        result["chunks"] = chunk_text(text_content, chunk_size=1000, overlap=200)
-    
+        # Mark extraction as failed - let caller decide how to handle
+        # Don't create chunks on failure to prevent orphan issues
+        result["extraction_failed"] = True
+        result["extraction_error"] = str(e)
+        result["chunks"] = []  # Don't create chunks automatically on failure
+
     return result
 
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
@@ -390,12 +393,34 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                     text_content,
                     event.bundle.manifest.metadata or {}
                 )
-                
-                chunks = extraction_result["chunks"]
-                enhanced_metadata = extraction_result["metadata"]
+
+                # Handle extraction failures gracefully
+                if extraction_result.get("extraction_failed"):
+                    logger.warning(
+                        f"LLM extraction failed for {event.bundle.rid}: "
+                        f"{extraction_result.get('extraction_error')}, using basic chunking"
+                    )
+                    chunks = chunk_text(text_content, chunk_size=1000, overlap=200)
+                    enhanced_metadata = extraction_result["metadata"]
+                else:
+                    chunks = extraction_result["chunks"]
+                    enhanced_metadata = extraction_result["metadata"]
+
+                # Validate we have chunks to process
+                if not chunks:
+                    return ProcessingResult(
+                        success=False,
+                        rid=event.bundle.rid,
+                        cid="",
+                        chunks_created=0,
+                        embeddings_created=0,
+                        error="No chunks created - document processing failed"
+                    )
+
                 cat_receipt_rid = extraction_result["cat_receipt_rid"]
                 
-                # Implement three-layer storage architecture
+                # Implement three-layer storage architecture with transaction wrapping
+                # This ensures atomicity: either ALL storage succeeds or NONE does
                 chunks_created = 0
                 embeddings_created = 0
 
@@ -417,16 +442,6 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                 raw_content = json.dumps(event.bundle.contents)  # Store original bundle contents
                 content_type = "json"  # Could be enhanced to detect HTML/text
                 content_rid = f"content:{event.bundle.rid}"
-
-                if USE_ISOLATED_TABLES:
-                    await store_raw_content(
-                        conn,
-                        content_rid,
-                        raw_content,
-                        content_type,
-                        {**original_metadata, **content_metadata},
-                        event
-                    )
 
                 # Layer 2: Store processed document in koi_memories
                 document_rid = event.bundle.rid
@@ -498,66 +513,93 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                         document_metadata["published_confidence"] = date_confidence
                         logger.info(f"Promoted date confidence: {date_confidence}")
 
-                if USE_ISOLATED_TABLES:
-                    await store_processed_document(
-                        conn,
-                        document_rid,
-                        content_rid,
-                        text_content,
-                        document_metadata,
-                        event
-                    )
+                # Collect chunk data for embedding generation (done outside transaction)
+                chunk_embedding_data = []
 
-                # Layer 3: Store chunks in koi_memory_chunks
-                # First, clean up old chunks if this is an UPDATE (prevents orphaned chunks)
-                if event.event_type == "UPDATE" and USE_ISOLATED_TABLES:
-                    # Delete old chunks that won't be replaced
-                    # (e.g., if old content had 10 chunks but new has only 5)
-                    await conn.execute("""
-                        DELETE FROM koi_memory_chunks
-                        WHERE document_rid = $1
-                          AND chunk_index >= $2
-                    """, document_rid, len(chunks))
-                    logger.info(f"Cleaned up old chunks for {document_rid} (keeping {len(chunks)} chunks)")
-
-                for i, chunk in enumerate(chunks):
-                    chunk_rid = f"{event.bundle.rid}:chunk_{i}"
-
-                    # Preserve key metadata in chunks for temporal filtering
-                    chunk_metadata = {
-                        **document_metadata,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks)
-                    }
-
+                # ============================================================
+                # TRANSACTION BLOCK: Ensures atomicity of all storage operations
+                # Either ALL of Layer 1 + Layer 2 + Layer 3 succeed, or NONE do
+                # This prevents orphaned chunks when parent document creation fails
+                # ============================================================
+                async with conn.transaction():
                     if USE_ISOLATED_TABLES:
-                        chunk_id = await store_memory_chunk(
+                        await store_raw_content(
                             conn,
-                            chunk_rid,
-                            document_rid,
                             content_rid,
-                            i,
-                            len(chunks),
-                            chunk,
-                            chunk_metadata
-                        )
-                    else:
-                        # Legacy storage for non-isolated tables
-                        chunk_id = str(uuid.uuid4())
-                        await store_legacy_memory_chunk(
-                            conn,
-                            chunk_id,
-                            event.bundle.rid,
-                            f"chunk_{i}",
-                            chunk,
-                            chunk_metadata,
+                            raw_content,
+                            content_type,
+                            {**original_metadata, **content_metadata},
                             event
                         )
 
-                    chunks_created += 1
+                    if USE_ISOLATED_TABLES:
+                        await store_processed_document(
+                            conn,
+                            document_rid,
+                            content_rid,
+                            text_content,
+                            document_metadata,
+                            event
+                        )
 
-                    # Generate embedding
-                    embedding = await generate_embedding_bge(chunk)
+                    # Layer 3: Store chunks in koi_memory_chunks
+                    # First, clean up old chunks if this is an UPDATE (prevents orphaned chunks)
+                    if event.event_type == "UPDATE" and USE_ISOLATED_TABLES:
+                        # Delete old chunks that won't be replaced
+                        # (e.g., if old content had 10 chunks but new has only 5)
+                        await conn.execute("""
+                            DELETE FROM koi_memory_chunks
+                            WHERE document_rid = $1
+                              AND chunk_index >= $2
+                        """, document_rid, len(chunks))
+                        logger.info(f"Cleaned up old chunks for {document_rid} (keeping {len(chunks)} chunks)")
+
+                    for i, chunk in enumerate(chunks):
+                        chunk_rid = f"{event.bundle.rid}:chunk_{i}"
+
+                        # Preserve key metadata in chunks for temporal filtering
+                        chunk_metadata = {
+                            **document_metadata,
+                            "chunk_index": i,
+                            "total_chunks": len(chunks)
+                        }
+
+                        if USE_ISOLATED_TABLES:
+                            chunk_id = await store_memory_chunk(
+                                conn,
+                                chunk_rid,
+                                document_rid,
+                                content_rid,
+                                i,
+                                len(chunks),
+                                chunk,
+                                chunk_metadata
+                            )
+                        else:
+                            # Legacy storage for non-isolated tables
+                            chunk_id = str(uuid.uuid4())
+                            await store_legacy_memory_chunk(
+                                conn,
+                                chunk_id,
+                                event.bundle.rid,
+                                f"chunk_{i}",
+                                chunk,
+                                chunk_metadata,
+                                event
+                            )
+
+                        chunks_created += 1
+                        # Collect chunk data for embedding generation outside transaction
+                        chunk_embedding_data.append((chunk_rid, chunk_id, chunk, i))
+
+                # ============================================================
+                # EMBEDDING GENERATION: Done OUTSIDE transaction
+                # Embedding generation involves external API calls which:
+                # 1. Can be slow and would block the transaction
+                # 2. Should not cause storage rollback if they fail
+                # ============================================================
+                for chunk_rid, chunk_id, chunk_text, chunk_index in chunk_embedding_data:
+                    embedding = await generate_embedding_bge(chunk_text)
                     if embedding:
                         # Store embedding linked to chunk
                         if USE_ISOLATED_TABLES:
@@ -574,7 +616,7 @@ async def process_koi_event_semantic(event: KOIEvent) -> ProcessingResult:
                         # Create embedding CAT receipt
                         await cat_chain.create_embedding_receipt(
                             parent_rid=cat_receipt_rid,
-                            content_cid=f"{event.bundle.rid}:chunk_{i}:embedding",
+                            content_cid=f"{event.bundle.rid}:chunk_{chunk_index}:embedding",
                             model="bge-m3",
                             dimension=len(embedding)
                         )
@@ -797,7 +839,24 @@ async def store_memory_chunk(
     content: str,
     metadata: Dict[str, Any]
 ) -> str:
-    """Store a memory chunk in koi_memory_chunks table (Layer 3)"""
+    """Store a memory chunk in koi_memory_chunks table (Layer 3)
+
+    Note: This function should be called within a transaction that has already
+    created the parent document. The parent verification guard ensures data
+    integrity even if called outside a transaction context.
+    """
+    # Verify parent document exists before creating chunk (defense-in-depth)
+    # This guard prevents orphaned chunks even if transaction wrapping fails
+    parent_exists = await conn.fetchval(
+        "SELECT 1 FROM koi_memories WHERE rid = $1",
+        document_rid
+    )
+    if not parent_exists:
+        raise ValueError(
+            f"Cannot create chunk: parent document {document_rid} does not exist. "
+            "This indicates a transaction isolation issue or storage order problem."
+        )
+
     chunk_id = str(uuid.uuid4())
 
     # Preserve key metadata fields for temporal filtering

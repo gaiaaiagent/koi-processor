@@ -5,6 +5,63 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2] - 2026-02-25
+
+### Added
+- **KOI-net document sharing API** with rich-share metadata:
+  - `POST /koi-net/share` now supports:
+    - `share_mode`: `root_only` | `root_plus_required` | `context_pack`
+    - `context_depth` (1-4)
+    - `recipient_type`: `peer` | `commons`
+  - Share manifests now store:
+    - `references_summary`
+    - `dependency_graph_summary`
+    - `missing_references`
+    - `recipient_type`
+- **Commons intake workflow endpoints**:
+  - `GET /koi-net/commons/intake`
+  - `POST /koi-net/commons/intake/decide` (localhost + admin token)
+
+### Changed
+- **`/koi-net/shared-with-me` response expanded** to include:
+  - `recipient_type`
+  - `intake_status`
+  - `reviewed_at`, `reviewed_by`, `review_notes`
+  - `context_depth` and dependency summary fields
+- **Inbound share persistence now retains manifest/context metadata** for receiver-side visibility.
+
+### Security
+- Added reusable localhost/admin-token gate helpers for admin-only actions:
+  - `_read_admin_token()`
+  - `_enforce_local_admin()`
+- Edge approval and commons intake decisions both require local admin authorization.
+
+### Migrations
+- Added `047_shared_documents_intake.sql`:
+  - `koi_shared_documents.recipient_type`
+  - `koi_shared_documents.intake_status`
+  - `koi_shared_documents.reviewed_at`
+  - `koi_shared_documents.reviewed_by`
+  - `koi_shared_documents.review_notes`
+
+### Validation
+- Python compile checks pass for `koi_net_router.py` and `koi_poller.py`.
+- Live smoke checks run against local node on port `8351`:
+  - `recipient_type=commons` share request accepted
+  - commons intake listing/approve/reject flow verified
+  - invalid UUID input now returns `INVALID_EVENT_ID` (400) instead of 500
+
+## [3.3.1] - 2026-02-19
+
+### Fixed
+- **extractor_version column too narrow** - Widened `koi_kg_extractions.extractor_version` from varchar(20) to varchar(50) to accommodate model names like `docstring-gpt-4.1-mini`
+
+### Production Run
+- **Docstring extraction deployed** on koi-processor (290 files) and regen-ledger (500 files)
+  - 1,167 batches, 10,508 entities persisted, 235 relationships
+  - Top types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960)
+  - Zero failures, idempotency verified on re-run
+
 ## [3.3.0] - 2026-02-18
 
 ### Added
