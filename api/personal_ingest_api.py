@@ -474,6 +474,13 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     # Get schema-driven config for multi-word token overlap
     schema = get_schema_for_type(entity_type)
     if not schema.require_token_overlap:
+        # Even with token overlap bypassed, guard against first-name inflation for
+        # 2-token full names (First Last): require the last tokens (family names)
+        # to have a minimum JW similarity so "Benjamin Life" ≠ "Benjamin Neal".
+        if len(tokens1) == 2 and len(tokens2) == 2:
+            last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
+            if last_jw < 0.75:
+                return False
         return True  # Schema says bypass multi-word token overlap check
 
     overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
