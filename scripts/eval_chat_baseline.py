@@ -240,7 +240,8 @@ async def compute_graph_version(api_url: str, client: httpx.AsyncClient) -> str:
     try:
         resp = await client.get(f"{api_url}/entity-search?query=a&limit=1", timeout=10)
         entity_data = resp.json()
-        entity_count = len(entity_data) if isinstance(entity_data, list) else 0
+        # /entity-search returns {"results": [...], "count": N}
+        entity_count = entity_data.get("count", 0) if isinstance(entity_data, dict) else 0
     except Exception:
         entity_count = -1
     state_str = f"fallback:{entity_count}"

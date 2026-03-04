@@ -1614,10 +1614,10 @@ async def graph_version_endpoint():
                 (SELECT COUNT(*) FROM entity_registry) AS entity_count,
                 (SELECT COUNT(*) FROM entity_relationships) AS rel_count,
                 (SELECT COALESCE(MAX(updated_at), '1970-01-01'::timestamptz) FROM entity_registry) AS max_entity_updated,
-                (SELECT COALESCE(MAX(created_at), '1970-01-01'::timestamptz) FROM entity_relationships) AS max_rel_created
+                (SELECT COALESCE(GREATEST(MAX(created_at), MAX(updated_at)), '1970-01-01'::timestamptz) FROM entity_relationships) AS max_rel_changed
         """)
         import hashlib as _hl
-        state = f"{row['entity_count']}:{row['rel_count']}:{row['max_entity_updated']}:{row['max_rel_created']}"
+        state = f"{row['entity_count']}:{row['rel_count']}:{row['max_entity_updated']}:{row['max_rel_changed']}"
         version_hash = _hl.sha256(state.encode()).hexdigest()[:16]
         return {
             "graph_version": version_hash,
@@ -4076,7 +4076,7 @@ async def _compute_graph_version_hash(conn) -> str:
             (SELECT COUNT(*) FROM entity_registry) AS ec,
             (SELECT COUNT(*) FROM entity_relationships) AS rc,
             (SELECT MAX(updated_at) FROM entity_registry) AS meu,
-            (SELECT MAX(created_at) FROM entity_relationships) AS mrc
+            (SELECT GREATEST(MAX(created_at), MAX(updated_at)) FROM entity_relationships) AS mrc
     """)
     state = f"{row['ec']}:{row['rc']}:{row['meu']}:{row['mrc']}"
     return _hashlib.sha256(state.encode()).hexdigest()[:16]

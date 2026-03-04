@@ -72,11 +72,11 @@ async def compute_graph_version(conn: asyncpg.Connection) -> str:
             (SELECT COUNT(*) FROM entity_registry) AS entity_count,
             (SELECT COUNT(*) FROM entity_relationships) AS rel_count,
             (SELECT MAX(updated_at) FROM entity_registry) AS max_entity_updated,
-            (SELECT MAX(created_at) FROM entity_relationships) AS max_rel_created
+            (SELECT GREATEST(MAX(created_at), MAX(updated_at)) FROM entity_relationships) AS max_rel_changed
     """)
     state_str = (
         f"{row['entity_count']}:{row['rel_count']}:"
-        f"{row['max_entity_updated']}:{row['max_rel_created']}"
+        f"{row['max_entity_updated']}:{row['max_rel_changed']}"
     )
     return hashlib.sha256(state_str.encode()).hexdigest()[:16]
 
