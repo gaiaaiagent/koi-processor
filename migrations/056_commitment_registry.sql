@@ -2,18 +2,14 @@
 -- Commitment entity registry: individual pledges with lifecycle state machine.
 -- Models Community Asset Vouchers (CAVs) as first-class KOI entities.
 
--- Commitment lifecycle states
-CREATE TYPE IF NOT EXISTS commitment_state AS ENUM (
-    'PROPOSED',        -- Pledge submitted, awaiting steward review
-    'VERIFIED',        -- Steward approved the pledge
-    'ACTIVE',          -- Pool threshold met; commitment is routable
-    'EVIDENCE_LINKED', -- Fulfillment evidence attached
-    'REDEEMED',        -- Commitment fully fulfilled and verified
-    'REJECTED',        -- Steward rejected the pledge
-    'WITHDRAWN',       -- Pledger withdrew the commitment
-    'DISPUTED',        -- Formal dispute raised against this commitment
-    'RESOLVED'         -- Dispute resolved (may end in REDEEMED or REJECTED)
-);
+-- Commitment lifecycle states (idempotent via DO block)
+DO $$ BEGIN
+    CREATE TYPE commitment_state AS ENUM (
+        'PROPOSED', 'VERIFIED', 'ACTIVE', 'EVIDENCE_LINKED', 'REDEEMED',
+        'REJECTED', 'WITHDRAWN', 'DISPUTED', 'RESOLVED'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS commitments (
     id              SERIAL PRIMARY KEY,
