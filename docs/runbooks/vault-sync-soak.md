@@ -125,18 +125,64 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 
 Repeat the same scoped repair + verify sequence on Dobby.
 
-## Shawn Onboarding
+## Shawn Onboarding (Multi-Peer)
 
-Use the tested SHA for Shawn's node. His node gets:
+Requires migration `060_multi_peer_sync.sql` (multi-peer vault sync support).
 
-1. Clone repo, checkout `5ddd839e`
-2. Run migrations: `049_vault_sync.sql` then `050_vault_sync_metrics.sql`
-3. Install deps: `pip install 'watchdog>=4.0.0'` (or full `requirements.txt`)
-4. Set env:
-   ```bash
-   VAULT_SYNC_ENABLED=true
-   VAULT_SYNC_FOLDER=Shared
-   VAULT_SYNC_REPAIR_ENABLED=false  # enable after his own soak
-   ```
-5. Run smoke test (local mode first, then two-peer)
-6. Keep repair disabled until his own 72h soak passes
+### On Shawn's machine
+
+```bash
+# 1. Set up the node (creates DB, runs all migrations through 060, installs deps)
+#    Args: <node-name> <wireguard-ip> [koi-processor-path]
+./scripts/federation/setup-node.sh shawn-personal 10.100.0.X /home/shawn/koi-processor
+
+# 2. Connect to Darren's node (TOFU fingerprint verify, bidirectional handshake)
+./scripts/federation/connect-peers.sh http://<darren-ip>:8351 darren
+```
+
+### On Darren's machine
+
+```bash
+# 3. Connect to Shawn's node (same from other side)
+./scripts/federation/connect-peers.sh http://<shawn-ip>:8351 shawn
+```
+
+### Both sides — configure vault sync
+
+```bash
+# 4. Configure vault sync for the new peer
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"peer": "shawn-personal", "shared_folder": "Shared"}' \
+  localhost:8351/koi-net/vault-sync/configure
+
+# Verify multi-peer status
+curl -s -H "Authorization: Bearer $TOKEN" \
+  localhost:8351/koi-net/vault-sync/status | jq '{peer_count, peers}'
+```
+
+### Smoke test
+
+```bash
+# 5. Create a test file, verify sync within 60s
+echo "# Hello Shawn" > ~/Documents/Notes/Shared/hello-shawn.md
+sleep 65  # wait for scan cycle
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8351/koi-net/vault-sync/status | jq .pending_events
+# Shawn checks: cat ~/Documents/Notes/Shared/hello-shawn.md
+```
+
+### Soak
+
+```bash
+# 6. Soak 72h with auto-repair disabled
+export VAULT_SYNC_AUTO_REPAIR=false
+# Run soak-check.sh every 6-12h as normal
+bash scripts/federation/soak-check.sh
+```
+
+### Multi-peer smoke (optional)
+
+```bash
+# After soak passes, run multi-peer smoke test
+MULTI_PEER=1 SECOND_PEER_NAME=shawn-personal \
+  bash scripts/federation/smoke-vault-sync.sh
+```
