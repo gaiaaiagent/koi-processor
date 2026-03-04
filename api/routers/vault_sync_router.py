@@ -102,6 +102,21 @@ def create_router(pool, caps):
             return JSONResponse(status_code=404, content=result)
         return JSONResponse(content=result)
 
+    @router.delete("/peers/{peer_name}")
+    async def vault_sync_remove_peer(request: Request, peer_name: str):
+        """Disable/remove a vault sync peer."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
+
+        if _vault_sync_manager is None:
+            return _unavailable("Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)")
+
+        result = await _vault_sync_manager.unconfigure(peer_name)
+        if "error" in result:
+            return JSONResponse(status_code=404, content=result)
+        return JSONResponse(content=result)
+
     @router.post("/reconcile")
     async def vault_sync_reconcile(request: Request):
         """Run reconciliation: detect or repair drift between DB and filesystem."""
@@ -135,9 +150,9 @@ def create_router(pool, caps):
                 confirm=body.get("confirm", False),
                 paths=body.get("paths"),
                 max_actions=body.get("max_actions", 50),
+                peer_rid=body.get("peer"),
             )
         except Exception as e:
-            # Handle VaultUnavailableError or any other reconcile failure
             if type(e).__name__ == "VaultUnavailableError":
                 return JSONResponse(status_code=503, content={"error": str(e)})
             raise
