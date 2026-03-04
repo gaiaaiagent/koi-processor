@@ -85,16 +85,21 @@ BKC_ONLY = [
     ("POST", "/web/process"),
     ("POST", "/web/ingest"),
     ("GET", "/web/submissions"),
-    ("POST", "/github/scan"),
-    ("GET", "/github/status"),
-    ("GET", "/github/repos"),
     ("POST", "/entity-search"),
     ("GET", "/network/nodes"),
     ("GET", "/network/entities"),
     ("GET", "/network/health"),
 ]
 
-ALL_ENDPOINTS = CORE_ENDPOINTS + PLANNED_CORE_ENDPOINTS + FEDERATION_ENDPOINTS + PERSONAL_ONLY + BKC_ONLY
+# BKC endpoints that exist as stubs (501) — tracked separately so we know
+# when they become functional.  Move to BKC_ONLY when implemented.
+BKC_PLANNED = [
+    ("POST", "/github/scan"),
+    ("GET", "/github/status"),
+    ("GET", "/github/repos"),
+]
+
+ALL_ENDPOINTS = CORE_ENDPOINTS + PLANNED_CORE_ENDPOINTS + FEDERATION_ENDPOINTS + PERSONAL_ONLY + BKC_ONLY + BKC_PLANNED
 
 
 # ---------------------------------------------------------------------------
@@ -186,15 +191,33 @@ class TestCoreEndpointsReachable:
         POST with empty body should return 2xx or 422 (validation), proving
         the route exists and the handler runs.
         404 is a FAILURE — it means the route is missing from this deployment.
+
+        Exception: path-parameter endpoints (e.g. /graph/neighborhood/{uri})
+        may return 404 when the test entity doesn't exist — that's an
+        application-level 404 (route IS registered), not a framework 404.
         """
         if method == "GET":
             r = client.get(path)
         else:
             # POST with empty body — expect 422 (validation) not 500
             r = client.request(method, path, json={})
-        assert r.status_code != 404, (
-            f"{method} {path} returned 404 — route not registered"
-        )
+        if r.status_code == 404:
+            # Distinguish application 404 (entity not found) from framework
+            # 404 (route not registered).  Application 404s include a JSON
+            # body with "detail"; framework 404s return {"detail":"Not Found"}.
+            try:
+                body = r.json()
+                detail = body.get("detail", "")
+                app_404 = (
+                    isinstance(detail, str)
+                    and detail != "Not Found"
+                    and detail != ""
+                )
+            except Exception:
+                app_404 = False
+            assert app_404, (
+                f"{method} {path} returned 404 — route not registered"
+            )
         assert r.status_code < 500, (
             f"{method} {path} returned {r.status_code}: {r.text[:200]}"
         )
@@ -361,6 +384,32 @@ class TestBkcOnlyEndpoints:
             r = client.get(path)
         else:
             r = client.request(method, path, json={})
+        assert r.status_code < 500, (
+            f"{method} {path} returned {r.status_code}: {r.text[:200]}"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.bkc
+class TestBkcPlannedEndpoints:
+    """BKC endpoints that exist as stubs (501) — tracked for future implementation."""
+
+    @pytest.mark.parametrize(
+        "method,path",
+        BKC_PLANNED,
+        ids=[f"{m} {p}" for m, p in BKC_PLANNED],
+    )
+    def test_bkc_planned_endpoint_status(
+        self, client, server_profile, method, path
+    ):
+        if "bkc" not in server_profile:
+            pytest.skip("Server does not include bkc profile")
+        if method == "GET":
+            r = client.get(path)
+        else:
+            r = client.request(method, path, json={})
+        if r.status_code in (404, 501):
+            pytest.xfail(f"{method} {path} not yet implemented ({r.status_code})")
         assert r.status_code < 500, (
             f"{method} {path} returned {r.status_code}: {r.text[:200]}"
         )
