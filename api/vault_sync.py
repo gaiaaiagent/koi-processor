@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +30,12 @@ DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
 TOMBSTONE_CLEANUP_DAYS = 30
 DEDUP_CLEANUP_DAYS = 90
+EVENT_QUEUE_RETENTION_DAYS = int(os.getenv("EVENT_QUEUE_RETENTION_DAYS", "90"))
+
+# Auto-repair constants
+AUTO_REPAIR_ENABLED = os.getenv("VAULT_SYNC_AUTO_REPAIR", "false").strip().lower() in ("1", "true", "yes", "on")
+AUTO_REPAIR_MAX_DRIFT = int(os.getenv("VAULT_SYNC_AUTO_REPAIR_MAX_DRIFT", "10"))
+AUTO_REPAIR_BACKOFF_LIMIT = 3  # consecutive failures before disabling
 WRITE_DEBOUNCE_MS = 500
 
 # Backpressure constants (WP3)
@@ -78,6 +84,12 @@ class SyncMetrics:
     watcher_events_received: int = 0
     watcher_triggered_scans: int = 0
     watcher_events_coalesced: int = 0
+    # Auto-repair
+    auto_repairs_attempted: int = 0
+    auto_repairs_succeeded: int = 0
+    auto_repairs_failed: int = 0
+    # Event queue cleanup
+    event_queue_cleaned: int = 0
     # Timestamps
     last_scan_started_at: Optional[str] = None
     last_scan_completed_at: Optional[str] = None
@@ -212,6 +224,10 @@ class VaultSyncManager:
         # E2EE
         self._encryption_private_key = encryption_private_key
         self._shared_key_cache: Dict[str, bytes] = {}  # peer_node_rid -> derived key
+        # Auto-repair state
+        self._auto_repair_enabled = AUTO_REPAIR_ENABLED
+        self._auto_repair_consecutive_failures = 0
+        self._last_reconcile_drift: int = 0
 
     # ------------------------------------------------------------------
     # Backward-compat property: _rejected_counts → metrics
@@ -520,6 +536,12 @@ class VaultSyncManager:
                    AND expires_at > NOW()
                    AND array_length(delivered_to, 1) IS NULL""",
             )
+        # Compute next reconcile time
+        next_reconcile_at = None
+        if self._last_reconcile_at:
+            next_dt = self._last_reconcile_at + timedelta(seconds=self.reconcile_interval)
+            next_reconcile_at = next_dt.isoformat()
+
         return {
             "enabled": peer is not None and peer.get("enabled", False),
             "peer": peer["peer_node_rid"] if peer else None,
@@ -531,6 +553,14 @@ class VaultSyncManager:
             "last_reconcile_at": self._last_reconcile_at.isoformat() if self._last_reconcile_at else None,
             "rejected_events": dict(self._rejected_counts),
             "metrics": self._metrics.to_dict(),
+            "reconcile": {
+                "last_run_at": self._last_reconcile_at.isoformat() if self._last_reconcile_at else None,
+                "mode": "auto-repair" if self._auto_repair_enabled else "detect",
+                "drift_count": self._last_reconcile_drift,
+                "next_scheduled_at": next_reconcile_at,
+                "auto_repair_enabled": self._auto_repair_enabled,
+                "auto_repair_consecutive_failures": self._auto_repair_consecutive_failures,
+            },
         }
 
     async def configure(self, peer_name: str, shared_folder: str = "Shared", enabled: bool = True) -> Dict[str, Any]:
@@ -974,6 +1004,7 @@ class VaultSyncManager:
 
         # Periodic cleanup
         await self._cleanup_tombstones()
+        await self._cleanup_event_queue()
 
     # ------------------------------------------------------------------
     # Internal: Apply incoming events
@@ -1148,11 +1179,55 @@ class VaultSyncManager:
     # ------------------------------------------------------------------
 
     async def _reconcile(self):
-        """Send manifest to peer for drift detection."""
+        """Send manifest to peer for drift detection, with optional auto-repair."""
         peer = await self._get_peer_config()
         if not peer or not peer.get("enabled"):
             return
 
+        # --- Local drift detection (DB vs filesystem) ---
+        drift_result = await self.reconcile(mode="detect")
+        drift_count = drift_result.get("total_drift", 0)
+        self._last_reconcile_drift = drift_count
+
+        if drift_count > 0:
+            logger.info("vault_sync.reconcile_drift_detected count=%d", drift_count)
+
+            # Auto-repair if enabled, within threshold, and not backed off
+            if (self._auto_repair_enabled
+                    and drift_count <= AUTO_REPAIR_MAX_DRIFT
+                    and self._auto_repair_consecutive_failures < AUTO_REPAIR_BACKOFF_LIMIT):
+                self._metrics.auto_repairs_attempted += 1
+                logger.info("vault_sync.auto_repair_starting drift=%d", drift_count)
+                try:
+                    repair_result = await self.reconcile(mode="repair", confirm=True)
+                    actions = repair_result.get("actions_taken", 0)
+                    self._metrics.auto_repairs_succeeded += 1
+                    self._auto_repair_consecutive_failures = 0
+                    logger.info("vault_sync.auto_repair_succeeded actions=%d", actions)
+                except Exception as e:
+                    self._metrics.auto_repairs_failed += 1
+                    self._auto_repair_consecutive_failures += 1
+                    logger.error(
+                        "vault_sync.auto_repair_failed error=%s consecutive_failures=%d",
+                        e, self._auto_repair_consecutive_failures,
+                    )
+                    if self._auto_repair_consecutive_failures >= AUTO_REPAIR_BACKOFF_LIMIT:
+                        self._auto_repair_enabled = False
+                        logger.warning(
+                            "vault_sync.auto_repair_disabled_backoff failures=%d",
+                            self._auto_repair_consecutive_failures,
+                        )
+            elif self._auto_repair_enabled and drift_count > AUTO_REPAIR_MAX_DRIFT:
+                logger.warning(
+                    "vault_sync.auto_repair_skipped_threshold drift=%d max=%d",
+                    drift_count, AUTO_REPAIR_MAX_DRIFT,
+                )
+        else:
+            # Reset failure counter on clean reconcile
+            if self._auto_repair_consecutive_failures > 0:
+                self._auto_repair_consecutive_failures = 0
+
+        # --- Send manifest to peer (existing behavior) ---
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT relative_path, content_hash, origin_node, origin_seq
@@ -1345,6 +1420,24 @@ class VaultSyncManager:
             purged = await conn.execute(
                 f"DELETE FROM vault_sync_applied_events WHERE applied_at < NOW() - INTERVAL '{DEDUP_CLEANUP_DAYS} days'"
             )
+
+    async def _cleanup_event_queue(self):
+        """Purge delivered events older than retention period. Never deletes undelivered events."""
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    f"""DELETE FROM koi_net_events
+                        WHERE rid LIKE 'orn:koi-net.vault-file:%'
+                        AND array_length(delivered_to, 1) IS NOT NULL
+                        AND queued_at < NOW() - INTERVAL '{EVENT_QUEUE_RETENTION_DAYS} days'"""
+                )
+                # result is like "DELETE N"
+                count = int(result.split()[-1]) if result else 0
+                if count > 0:
+                    self._metrics.event_queue_cleaned += count
+                    logger.info("vault_sync.event_queue_cleanup removed=%d retention_days=%d", count, EVENT_QUEUE_RETENTION_DAYS)
+        except Exception as e:
+            logger.warning("vault_sync.event_queue_cleanup_failed error=%s", e)
 
     def _reject(self, reason: str, rid: str, source_node: str, event_id: Optional[str], detail: str):
         """Log and count a rejected event."""
