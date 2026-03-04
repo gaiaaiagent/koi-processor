@@ -1235,7 +1235,7 @@ async def startup():
 
             # Commitment pooling router (always on, no capability gate)
             try:
-                from api.routers.commitment_router import create_commitment_router, create_pool_router
+                from api.routers.commitment_router import create_router as create_commitment_router, create_pool_router
                 app.include_router(create_commitment_router(db_pool))
                 app.include_router(create_pool_router(db_pool))
                 logger.info("Commitment routers mounted (/commitments/, /pools/)")
