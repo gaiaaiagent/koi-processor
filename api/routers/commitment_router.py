@@ -417,6 +417,11 @@ def create_pool_router(pool, caps=None):
             )
             if not commitment:
                 raise HTTPException(status_code=404, detail=f"Commitment not found: {body.commitment_rid}")
+            if commitment["state"] not in ("PROPOSED", "VERIFIED"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Commitment is {commitment['state']}; only PROPOSED or VERIFIED can be added to a pool.",
+                )
 
             await conn.execute("""
                 UPDATE commitments SET pool_id = $1, updated_at = NOW()

@@ -1600,6 +1600,32 @@ async def health_check():
         )
 
 
+@app.get("/graph-version")
+async def graph_version_endpoint():
+    """Return a deterministic hash of graph state for eval snapshot pinning.
+
+    Hash = SHA-256(entity_count:rel_count:max_entity_updated:max_rel_created)[:16]
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                (SELECT COUNT(*) FROM entity_registry) AS entity_count,
+                (SELECT COUNT(*) FROM entity_relationships) AS rel_count,
+                (SELECT COALESCE(MAX(updated_at), '1970-01-01'::timestamptz) FROM entity_registry) AS max_entity_updated,
+                (SELECT COALESCE(MAX(created_at), '1970-01-01'::timestamptz) FROM entity_relationships) AS max_rel_created
+        """)
+        import hashlib as _hl
+        state = f"{row['entity_count']}:{row['rel_count']}:{row['max_entity_updated']}:{row['max_rel_created']}"
+        version_hash = _hl.sha256(state.encode()).hexdigest()[:16]
+        return {
+            "graph_version": version_hash,
+            "entity_count": row['entity_count'],
+            "relationship_count": row['rel_count'],
+        }
+
+
 @app.get("/entity-types")
 async def get_entity_types_endpoint():
     """
@@ -4364,18 +4390,28 @@ async def chat_endpoint(request: ChatRequest):
 
     # ── B2 GraphRAG dispatch ──
     _use_graphrag = request.retrieval_mode == "graphrag"
-    _graphrag_sources = None
+    _graphrag_done = False  # True when graphrag produced usable results
 
     if _use_graphrag:
         async with db_pool.acquire() as conn:
             _gr_sources, _gr_rels, _gr_docs, _gr_web = await _graph_guided_retrieval(
                 request.query, query_embedding, conn, top_k=request.max_context_entities
             )
-        _graphrag_sources = (_gr_sources, _gr_rels, _gr_docs, _gr_web)
+        # Only use graphrag results if it actually found sources;
+        # otherwise fall through to B1 so we don't serve empty context.
+        if _gr_sources:
+            sources = _gr_sources
+            relationships_ctx = _gr_rels
+            doc_chunks = _gr_docs
+            web_sources = _gr_web
+            _graphrag_done = True
 
-    sources: List[Dict[str, Any]] = []
+    # ── B1 hybrid retrieval (skipped when graphrag produced results) ──
+    if not _graphrag_done:
+        sources: List[Dict[str, Any]] = []
 
-    async with db_pool.acquire() as conn:
+    if not _graphrag_done:
+      async with db_pool.acquire() as conn:
         if query_embedding:
             embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
             try:
@@ -4564,12 +4600,6 @@ async def chat_endpoint(request: ChatRequest):
             except (asyncpg.exceptions.UndefinedTableError,
                     asyncpg.exceptions.UndefinedColumnError):
                 pass  # web_submissions or expected columns not available
-
-    # ------------------------------------------------------------------
-    # 2d. GraphRAG override: replace B1 retrieval results with B2 results
-    # ------------------------------------------------------------------
-    if _graphrag_sources is not None:
-        sources, relationships_ctx, doc_chunks, web_sources = _graphrag_sources
 
     # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context

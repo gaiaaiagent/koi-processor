@@ -48,9 +48,12 @@ CREATE INDEX IF NOT EXISTS idx_pool_events_rid   ON commitment_pool_events(pool_
 CREATE INDEX IF NOT EXISTS idx_pool_events_type  ON commitment_pool_events(event_type);
 
 -- Add FK from commitments.pool_id → commitment_pools.id (both tables now exist)
-ALTER TABLE commitments
-    ADD CONSTRAINT fk_commitments_pool
-    FOREIGN KEY (pool_id) REFERENCES commitment_pools(id) ON DELETE SET NULL;
+DO $$ BEGIN
+    ALTER TABLE commitments
+        ADD CONSTRAINT fk_commitments_pool
+        FOREIGN KEY (pool_id) REFERENCES commitment_pools(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Register migration
 INSERT INTO koi_migrations (migration_id, checksum)

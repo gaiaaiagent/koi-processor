@@ -223,33 +223,28 @@ Rate the answer's relevance (1-5):"""
 
 
 async def compute_graph_version(api_url: str, client: httpx.AsyncClient) -> str:
-    """Compute a graph_version hash from entity/relationship counts + timestamps.
+    """Get the deterministic graph-state hash from the /graph-version endpoint.
 
-    This is computed by querying the server's DB state via a diagnostic endpoint
-    or by SSH. For portability, we compute it from the /health endpoint stats
-    plus entity count from a known query.
+    The server computes SHA-256(entity_count:rel_count:max_entity_updated:max_rel_created)[:16].
+    This changes whenever entities or relationships are added/modified.
     """
-    # Query entity and relationship counts via chat with a meta-query
-    # Fallback: use a deterministic hash of the entity registry stats
     try:
-        resp = await client.get(f"{api_url}/health", timeout=10)
-        health = resp.json()
+        resp = await client.get(f"{api_url}/graph-version", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["graph_version"]
     except Exception:
-        health = {}
+        pass
 
-    # Get entity count from a broad query (best we can do without direct DB access)
+    # Fallback: hash of entity count from /entity-search (best effort)
     try:
-        resp = await client.get(f"{api_url}/entity-search?q=*&limit=1", timeout=10)
+        resp = await client.get(f"{api_url}/entity-search?query=a&limit=1", timeout=10)
         entity_data = resp.json()
-        entity_count = entity_data.get("total", 0) if isinstance(entity_data, dict) else len(entity_data)
+        entity_count = len(entity_data) if isinstance(entity_data, list) else 0
     except Exception:
         entity_count = -1
-
-    # Build a deterministic state string
-    state_str = f"{entity_count}:{health.get('status', 'unknown')}:{health.get('uptime', 0)}"
-    version_hash = hashlib.sha256(state_str.encode()).hexdigest()[:16]
-
-    return version_hash
+    state_str = f"fallback:{entity_count}"
+    return hashlib.sha256(state_str.encode()).hexdigest()[:16]
 
 
 async def run_query(
@@ -358,7 +353,8 @@ def compute_aggregates(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "total_queries": len(results),
         "successful_queries": len(ok_results),
         "error_queries": len(results) - len(ok_results),
-        "resolution_rate": round(len(resolved) / len(ok_results) * 100, 1) if ok_results else 0,
+        # Denominator is total queries (not just successful) — errors count as unresolved
+        "resolution_rate": round(len(resolved) / len(results) * 100, 1) if results else 0,
         "avg_source_count": round(statistics.mean(source_counts), 2) if source_counts else 0,
         "median_source_count": round(statistics.median(source_counts), 1) if source_counts else 0,
     }
@@ -461,7 +457,7 @@ def compare_baselines(current: Dict[str, Any], baseline_path: str) -> None:
         baseline = json.load(f)
 
     b_agg = baseline["aggregates"]
-    c_agg = current
+    c_agg = current["aggregates"]
 
     print("\n" + "=" * 72)
     print("  BASELINE COMPARISON")
@@ -581,7 +577,7 @@ async def main():
 
     # Compare if requested
     if args.compare:
-        compare_baselines(aggregates, args.compare)
+        compare_baselines(baseline, args.compare)
 
     # Exit code based on gates
     if aggregates["resolution_rate"] < 80 or aggregates.get("latency_p50_s", 999) > 3.0:
