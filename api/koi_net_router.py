@@ -81,6 +81,7 @@ koi_net_router = APIRouter(tags=["koi-net"])
 
 # Module-level state (initialized in setup_koi_net)
 _private_key = None
+_encryption_private_key = None  # X25519 private key for E2EE
 _node_profile: Optional[NodeProfile] = None
 _event_queue: Optional[EventQueue] = None
 _db_pool: Optional[asyncpg.Pool] = None
@@ -189,13 +190,13 @@ def _manifest_sha256_hash(manifest: Dict[str, Any], contents: Optional[Dict[str,
 
 async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
     """Initialize KOI-net subsystem. Called from app startup."""
-    global _private_key, _node_profile, _event_queue, _db_pool, _poller, _vault_sync, _commons_ingest_worker
+    global _private_key, _encryption_private_key, _node_profile, _event_queue, _db_pool, _poller, _vault_sync, _commons_ingest_worker
     _db_pool = pool
 
     node_name = os.getenv("KOI_NODE_NAME", "darren-personal")
     base_url = os.getenv("KOI_BASE_URL")  # e.g. http://127.0.0.1:8351
 
-    _private_key, _node_profile = load_or_create_identity(
+    _private_key, _node_profile, _encryption_private_key = load_or_create_identity(
         node_name=node_name,
         base_url=base_url,
         node_type="FULL",
@@ -231,11 +232,12 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
             node_rid=_node_profile.node_rid,
             event_queue=_event_queue,
             vault_path=vault_path,
+            encryption_private_key=_encryption_private_key,
         )
         _poller.vault_sync = _vault_sync
         await _vault_sync.load_metrics()
         _vault_sync.start_watcher()
-        logger.info(f"Vault sync enabled (vault={vault_path})")
+        logger.info(f"Vault sync enabled (vault={vault_path}, e2ee={'yes' if _encryption_private_key else 'no'})")
 
     policy = _security_policy()
     logger.info(
@@ -691,16 +693,17 @@ async def handshake(request: Request):
         await conn.execute(
             """
             INSERT INTO koi_net_nodes
-                (node_rid, node_name, node_type, base_url, public_key,
+                (node_rid, node_name, node_type, base_url, public_key, encryption_key,
                  provides_event, provides_state, ontology_uri, ontology_version,
                  last_seen, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'active')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), 'active')
             ON CONFLICT (node_rid) DO UPDATE SET
                 node_name = EXCLUDED.node_name,
                 node_type = EXCLUDED.node_type,
                 base_url = EXCLUDED.base_url,
                 provides_event = EXCLUDED.provides_event,
                 provides_state = EXCLUDED.provides_state,
+                encryption_key = COALESCE(EXCLUDED.encryption_key, koi_net_nodes.encryption_key),
                 ontology_uri = COALESCE(EXCLUDED.ontology_uri, koi_net_nodes.ontology_uri),
                 ontology_version = COALESCE(EXCLUDED.ontology_version, koi_net_nodes.ontology_version),
                 last_seen = NOW(),
@@ -711,6 +714,7 @@ async def handshake(request: Request):
             peer.node_type,
             peer.base_url,
             peer.public_key,
+            peer.encryption_key,
             peer.provides.event if peer.provides else [],
             peer.provides.state if peer.provides else [],
             peer.ontology_uri,
@@ -759,9 +763,14 @@ async def handshake(request: Request):
                 peer.node_rid,
             )
 
+    # Invalidate cached E2EE shared key on handshake (key may have rotated)
+    if _vault_sync:
+        _vault_sync.invalidate_shared_key(peer.node_rid)
+
     logger.info(
         f"Handshake with {peer.node_rid} ({peer.node_name}) — "
         f"inbound edge APPROVED, outbound edge PROPOSED, alias '{peer.node_name}'"
+        f"{', e2ee=yes' if peer.encryption_key else ''}"
     )
 
     response = HandshakeResponse(

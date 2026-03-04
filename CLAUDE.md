@@ -145,6 +145,26 @@ Added in Sync-1.5:
 Soak runbook: `docs/runbooks/vault-sync-soak.md`
 Canonical phased roadmap: `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
 
+## KOI-net Vault Sync — E2EE (2026-03-03)
+
+End-to-end encryption for vault sync using X25519 + ChaCha20-Poly1305. Zero new dependencies
+(`cryptography>=42.0.0` already installed). File contents encrypted in event queue, transit, and relay —
+plaintext only on endpoints (Obsidian vault).
+
+Key files:
+- `api/koi_encryption.py` — Core E2EE module (keygen, ECDH, encrypt/decrypt)
+- `api/node_identity.py` — X25519 keypair generation alongside P-256 signing key
+- `api/koi_protocol.py` — `encryption_key` field on `NodeProfile`
+- `api/koi_net_router.py` — Peer encryption key stored on handshake
+- `api/vault_sync.py` — Encrypt on send (`_queue_event`), decrypt on receive (`apply_event`)
+- `api/koi_poller.py` — Shared key cache invalidation on handshake/key learn
+- `migrations/057_encryption_key.sql` — `encryption_key TEXT` column on `koi_net_nodes`
+
+Crypto stack: X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 (AEAD). AAD = event RID (path binding).
+Backward compatible: plaintext fallback when peer lacks encryption key.
+
+Env: No new env vars. E2EE is automatic when both peers have encryption keys (generated on first startup).
+
 ### Code↔Docs Bridge - COMPLETE
 
 | Component | Count |
@@ -491,4 +511,5 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 | `df92b730` | 2026-02-25 | koi-processor | Phase 1 TDB smoke test: fresh import, health/outbox/auth/fail-open/idempotency/reconciliation all pass. Fixed vault_parser.py SAVEPOINT bug. Created smoke_phase1.sh. Updated README + CLAUDE.md. Committed + pushed. |
 | `371b493e` | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
 | `17263f5c` | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
-| current | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers (SHA 5ddd839e). Fixed smoke test tilde-expansion bug. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
+| `5ddd839e` | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
+| current | 2026-03-03 | koi-processor | E2EE for vault sync: X25519 + ChaCha20-Poly1305 encryption, zero new deps. Encrypt on send, decrypt on receive, backward-compatible plaintext fallback. |

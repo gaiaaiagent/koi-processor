@@ -67,6 +67,7 @@ class NodeProfile(BaseModel):
     base_url: Optional[str] = None  # None for PARTIAL nodes
     provides: NodeProvides
     public_key: Optional[str] = None  # DER-encoded, base64
+    encryption_key: Optional[str] = None  # X25519 public key, base64 (E2EE)
     ontology_uri: Optional[str] = None
     ontology_version: Optional[str] = None
 
