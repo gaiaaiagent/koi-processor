@@ -45,6 +45,9 @@ FOLDER_FALLBACKS = {
     'Question': 'Questions',
     'Claim': 'Claims',
     'Evidence': 'Evidence',
+    'Commitment': 'Commitments',
+    'CommitmentPool': 'CommitmentPools',
+    'CommitmentAction': 'CommitmentActions',
     'Task': 'Tasks',
     'Outcome': 'Outcomes',
     'Initiative': 'Initiatives',
@@ -115,14 +118,14 @@ DEFAULT_SCHEMAS = {
         label='Organization',
         folder='Organizations',
         phonetic_matching=False,  # Opt-in, not default
-        similarity_threshold=0.90
+        similarity_threshold=0.85
     ),
     'Project': EntityTypeConfig(
         type_key='Project',
         label='Project',
         folder='Projects',
         phonetic_matching=False,  # Opt-in, not default
-        similarity_threshold=0.90
+        similarity_threshold=0.85
     ),
     'Location': EntityTypeConfig(
         type_key='Location',
@@ -137,9 +140,9 @@ DEFAULT_SCHEMAS = {
         label='Concept',
         folder='Concepts',
         phonetic_matching=False,
-        similarity_threshold=0.88,
+        similarity_threshold=0.75,
         semantic_threshold=0.88,
-        require_token_overlap=True
+        require_token_overlap=False
     ),
     'Meeting': EntityTypeConfig(
         type_key='Meeting',
@@ -228,6 +231,34 @@ DEFAULT_SCHEMAS = {
         phonetic_matching=False,
         similarity_threshold=0.80,
         semantic_threshold=0.90,
+        require_token_overlap=True,
+    ),
+    # ── Commitment pooling entity types ──────────────────────────────────
+    'Commitment': EntityTypeConfig(
+        type_key='Commitment',
+        label='Commitment',
+        folder='Commitments',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'CommitmentPool': EntityTypeConfig(
+        type_key='CommitmentPool',
+        label='Commitment Pool',
+        folder='CommitmentPools',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'CommitmentAction': EntityTypeConfig(
+        type_key='CommitmentAction',
+        label='Commitment Action',
+        folder='CommitmentActions',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
         require_token_overlap=True,
     ),
     'Task': EntityTypeConfig(
