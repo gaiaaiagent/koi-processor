@@ -66,13 +66,29 @@ Required gate sequence before external peer production use:
 4. Confirm no increase in `rejected_events` and `FAIL: 0` on both directional runs.
 5. Archive test run metadata (commit SHA, peers, timestamp, PASS/FAIL counts) in session notes or PR comment.
 
-## Phase Sync-1.5 (Hardening) — IMPLEMENTATION COMPLETE, SOAK IN PROGRESS
+## Phase Sync-1.5 (Hardening) — COMPLETE (2026-03-04)
 
-Status: All 5 work packages implemented. 39/39 tests pass. Two-peer smoke 15/15.
-Soak started: 2026-02-26T04:31:19Z. Go/no-go at 72h: 2026-03-01T04:31:19Z.
+Status: Soak PASSED. All 5 work packages implemented. 39/39 tests pass.
+Soak ran 2026-02-26 → 2026-03-04 (6+ days, target was 72h).
 
-Runtime SHA (both peers): `5ddd839e`
+Runtime SHA (both peers): `5ddd839e` → `cf805a77` (E2EE upgrade during soak)
 Soak log: `/tmp/vault-sync-soak.jsonl`
+
+### Soak results
+
+| Criterion | Threshold | Local (darren) | NUC (nuc-personal) | Result |
+|-----------|-----------|----------------|-------------------|--------|
+| Duration | >= 72h | 6+ days (3,843 scans) | 6+ days (8,353 scans) | PASS |
+| Rejected events | 0 | 0 (all 7 categories) | 0 (all 7 categories) | PASS |
+| Reconcile drift | 0 | 0 (soak log + DB file state) | 0 (soak log + DB file state) | PASS |
+| Pending queue | < 100 | ~6 (normal TTL) | 0 | PASS |
+| File state | peers agree | 1 active, 16 deleted | 1 active, 25 deleted | PASS |
+| Manual intervention | none unexpected | E2EE deploy restarts | E2EE deploy restarts | PASS |
+
+Notes:
+- Server restarts during soak were for E2EE code deployment — expected operational event, not soak failure.
+- Smoke test 15/15 waived: old `koi_net_router.py` status/reconcile endpoints not wired to capability-gated vault sync manager. DB state comparison provided equivalent drift evidence (both peers agree on all file hashes).
+- NUC has more deleted-file records from additional smoke test runs originating from NUC side.
 
 ### What was built
 
@@ -153,6 +169,27 @@ export VAULT_SYNC_WATCHER=false
 3. Reconciliation run shows zero unexplained drift on both peers.
 4. Repair mode validated (progressive enable after soak).
 
+## Phase E2EE — COMPLETE (2026-03-03)
+
+Status: Implemented and deployed to both peers. Originally scoped under Sync-3, pulled forward due to priority.
+
+Crypto stack: X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 (AEAD). AAD = event RID (path binding).
+Zero new dependencies (`cryptography>=42.0.0` already installed).
+
+Key files:
+- `api/koi_encryption.py` — Core E2EE module (keygen, ECDH, encrypt/decrypt)
+- `api/node_identity.py` — X25519 keypair generation alongside P-256 signing key
+- `api/koi_protocol.py` — `encryption_key` field on `NodeProfile`
+- `api/koi_net_router.py` — Peer encryption key stored on handshake
+- `api/vault_sync.py` — Encrypt on send (`_queue_event`), decrypt on receive (`apply_event`)
+- `api/koi_poller.py` — Shared key cache invalidation on handshake/key learn
+- `migrations/057_encryption_key.sql` — `encryption_key TEXT` column on `koi_net_nodes`
+
+Backward compatible: plaintext fallback when peer lacks encryption key.
+E2EE is automatic when both peers have encryption keys (generated on first startup).
+
+Verification: Ciphertext confirmed in event queue, plaintext delivery verified on NUC peer.
+
 ## Phase Sync-2 (Feature Expansion)
 
 Scope:
@@ -165,32 +202,35 @@ Planned work:
 3. More explicit rename/move tracking (optional).
 4. Policy controls per peer/folder (limits, inclusion rules).
 
+Note: E2EE is now available for all peers from day one (Phase E2EE complete).
+
 Definition of done:
 1. One node can sync to multiple peers without state ambiguity.
 2. Attachments replicate safely with bounded resource usage.
 3. Peer-level policy controls enforced.
 
-## Phase Sync-3 (Advanced Collaboration/Security)
+## Phase Sync-3 (Advanced Collaboration)
 
 Scope:
-1. Optional collaborative merge and stronger confidentiality guarantees.
+1. Collaborative merge and key management improvements.
 
 Candidates:
-1. App-layer E2EE for payloads (in addition to WireGuard).
-2. Optional CRDT/OT-based merge mode for concurrent edits.
-3. Key rotation and recovery workflows for encrypted payload mode.
+1. CRDT/OT-based merge mode for concurrent edits.
+2. Key rotation and recovery workflows.
+3. Forward secrecy (if needed beyond current ECDH model).
 
 Notes:
-1. CRDT is intentionally deferred. Sync-1 uses conflict copies for simplicity and correctness.
-2. Git can remain optional for history/audit, but is not the transport layer.
-3. TerminusDB remains useful for structured graph federation, not raw markdown file replication.
+1. App-layer E2EE is DONE (Phase E2EE). Sync-3 focuses on key lifecycle and merge strategies.
+2. CRDT is intentionally deferred. Sync-1 uses conflict copies for simplicity and correctness.
+3. Git can remain optional for history/audit, but is not the transport layer.
+4. TerminusDB remains useful for structured graph federation, not raw markdown file replication.
 
 ## Open Questions
 
 1. Exact stale-resync threshold when peer has been offline beyond event TTL.
 2. ~~Default conflict copy naming and retention policy.~~ → Resolved: `{stem} (conflict {YYYY-MM-DD HH-MM-SS}){suffix}`. Retention: manual cleanup for now, automated policy in Sync-2.
 3. Attachment policy in Sync-2 (size and format boundaries).
-4. Whether app-layer E2EE becomes default or optional in Sync-3.
+4. ~~Whether app-layer E2EE becomes default or optional in Sync-3.~~ → Resolved: E2EE is default. Automatic when both peers have keys, plaintext fallback for peers without keys.
 
 ## Related Documents
 

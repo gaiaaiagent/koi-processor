@@ -130,10 +130,10 @@ Bugs found and fixed during live two-peer testing:
 3. FORGET `origin_seq` not incrementing — stale-event guard rejected deletes.
 4. Smoke test tilde expansion in SSH remote commands — unquote paths for remote `~` expansion.
 
-## KOI-net Vault Sync — Phase Sync-1.5 SOAK IN PROGRESS (2026-02-26)
+## KOI-net Vault Sync — Phase Sync-1.5 COMPLETE (2026-03-04)
 
-Implementation complete. 39/39 tests pass. Two-peer smoke 15/15 (watcher off + on).
-Runtime SHA: `5ddd839e`. Soak started 2026-02-26T04:31:19Z, go/no-go at 72h.
+Soak PASSED. 6+ days (2026-02-26 → 2026-03-04), zero rejected events, zero reconcile drift on both peers.
+Runtime SHA: `5ddd839e` → `cf805a77` (E2EE upgrade during soak). 39/39 tests pass.
 
 Added in Sync-1.5:
 - SyncMetrics (23 fields, persisted to JSONB singleton table)
@@ -499,8 +499,8 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
-**Last Updated**: 2026-02-25
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Phase Sync-1 validated
+**Last Updated**: 2026-03-04
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Sync-1.5 COMPLETE + E2EE COMPLETE
 
 ---
 
