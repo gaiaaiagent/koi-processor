@@ -370,5 +370,57 @@ else
     fail "rejected events increased: ${BASELINE_REJECTED} -> ${FINAL_REJECTED}"
 fi
 
+# ============================================================
+# Step 10 (optional): Multi-peer Smoke
+# ============================================================
+if [[ "${MULTI_PEER:-0}" == "1" ]]; then
+    step "10. Multi-peer Smoke"
+
+    SECOND_PEER="${SECOND_PEER_NAME:-test-second-peer}"
+    SECOND_PEER_FOLDER="${SECOND_PEER_FOLDER:-Shared}"
+
+    # Configure a second peer
+    if MULTI_RESP=$(curl "${CURL_OPTS[@]}" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"peer\": \"${SECOND_PEER}\", \"shared_folder\": \"${SECOND_PEER_FOLDER}\"}" \
+        "${BASE_URL}/koi-net/vault-sync/configure" 2>&1); then
+        pass "second peer '${SECOND_PEER}' configured"
+    else
+        fail "second peer configure failed"
+    fi
+
+    # Verify status shows peer_count >= 2
+    MULTI_STATUS=$(curl "${CURL_OPTS[@]}" "${BASE_URL}/koi-net/vault-sync/status" 2>/dev/null || echo "{}")
+    PEER_COUNT=$(echo "$MULTI_STATUS" | json_get ".get('peer_count', 0)" 2>/dev/null || echo "0")
+    if [[ "$PEER_COUNT" -ge 2 ]]; then
+        pass "peer_count=$PEER_COUNT (>= 2)"
+    else
+        fail "peer_count=$PEER_COUNT (expected >= 2)"
+    fi
+
+    # Create test file and trigger — events should be queued for both peers
+    MULTI_FILE="${SHARED_FOLDER}/_smoke-multi-${RUN_ID}.md"
+    cat > "${VAULT_PATH}/${MULTI_FILE}" <<EOF
+# Multi-peer smoke test
+Run ID: ${RUN_ID}
+EOF
+    curl "${CURL_OPTS[@]}" -X POST "${BASE_URL}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+    sleep 3
+
+    MULTI_TRACKED=$(psql -tAq personal_koi -c "
+        SELECT COUNT(*) FROM vault_sync_state
+        WHERE relative_path = '${MULTI_FILE}' AND is_deleted = FALSE;
+    ")
+    if [[ "$MULTI_TRACKED" -ge 1 ]]; then
+        pass "multi-peer file tracked"
+    else
+        fail "multi-peer file not tracked"
+    fi
+
+    # Clean up second peer + test file
+    rm -f "${VAULT_PATH}/${MULTI_FILE}"
+    curl "${CURL_OPTS[@]}" -X DELETE "${BASE_URL}/koi-net/vault-sync/peers/${SECOND_PEER}" >/dev/null 2>&1 || true
+fi
+
 # Cleanup runs via EXIT trap; exit non-zero if any test failed
 [[ $FAIL -eq 0 ]] || exit 1

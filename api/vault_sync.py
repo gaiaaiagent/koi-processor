@@ -77,6 +77,7 @@ class SyncMetrics:
     rejected_invalid_type: int = 0
     rejected_integrity_mismatch: int = 0
     rejected_stale_event: int = 0
+    rejected_unauthorized_source: int = 0
     # Backpressure (WP3)
     scans_capped: int = 0
     # Watcher (WP4)
@@ -114,6 +115,7 @@ _REJECT_FIELD_MAP = {
     "invalid_type": "rejected_invalid_type",
     "integrity_mismatch": "rejected_integrity_mismatch",
     "stale_event": "rejected_stale_event",
+    "unauthorized_source": "rejected_unauthorized_source",
 }
 
 
@@ -242,6 +244,7 @@ class VaultSyncManager:
             "invalid_type": self._metrics.rejected_invalid_type,
             "integrity_mismatch": self._metrics.rejected_integrity_mismatch,
             "stale_event": self._metrics.rejected_stale_event,
+            "unauthorized_source": self._metrics.rejected_unauthorized_source,
         }
 
     # ------------------------------------------------------------------
@@ -418,13 +421,14 @@ class VaultSyncManager:
             self._reject("invalid_type", rid, source_node, event_id, f"not a .md file: {relative_path}")
             return
 
-        # Get peer config
-        peer = await self._get_peer_config()
+        # Source allowlist — must be a configured vault sync peer
+        peer = await self._get_peer_by_source(source_node)
         if not peer:
-            logger.warning("vault_sync: no peer configured, ignoring event")
+            self._reject("unauthorized_source", rid, source_node, event_id,
+                         f"source {source_node} not a configured vault sync peer")
             return
 
-        # Path traversal check
+        # Path traversal check — use THIS peer's shared_folder
         shared_folder = peer["shared_folder"]
         base_dir = (self.vault_path / shared_folder).resolve()
         target_path = (base_dir / relative_path.split("/", 1)[-1] if "/" in relative_path else base_dir / relative_path).resolve()
@@ -471,14 +475,15 @@ class VaultSyncManager:
                              f"manifest.bytes={manifest_bytes} != actual={actual_bytes}")
                 return
 
-        # Idempotency check
+        # Event-ID dedup / loop detection — check if we already applied this event_id
+        # (from ANY source, not just this one — catches forwarded loops)
         async with self.pool.acquire() as conn:
             already = await conn.fetchval(
-                "SELECT 1 FROM vault_sync_applied_events WHERE source_node=$1 AND event_id=$2::UUID AND rid=$3",
-                source_node, event_id, rid,
+                "SELECT 1 FROM vault_sync_applied_events WHERE event_id=$1::uuid LIMIT 1",
+                event_id,
             )
             if already:
-                logger.debug("vault_sync.apply_skip_dedup event_id=%s", event_id)
+                logger.debug("vault_sync.loop_detected event_id=%s source=%s", event_id, source_node)
                 self._metrics.events_skipped_dedup += 1
                 return
 
@@ -524,9 +529,17 @@ class VaultSyncManager:
         self._metrics.last_apply_at = datetime.now(timezone.utc).isoformat()
         logger.info("vault_sync.apply event_type=%s path=%s source=%s", event_type, relative_path, source_node)
 
+        # Forward to other peers (mesh relay)
+        await self._forward_to_peers(
+            event_id, event_type, rid, manifest,
+            markdown if event_type != "FORGET" else None,
+            source_node,
+        )
+
     async def get_status(self) -> Dict[str, Any]:
         """Return sync dashboard info."""
-        peer = await self._get_peer_config()
+        peers = await self._get_all_peers()
+        first_peer = peers[0] if peers else None
         async with self.pool.acquire() as conn:
             total = await conn.fetchval("SELECT COUNT(*) FROM vault_sync_state WHERE is_deleted=FALSE")
             tombstones = await conn.fetchval("SELECT COUNT(*) FROM vault_sync_state WHERE is_deleted=TRUE")
@@ -543,9 +556,20 @@ class VaultSyncManager:
             next_reconcile_at = next_dt.isoformat()
 
         return {
-            "enabled": peer is not None and peer.get("enabled", False),
-            "peer": peer["peer_node_rid"] if peer else None,
-            "shared_folder": peer["shared_folder"] if peer else None,
+            "enabled": len(peers) > 0,
+            # Backward compat: root-level peer/shared_folder show first enabled peer
+            "peer": first_peer["peer_node_rid"] if first_peer else None,
+            "shared_folder": first_peer["shared_folder"] if first_peer else None,
+            "peer_count": len(peers),
+            "peers": [
+                {
+                    "peer_node_rid": p["peer_node_rid"],
+                    "shared_folder": p["shared_folder"],
+                    "enabled": p.get("enabled", True),
+                    "last_full_sync_at": p["last_full_sync_at"].isoformat() if p.get("last_full_sync_at") else None,
+                }
+                for p in peers
+            ],
             "files_tracked": total or 0,
             "tombstones": tombstones or 0,
             "pending_events": pending or 0,
@@ -583,10 +607,9 @@ class VaultSyncManager:
                     return {"error": f"Peer '{peer_name}' not found"}
 
             await conn.execute(
-                """INSERT INTO vault_sync_peers (id, peer_node_rid, shared_folder, enabled)
-                   VALUES (1, $1, $2, $3)
-                   ON CONFLICT (id) DO UPDATE SET
-                       peer_node_rid = EXCLUDED.peer_node_rid,
+                """INSERT INTO vault_sync_peers (peer_node_rid, shared_folder, enabled)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (peer_node_rid) DO UPDATE SET
                        shared_folder = EXCLUDED.shared_folder,
                        enabled = EXCLUDED.enabled""",
                 node_rid, shared_folder, enabled,
@@ -602,6 +625,33 @@ class VaultSyncManager:
                 "enabled": enabled,
             }
 
+    async def unconfigure(self, peer_name: str) -> Dict[str, Any]:
+        """Disable vault sync for a peer. Resolves peer name to node_rid."""
+        async with self.pool.acquire() as conn:
+            node_rid = await conn.fetchval(
+                "SELECT node_rid FROM koi_net_peer_aliases WHERE LOWER(alias) = LOWER($1)",
+                peer_name,
+            )
+            if not node_rid:
+                node_rid = await conn.fetchval(
+                    "SELECT node_rid FROM koi_net_nodes WHERE LOWER(node_name) = LOWER($1) AND status = 'active'",
+                    peer_name,
+                )
+            if not node_rid:
+                if peer_name.startswith("orn:koi-net.node:"):
+                    node_rid = peer_name
+                else:
+                    return {"error": f"Peer '{peer_name}' not found"}
+
+            result = await conn.execute(
+                "UPDATE vault_sync_peers SET enabled=FALSE WHERE peer_node_rid=$1",
+                node_rid,
+            )
+            count = int(result.split()[-1])
+            if count == 0:
+                return {"error": f"Peer '{peer_name}' not configured for vault sync"}
+            return {"peer_node_rid": node_rid, "enabled": False}
+
     async def trigger_sync(self) -> Dict[str, Any]:
         """Force an immediate sync cycle."""
         self._last_scan_at = None  # Reset timer to force scan
@@ -613,45 +663,62 @@ class VaultSyncManager:
     # ------------------------------------------------------------------
 
     async def reconcile(self, mode: str = "detect", confirm: bool = False,
-                        paths: Optional[List[str]] = None, max_actions: int = 50) -> Dict[str, Any]:
+                        paths: Optional[List[str]] = None, max_actions: int = 50,
+                        peer_rid: Optional[str] = None) -> Dict[str, Any]:
         """Detect or repair drift between DB state and filesystem.
 
         mode="detect": read-only drift report.
         mode="repair": queue events to fix drift (requires confirm=True).
+        peer_rid: optional filter to reconcile for a specific peer only.
         """
-        peer = await self._get_peer_config()
-        if not peer or not peer.get("enabled"):
+        if peer_rid:
+            peer = await self._get_peer_by_source(peer_rid)
+            peers = [peer] if peer else []
+        else:
+            peers = await self._get_all_peers()
+        if not peers:
             return {"error": "vault sync not configured or disabled"}
 
-        shared_folder = peer["shared_folder"]
-        base_dir = self.vault_path / shared_folder
+        # Collect unique shared folders from peers
+        folder_set: set = set()
+        for p in peers:
+            folder_set.add(p["shared_folder"])
 
-        # Vault root safety check
-        if not base_dir.is_dir():
-            raise VaultUnavailableError(f"shared folder not accessible: {base_dir}")
+        # Vault root safety check — all folders must be accessible
+        for folder in folder_set:
+            folder_dir = self.vault_path / folder
+            if not folder_dir.is_dir():
+                raise VaultUnavailableError(f"shared folder not accessible: {folder_dir}")
 
-        # Snapshot DB under brief lock
+        # Snapshot DB under brief lock — scoped to folder prefixes
         async with self._write_lock:
             async with self.pool.acquire() as conn:
-                db_rows = await conn.fetch(
-                    "SELECT relative_path, content_hash FROM vault_sync_state WHERE is_deleted=FALSE"
-                )
+                db_rows = []
+                for folder in folder_set:
+                    rows = await conn.fetch(
+                        "SELECT relative_path, content_hash FROM vault_sync_state "
+                        "WHERE is_deleted=FALSE AND relative_path LIKE $1",
+                        folder + "/%",
+                    )
+                    db_rows.extend(rows)
 
-        # Compare against filesystem (no lock)
+        # Compare against filesystem (no lock) — scan each folder
         db_map = {r["relative_path"]: r["content_hash"] for r in db_rows}
         disk_files: Dict[str, str] = {}
-        for md_file in base_dir.rglob("*.md"):
-            if md_file.is_symlink() or not md_file.is_file():
-                continue
-            try:
-                rel_path = f"{shared_folder}/{md_file.relative_to(base_dir)}"
-            except ValueError:
-                continue
-            try:
-                content = md_file.read_bytes()
-                disk_files[rel_path] = hashlib.sha256(content).hexdigest()
-            except OSError:
-                continue
+        for shared_folder in folder_set:
+            base_dir = self.vault_path / shared_folder
+            for md_file in base_dir.rglob("*.md"):
+                if md_file.is_symlink() or not md_file.is_file():
+                    continue
+                try:
+                    rel_path = f"{shared_folder}/{md_file.relative_to(base_dir)}"
+                except ValueError:
+                    continue
+                try:
+                    content = md_file.read_bytes()
+                    disk_files[rel_path] = hashlib.sha256(content).hexdigest()
+                except OSError:
+                    continue
 
         missing_on_disk = []
         hash_mismatch = []
@@ -689,9 +756,21 @@ class VaultSyncManager:
                 result["repair_requires_confirm"] = True
                 return result
 
-            peer_node_rid = peer["peer_node_rid"]
             actions_taken = 0
             remaining = 0
+
+            # Build folder→peers lookup so repair only queues to matching peers
+            folder_peers: Dict[str, List[Dict[str, Any]]] = {}
+            for p in peers:
+                folder_peers.setdefault(p["shared_folder"], []).append(p)
+
+            def _peers_for_path(rel_path: str) -> List[Dict[str, Any]]:
+                """Return peers whose shared_folder is a prefix of rel_path."""
+                matched = []
+                for folder, plist in folder_peers.items():
+                    if rel_path.startswith(folder + "/"):
+                        matched.extend(plist)
+                return matched
 
             # Repair missing_in_db — queue NEW events for files on disk but not in DB
             for rel_path in missing_in_db:
@@ -705,26 +784,29 @@ class VaultSyncManager:
                     continue
                 content_hash = hashlib.sha256(file_bytes).hexdigest()
                 size = len(file_bytes)
+                new_seq = 1
                 async with self._write_lock:
                     async with self.pool.acquire() as conn:
                         await conn.execute(
                             """INSERT INTO vault_sync_state
-                               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
-                               VALUES ($1, $2, $3, 1, $4, NOW())
+                               (relative_path, content_hash, origin_node, origin_seq, local_edit_seq, file_size_bytes, last_modified_at)
+                               VALUES ($1, $2, $3, $4, $4, $5, NOW())
                                ON CONFLICT (relative_path) DO UPDATE SET
                                    content_hash = EXCLUDED.content_hash,
                                    origin_node = EXCLUDED.origin_node,
-                                   origin_seq = 1,
+                                   origin_seq = EXCLUDED.origin_seq,
+                                   local_edit_seq = EXCLUDED.local_edit_seq,
                                    file_size_bytes = EXCLUDED.file_size_bytes,
                                    is_deleted = FALSE, deleted_at = NULL,
                                    updated_at = NOW()""",
-                            rel_path, content_hash, self.node_rid, size,
+                            rel_path, content_hash, self.node_rid, new_seq, size,
                         )
-                    await self._queue_event(
-                        "NEW", rel_path, content_hash, None, 1,
-                        file_bytes.decode("utf-8", errors="replace"),
-                        size, peer_node_rid,
-                    )
+                    for peer in _peers_for_path(rel_path):
+                        await self._queue_event(
+                            "NEW", rel_path, content_hash, None, new_seq,
+                            file_bytes.decode("utf-8", errors="replace"),
+                            size, peer["peer_node_rid"],
+                        )
                 actions_taken += 1
 
             # Repair hash_mismatch — queue UPDATE events (disk wins)
@@ -743,22 +825,23 @@ class VaultSyncManager:
                 async with self._write_lock:
                     async with self.pool.acquire() as conn:
                         row = await conn.fetchrow(
-                            "SELECT origin_node, origin_seq FROM vault_sync_state WHERE relative_path=$1",
+                            "SELECT origin_node, origin_seq, local_edit_seq FROM vault_sync_state WHERE relative_path=$1",
                             rel_path,
                         )
-                        new_seq = (row["origin_seq"] + 1) if row and row["origin_node"] == self.node_rid else 1
+                        new_seq = (row["local_edit_seq"] + 1) if row else 1
                         await conn.execute(
                             """UPDATE vault_sync_state
-                               SET content_hash=$2, origin_node=$3, origin_seq=$4,
+                               SET content_hash=$2, origin_node=$3, origin_seq=$4, local_edit_seq=$4,
                                    file_size_bytes=$5, updated_at=NOW()
                                WHERE relative_path=$1""",
                             rel_path, content_hash, self.node_rid, new_seq, size,
                         )
-                    await self._queue_event(
-                        "UPDATE", rel_path, content_hash, prev_hash, new_seq,
-                        file_bytes.decode("utf-8", errors="replace"),
-                        size, peer_node_rid,
-                    )
+                    for peer in _peers_for_path(rel_path):
+                        await self._queue_event(
+                            "UPDATE", rel_path, content_hash, prev_hash, new_seq,
+                            file_bytes.decode("utf-8", errors="replace"),
+                            size, peer["peer_node_rid"],
+                        )
                 actions_taken += 1
 
             # Repair missing_on_disk — queue FORGET events
@@ -770,21 +853,22 @@ class VaultSyncManager:
                 async with self._write_lock:
                     async with self.pool.acquire() as conn:
                         row = await conn.fetchrow(
-                            "SELECT origin_seq FROM vault_sync_state WHERE relative_path=$1",
+                            "SELECT origin_seq, local_edit_seq FROM vault_sync_state WHERE relative_path=$1",
                             rel_path,
                         )
-                        new_seq = (row["origin_seq"] + 1) if row else 1
+                        new_seq = (row["local_edit_seq"] + 1) if row else 1
                         await conn.execute(
                             """UPDATE vault_sync_state
                                SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW(),
-                                   origin_seq=$2
+                                   origin_seq=$2, local_edit_seq=$2
                                WHERE relative_path=$1""",
                             rel_path, new_seq,
                         )
-                    await self._queue_event(
-                        "FORGET", rel_path, prev_hash, prev_hash,
-                        new_seq, None, 0, peer_node_rid,
-                    )
+                    for peer in _peers_for_path(rel_path):
+                        await self._queue_event(
+                            "FORGET", rel_path, prev_hash, prev_hash,
+                            new_seq, None, 0, peer["peer_node_rid"],
+                        )
                 actions_taken += 1
 
             result["actions_taken"] = actions_taken
@@ -799,21 +883,29 @@ class VaultSyncManager:
     # ------------------------------------------------------------------
 
     async def _scan_async(self):
-        """Async scan implementation."""
-        peer = await self._get_peer_config()
-        if not peer or not peer.get("enabled"):
+        """Async scan implementation — scans per-peer folders."""
+        peers = await self._get_all_peers()
+        if not peers:
             return
 
-        shared_folder = peer["shared_folder"]
-        peer_node_rid = peer["peer_node_rid"]
+        # Group peers by shared_folder to scan each folder once
+        folder_peers: Dict[str, List[Dict[str, Any]]] = {}
+        for p in peers:
+            folder_peers.setdefault(p["shared_folder"], []).append(p)
+
+        for shared_folder, peer_list in folder_peers.items():
+            await self._scan_folder(shared_folder, peer_list)
+
+    async def _scan_folder(self, shared_folder: str, peer_list: List[Dict[str, Any]]):
+        """Scan a single shared folder and queue events for matching peers."""
         base_dir = self.vault_path / shared_folder
 
         if not base_dir.exists():
             base_dir.mkdir(parents=True, exist_ok=True)
             logger.info("vault_sync.scan_created_folder path=%s", base_dir)
 
-        # Initial sync check
-        is_initial = peer.get("last_full_sync_at") is None
+        # Initial sync check — any peer lacking last_full_sync_at counts
+        is_initial = any(p.get("last_full_sync_at") is None for p in peer_list)
 
         # Phase 1: glob + hash (NO lock) — collect changed files
         changed_files: List[Tuple[str, str, int, float, bytes]] = []  # (rel_path, content_hash, size, mtime, file_bytes)
@@ -908,65 +1000,73 @@ class VaultSyncManager:
 
                     if not row:
                         # New file
+                        new_seq = 1
                         await conn.execute(
                             """INSERT INTO vault_sync_state
-                               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes, last_modified_at)
-                               VALUES ($1, $2, $3, 1, $4, $5)""",
-                            rel_path, content_hash, self.node_rid, size,
+                               (relative_path, content_hash, origin_node, origin_seq, local_edit_seq, file_size_bytes, last_modified_at)
+                               VALUES ($1, $2, $3, $4, $4, $5, $6)""",
+                            rel_path, content_hash, self.node_rid, new_seq, size,
                             datetime.fromtimestamp(mtime, tz=timezone.utc),
                         )
-                        await self._queue_event(
-                            "NEW", rel_path, content_hash, None, 1,
-                            file_bytes.decode("utf-8", errors="replace"),
-                            size, peer_node_rid,
-                        )
+                        for peer in peer_list:
+                            await self._queue_event(
+                                "NEW", rel_path, content_hash, None, new_seq,
+                                file_bytes.decode("utf-8", errors="replace"),
+                                size, peer["peer_node_rid"],
+                            )
                         events_this_cycle += 1
                         self._metrics.events_queued += 1
                         self._metrics.bytes_queued += size
                     elif row["is_deleted"]:
                         # File reappeared after deletion — treat as new
+                        new_seq = row["local_edit_seq"] + 1
                         await conn.execute(
                             """UPDATE vault_sync_state
-                               SET content_hash=$2, origin_node=$3, origin_seq=1,
-                                   file_size_bytes=$4, last_modified_at=$5,
+                               SET content_hash=$2, origin_node=$3, origin_seq=$4, local_edit_seq=$4,
+                                   file_size_bytes=$5, last_modified_at=$6,
                                    is_deleted=FALSE, deleted_at=NULL, updated_at=NOW()
                                WHERE relative_path=$1""",
-                            rel_path, content_hash, self.node_rid, size,
+                            rel_path, content_hash, self.node_rid, new_seq, size,
                             datetime.fromtimestamp(mtime, tz=timezone.utc),
                         )
-                        await self._queue_event(
-                            "NEW", rel_path, content_hash, None, 1,
-                            file_bytes.decode("utf-8", errors="replace"),
-                            size, peer_node_rid,
-                        )
+                        for peer in peer_list:
+                            await self._queue_event(
+                                "NEW", rel_path, content_hash, None, new_seq,
+                                file_bytes.decode("utf-8", errors="replace"),
+                                size, peer["peer_node_rid"],
+                            )
                         events_this_cycle += 1
                         self._metrics.events_queued += 1
                         self._metrics.bytes_queued += size
                     elif row["content_hash"] != content_hash:
                         # Modified file
                         prev_hash = row["content_hash"]
-                        new_seq = (row["origin_seq"] + 1) if row["origin_node"] == self.node_rid else 1
+                        new_seq = row["local_edit_seq"] + 1
                         await conn.execute(
                             """UPDATE vault_sync_state
-                               SET content_hash=$2, origin_node=$3, origin_seq=$4,
+                               SET content_hash=$2, origin_node=$3, origin_seq=$4, local_edit_seq=$4,
                                    file_size_bytes=$5, last_modified_at=$6, updated_at=NOW()
                                WHERE relative_path=$1""",
                             rel_path, content_hash, self.node_rid, new_seq, size,
                             datetime.fromtimestamp(mtime, tz=timezone.utc),
                         )
-                        await self._queue_event(
-                            "UPDATE", rel_path, content_hash, prev_hash, new_seq,
-                            file_bytes.decode("utf-8", errors="replace"),
-                            size, peer_node_rid,
-                        )
+                        for peer in peer_list:
+                            await self._queue_event(
+                                "UPDATE", rel_path, content_hash, prev_hash, new_seq,
+                                file_bytes.decode("utf-8", errors="replace"),
+                                size, peer["peer_node_rid"],
+                            )
                         events_this_cycle += 1
                         self._metrics.events_queued += 1
                         self._metrics.bytes_queued += size
 
             # Deletion loop — uses remaining budget up to MAX_EVENTS_PER_SCAN
+            # Only check files in THIS shared_folder
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT relative_path, content_hash, origin_seq FROM vault_sync_state WHERE is_deleted=FALSE"
+                    "SELECT relative_path, content_hash, origin_seq, local_edit_seq FROM vault_sync_state "
+                    "WHERE is_deleted=FALSE AND relative_path LIKE $1",
+                    shared_folder + "/%",
                 )
                 for row in rows:
                     if row["relative_path"] not in seen_paths:
@@ -975,32 +1075,36 @@ class VaultSyncManager:
                             logger.info("vault_sync.scan_capped reason=event_cap_deletes total=%d", events_this_cycle)
                             break
                         rel_path = row["relative_path"]
+                        new_seq = row["local_edit_seq"] + 1
                         # Remove from stat cache
                         self._stat_cache.pop(rel_path, None)
                         await conn.execute(
                             """UPDATE vault_sync_state
                                SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW(),
-                                   origin_seq=origin_seq+1
+                                   origin_seq=$2, local_edit_seq=$2
                                WHERE relative_path=$1""",
-                            rel_path,
+                            rel_path, new_seq,
                         )
-                        await self._queue_event(
-                            "FORGET", rel_path, row["content_hash"], row["content_hash"],
-                            row["origin_seq"] + 1, None, 0, peer_node_rid,
-                        )
+                        for peer in peer_list:
+                            await self._queue_event(
+                                "FORGET", rel_path, row["content_hash"], row["content_hash"],
+                                new_seq, None, 0, peer["peer_node_rid"],
+                            )
                         events_this_cycle += 1
                         self._metrics.events_queued += 1
 
         self._metrics.files_scanned += files_scanned
-        logger.info("vault_sync.scan_complete files_changed=%d events_queued=%d duration_ms=%d",
-                     files_changed, events_this_cycle, self._metrics.last_scan_duration_ms)
+        logger.info("vault_sync.scan_complete folder=%s files_changed=%d events_queued=%d duration_ms=%d",
+                     shared_folder, files_changed, events_this_cycle, self._metrics.last_scan_duration_ms)
 
-        # Mark initial sync complete
+        # Mark initial sync complete — per peer
         if is_initial:
             async with self.pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE vault_sync_peers SET last_full_sync_at=NOW() WHERE id=1"
-                )
+                for peer in peer_list:
+                    await conn.execute(
+                        "UPDATE vault_sync_peers SET last_full_sync_at=NOW() WHERE peer_node_rid=$1",
+                        peer["peer_node_rid"],
+                    )
 
         # Periodic cleanup
         await self._cleanup_tombstones()
@@ -1179,9 +1283,9 @@ class VaultSyncManager:
     # ------------------------------------------------------------------
 
     async def _reconcile(self):
-        """Send manifest to peer for drift detection, with optional auto-repair."""
-        peer = await self._get_peer_config()
-        if not peer or not peer.get("enabled"):
+        """Send manifest to all peers for drift detection, with optional auto-repair."""
+        peers = await self._get_all_peers()
+        if not peers:
             return
 
         # --- Local drift detection (DB vs filesystem) ---
@@ -1244,25 +1348,27 @@ class VaultSyncManager:
             for r in rows
         ]
 
-        # Queue reconcile event
+        # Queue reconcile event — one per peer
         now = datetime.now(timezone.utc).isoformat()
-        await self.event_queue.add(
-            event_type="UPDATE",
-            # Keep reconcile events under the vault-file RID type so edge rid_types
-            # filters allow delivery without requiring an extra capability type.
-            rid=f"orn:koi-net.vault-file:reconcile/{self.node_rid}",
-            manifest={"type": "reconcile", "timestamp": now, "entry_count": len(manifest_entries)},
-            contents={"_vault_sync": True, "_reconcile": True, "entries": manifest_entries},
-            ttl_hours=24,
-            target_node=peer["peer_node_rid"],
-        )
-        logger.info("vault_sync.reconcile_sent entries=%d", len(manifest_entries))
+        for peer in peers:
+            await self.event_queue.add(
+                event_type="UPDATE",
+                # Keep reconcile events under the vault-file RID type so edge rid_types
+                # filters allow delivery without requiring an extra capability type.
+                rid=f"orn:koi-net.vault-file:reconcile/{self.node_rid}",
+                manifest={"type": "reconcile", "timestamp": now, "entry_count": len(manifest_entries)},
+                contents={"_vault_sync": True, "_reconcile": True, "entries": manifest_entries},
+                ttl_hours=24,
+                target_node=peer["peer_node_rid"],
+            )
+        logger.info("vault_sync.reconcile_sent entries=%d peers=%d", len(manifest_entries), len(peers))
 
     async def apply_reconcile(self, contents: Dict[str, Any], source_node: str):
         """Process a reconcile manifest from a peer."""
         entries = contents.get("entries", [])
-        peer = await self._get_peer_config()
+        peer = await self._get_peer_by_source(source_node)
         if not peer:
+            logger.warning("vault_sync.reconcile_unknown_source source=%s", source_node)
             return
 
         shared_folder = peer["shared_folder"]
@@ -1294,12 +1400,27 @@ class VaultSyncManager:
     # ------------------------------------------------------------------
 
     async def _get_peer_config(self) -> Optional[Dict[str, Any]]:
-        """Get the singleton peer config."""
+        """Get the first enabled peer config (backward compat)."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM vault_sync_peers WHERE id=1")
+            row = await conn.fetchrow(
+                "SELECT * FROM vault_sync_peers WHERE enabled=TRUE ORDER BY peer_node_rid LIMIT 1"
+            )
             if not row:
                 return None
             return dict(row)
+
+    async def _get_all_peers(self) -> List[Dict[str, Any]]:
+        """Get all enabled vault sync peers."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM vault_sync_peers WHERE enabled=TRUE ORDER BY peer_node_rid")
+            return [dict(r) for r in rows]
+
+    async def _get_peer_by_source(self, source_node: str) -> Optional[Dict[str, Any]]:
+        """Get peer config for a specific source node."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM vault_sync_peers WHERE peer_node_rid=$1 AND enabled=TRUE", source_node)
+            return dict(row) if row else None
 
     async def _get_shared_key(self, peer_node_rid: str) -> Optional[bytes]:
         """Get or derive the shared E2EE key for a peer. Returns None if E2EE unavailable."""
@@ -1385,6 +1506,50 @@ class VaultSyncManager:
             ttl_hours=168,  # 7 days
             target_node=peer_node_rid,
         )
+
+    async def _forward_to_peers(
+        self, event_id: str, event_type: str, rid: str,
+        manifest: Dict[str, Any], plaintext_markdown: Optional[str],
+        source_node: str,
+    ):
+        """Forward applied event to all other configured peers. Re-encrypts per target."""
+        peers = await self._get_all_peers()
+        rel_path = manifest.get("relative_path", "")
+
+        for peer in peers:
+            if peer["peer_node_rid"] == source_node:
+                continue  # Don't echo back
+
+            # Check if file is in this peer's shared_folder (exact boundary match)
+            folder = peer["shared_folder"]
+            if rel_path != folder and not rel_path.startswith(folder + "/"):
+                continue
+
+            # Build contents — re-encrypt for this specific target
+            contents: Dict[str, Any] = {"_vault_sync": True, "relative_path": rel_path}
+            shared_key = await self._get_shared_key(peer["peer_node_rid"])
+            if shared_key and plaintext_markdown is not None:
+                try:
+                    from api.koi_encryption import encrypt_content
+                    contents["ciphertext"] = encrypt_content(plaintext_markdown, shared_key, rid)
+                    contents["e2ee_version"] = 1
+                except Exception as e:
+                    logger.warning("vault_sync.forward_encrypt_failed peer=%s error=%s", peer["peer_node_rid"], e)
+                    contents["markdown"] = plaintext_markdown
+            elif plaintext_markdown is not None:
+                contents["markdown"] = plaintext_markdown
+
+            # Queue with SAME event_id for loop detection on remote
+            await self.event_queue.add(
+                event_type=event_type,
+                rid=rid,
+                manifest=manifest,
+                contents=contents,
+                event_id=event_id,
+                ttl_hours=168,
+                target_node=peer["peer_node_rid"],
+            )
+            logger.info("vault_sync.forwarded event_id=%s to=%s", event_id, peer["peer_node_rid"])
 
     async def _atomic_write(self, path: Path, content: str):
         """Write file atomically via tmp + rename."""

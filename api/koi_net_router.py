@@ -2032,6 +2032,25 @@ async def vault_sync_configure(request: Request):
     return JSONResponse(content=result)
 
 
+@koi_net_router.delete("/vault-sync/peers/{peer_name}")
+async def vault_sync_remove_peer(request: Request, peer_name: str):
+    """Disable/remove a vault sync peer."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)"},
+        )
+
+    result = await _vault_sync.unconfigure(peer_name)
+    if "error" in result:
+        return JSONResponse(status_code=404, content=result)
+    return JSONResponse(content=result)
+
+
 @koi_net_router.get("/vault-sync/status")
 async def vault_sync_status(request: Request):
     """Get vault sync dashboard info."""
@@ -2048,7 +2067,7 @@ async def vault_sync_status(request: Request):
 
 @koi_net_router.post("/vault-sync/trigger")
 async def vault_sync_trigger(request: Request):
-    """Force an immediate sync cycle (for testing)."""
+    """Force an immediate sync cycle (for testing). Scans all configured peers."""
     err = _enforce_local_admin(request)
     if err:
         return err
@@ -2106,6 +2125,7 @@ async def vault_sync_reconcile(request: Request):
             confirm=body.get("confirm", False),
             paths=body.get("paths"),
             max_actions=body.get("max_actions", 50),
+            peer_rid=body.get("peer"),
         )
     except VaultUnavailableError as e:
         return JSONResponse(
