@@ -81,9 +81,9 @@ class CodeGraphProcessor:
 
             # Extract file path from manifest metadata
             manifest_metadata = manifest.get("metadata", {})
-            logger.info(f"DEBUG: manifest_metadata keys: {list(manifest_metadata.keys())}")
+            logger.debug(f"DEBUG: manifest_metadata keys: {list(manifest_metadata.keys())}")
             file_path = manifest_metadata.get("file_path", "")
-            logger.info(f"DEBUG: Extracted file_path='{file_path}' from manifest metadata")
+            logger.debug(f"DEBUG: Extracted file_path='{file_path}' from manifest metadata")
 
             # Extract repo from file path (e.g., "regen-network/regen-ledger/x/ecocredit/msg.go")
             repo = self.extract_repo_from_path(file_path)
@@ -144,21 +144,21 @@ class CodeGraphProcessor:
                 file_path = file_info.get("path")
                 content = file_info.get("content")
 
-                logger.info(f"DEBUG: Processing file_path={file_path}, content_length={len(content) if content else 0}")
+                logger.debug(f"DEBUG: Processing file_path={file_path}, content_length={len(content) if content else 0}")
 
                 if not content or not file_path:
-                    logger.info(f"DEBUG: Skipping - no content or path")
+                    logger.debug(f"DEBUG: Skipping - no content or path")
                     continue
 
                 # Check if file is a code file
                 language = self._detect_language(file_path)
-                logger.info(f"DEBUG: Detected language={language} for {file_path}")
+                logger.debug(f"DEBUG: Detected language={language} for {file_path}")
                 if not language:
                     continue
 
                 # Extract entities from file
                 entities = self.extract_entities(content, file_path, repo, language)
-                logger.info(f"DEBUG: Extracted {len(entities) if entities else 0} entities from {file_path}")
+                logger.debug(f"DEBUG: Extracted {len(entities) if entities else 0} entities from {file_path}")
 
                 if not entities:
                     continue
@@ -798,10 +798,10 @@ class CodeGraphProcessor:
 
     def extract_repo_from_path(self, file_path: str) -> str:
         """Extract repository name from file path"""
-        logger.info(f"DEBUG extract_repo: file_path='{file_path}'")
+        logger.debug(f"DEBUG extract_repo: file_path='{file_path}'")
 
         if not file_path:
-            logger.info(f"DEBUG extract_repo: empty path, returning None")
+            logger.debug(f"DEBUG extract_repo: empty path, returning None")
             return None
 
         # Handle paths like:
@@ -810,15 +810,15 @@ class CodeGraphProcessor:
         # - "x/ecocredit/msg.go" → None (no repo info)
 
         parts = file_path.split('/')
-        logger.info(f"DEBUG extract_repo: parts={parts}, enabled_repos={list(self.graph_enabled_repos)}")
+        logger.debug(f"DEBUG extract_repo: parts={parts}, enabled_repos={list(self.graph_enabled_repos)}")
 
         # Check if any part matches our enabled repos
         for part in parts:
             if part in self.graph_enabled_repos:
-                logger.info(f"DEBUG extract_repo: FOUND match '{part}' in enabled repos")
+                logger.debug(f"DEBUG extract_repo: FOUND match '{part}' in enabled repos")
                 return part
 
-        logger.info(f"DEBUG extract_repo: No direct match found")
+        logger.debug(f"DEBUG extract_repo: No direct match found")
 
         # Try to extract from org/repo pattern (first two parts)
         if len(parts) >= 2:
