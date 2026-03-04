@@ -4098,17 +4098,39 @@ async def _graph_guided_retrieval(
 
     embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
 
-    # ── Step 1: Seed entities via semantic search (like B1) ──
-    seed_rows = await conn.fetch("""
-        SELECT
-            er.id, er.fuseki_uri, er.entity_text, er.entity_type, er.metadata,
-            1 - (ee.embedding <=> $1::vector) AS similarity
-        FROM entity_registry er
-        JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
-        WHERE ee.embedding IS NOT NULL
-        ORDER BY ee.embedding <=> $1::vector
-        LIMIT $2
-    """, embedding_str, top_k)
+    # ── Step 1: Seed entities via semantic search (like B1, with fallback) ──
+    try:
+        seed_rows = await conn.fetch("""
+            SELECT
+                er.id, er.fuseki_uri, er.entity_text, er.entity_type, er.metadata,
+                1 - (ee.embedding <=> $1::vector) AS similarity
+            FROM entity_registry er
+            JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
+            WHERE ee.embedding IS NOT NULL
+            ORDER BY ee.embedding <=> $1::vector
+            LIMIT $2
+        """, embedding_str, top_k)
+    except Exception:
+        # Fallback: text search when entity_embeddings table is missing
+        words = [w for w in query.lower().split() if len(w) >= 3]
+        if words:
+            conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+            match_score = " + ".join(
+                f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                for i in range(len(words))
+            )
+            params = [f"%{w}%" for w in words]
+            params.append(top_k)
+            seed_rows = await conn.fetch(f"""
+                SELECT id, fuseki_uri, entity_text, entity_type, metadata,
+                       ({match_score})::float / {len(words)} AS similarity
+                FROM entity_registry
+                WHERE {conditions}
+                ORDER BY ({match_score}) DESC, created_at DESC
+                LIMIT ${len(words)+1}
+            """, *params)
+        else:
+            seed_rows = []
 
     if not seed_rows:
         return sources, relationships_ctx, doc_chunks, web_sources
