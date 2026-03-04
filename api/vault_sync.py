@@ -187,6 +187,7 @@ class VaultSyncManager:
         vault_path: str,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
         reconcile_interval: int = DEFAULT_RECONCILE_INTERVAL,
+        encryption_private_key=None,
     ):
         self.pool = pool
         self.node_rid = node_rid
@@ -208,6 +209,9 @@ class VaultSyncManager:
         # Watcher
         self._change_event = asyncio.Event()
         self._watcher: Optional[VaultWatcher] = None
+        # E2EE
+        self._encryption_private_key = encryption_private_key
+        self._shared_key_cache: Dict[str, bytes] = {}  # peer_node_rid -> derived key
 
     # ------------------------------------------------------------------
     # Backward-compat property: _rejected_counts → metrics
@@ -421,7 +425,25 @@ class VaultSyncManager:
             self._reject("oversize", rid, source_node, event_id, f"manifest.bytes={manifest_bytes}")
             return
 
-        markdown = contents.get("markdown", "")
+        # E2EE: decrypt if ciphertext present
+        if contents.get("ciphertext") and contents.get("e2ee_version") == 1:
+            shared_key = await self._get_shared_key(source_node)
+            if shared_key is None:
+                self._reject("missing_fields", rid, source_node, event_id,
+                             "encrypted event but no shared E2EE key available")
+                return
+            try:
+                from api.koi_encryption import decrypt_content
+                markdown = decrypt_content(contents["ciphertext"], shared_key, rid)
+            except Exception as e:
+                self._reject("integrity_mismatch", rid, source_node, event_id,
+                             f"E2EE decryption failed: {e}")
+                return
+        else:
+            markdown = contents.get("markdown", "")
+            if contents.get("ciphertext"):
+                logger.warning("vault_sync.e2ee_unknown_version version=%s", contents.get("e2ee_version"))
+
         if not manifest.get("deleted", False):
             actual_bytes = len(markdown.encode("utf-8"))
             if actual_bytes > MAX_VAULT_FILE_BYTES:
@@ -1204,6 +1226,41 @@ class VaultSyncManager:
                 return None
             return dict(row)
 
+    async def _get_shared_key(self, peer_node_rid: str) -> Optional[bytes]:
+        """Get or derive the shared E2EE key for a peer. Returns None if E2EE unavailable."""
+        if not self._encryption_private_key:
+            return None
+
+        cached = self._shared_key_cache.get(peer_node_rid)
+        if cached is not None:
+            return cached
+
+        # Look up peer's encryption public key from DB
+        async with self.pool.acquire() as conn:
+            enc_key_b64 = await conn.fetchval(
+                "SELECT encryption_key FROM koi_net_nodes WHERE node_rid = $1",
+                peer_node_rid,
+            )
+        if not enc_key_b64:
+            return None
+
+        try:
+            from api.koi_encryption import load_public_key_from_b64, derive_shared_key
+            peer_public = load_public_key_from_b64(enc_key_b64)
+            shared = derive_shared_key(
+                self._encryption_private_key, peer_public,
+                self.node_rid, peer_node_rid,
+            )
+            self._shared_key_cache[peer_node_rid] = shared
+            return shared
+        except Exception as e:
+            logger.warning("vault_sync.e2ee_key_derivation_failed peer=%s error=%s", peer_node_rid, e)
+            return None
+
+    def invalidate_shared_key(self, peer_node_rid: str) -> None:
+        """Invalidate cached shared key (call on handshake / key rotation)."""
+        self._shared_key_cache.pop(peer_node_rid, None)
+
     async def _queue_event(
         self, event_type: str, relative_path: str,
         content_hash: str, base_hash: Optional[str],
@@ -1218,8 +1275,21 @@ class VaultSyncManager:
             "relative_path": relative_path,
             "_vault_sync": True,
         }
-        if markdown is not None:
+
+        # E2EE: encrypt markdown if shared key available
+        shared_key = await self._get_shared_key(peer_node_rid) if markdown is not None else None
+        if shared_key is not None and markdown is not None:
+            try:
+                from api.koi_encryption import encrypt_content
+                contents["ciphertext"] = encrypt_content(markdown, shared_key, rid)
+                contents["e2ee_version"] = 1
+            except Exception as e:
+                logger.warning("vault_sync.e2ee_encrypt_failed path=%s error=%s, falling back to plaintext", relative_path, e)
+                contents["markdown"] = markdown
+        elif markdown is not None:
             contents["markdown"] = markdown
+            if self._encryption_private_key:
+                logger.debug("vault_sync.e2ee_unavailable peer=%s (no peer encryption key)", peer_node_rid)
 
         manifest = {
             "relative_path": relative_path,

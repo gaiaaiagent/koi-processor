@@ -436,6 +436,7 @@ class KOIPoller:
         node_type = node.get("node_type") or "FULL"
         ontology_uri = node.get("ontology_uri")
         ontology_version = node.get("ontology_version")
+        encryption_key = node.get("encryption_key")
         async with self.pool.acquire() as conn:
             # Key pinning: check for mismatch before upsert
             existing_key = await conn.fetchval(
@@ -455,12 +456,13 @@ class KOIPoller:
                 """
                 INSERT INTO koi_net_nodes
                     (node_rid, node_name, node_type, base_url, public_key,
-                     ontology_uri, ontology_version, status, last_seen)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW())
+                     encryption_key, ontology_uri, ontology_version, status, last_seen)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', NOW())
                 ON CONFLICT (node_rid) DO UPDATE SET
                     node_name = EXCLUDED.node_name,
                     node_type = EXCLUDED.node_type,
                     base_url = EXCLUDED.base_url,
+                    encryption_key = COALESCE(EXCLUDED.encryption_key, koi_net_nodes.encryption_key),
                     ontology_uri = COALESCE(EXCLUDED.ontology_uri, koi_net_nodes.ontology_uri),
                     ontology_version = COALESCE(EXCLUDED.ontology_version, koi_net_nodes.ontology_version),
                     status = 'active',
@@ -471,9 +473,14 @@ class KOIPoller:
                 node_type,
                 base_url,
                 public_key,
+                encryption_key,
                 ontology_uri,
                 ontology_version,
             )
+
+        # Invalidate cached E2EE shared key if encryption key changed
+        if encryption_key and self.vault_sync:
+            self.vault_sync.invalidate_shared_key(source_node)
 
         logger.info(f"Learned public key for {source_node} from {base_url}/koi-net/health")
         return public_key
@@ -497,6 +504,9 @@ class KOIPoller:
 
         if resp.status_code == 200:
             logger.info(f"Handshake accepted by {source_node}; peer should now have our public key")
+            # Invalidate cached E2EE shared key (peer may have new encryption key)
+            if self.vault_sync:
+                self.vault_sync.invalidate_shared_key(source_node)
             return True
 
         logger.warning(
