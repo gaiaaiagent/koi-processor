@@ -4040,10 +4040,281 @@ async def graph_shortest_path(
 CHAT_LLM_MODEL = os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini')
 
 
+# ── B2 GraphRAG: graph-guided retrieval ──────────────────────────────
+
+async def _compute_graph_version_hash(conn) -> str:
+    """Compute deterministic graph state hash for cache invalidation."""
+    import hashlib as _hashlib
+    row = await conn.fetchrow("""
+        SELECT
+            (SELECT COUNT(*) FROM entity_registry) AS ec,
+            (SELECT COUNT(*) FROM entity_relationships) AS rc,
+            (SELECT MAX(updated_at) FROM entity_registry) AS meu,
+            (SELECT MAX(created_at) FROM entity_relationships) AS mrc
+    """)
+    state = f"{row['ec']}:{row['rc']}:{row['meu']}:{row['mrc']}"
+    return _hashlib.sha256(state.encode()).hexdigest()[:16]
+
+
+async def _ensure_graph_metrics(conn) -> bool:
+    """Ensure entity_graph_metrics is populated and fresh. Returns True if available."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT graph_version, COUNT(*) as cnt FROM entity_graph_metrics GROUP BY graph_version LIMIT 1"
+        )
+        if not row or row['cnt'] == 0:
+            return False
+        current_version = await _compute_graph_version_hash(conn)
+        return row['graph_version'] == current_version
+    except Exception:
+        return False
+
+
+async def _graph_guided_retrieval(
+    query: str,
+    query_embedding: list,
+    conn,
+    top_k: int = 10,
+) -> tuple:
+    """B2 GraphRAG: community-aware, centrality-weighted retrieval.
+
+    Returns (sources, relationships_ctx, doc_chunks, web_sources) matching
+    the B1 interface so the LLM prompt builder works unchanged.
+
+    Strategy:
+    1. Semantic search for seed entities (same as B1)
+    2. Look up community_l1 + betweenness for each seed from entity_graph_metrics
+    3. Expand: entities in same L1 community, sorted by betweenness DESC
+    4. Follow edges from seeds via entity_relationships (predicate-aware)
+    5. Rank: semantic_score * 0.4 + centrality * 0.3 + community_overlap * 0.3
+    """
+    sources = []
+    relationships_ctx = []
+    doc_chunks = []
+    web_sources = []
+
+    if not query_embedding:
+        return sources, relationships_ctx, doc_chunks, web_sources
+
+    embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+
+    # ── Step 1: Seed entities via semantic search (like B1) ──
+    seed_rows = await conn.fetch("""
+        SELECT
+            er.id, er.fuseki_uri, er.entity_text, er.entity_type, er.metadata,
+            1 - (ee.embedding <=> $1::vector) AS similarity
+        FROM entity_registry er
+        JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
+        WHERE ee.embedding IS NOT NULL
+        ORDER BY ee.embedding <=> $1::vector
+        LIMIT $2
+    """, embedding_str, top_k)
+
+    if not seed_rows:
+        return sources, relationships_ctx, doc_chunks, web_sources
+
+    seed_ids = [r['id'] for r in seed_rows]
+    seed_uris = [r['fuseki_uri'] for r in seed_rows]
+    seed_scores = {r['id']: float(r['similarity']) for r in seed_rows}
+
+    # ── Step 2: Get community + centrality for seeds ──
+    metrics_available = await _ensure_graph_metrics(conn)
+    seed_communities = {}
+    seed_betweenness = {}
+
+    if metrics_available:
+        metric_rows = await conn.fetch("""
+            SELECT entity_id, community_l1, betweenness
+            FROM entity_graph_metrics
+            WHERE entity_id = ANY($1)
+        """, seed_ids)
+        for mr in metric_rows:
+            seed_communities[mr['entity_id']] = mr['community_l1']
+            seed_betweenness[mr['entity_id']] = mr['betweenness']
+
+    # Determine dominant communities from seeds
+    comm_counts = {}
+    for eid in seed_ids:
+        c = seed_communities.get(eid, -1)
+        if c >= 0:
+            comm_counts[c] = comm_counts.get(c, 0) + 1
+    dominant_communities = sorted(comm_counts, key=comm_counts.get, reverse=True)[:3]
+
+    # ── Step 3: Expand via community — get high-centrality entities in same communities ──
+    expanded_entities = {}  # id -> {uri, label, type, score, description}
+
+    if metrics_available and dominant_communities:
+        community_rows = await conn.fetch("""
+            SELECT
+                er.id, er.fuseki_uri, er.entity_text, er.entity_type, er.metadata,
+                egm.community_l1, egm.betweenness
+            FROM entity_graph_metrics egm
+            JOIN entity_registry er ON er.id = egm.entity_id
+            WHERE egm.community_l1 = ANY($1)
+            ORDER BY egm.betweenness DESC
+            LIMIT $2
+        """, dominant_communities, top_k * 2)
+
+        for cr in community_rows:
+            eid = cr['id']
+            if eid not in expanded_entities:
+                expanded_entities[eid] = {
+                    'id': eid,
+                    'uri': cr['fuseki_uri'],
+                    'label': cr['entity_text'],
+                    'type': cr['entity_type'],
+                    'metadata': cr['metadata'],
+                    'betweenness': float(cr['betweenness'] or 0),
+                    'community': cr['community_l1'],
+                    'semantic_score': seed_scores.get(eid, 0.0),
+                }
+
+    # Add seeds that might not be in expanded set
+    for row in seed_rows:
+        eid = row['id']
+        if eid not in expanded_entities:
+            meta = row['metadata'] or {}
+            if isinstance(meta, str):
+                meta = json_module_global.loads(meta)
+            expanded_entities[eid] = {
+                'id': eid,
+                'uri': row['fuseki_uri'],
+                'label': row['entity_text'],
+                'type': row['entity_type'],
+                'metadata': meta,
+                'betweenness': seed_betweenness.get(eid, 0.0),
+                'community': seed_communities.get(eid, -1),
+                'semantic_score': float(row['similarity']),
+            }
+
+    # ── Step 4: Composite ranking ──
+    # score = semantic * 0.4 + centrality * 0.3 + community_overlap * 0.3
+    max_bc = max((e['betweenness'] for e in expanded_entities.values()), default=1.0) or 1.0
+
+    for eid, ent in expanded_entities.items():
+        sem = ent['semantic_score']
+        bc_norm = ent['betweenness'] / max_bc
+        comm_overlap = 1.0 if ent['community'] in dominant_communities else 0.0
+        ent['composite_score'] = sem * 0.4 + bc_norm * 0.3 + comm_overlap * 0.3
+
+    # Sort by composite score, take top_k
+    ranked = sorted(expanded_entities.values(), key=lambda x: x['composite_score'], reverse=True)[:top_k]
+
+    # Build sources list
+    entity_uris = []
+    for ent in ranked:
+        meta = ent.get('metadata', {})
+        if isinstance(meta, str):
+            meta = json_module_global.loads(meta)
+        description = meta.get('description', '') if isinstance(meta, dict) else ''
+        sources.append({
+            "uri": ent['uri'],
+            "label": ent['label'],
+            "entity_type": ent['type'],
+            "score": round(ent['composite_score'], 4),
+            "description": description,
+            "retrieval_mode": "graphrag",
+            "community": ent.get('community', -1),
+            "betweenness": round(ent.get('betweenness', 0), 6),
+        })
+        entity_uris.append(ent['uri'])
+
+    # ── Step 5: Relationships — predicate-aware, community-guided ──
+    if entity_uris:
+        rel_rows = await conn.fetch("""
+            WITH RECURSIVE traverse AS (
+                SELECT r.subject_uri, r.object_uri, r.predicate, 1 AS depth
+                FROM entity_relationships r
+                WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
+                UNION
+                SELECT r2.subject_uri, r2.object_uri, r2.predicate, t.depth + 1
+                FROM traverse t
+                JOIN entity_relationships r2
+                    ON r2.subject_uri IN (t.subject_uri, t.object_uri)
+                    OR r2.object_uri IN (t.subject_uri, t.object_uri)
+                WHERE t.depth < 2
+            )
+            SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
+                t.subject_uri,
+                s.entity_text AS subject_label,
+                t.predicate,
+                t.object_uri,
+                o.entity_text AS object_label,
+                t.depth
+            FROM traverse t
+            LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
+            LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+            ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
+            LIMIT 50
+        """, entity_uris)
+        for rr in rel_rows:
+            subj = rr['subject_label'] or rr['subject_uri']
+            obj = rr['object_label'] or rr['object_uri']
+            relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+
+    # ── Step 6: Document chunks (same as B1) ──
+    try:
+        chunk_rows = await conn.fetch("""
+            SELECT DISTINCT ON (c.document_rid)
+                c.document_rid,
+                m.content->>'title' AS title,
+                LEFT(c.content->>'text', 500) AS chunk_text,
+                1 - (c.embedding <=> $1::vector) AS similarity
+            FROM koi_memory_chunks c
+            JOIN koi_memories m ON m.rid = c.document_rid
+            WHERE c.embedding IS NOT NULL
+            ORDER BY c.document_rid, c.embedding <=> $1::vector
+            LIMIT 5
+        """, embedding_str)
+        for cr in chunk_rows:
+            if float(cr['similarity']) > 0.3:
+                doc_chunks.append({
+                    "rid": cr['document_rid'],
+                    "title": cr['title'] or cr['document_rid'],
+                    "text": cr['chunk_text'] or "",
+                    "score": round(float(cr['similarity']), 4),
+                })
+                sources.append({
+                    "uri": cr['document_rid'],
+                    "label": cr['title'] or cr['document_rid'],
+                    "entity_type": "Document",
+                    "score": round(float(cr['similarity']), 4),
+                    "description": (cr['chunk_text'] or "")[:200],
+                })
+    except Exception:
+        pass
+
+    # ── Step 7: Web sources (same as B1) ──
+    if entity_uris:
+        try:
+            ws_rows = await conn.fetch("""
+                SELECT DISTINCT ON (ws.url) ws.url, ws.title, ws.description
+                FROM web_submissions ws
+                JOIN document_entity_links del ON del.document_rid = 'web:' || ws.rid::text
+                WHERE del.entity_uri = ANY($1) AND ws.status IN ('ingested', 'monitoring')
+                LIMIT 5
+            """, entity_uris)
+            for wr in ws_rows:
+                desc = wr['description'] or ""
+                web_sources.append({"url": wr['url'], "title": wr['title'] or wr['url'], "summary": desc})
+                sources.append({
+                    "uri": wr['url'],
+                    "label": wr['title'] or wr['url'],
+                    "entity_type": "WebSource",
+                    "score": 0.8,
+                    "description": desc[:200],
+                })
+        except Exception:
+            pass
+
+    return sources, relationships_ctx, doc_chunks, web_sources
+
+
 class ChatRequest(BaseModel):
     """Request for RAG chat."""
     query: str
     max_context_entities: int = Field(default=5, ge=1, le=20)
+    retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
 
 
 @app.post("/chat")
@@ -4068,6 +4339,17 @@ async def chat_endpoint(request: ChatRequest):
     # 1. Semantic search over entity embeddings to find relevant entities
     # ------------------------------------------------------------------
     query_embedding = await generate_embedding(request.query)
+
+    # ── B2 GraphRAG dispatch ──
+    _use_graphrag = request.retrieval_mode == "graphrag"
+    _graphrag_sources = None
+
+    if _use_graphrag:
+        async with db_pool.acquire() as conn:
+            _gr_sources, _gr_rels, _gr_docs, _gr_web = await _graph_guided_retrieval(
+                request.query, query_embedding, conn, top_k=request.max_context_entities
+            )
+        _graphrag_sources = (_gr_sources, _gr_rels, _gr_docs, _gr_web)
 
     sources: List[Dict[str, Any]] = []
 
@@ -4262,6 +4544,12 @@ async def chat_endpoint(request: ChatRequest):
                 pass  # web_submissions or expected columns not available
 
     # ------------------------------------------------------------------
+    # 2d. GraphRAG override: replace B1 retrieval results with B2 results
+    # ------------------------------------------------------------------
+    if _graphrag_sources is not None:
+        sources, relationships_ctx, doc_chunks, web_sources = _graphrag_sources
+
+    # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context
     # ------------------------------------------------------------------
     entity_block = "\n".join(
@@ -4337,6 +4625,7 @@ async def chat_endpoint(request: ChatRequest):
         "answer": answer,
         "sources": sources,
         "intent": intent,
+        "retrieval_mode": request.retrieval_mode,
     }
 
 
