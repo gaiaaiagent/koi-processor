@@ -65,7 +65,7 @@ from api.node_identity import (
     node_rid_suffix,
 )
 from api.event_queue import EventQueue
-from api.vault_sync import VaultSyncManager, VaultUnavailableError
+from api.vault_sync import VaultSyncManager
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,9 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
         _poller.vault_sync = _vault_sync
         await _vault_sync.load_metrics()
         _vault_sync.start_watcher()
+        # Bridge to vault_sync_router so the new router can access the manager
+        from api.routers.vault_sync_router import set_vault_sync_manager
+        set_vault_sync_manager(_vault_sync)
         logger.info(f"Vault sync enabled (vault={vault_path}, e2ee={'yes' if _encryption_private_key else 'no'})")
 
     policy = _security_policy()
@@ -2000,117 +2003,3 @@ async def _resolve_recipient(conn: asyncpg.Connection, recipient: str) -> Option
     return None
 
 
-# =====================================================================
-# VAULT SYNC ENDPOINTS
-# =====================================================================
-
-
-@koi_net_router.post("/vault-sync/configure")
-async def vault_sync_configure(request: Request):
-    """Configure vault sync for a peer."""
-    err = _enforce_local_admin(request)
-    if err:
-        return err
-
-    if not _vault_sync:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)"},
-        )
-
-    body = await request.json()
-    peer = body.get("peer")
-    shared_folder = body.get("shared_folder", "Shared")
-    enabled = body.get("enabled", True)
-
-    if not peer:
-        return JSONResponse(status_code=400, content={"error": "peer is required"})
-
-    result = await _vault_sync.configure(peer, shared_folder, enabled)
-    if "error" in result:
-        return JSONResponse(status_code=404, content=result)
-    return JSONResponse(content=result)
-
-
-@koi_net_router.get("/vault-sync/status")
-async def vault_sync_status(request: Request):
-    """Get vault sync dashboard info."""
-    err = _enforce_local_admin(request)
-    if err:
-        return err
-
-    if not _vault_sync:
-        return JSONResponse(content={"enabled": False, "reason": "VAULT_SYNC_ENABLED not set"})
-
-    status = await _vault_sync.get_status()
-    return JSONResponse(content=status)
-
-
-@koi_net_router.post("/vault-sync/trigger")
-async def vault_sync_trigger(request: Request):
-    """Force an immediate sync cycle (for testing)."""
-    err = _enforce_local_admin(request)
-    if err:
-        return err
-
-    if not _vault_sync:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Vault sync is not enabled"},
-        )
-
-    result = await _vault_sync.trigger_sync()
-    return JSONResponse(content=result)
-
-
-def _bool_env_raw(name: str, default: bool = False) -> bool:
-    """Check env var as bool (standalone, no side effects)."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-@koi_net_router.post("/vault-sync/reconcile")
-async def vault_sync_reconcile(request: Request):
-    """Run reconciliation: detect or repair drift between DB and filesystem."""
-    err = _enforce_local_admin(request)
-    if err:
-        return err
-
-    if not _vault_sync:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Vault sync is not enabled"},
-        )
-
-    body = await request.json()
-    mode = body.get("mode", "detect")
-
-    if mode == "repair":
-        if not _bool_env_raw("VAULT_SYNC_REPAIR_ENABLED", False):
-            return JSONResponse(
-                status_code=403,
-                content={"error": "repair mode disabled"},
-            )
-
-    if mode not in ("detect", "repair"):
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"invalid mode: {mode}. Use 'detect' or 'repair'."},
-        )
-
-    try:
-        result = await _vault_sync.reconcile(
-            mode=mode,
-            confirm=body.get("confirm", False),
-            paths=body.get("paths"),
-            max_actions=body.get("max_actions", 50),
-        )
-    except VaultUnavailableError as e:
-        return JSONResponse(
-            status_code=503,
-            content={"error": str(e)},
-        )
-
-    return JSONResponse(content=result)

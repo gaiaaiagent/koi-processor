@@ -1246,6 +1246,14 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"Network router not mounted: {e}")
 
+        if _caps.vault_sync:
+            try:
+                from api.routers.vault_sync_router import create_router as create_vault_sync_router
+                app.include_router(create_vault_sync_router(db_pool, _caps))
+                logger.info("Vault sync router mounted (/koi-net/vault-sync)")
+            except Exception as e:
+                logger.warning(f"Vault sync router not mounted: {e}")
+
         # Task router is always mounted (no capability gate — core feature)
         # fail-fast: startup event raises if import fails
         from api.routers.task_router import create_router as create_task_router
