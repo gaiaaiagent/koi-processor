@@ -63,10 +63,10 @@ The script:
 1. Installs prerequisites, PostgreSQL, repo, Python venv (idempotent)
 2. Generates WireGuard keypair + KOI node identity
 3. Writes and activates WireGuard config (from token's relay info)
-4. Runs `setup-node.sh` (env, migrations, firewall, start service)
-5. Sets up **personal-koi MCP server** for Claude Code (best-effort, non-fatal — skip with `--skip-mcp`)
-6. **Prints WG public key** — peer sends this to admin via Signal
-7. **Blocks** waiting for relay to become reachable (admin must approve first)
+4. **Prints WG public key** — peer sends this to admin via Signal
+5. **Blocks** waiting for relay to become reachable (admin must approve first)
+6. Runs `setup-node.sh` (env, migrations, firewall, start service)
+7. Sets up **personal-koi MCP server** for Claude Code (best-effort, non-fatal — skip with `--skip-mcp`)
 
 ### Step 3: Admin approves WG key
 
