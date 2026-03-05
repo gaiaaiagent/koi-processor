@@ -28,11 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 async def backfill(dry_run: bool = False):
-    db_name = os.environ.get("DB_NAME", "octo_koi")
-    db_user = os.environ.get("DB_USER", "postgres")
-    db_pass = os.environ.get("DB_PASSWORD", "postgres")
-    db_host = os.environ.get("DB_HOST", "127.0.0.1")
-    db_port = int(os.environ.get("DB_PORT", "5432"))
+    # Support both POSTGRES_URL (production) and individual DB_* vars (dev)
+    postgres_url = os.environ.get("POSTGRES_URL")
+    if not postgres_url:
+        db_name = os.environ.get("DB_NAME", "octo_koi")
+        db_user = os.environ.get("DB_USER", "postgres")
+        db_pass = os.environ.get("DB_PASSWORD", "postgres")
+        db_host = os.environ.get("DB_HOST", "127.0.0.1")
+        db_port = int(os.environ.get("DB_PORT", "5432"))
+        postgres_url = f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
 
     vault_root = os.path.expanduser(
         os.environ.get("VAULT_PATH") or os.environ.get("OBSIDIAN_VAULT_PATH", "")
@@ -41,9 +45,7 @@ async def backfill(dry_run: bool = False):
         logger.error(f"Vault root not found: {vault_root!r}")
         sys.exit(1)
 
-    conn = await asyncpg.connect(
-        database=db_name, user=db_user, password=db_pass, host=db_host, port=db_port
-    )
+    conn = await asyncpg.connect(postgres_url)
 
     try:
         rows = await conn.fetch("""
