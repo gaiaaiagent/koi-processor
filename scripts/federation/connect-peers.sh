@@ -20,8 +20,22 @@ fi
 # PARSE ARGS
 # ============================================
 
+AUTO_VAULT_SYNC=false
+SHARED_FOLDER="Shared"
+
+# Parse flags
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --auto-vault-sync) AUTO_VAULT_SYNC=true; shift ;;
+        --shared-folder) SHARED_FOLDER="$2"; shift 2 ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <peer-url> [alias]"
+    echo "Usage: $0 [--auto-vault-sync] [--shared-folder <name>] <peer-url> [alias]"
     echo "Example: $0 http://10.100.0.3:8351 shawn"
     exit 1
 fi
@@ -339,3 +353,38 @@ echo ""
 echo "  Their outbound edge to you is currently PROPOSED."
 echo "  They must approve it for bidirectional polling."
 echo "==================================="
+
+# ============================================
+# OPTIONAL: Configure vault sync
+# ============================================
+if [[ -n "$PEER_ALIAS" ]]; then
+    CONFIGURE_VAULT=false
+    if $AUTO_VAULT_SYNC; then
+        CONFIGURE_VAULT=true
+    elif [[ -t 0 ]]; then
+        echo ""
+        read -rp "Configure vault sync with '$PEER_ALIAS'? Shared folder: $SHARED_FOLDER [y/N]: " vs_confirm
+        if [[ "$vs_confirm" == "y" || "$vs_confirm" == "Y" ]]; then
+            CONFIGURE_VAULT=true
+        fi
+    fi
+
+    if $CONFIGURE_VAULT; then
+        ADMIN_TOKEN="${KOI_ADMIN_TOKEN:-}"
+        if [[ -z "$ADMIN_TOKEN" ]]; then
+            KOI_STATE="${KOI_STATE_DIR:-$HOME/.config/personal-koi/koi-state}"
+            ADMIN_TOKEN=$(cat "$(dirname "$KOI_STATE")/admin_token" 2>/dev/null || true)
+        fi
+        if [[ -n "$ADMIN_TOKEN" ]]; then
+            echo "Configuring vault sync with $PEER_ALIAS (folder: $SHARED_FOLDER)..."
+            curl -sf -X POST "${LOCAL_URL}/koi-net/vault-sync/configure" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"peer_alias\": \"$PEER_ALIAS\", \"shared_folder\": \"$SHARED_FOLDER\"}" \
+                && echo "  Vault sync configured." \
+                || echo "  WARNING: Failed to configure vault sync. You can do it manually later."
+        else
+            echo "  Skipping vault sync configure (no admin token found)."
+        fi
+    fi
+fi

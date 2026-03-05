@@ -155,22 +155,26 @@ Should show a new peer entry with `allowed-ips: 10.100.0.3/32`.
 
 Peer receives the `wg-koi.conf` template from admin.
 
-### Linux
+### Automated (recommended)
 
 ```bash
-# Insert your private key (from ~/.config/personal-koi/wireguard/private.key)
+cd ~/projects/RegenAI/koi-processor
+./scripts/federation/activate-wireguard.sh wg-koi.conf
+```
+
+This reads the private key from `~/.config/personal-koi/wireguard/private.key`, fills the template, installs to `/etc/wireguard/`, and activates the tunnel. On macOS it writes the filled config and prints WireGuard.app import instructions.
+
+### Manual (Linux)
+
+```bash
 PRIVATE_KEY=$(cat ~/.config/personal-koi/wireguard/private.key)
 sed -i "s|<PASTE_YOUR_PRIVATE_KEY_HERE>|${PRIVATE_KEY}|" wg-koi.conf
-
-# Install config
 sudo cp wg-koi.conf /etc/wireguard/wg-koi.conf
 sudo chmod 600 /etc/wireguard/wg-koi.conf
-
-# Activate
 sudo wg-quick up wg-koi
 ```
 
-### macOS
+### Manual (macOS)
 
 1. Open WireGuard.app
 2. Import tunnel from file → select `wg-koi.conf`
@@ -311,6 +315,8 @@ Both should show two APPROVED edges (one inbound, one outbound) for the peer rel
 ## Phase 6: Configure Vault Sync
 
 Both sides must configure which folders to sync with the new peer.
+
+> **Note:** If you used `--auto-vault-sync` with `connect-peers.sh` (Phase 5), vault sync was already configured on that side. You can verify with the status check below and skip to configuring the other side.
 
 ### Admin configures sync to new peer:
 

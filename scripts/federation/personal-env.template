@@ -27,9 +27,15 @@ EVENT_BRIDGE_PORT=8100
 # ============================================
 # EMBEDDING CONFIGURATION
 # ============================================
-# Set your personal OpenAI API key
+# Provider: "openai", "ollama", or "" (empty = disabled, no semantic matching)
+# If unset and OPENAI_API_KEY is present, auto-selects "openai" (backward compat)
+EMBEDDING_PROVIDER={{EMBEDDING_PROVIDER}}
+EMBEDDING_MODEL={{EMBEDDING_MODEL}}
+# EMBEDDING_DIMENSION=        # optional override (default from provider)
+
+# Provider-specific keys (only needed for your chosen provider):
 OPENAI_API_KEY="{{OPENAI_API_KEY}}"
-EMBEDDING_MODEL=text-embedding-ada-002
+# OLLAMA_BASE_URL=http://localhost:11434  # for ollama provider
 
 # ============================================
 # PERSONAL KOI API

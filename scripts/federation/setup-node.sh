@@ -125,7 +125,9 @@ if $WRITE_ENV && [[ -f "$TEMPLATE" ]]; then
         -e "s|{{STATE_DIR}}|$KOI_STATE|g" \
         -e "s|{{DB_USER}}|$DB_USER|g" \
         -e "s|{{OBSIDIAN_VAULT_PATH}}|~/Documents/Notes|g" \
-        -e "s|{{OPENAI_API_KEY}}|REPLACE_ME_WITH_YOUR_OPENAI_API_KEY|g" \
+        -e "s|{{EMBEDDING_PROVIDER}}||g" \
+        -e "s|{{EMBEDDING_MODEL}}||g" \
+        -e "s|{{OPENAI_API_KEY}}||g" \
         "$TEMPLATE" > "$TARGET"
     log_info "Generated personal.env"
 elif ! $WRITE_ENV; then
