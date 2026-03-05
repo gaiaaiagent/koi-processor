@@ -63,8 +63,10 @@ The script:
 1. Installs prerequisites, PostgreSQL, repo, Python venv (idempotent)
 2. Generates WireGuard keypair + KOI node identity
 3. Writes and activates WireGuard config (from token's relay info)
-4. **Prints WG public key** — peer sends this to admin via Signal
-5. **Blocks** waiting for relay to become reachable (admin must approve first)
+4. Runs `setup-node.sh` (env, migrations, firewall, start service)
+5. Sets up **personal-koi MCP server** for Claude Code (best-effort, non-fatal — skip with `--skip-mcp`)
+6. **Prints WG public key** — peer sends this to admin via Signal
+7. **Blocks** waiting for relay to become reachable (admin must approve first)
 
 ### Step 3: Admin approves WG key
 
@@ -174,6 +176,12 @@ cd projects/RegenAI/koi-processor
     1) Activate WireGuard (wg-quick up wg-koi)
     2) Run setup-node.sh --yes shawn-personal 10.100.0.3
     3) Run connect-peers.sh http://10.100.0.2:8351 darren
+
+  MCP server (for Claude Code users):
+    1) Install Node.js >= 18
+    2) git clone https://github.com/DarrenZal/personal-koi-mcp.git ~/projects/personal-koi-mcp
+    3) cd ~/projects/personal-koi-mcp && npm install && npm run build
+    4) claude mcp add --scope user -e OBSIDIAN_VAULT_PATH=~/Documents/Notes -e KOI_API_ENDPOINT=http://localhost:8351 personal-koi -- node ~/projects/personal-koi-mcp/dist/index.js
 ===================================
 ```
 

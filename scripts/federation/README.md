@@ -28,6 +28,8 @@ What `bootstrap-node.sh` does:
 5. Runs `join-request.sh` (unless `--skip-join-request`).
 6. Runs `validate-node.sh` checks.
 
+In invite mode, bootstrap also sets up the **personal-koi MCP server** for Claude Code (best-effort, non-fatal). This clones `personal-koi-mcp`, runs `npm install && npm run build`, generates `.env`, and registers the MCP server with Claude Code if the CLI is available. Use `--skip-mcp` to skip this step. Manual flow prints MCP setup instructions instead.
+
 ## Secure Peer Onboarding Flow
 
 1. Peer machine:

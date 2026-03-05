@@ -26,6 +26,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 YES=false
 SKIP_JOIN=false
+SKIP_MCP=false
 INVITE_TOKEN=""
 REPO_URL="https://github.com/gaiaaiagent/koi-processor.git"
 REPO_REF="regen-prod"
@@ -34,7 +35,7 @@ usage() {
     cat <<USAGE
 Usage:
   $0 [--dry-run] [--yes] [--skip-join-request] [--repo-url <url>] [--ref <git-ref>] <node-name> <wireguard-ip> [koi-processor-path]
-  $0 [--dry-run] [--yes] --invite <token> [--repo-url <url>] [--ref <git-ref>] [koi-processor-path]
+  $0 [--dry-run] [--yes] [--skip-mcp] --invite <token> [--repo-url <url>] [--ref <git-ref>] [koi-processor-path]
 
 Examples:
   $0 --yes nuc-personal 10.100.0.22 ~/projects/RegenAI/koi-processor
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-join-request)
             SKIP_JOIN=true
+            shift
+            ;;
+        --skip-mcp)
+            SKIP_MCP=true
             shift
             ;;
         --invite)
@@ -272,6 +277,158 @@ run_validation() {
     fi
 }
 
+ensure_node_runtime() {
+    # Check if node >= 18 is available
+    if command -v node >/dev/null 2>&1; then
+        local node_major
+        node_major=$(node -v | sed 's/v//' | cut -d. -f1)
+        if (( node_major >= 18 )); then
+            return 0
+        fi
+        log_warn "Node.js $(node -v) found but >= 18 required for MCP server"
+    fi
+
+    case "$(uname -s)" in
+        Linux)
+            if ! confirm_or_exit "Install Node.js 20.x for MCP server?"; then
+                log_warn "Skipping Node.js install — MCP server won't be set up"
+                return 1
+            fi
+            if ! curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - 2>/dev/null; then
+                log_warn "Node.js repo setup failed — skipping MCP server"
+                return 1
+            fi
+            if ! sudo apt-get install -y -qq nodejs 2>/dev/null; then
+                log_warn "Node.js install failed — skipping MCP server"
+                return 1
+            fi
+            ;;
+        Darwin)
+            if command -v brew >/dev/null 2>&1; then
+                if ! confirm_or_exit "Install Node.js via brew for MCP server?"; then
+                    log_warn "Skipping Node.js install — MCP server won't be set up"
+                    return 1
+                fi
+                if ! brew install node 2>/dev/null; then
+                    log_warn "Node.js install failed — skipping MCP server"
+                    return 1
+                fi
+            else
+                log_warn "brew not found — install Node.js >= 18 manually for MCP server"
+                return 1
+            fi
+            ;;
+    esac
+}
+
+setup_mcp_server() {
+    local koi_path="$1"
+    local vault_path="$2"
+    local mcp_path="${MCP_PATH:-$HOME/projects/personal-koi-mcp}"
+    local mcp_repo="https://github.com/DarrenZal/personal-koi-mcp.git"
+
+    (
+        set +e  # Non-fatal — MCP setup failure should not abort onboarding
+        trap 'log_warn "MCP setup failed — see manual steps below"; exit 0' ERR
+
+        log_info "Setting up personal-koi MCP server..."
+
+        # Clone or update
+        if [[ -d "$mcp_path/.git" ]]; then
+            log_info "personal-koi-mcp exists, pulling latest..."
+            git -C "$mcp_path" pull --ff-only 2>/dev/null || log_warn "git pull failed, using existing"
+        else
+            mkdir -p "$(dirname "$mcp_path")"
+            git clone "$mcp_repo" "$mcp_path" || { log_warn "git clone failed"; exit 1; }
+        fi
+
+        # Install deps + build
+        cd "$mcp_path"
+        npm install --no-audit --no-fund 2>&1 | tail -3
+        npm run build 2>&1 | tail -3
+
+        if [[ ! -f "$mcp_path/dist/index.js" ]]; then
+            log_warn "MCP build failed — dist/index.js not found"
+            exit 1
+        fi
+
+        # Upsert KOI_API_ENDPOINT in .env (create if missing, update if present)
+        if [[ ! -f "$mcp_path/.env" ]]; then
+            cat > "$mcp_path/.env" <<EOF
+KOI_API_ENDPOINT=http://localhost:8351
+EOF
+        elif grep -q '^KOI_API_ENDPOINT=' "$mcp_path/.env"; then
+            sed -i.bak 's|^KOI_API_ENDPOINT=.*|KOI_API_ENDPOINT=http://localhost:8351|' "$mcp_path/.env"
+            rm -f "$mcp_path/.env.bak"
+            log_info ".env exists — updated KOI_API_ENDPOINT to localhost:8351"
+        else
+            echo "KOI_API_ENDPOINT=http://localhost:8351" >> "$mcp_path/.env"
+            log_info ".env exists — appended KOI_API_ENDPOINT"
+        fi
+
+        # Register with Claude Code if CLI available
+        local mcp_entry="$mcp_path/dist/index.js"
+        if command -v claude >/dev/null 2>&1; then
+            log_info "Registering MCP server with Claude Code..."
+            # Remove stale entries across all scopes, then add fresh in user scope
+            for scope in user local project; do
+                claude mcp remove --scope "$scope" personal-koi 2>/dev/null || true
+            done
+            claude mcp add --scope user \
+                -e OBSIDIAN_VAULT_PATH="$vault_path" \
+                -e KOI_API_ENDPOINT="http://localhost:8351" \
+                personal-koi -- node "$mcp_entry" \
+                2>/dev/null && log_info "MCP registered via 'claude mcp add --scope user'" \
+                || log_warn "claude mcp add failed — paste config manually"
+            # Verify registration (scope-aware)
+            if claude mcp get --scope user personal-koi 2>/dev/null | grep -q personal-koi; then
+                log_info "MCP server 'personal-koi' confirmed (user scope)"
+                log_info "Note: restart Claude Code to pick up the new MCP server"
+            else
+                log_warn "MCP server not confirmed — may need manual registration (see config below)"
+            fi
+        fi
+
+        log_info "MCP server built at $mcp_path"
+    ) || true  # Ensure non-fatal
+
+    # Always print config (even if setup failed — user can retry manually)
+    local mcp_path="${MCP_PATH:-$HOME/projects/personal-koi-mcp}"
+    local mcp_entry="$mcp_path/dist/index.js"
+    local vault_path="$2"
+    cat <<MCPCONFIG
+
+===================================
+  Claude Code MCP Configuration
+===================================
+
+To use your KOI knowledge base in Claude Code, ensure this MCP server is registered.
+
+Option A (CLI):
+  claude mcp add --scope user -e OBSIDIAN_VAULT_PATH="$vault_path" -e KOI_API_ENDPOINT="http://localhost:8351" personal-koi -- node "$mcp_entry"
+
+Option B (JSON — add to ~/.mcp.json):
+  {
+    "mcpServers": {
+      "personal-koi": {
+        "command": "node",
+        "args": ["$mcp_entry"],
+        "env": {
+          "OBSIDIAN_VAULT_PATH": "$vault_path",
+          "KOI_API_ENDPOINT": "http://localhost:8351"
+        }
+      }
+    }
+  }
+
+If MCP setup failed, retry manually:
+  cd $mcp_path && npm install && npm run build
+  Then register with one of the options above.
+
+===================================
+MCPCONFIG
+}
+
 # ============================================
 # EXECUTION
 # ============================================
@@ -417,6 +574,17 @@ WGCONF
         bash "$SETUP_SCRIPT" --yes "$NODE_NAME" "$WG_IP" "$KOI_PATH"
     else
         log_fatal "setup-node.sh not found at $SETUP_SCRIPT"
+    fi
+
+    # --- Step 10b: Set up MCP server for Claude Code ---
+    if ! $SKIP_MCP; then
+        VAULT_PATH="${VAULT_PATH:-$HOME/Documents/Notes}"
+        if ensure_node_runtime; then
+            setup_mcp_server "$KOI_PATH" "$VAULT_PATH"
+        else
+            log_warn "Skipping MCP setup (no Node.js). Install Node >= 18 and run manually:"
+            log_warn "  cd ~/projects/personal-koi-mcp && npm install && npm run build"
+        fi
     fi
 
     KOI_PORT="${KOI_API_PORT:-8351}"
@@ -642,5 +810,12 @@ else
     echo "    1) Activate WireGuard (wg-quick up wg-koi)"
     echo "    2) Run setup-node.sh --yes $NODE_NAME $WG_IP \"$KOI_PATH\""
     echo "    3) Run connect-peers.sh http://10.100.0.2:8351 darren"
+    echo ""
+    _vault_hint="${VAULT_PATH:-\$HOME/Documents/Notes}"
+    echo "  MCP server (for Claude Code users):"
+    echo "    1) Install Node.js >= 18"
+    echo "    2) git clone https://github.com/DarrenZal/personal-koi-mcp.git ~/projects/personal-koi-mcp"
+    echo "    3) cd ~/projects/personal-koi-mcp && npm install && npm run build"
+    echo "    4) claude mcp add --scope user -e OBSIDIAN_VAULT_PATH=$_vault_hint -e KOI_API_ENDPOINT=http://localhost:8351 personal-koi -- node ~/projects/personal-koi-mcp/dist/index.js"
     echo "==================================="
 fi
