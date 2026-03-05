@@ -5,14 +5,18 @@ web content curation.  Only included when caps.web_sensor is True.
 """
 
 import logging
+import os
 import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api.llm_enricher import LLM_BACKEND
+from api.entity_schema import type_to_folder
+from api.vault_parser import FIELD_TO_PREDICATE
+from api.vault_note_utils import sanitize_filename, vault_slug, build_frontmatter, vault_note_path
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,7 @@ class WebIngestEntity(BaseModel):
     type: str
     context: Optional[str] = None
     confidence: Optional[float] = None
+    description: Optional[str] = None
 
 
 class WebIngestRelationship(BaseModel):
@@ -97,6 +102,7 @@ class WebIngestResponse(BaseModel):
     entities_resolved: int = 0
     entities_created: int = 0
     relationships_created: int = 0
+    vault_notes_created: int = 0
     quality_stats: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
@@ -108,6 +114,135 @@ class WebMonitorAddRequest(BaseModel):
 
 class WebMonitorRemoveRequest(BaseModel):
     url: str
+
+
+# -- Vault note creation for web ingest --------------------------------------
+
+_VAULT_ROOT = os.path.expanduser(
+    os.environ.get('VAULT_PATH') or os.environ.get('OBSIDIAN_VAULT_PATH', '')
+)
+
+# Direction-aware reverse mapping: (predicate, role) -> [(field, type_hint), ...]
+_PREDICATE_ROLE_TO_FIELDS: Dict[Tuple[str, str], List[Tuple[str, Optional[str]]]] = {}
+for _field, (_pred, _direction, _hint) in FIELD_TO_PREDICATE.items():
+    _role = 'subject' if _direction == 'outgoing' else 'object'
+    _PREDICATE_ROLE_TO_FIELDS.setdefault((_pred, _role), []).append((_field, _hint))
+
+
+def _find_field_for_relationship(
+    predicate: str, is_subject: bool, target_type: Optional[str] = None
+) -> Optional[str]:
+    """Find frontmatter field via strict (predicate, role) mapping only."""
+    role = 'subject' if is_subject else 'object'
+    candidates = _PREDICATE_ROLE_TO_FIELDS.get((predicate, role), [])
+    for field, hint in candidates:
+        if hint is None or target_type is None or hint == target_type:
+            return field
+    return None
+
+
+def write_vault_note(
+    entity_name: str,
+    entity_type: str,
+    entity_uri: str,
+    source_url: str,
+    context: Optional[str],
+    description: Optional[str],
+    relationships: List[WebIngestRelationship],
+    all_entities: List[dict],
+) -> Optional[Tuple[str, str, bool]]:
+    """Write a vault .md note for a newly-ingested entity.
+
+    Returns (vault_rel, vault_rid, note_created) or None if vault not configured.
+    """
+    if not _VAULT_ROOT or not os.path.isdir(_VAULT_ROOT):
+        return None
+
+    folder = type_to_folder(entity_type)
+    safe_name = sanitize_filename(entity_name)
+    if safe_name is None:
+        logger.warning(f"Entity name sanitizes to empty, skipping vault note: {entity_name!r}")
+        return None
+
+    note_path = vault_note_path(_VAULT_ROOT, folder, safe_name)
+    if note_path is None:
+        logger.warning(f"Path traversal rejected for entity: {entity_name}")
+        return None
+
+    vault_rel = os.path.relpath(note_path, _VAULT_ROOT)
+    vault_rid = f"{folder.lower()}/{vault_slug(entity_name)}"
+
+    if os.path.exists(note_path):
+        return vault_rel, vault_rid, False
+
+    # Build entity name lookup for wikilink generation
+    entity_name_to_info: Dict[str, dict] = {}
+    for ent in all_entities:
+        ent_name = ent.get("name", "")
+        ent_type = ent.get("type", "Concept")
+        ent_folder = type_to_folder(ent_type)
+        entity_name_to_info[ent_name.lower()] = {
+            "name": ent_name, "type": ent_type, "folder": ent_folder
+        }
+
+    # Build relationship wikilinks grouped by frontmatter field
+    rel_fields: Dict[str, List[str]] = {}
+    for rel in relationships:
+        is_subject = rel.subject.lower() == entity_name.lower()
+        is_object = rel.object.lower() == entity_name.lower()
+        if not is_subject and not is_object:
+            continue
+
+        target_name = rel.object if is_subject else rel.subject
+        target_info = entity_name_to_info.get(target_name.lower())
+        target_type = target_info["type"] if target_info else None
+        target_folder = target_info["folder"] if target_info else None
+
+        field = _find_field_for_relationship(rel.predicate, is_subject, target_type)
+        if not field or not target_folder:
+            continue
+
+        target_display = target_info["name"] if target_info else target_name
+        wikilink = f"[[{target_folder}/{target_display}]]"
+        rel_fields.setdefault(field, [])
+        if wikilink not in rel_fields[field]:
+            rel_fields[field].append(wikilink)
+
+    # Build frontmatter
+    schema_type = f"bkc:{entity_type}"
+    fm: Dict[str, Any] = {"@type": schema_type, "name": entity_name}
+
+    body_text = description or context or ""
+    if body_text:
+        fm["description"] = body_text
+
+    fm["url"] = source_url
+    fm["uri"] = entity_uri
+    fm["source"] = "web_ingest"
+    fm["dateAccessed"] = str(date.today())
+
+    # Add relationship fields
+    for field, links in sorted(rel_fields.items()):
+        fm[field] = links
+
+    # Build note content
+    content = build_frontmatter(fm)
+    content += f"\n# {entity_name}\n"
+    if body_text:
+        content += f"\n{body_text}\n"
+    content += f"\n## Source\n\n"
+    # Extract domain for display
+    from urllib.parse import urlparse
+    parsed = urlparse(source_url)
+    domain = parsed.netloc or source_url
+    content += f"- Ingested from: [{domain}]({source_url})\n"
+
+    os.makedirs(os.path.dirname(note_path), exist_ok=True)
+    with open(note_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    logger.info(f"Created vault note: {vault_rel}")
+    return vault_rel, vault_rid, True
 
 
 # -- Router factory ----------------------------------------------------------
@@ -453,7 +588,8 @@ def create_router(pool, caps):
 
         # Convert request entities to dicts for quality gates
         entities_raw = [
-            {"name": e.name, "type": e.type, "context": e.context, "confidence": e.confidence}
+            {"name": e.name, "type": e.type, "context": e.context,
+             "confidence": e.confidence, "description": e.description}
             for e in body.entities
         ]
 
@@ -481,6 +617,7 @@ def create_router(pool, caps):
             )
 
             # Resolve entities
+            new_entities_batch = []
             for ent in entities_raw:
                 extracted = ExtractedEntity(
                     name=ent["name"],
@@ -493,6 +630,13 @@ def create_router(pool, caps):
                     doc_rid = submission["rid"] if submission else body.url
                     await store_new_entity(conn, extracted, canonical, doc_rid, source="web_ingest")
                     entities_created += 1
+                    new_entities_batch.append({
+                        "name": canonical.name,
+                        "type": extracted.type or "Concept",
+                        "uri": canonical.uri,
+                        "context": ent.get("context"),
+                        "description": ent.get("description"),
+                    })
 
                 # Link document to entity
                 if submission and canonical.uri:
@@ -516,6 +660,49 @@ def create_router(pool, caps):
                     relationships_created += 1
                 except Exception as e:
                     logger.warning(f"Failed to create relationship {rel}: {e}")
+
+            # Create vault notes + RID mappings for new entities
+            vault_notes_created = 0
+            for new_ent in new_entities_batch:
+                result = None
+                try:
+                    result = write_vault_note(
+                        entity_name=new_ent["name"],
+                        entity_type=new_ent["type"],
+                        entity_uri=new_ent["uri"],
+                        source_url=body.url,
+                        context=new_ent.get("context"),
+                        description=new_ent.get("description"),
+                        relationships=body.relationships,
+                        all_entities=entities_raw,
+                    )
+                    if result and result[2]:
+                        vault_notes_created += 1
+                except Exception as e:
+                    logger.warning(f"Vault note creation failed for {new_ent['name']} (non-fatal): {e}")
+
+                if result:
+                    vault_rel, vault_rid, _created = result
+                    tag = await conn.execute("""
+                        INSERT INTO entity_rid_mappings (
+                            vault_rid, vault_path, canonical_uri, entity_type,
+                            name, sync_status, last_synced
+                        ) VALUES ($1, $2, $3, $4, $5, 'linked', NOW())
+                        ON CONFLICT (vault_rid) DO UPDATE SET
+                            vault_path = EXCLUDED.vault_path,
+                            canonical_uri = EXCLUDED.canonical_uri,
+                            entity_type = EXCLUDED.entity_type,
+                            name = EXCLUDED.name,
+                            sync_status = 'linked',
+                            last_synced = NOW()
+                        WHERE entity_rid_mappings.canonical_uri = EXCLUDED.canonical_uri
+                    """, vault_rid, vault_rel, new_ent["uri"],
+                        new_ent["type"], new_ent["name"])
+                    if tag.endswith(" 0"):
+                        logger.warning(
+                            f"vault_rid collision: {vault_rid} already maps to a different "
+                            f"canonical_uri, skipping remap to {new_ent['uri']}"
+                        )
 
             # Update submission status
             await conn.execute("""
@@ -565,6 +752,7 @@ def create_router(pool, caps):
             entities_resolved=entities_resolved,
             entities_created=entities_created,
             relationships_created=relationships_created,
+            vault_notes_created=vault_notes_created,
             quality_stats=quality_stats,
         )
 
