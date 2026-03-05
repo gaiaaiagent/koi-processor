@@ -2,7 +2,7 @@
 # create-invite.sh — Admin generates an invite token for a new peer
 #
 # Usage: ./create-invite.sh [--dry-run] [--ttl <hours>] [--vault-sync-folder <folder>] [--relay-ssh <user@host>] <peer-name> <peer-number>
-# Example: ./create-invite.sh shawn-personal 3 --ttl 24 --vault-sync-folder Shared
+# Example: ./create-invite.sh --vault-sync-folder Shared shawn-personal 3
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -159,11 +159,9 @@ fi
 
 log_info "Reading admin node info..."
 
-ADMIN_WG_IP=""
-ADMIN_BASE_URL=""
-
 # Admin WG IP is convention: peer 2 in the 10.100.0.0/24 subnet.
 # Do NOT derive from /koi-net/health base_url — that may report a LAN IP.
+# Override: ADMIN_WG_IP=10.100.0.9 ./create-invite.sh ...
 ADMIN_WG_IP="${ADMIN_WG_IP:-10.100.0.2}"
 ADMIN_BASE_URL="http://${ADMIN_WG_IP}:8351"
 
