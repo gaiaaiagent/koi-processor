@@ -498,7 +498,12 @@ import sys, os
 sys.path.insert(0, '$KOI_PATH')
 os.environ['KOI_STATE_DIR'] = '$KOI_STATE'
 from api.node_identity import load_or_create_identity, get_public_key_der_b64
-private_key, profile = load_or_create_identity('$NODE_NAME')
+# load_or_create_identity may return (private_key, profile) or
+# (private_key, profile, encryption_private_key) depending on version.
+identity = load_or_create_identity('$NODE_NAME')
+if not isinstance(identity, tuple) or len(identity) < 2:
+    raise RuntimeError(f'Unexpected identity return shape: {type(identity)}')
+private_key, profile = identity[0], identity[1]
 koi_pubkey = get_public_key_der_b64(private_key)
 print(f'node_rid={profile.node_rid}')
 print(f'koi_public_key={koi_pubkey}')
