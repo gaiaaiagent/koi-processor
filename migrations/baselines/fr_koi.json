@@ -140,6 +140,11 @@
       "file": "060_multi_peer_sync.sql",
       "checksum": "83de8aa07a7f25d4ff932e8b8c1d408e1e721ec8d0a15c1ccbd0f1ae428e38ab",
       "note": "Partial: only step 3 applied (event dedup index widened to per-target). Steps 1-2 (vault_sync_peers PK, vault_sync_state.local_edit_seq) and step 4 (vault_sync_applied_events index) skipped — 049_vault_sync never applied to BKC nodes. Safe to re-run full migration if 049 is added later."
+    },
+    {
+      "id": "bkc:061_edge_status_index",
+      "file": "061_edge_status_index.sql",
+      "checksum": "caeb0efbb547f14f425361674abb5328377e9506a85964c0796eb63c1280cd47"
     }
   ]
 }

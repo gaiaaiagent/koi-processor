@@ -149,6 +149,8 @@ class HandshakeResponse(BaseModel):
     type: Literal["handshake_response"] = "handshake_response"
     profile: NodeProfile
     accepted: bool
+    edge_status: Optional[str] = None   # "APPROVED" or "PROPOSED" — inbound poll edge
+    edge_rid: Optional[str] = None      # inbound poll edge RID for admin reference
 
 
 class ConfirmEventsResponse(BaseModel):

@@ -647,6 +647,34 @@ def _enforce_commons_admin(request: Request) -> Optional[JSONResponse]:
 
 
 # =============================================================================
+# Membrane Governance Helpers
+# =============================================================================
+
+async def _check_approved_edge(source_node: str, direction: str = "any") -> bool:
+    """Return True if source_node has an APPROVED edge relationship with us.
+
+    direction="poll": source polls us (source_node=source, target_node=us) — for fetch/poll gating
+    direction="any": any approved edge in either direction — for broadcast/confirm gating
+    """
+    if not _db_pool or not _node_profile:
+        return False
+    async with _db_pool.acquire() as conn:
+        if direction == "poll":
+            edge = await conn.fetchrow(
+                "SELECT 1 FROM koi_net_edges WHERE source_node = $1 AND target_node = $2 AND status = 'APPROVED'",
+                source_node, _node_profile.node_rid,
+            )
+        else:  # "any" — either direction
+            edge = await conn.fetchrow(
+                """SELECT 1 FROM koi_net_edges
+                   WHERE status = 'APPROVED'
+                   AND ((source_node = $1 AND target_node = $2) OR (source_node = $2 AND target_node = $1))""",
+                source_node, _node_profile.node_rid,
+            )
+        return edge is not None
+
+
+# =============================================================================
 # Endpoints
 # =============================================================================
 
@@ -721,8 +749,21 @@ async def handshake(request: Request):
             peer.ontology_version,
         )
 
-        # Create inbound POLL edge (APPROVED by default, PROPOSED when defer_approval=True)
-        inbound_status = 'PROPOSED' if req.defer_approval else 'APPROVED'
+        # Server-side deferral for unknown nodes (membrane governance)
+        defer_for_unknown = _bool_env("KOI_NET_DEFER_UNKNOWN_HANDSHAKE", False)
+        is_known = await conn.fetchval(
+            "SELECT 1 FROM koi_net_nodes WHERE node_rid = $1", peer.node_rid
+        )
+        effective_defer = req.defer_approval or (defer_for_unknown and not is_known)
+        if effective_defer and not req.defer_approval and not is_known:
+            logger.warning(
+                "HANDSHAKE DEFERRED by server policy: unknown node %s (%s) — "
+                "inbound edge will be PROPOSED. Approve via POST /koi-net/edges/approve",
+                peer.node_rid, peer.node_name,
+            )
+
+        # Create inbound POLL edge (APPROVED by default, PROPOSED when deferred)
+        inbound_status = 'PROPOSED' if effective_defer else 'APPROVED'
         edge_rid_inbound = f"orn:koi-net.edge:{peer.node_rid}>{_node_profile.node_rid}:poll"
         await conn.execute(
             """
@@ -778,6 +819,8 @@ async def handshake(request: Request):
     response = HandshakeResponse(
         profile=_node_profile,
         accepted=True,
+        edge_status=inbound_status,
+        edge_rid=edge_rid_inbound,
     )
     return JSONResponse(
         content=_wrap_response(response.model_dump(), peer.node_rid, signed)
@@ -794,6 +837,14 @@ async def events_broadcast(request: Request):
 
     if not payload:
         return _protocol_error(400, "EMPTY_PAYLOAD", "Empty payload")
+
+    # Membrane governance: gate write path for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            return _protocol_error(403, "IDENTITY_REQUIRED", "Signed envelope required for broadcast in strict mode")
+        if not await _check_approved_edge(source_node, direction="any"):
+            return _protocol_error(403, "UNAPPROVED_EDGE", f"No approved edge for {source_node}")
 
     events = payload.get("events", [])
     if not isinstance(events, list):
@@ -922,6 +973,15 @@ async def events_confirm(request: Request):
     if not confirming_node:
         return _protocol_error(400, "MISSING_CONFIRMING_NODE", "Cannot identify confirming node")
 
+    # Membrane governance: gate confirm for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("Confirm: unsigned request rejected — signed envelope required in strict mode")
+            return _protocol_error(403, "IDENTITY_REQUIRED", "Signed envelope required for confirm in strict mode")
+        if not await _check_approved_edge(confirming_node, direction="any"):
+            return _protocol_error(403, "UNAPPROVED_EDGE", f"No approved edge for {confirming_node}")
+
     confirmed = await _event_queue.confirm(event_ids, confirming_node)
     resp = ConfirmEventsResponse(confirmed=confirmed)
     return JSONResponse(
@@ -938,6 +998,18 @@ async def manifests_fetch(request: Request):
         return _envelope_error_response(exc)
 
     rids = payload.get("rids", []) if payload else []
+
+    # Membrane governance: gate fetch for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("manifests/fetch: unsigned request, returning empty (strict)")
+            resp = ManifestsPayloadResponse(manifests=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), None, False))
+        if not await _check_approved_edge(source_node, direction="poll"):
+            logger.info(f"manifests/fetch: no approved poll edge for {source_node}, returning empty (strict)")
+            resp = ManifestsPayloadResponse(manifests=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), source_node, signed))
 
     manifests = []
     async with _db_pool.acquire() as conn:
@@ -974,6 +1046,18 @@ async def bundles_fetch(request: Request):
         return _envelope_error_response(exc)
 
     rids = payload.get("rids", []) if payload else []
+
+    # Membrane governance: gate fetch for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("bundles/fetch: unsigned request, returning empty (strict)")
+            resp = BundlesPayloadResponse(bundles=[], not_found=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), None, False))
+        if not await _check_approved_edge(source_node, direction="poll"):
+            logger.info(f"bundles/fetch: no approved poll edge for {source_node}, returning empty (strict)")
+            resp = BundlesPayloadResponse(bundles=[], not_found=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), source_node, signed))
 
     bundles = []
     not_found = []
@@ -1018,6 +1102,18 @@ async def rids_fetch(request: Request):
 
     rid_types = (payload or {}).get("rid_types")
 
+    # Membrane governance: gate fetch for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("rids/fetch: unsigned request, returning empty (strict)")
+            resp = RidsPayloadResponse(rids=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(), None, False))
+        if not await _check_approved_edge(source_node, direction="poll"):
+            logger.info(f"rids/fetch: no approved poll edge for {source_node}, returning empty (strict)")
+            resp = RidsPayloadResponse(rids=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(), source_node, signed))
+
     async with _db_pool.acquire() as conn:
         if rid_types:
             rows = await conn.fetch(
@@ -1048,16 +1144,47 @@ async def rids_fetch(request: Request):
 
 
 @koi_net_router.get("/edges")
-async def koi_net_edges():
-    """Active federation edges (for dashboard visualization)."""
+async def koi_net_edges(request: Request, status: Optional[str] = None):
+    """Federation edges. Unauthenticated: APPROVED only. Admin: filter by status."""
     if not _db_pool:
         return {"edges": []}
-    async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
+
+    # Check if admin request (localhost + token)
+    is_admin = _enforce_local_admin(request) is None
+
+    if is_admin and status:
+        if status == "all":
+            query = (
+                "SELECT edge_rid, source_node, target_node, edge_type, status, "
+                "created_at, updated_at FROM koi_net_edges"
+            )
+            params = []
+        else:
+            query = (
+                "SELECT edge_rid, source_node, target_node, edge_type, status, "
+                "created_at, updated_at FROM koi_net_edges WHERE status = $1"
+            )
+            params = [status.upper()]
+    else:
+        # Unauthenticated: APPROVED only (backward compatible)
+        query = (
             "SELECT edge_rid, source_node, target_node, edge_type, status "
             "FROM koi_net_edges WHERE status = 'APPROVED'"
         )
-    return {"edges": [dict(r) for r in rows]}
+        params = []
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+
+    edges = []
+    for r in rows:
+        edge = dict(r)
+        # Serialize datetime fields for JSON
+        for field in ("created_at", "updated_at"):
+            if field in edge and edge[field] is not None:
+                edge[field] = edge[field].isoformat()
+        edges.append(edge)
+    return {"edges": edges}
 
 
 @koi_net_router.post("/edges/approve")
@@ -1100,6 +1227,63 @@ async def approve_edge(request: Request):
 
     logger.info(f"Approved edge: {edge_rid}")
     return {"status": "approved", "edge_rid": edge_rid}
+
+
+@koi_net_router.post("/edges/reject")
+async def reject_edge(request: Request):
+    """Reject a PROPOSED edge. Optionally deactivate the peer node.
+
+    Admin-only: requires localhost + admin token.
+    """
+    auth_err = _enforce_local_admin(request)
+    if auth_err:
+        return auth_err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _protocol_error(400, "INVALID_JSON", "Invalid JSON body")
+
+    edge_rid = body.get("edge_rid")
+    if not edge_rid:
+        return _protocol_error(400, "MISSING_EDGE_RID", "edge_rid is required")
+
+    deactivate_node = body.get("deactivate_node", False)
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    async with _db_pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE koi_net_edges SET status = 'REJECTED', updated_at = NOW()
+            WHERE edge_rid = $1 AND status = 'PROPOSED'
+            """,
+            edge_rid,
+        )
+        count = int(result.split()[-1])
+
+        if count == 0:
+            return _protocol_error(
+                404, "EDGE_NOT_FOUND",
+                f"No PROPOSED edge found with rid '{edge_rid}'"
+            )
+
+        if deactivate_node:
+            # Extract source_node from the edge to deactivate
+            source = await conn.fetchval(
+                "SELECT source_node FROM koi_net_edges WHERE edge_rid = $1",
+                edge_rid,
+            )
+            if source:
+                await conn.execute(
+                    "UPDATE koi_net_nodes SET status = 'rejected' WHERE node_rid = $1",
+                    source,
+                )
+                logger.info(f"Deactivated node: {source}")
+
+    logger.info(f"Rejected edge: {edge_rid}")
+    return {"status": "rejected", "edge_rid": edge_rid}
 
 
 @koi_net_router.get("/health")
