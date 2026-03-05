@@ -440,13 +440,13 @@ WGCONF
     # Get admin's profile
     ADMIN_HEALTH=$(curl -sf "${INVITE_ADMIN_BASE_URL}/koi-net/health") || \
         log_fatal "Cannot reach admin at ${INVITE_ADMIN_BASE_URL}/koi-net/health"
-    ADMIN_PROFILE=$(echo "$ADMIN_HEALTH" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['profile']))")
+    ADMIN_PROFILE=$(echo "$ADMIN_HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('node', d.get('profile', {}))))")
     ADMIN_NODE_RID=$(echo "$ADMIN_PROFILE" | python3 -c "import sys,json; print(json.load(sys.stdin)['node_rid'])")
     ADMIN_KOI_PUBKEY=$(echo "$ADMIN_PROFILE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('public_key',''))")
 
     # Get local profile
     LOCAL_HEALTH=$(curl -sf "http://127.0.0.1:${KOI_PORT}/koi-net/health")
-    LOCAL_PROFILE=$(echo "$LOCAL_HEALTH" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['profile']))")
+    LOCAL_PROFILE=$(echo "$LOCAL_HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('node', d.get('profile', {}))))")
 
     # Handshake: local → admin (with defer_approval)
     log_info "Sending handshake to admin..."

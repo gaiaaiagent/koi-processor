@@ -72,7 +72,7 @@ log_info "Resolved peer: $PEER_RID"
 
 HEALTH=$(curl -sf "http://127.0.0.1:${KOI_PORT}/koi-net/health") || \
     log_fatal "Cannot reach local KOI-net API"
-LOCAL_RID=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['profile']['node_rid'])")
+LOCAL_RID=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('node', d.get('profile', {}))['node_rid'])")
 
 log_info "Local node: $LOCAL_RID"
 

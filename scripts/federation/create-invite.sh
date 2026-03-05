@@ -165,7 +165,7 @@ ADMIN_BASE_URL=""
 if ! $DRY_RUN; then
     HEALTH=$(curl -sf "http://127.0.0.1:8351/koi-net/health" 2>/dev/null) || \
         log_fatal "Cannot reach local KOI-net API at http://127.0.0.1:8351/koi-net/health"
-    ADMIN_BASE_URL=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['profile']['base_url'])" 2>/dev/null) || \
+    ADMIN_BASE_URL=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('node', d.get('profile', {}))['base_url'])" 2>/dev/null) || \
         log_fatal "Cannot extract base_url from health response"
     # Extract WG IP from base_url (http://10.100.0.X:8351)
     ADMIN_WG_IP=$(echo "$ADMIN_BASE_URL" | python3 -c "

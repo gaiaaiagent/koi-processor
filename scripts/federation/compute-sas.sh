@@ -19,7 +19,7 @@ KOI_PORT="${KOI_API_PORT:-8351}"
 # Get local KOI public key
 HEALTH=$(curl -sf "http://127.0.0.1:${KOI_PORT}/koi-net/health") || \
     log_fatal "Cannot reach local KOI-net API"
-LOCAL_PUBKEY=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['profile']['public_key'])")
+LOCAL_PUBKEY=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('node', d.get('profile', {}))['public_key'])")
 
 # Get peer's KOI public key from DB
 PEER_PUBKEY=$(psql -d personal_koi -Atc "
