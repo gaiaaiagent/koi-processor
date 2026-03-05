@@ -125,64 +125,35 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" \
 
 Repeat the same scoped repair + verify sequence on Dobby.
 
-## Shawn Onboarding (Multi-Peer)
+## Peer Onboarding
 
-Requires migration `060_multi_peer_sync.sql` (multi-peer vault sync support).
+For onboarding a new peer (e.g., Shawn), see the dedicated runbook:
 
-### On Shawn's machine
+**[Peer Onboarding Runbook](peer-onboarding.md)**
 
-```bash
-# 1. Set up the node (creates DB, runs all migrations through 060, installs deps)
-#    Args: <node-name> <wireguard-ip> [koi-processor-path]
-./scripts/federation/setup-node.sh shawn-personal 10.100.0.X /home/shawn/koi-processor
+It covers the full flow: bootstrap → approval → WireGuard → node setup → handshake → vault sync configure → smoke test → soak.
 
-# 2. Connect to Darren's node (TOFU fingerprint verify, bidirectional handshake)
-./scripts/federation/connect-peers.sh http://<darren-ip>:8351 darren
-```
+Requires migration `060_multi_peer_sync.sql` (included in `setup-node.sh`).
 
-### On Darren's machine
+## 3-Peer Soak Test
+
+After onboarding a third peer and completing the initial 2-peer soak, run the 3-peer chain forwarding smoke test to validate mesh forwarding:
 
 ```bash
-# 3. Connect to Shawn's node (same from other side)
-./scripts/federation/connect-peers.sh http://<shawn-ip>:8351 shawn
-```
-
-### Both sides — configure vault sync
-
-```bash
-# 4. Configure vault sync for the new peer
-curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"peer": "shawn-personal", "shared_folder": "Shared"}' \
-  localhost:8351/koi-net/vault-sync/configure
-
-# Verify multi-peer status
-curl -s -H "Authorization: Bearer $TOKEN" \
-  localhost:8351/koi-net/vault-sync/status | jq '{peer_count, peers}'
-```
-
-### Smoke test
-
-```bash
-# 5. Create a test file, verify sync within 60s
-echo "# Hello Shawn" > ~/Documents/Notes/Shared/hello-shawn.md
-sleep 65  # wait for scan cycle
-curl -s -H "Authorization: Bearer $TOKEN" localhost:8351/koi-net/vault-sync/status | jq .pending_events
-# Shawn checks: cat ~/Documents/Notes/Shared/hello-shawn.md
-```
-
-### Soak
-
-```bash
-# 6. Soak 72h with auto-repair disabled
-export VAULT_SYNC_AUTO_REPAIR=false
-# Run soak-check.sh every 6-12h as normal
-bash scripts/federation/soak-check.sh
-```
-
-### Multi-peer smoke (optional)
-
-```bash
-# After soak passes, run multi-peer smoke test
-MULTI_PEER=1 SECOND_PEER_NAME=shawn-personal \
+THREE_PEER=1 \
+  PEER_SSH=dobby@192.168.1.69 PEER_NAME=nuc-personal \
+  THIRD_PEER_SSH=shawn@10.100.0.3 THIRD_PEER_NAME=shawn \
+  KOI_ADMIN_TOKEN=$(cat ~/.config/personal-koi/koi-state/admin_token) \
+  PEER_KOI_ADMIN_TOKEN=<nuc-token> \
+  THIRD_PEER_ADMIN_TOKEN=<shawn-token> \
   bash scripts/federation/smoke-vault-sync.sh
 ```
+
+This tests:
+- **Chain topology**: Temporarily removes the A↔C link, forcing forwarding through B
+- **Forward path** (A → B → C): File created on A arrives on C via B's `_forward_to_peers()`
+- **Reverse path** (C → B → A): File created on C arrives on A via B
+- **Loop detection**: Verifies B applies each event exactly once (dedup prevents re-forwarding)
+- **Mesh restore**: Automatically re-establishes full mesh (A↔B, A↔C, B↔C) even if tests fail
+
+After the 3-peer smoke passes, run `soak-check.sh` on all three nodes every 6-12h for 24h before enabling repair mode.

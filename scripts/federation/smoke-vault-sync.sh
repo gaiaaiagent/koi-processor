@@ -422,5 +422,290 @@ EOF
     curl "${CURL_OPTS[@]}" -X DELETE "${BASE_URL}/koi-net/vault-sync/peers/${SECOND_PEER}" >/dev/null 2>&1 || true
 fi
 
+# ============================================================
+# Step 11 (optional): Three-Peer Chain Forwarding Test
+# ============================================================
+# Validates the mesh forwarding path: A→B→C where B forwards
+# events it receives from A to C (and vice versa).
+#
+# Requires: THREE_PEER=1 + a real 3-peer environment.
+# Cannot be validated locally — requires integration test
+# with a third node.
+#
+# Env vars:
+#   THREE_PEER=1
+#   THIRD_PEER_SSH=user@10.100.0.X
+#   THIRD_PEER_NAME=<alias>
+#   THIRD_PEER_ADMIN_TOKEN=<bearer-token>
+#   THIRD_PEER_VAULT_PATH=~/Documents/Notes  (default)
+# ============================================================
+if [[ "${THREE_PEER:-0}" == "1" ]]; then
+    step "11. Three-Peer Chain Forwarding Test"
+
+    # --- Validate required env vars ---
+    if [[ -z "${THIRD_PEER_SSH:-}" ]]; then
+        fail "THIRD_PEER_SSH required for THREE_PEER mode"; exit 1
+    fi
+    THIRD_PEER_NAME="${THIRD_PEER_NAME:-third-peer}"
+    THIRD_PEER_ADMIN_TOKEN="${THIRD_PEER_ADMIN_TOKEN:-}"
+    THIRD_PEER_VAULT_PATH="${THIRD_PEER_VAULT_PATH:-~/Documents/Notes}"
+
+    # Build curl command for third peer
+    THIRD_PEER_CURL="curl -sf"
+    if [[ -n "$THIRD_PEER_ADMIN_TOKEN" ]]; then
+        THIRD_PEER_CURL="curl -sf -H 'Authorization: Bearer ${THIRD_PEER_ADMIN_TOKEN}'"
+    fi
+
+    # Helper: check file arrived on a remote peer via SSH
+    check_peer_file_arrived() {
+        local peer_ssh="$1" file_path="$2"
+        ssh "$peer_ssh" "test -f ${file_path}" 2>/dev/null
+    }
+
+    # Helper: run psql query on a remote peer via SSH
+    ssh_peer_query() {
+        local peer_ssh="$1" query="$2"
+        ssh "$peer_ssh" "psql -tAq personal_koi -c \"${query}\"" 2>/dev/null
+    }
+
+    # --- Resolve node RIDs ---
+    # A = local, B = PEER (first peer), C = THIRD_PEER
+    A_RID="$LOCAL_RID"
+    B_RID="$PEER_RID"
+    C_RID=$(psql -tAq personal_koi -c "
+        SELECT COALESCE(
+            (SELECT node_rid FROM koi_net_peer_aliases WHERE LOWER(alias) = LOWER('${THIRD_PEER_NAME}')),
+            (SELECT node_rid FROM koi_net_nodes WHERE LOWER(node_name) = LOWER('${THIRD_PEER_NAME}') AND status = 'active')
+        );
+    ")
+    if [[ -z "$C_RID" ]]; then
+        fail "third peer '${THIRD_PEER_NAME}' not found in node registry"
+        # Skip remaining 3-peer tests but don't exit — cleanup still runs
+    else
+        pass "third peer '${THIRD_PEER_NAME}' resolved to ${C_RID}"
+
+    # --- 11a: Set up chain topology (A↔B, B↔C, but NOT A↔C) ---
+    step "11a. Set up chain topology"
+
+    # Resolve A's node name early — needed for both unconfigure and restore
+    A_NODE_NAME=$(curl "${CURL_OPTS[@]}" "${BASE_URL}/koi-net/health" 2>/dev/null \
+        | json_get "['node']['node_name']" 2>/dev/null || echo "")
+
+    # Restore function — MUST run on any exit to re-establish full mesh
+    restore_full_mesh() {
+        echo "  Restoring full mesh topology..."
+        # A re-configures C as peer
+        curl "${CURL_OPTS[@]}" -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"peer\": \"${THIRD_PEER_NAME}\", \"shared_folder\": \"${SHARED_FOLDER}\"}" \
+            "${BASE_URL}/koi-net/vault-sync/configure" >/dev/null 2>&1 || true
+        # C re-configures A as peer (via SSH) — use A's node name, not B's
+        if [[ -n "${A_NODE_NAME:-}" ]]; then
+            ssh "$THIRD_PEER_SSH" "${THIRD_PEER_CURL} -X POST \
+                -H 'Content-Type: application/json' \
+                -d '{\"peer\": \"${A_NODE_NAME}\", \"shared_folder\": \"${SHARED_FOLDER}\"}' \
+                http://localhost:${API_PORT}/koi-net/vault-sync/configure" >/dev/null 2>&1 || true
+        fi
+        echo "  Full mesh restore attempted"
+    }
+
+    # Install trap — chain with existing cleanup
+    original_cleanup=$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")
+    trap "restore_full_mesh; ${original_cleanup}" EXIT
+
+    # Remove A↔C link: unconfigure C on A
+    if curl "${CURL_OPTS[@]}" -X DELETE \
+        "${BASE_URL}/koi-net/vault-sync/peers/${THIRD_PEER_NAME}" >/dev/null 2>&1; then
+        pass "unconfigured ${THIRD_PEER_NAME} on A (local)"
+    else
+        fail "failed to unconfigure ${THIRD_PEER_NAME} on A"
+    fi
+
+    # Remove A↔C link: unconfigure A on C — use A's node name
+    if [[ -n "$A_NODE_NAME" ]]; then
+        if ssh "$THIRD_PEER_SSH" "${THIRD_PEER_CURL} -X DELETE \
+            http://localhost:${API_PORT}/koi-net/vault-sync/peers/${A_NODE_NAME}" >/dev/null 2>&1; then
+            pass "unconfigured A on C (${THIRD_PEER_SSH})"
+        else
+            fail "failed to unconfigure A (${A_NODE_NAME}) on C"
+        fi
+    else
+        fail "could not determine A's node name for C-side unconfigure"
+    fi
+
+    # Verify topology: A sees only B, C sees only B
+    A_PEER_COUNT=$(curl "${CURL_OPTS[@]}" "${BASE_URL}/koi-net/vault-sync/status" 2>/dev/null \
+        | json_get ".get('peer_count', 0)" 2>/dev/null || echo "0")
+    C_PEER_COUNT=$(ssh "$THIRD_PEER_SSH" "${THIRD_PEER_CURL} \
+        http://localhost:${API_PORT}/koi-net/vault-sync/status" 2>/dev/null \
+        | json_get ".get('peer_count', 0)" 2>/dev/null || echo "0")
+
+    if [[ "$A_PEER_COUNT" -eq 1 ]]; then
+        pass "A sees 1 peer (B only) — chain topology confirmed on A"
+    else
+        fail "A sees ${A_PEER_COUNT} peers (expected 1)"
+    fi
+    if [[ "$C_PEER_COUNT" -eq 1 ]]; then
+        pass "C sees 1 peer (B only) — chain topology confirmed on C"
+    else
+        fail "C sees ${C_PEER_COUNT} peers (expected 1)"
+    fi
+
+    # --- 11b: Forward path test (A → B → C) ---
+    step "11b. Chain forward test (A → B → C)"
+
+    CHAIN_FILE="${SHARED_FOLDER}/_chain-test-${RUN_ID}.md"
+    cat > "${VAULT_PATH}/${CHAIN_FILE}" <<EOF
+---
+title: Chain Forward Test ${RUN_ID}
+---
+# Chain Forward Test
+Created on A, should arrive on C via B's forwarding.
+Run ID: ${RUN_ID}
+EOF
+    pass "created ${CHAIN_FILE} on A"
+
+    # Trigger sync on A (queues event for B, A has no C peer)
+    curl "${CURL_OPTS[@]}" -X POST "${BASE_URL}/koi-net/vault-sync/trigger" >/dev/null 2>&1
+
+    # Wait for B to receive file
+    PEER_CHAIN_FILE="${PEER_VAULT_PATH}/${CHAIN_FILE}"
+    if wait_for "B receives file" "check_peer_file_arrived '$PEER_SSH' '${PEER_CHAIN_FILE}'"; then
+        pass "file arrived on B (first peer)"
+    else
+        fail "file not found on B after ${WAIT_TIMEOUT}s"
+    fi
+
+    # Trigger sync on B so it forwards to C
+    ssh "$PEER_SSH" "${PEER_CURL} -X POST http://localhost:${API_PORT}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+
+    # Wait for C to receive file (via B's _forward_to_peers)
+    THIRD_CHAIN_FILE="${THIRD_PEER_VAULT_PATH}/${CHAIN_FILE}"
+    if wait_for "C receives file via forwarding" "check_peer_file_arrived '$THIRD_PEER_SSH' '${THIRD_CHAIN_FILE}'"; then
+        pass "file arrived on C via B's forwarding"
+    else
+        fail "file not found on C after ${WAIT_TIMEOUT}s — forwarding may not be working"
+    fi
+
+    # Assert: C's applied_events shows source_node = B's RID (not A's)
+    C_SOURCE=$(ssh_peer_query "$THIRD_PEER_SSH" \
+        "SELECT source_node FROM vault_sync_applied_events WHERE rid LIKE '%chain-test-${RUN_ID}%' ORDER BY applied_at DESC LIMIT 1")
+    if [[ "$C_SOURCE" == "$B_RID" ]]; then
+        pass "C received event from B (source_node=${B_RID}) — forwarding path confirmed"
+    elif [[ -n "$C_SOURCE" ]]; then
+        fail "C received event from unexpected source: ${C_SOURCE} (expected B: ${B_RID})"
+    else
+        fail "could not query C's applied_events for chain-test file"
+    fi
+
+    # --- 11c: Reverse chain test (C → B → A) ---
+    step "11c. Reverse chain test (C → B → A)"
+
+    CHAIN_REV_FILE="${SHARED_FOLDER}/_chain-reverse-${RUN_ID}.md"
+
+    # C creates test file
+    ssh "$THIRD_PEER_SSH" "mkdir -p ${THIRD_PEER_VAULT_PATH}/${SHARED_FOLDER} && cat > ${THIRD_PEER_VAULT_PATH}/${CHAIN_REV_FILE}" <<EOF
+---
+title: Chain Reverse Test ${RUN_ID}
+---
+# Chain Reverse Test
+Created on C, should arrive on A via B's forwarding.
+Run ID: ${RUN_ID}
+EOF
+    pass "created ${CHAIN_REV_FILE} on C"
+
+    # Trigger sync on C
+    ssh "$THIRD_PEER_SSH" "${THIRD_PEER_CURL} -X POST http://localhost:${API_PORT}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+
+    # Wait for B to receive
+    PEER_REV_FILE="${PEER_VAULT_PATH}/${CHAIN_REV_FILE}"
+    if wait_for "B receives reverse file" "check_peer_file_arrived '$PEER_SSH' '${PEER_REV_FILE}'"; then
+        pass "reverse file arrived on B"
+    else
+        fail "reverse file not found on B after ${WAIT_TIMEOUT}s"
+    fi
+
+    # Trigger sync on B to forward to A
+    ssh "$PEER_SSH" "${PEER_CURL} -X POST http://localhost:${API_PORT}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+
+    # Wait for A to receive
+    if wait_for "A receives reverse file" "test -f '${VAULT_PATH}/${CHAIN_REV_FILE}'" ; then
+        pass "reverse file arrived on A via B's forwarding"
+    else
+        fail "reverse file not found on A after ${WAIT_TIMEOUT}s"
+    fi
+
+    # Assert: A's applied_events shows source_node = B's RID
+    A_SOURCE=$(psql -tAq personal_koi -c "
+        SELECT source_node FROM vault_sync_applied_events
+        WHERE rid LIKE '%chain-reverse-${RUN_ID}%'
+        ORDER BY applied_at DESC LIMIT 1;
+    ")
+    if [[ "$A_SOURCE" == "$B_RID" ]]; then
+        pass "A received event from B (source_node=${B_RID}) — reverse forwarding confirmed"
+    elif [[ -n "$A_SOURCE" ]]; then
+        fail "A received event from unexpected source: ${A_SOURCE} (expected B: ${B_RID})"
+    else
+        fail "could not query A's applied_events for chain-reverse file"
+    fi
+
+    # --- 11d: Loop detection verification ---
+    step "11d. Loop detection verification"
+
+    # On B: check dedup counter — events_skipped_dedup should exist in metrics
+    B_STATUS=$(ssh "$PEER_SSH" "${PEER_CURL} http://localhost:${API_PORT}/koi-net/vault-sync/status" 2>/dev/null || echo "{}")
+    B_DEDUP=$(echo "$B_STATUS" | json_get ".get('metrics',{}).get('events_skipped_dedup', 0)" 2>/dev/null || echo "0")
+    pass "B events_skipped_dedup=${B_DEDUP}"
+
+    # Verify B applied the chain-test event exactly once
+    B_CHAIN_COUNT=$(ssh_peer_query "$PEER_SSH" \
+        "SELECT COUNT(*) FROM vault_sync_applied_events WHERE rid LIKE '%chain-test-${RUN_ID}%'")
+    if [[ "$B_CHAIN_COUNT" -eq 1 ]]; then
+        pass "B applied chain-test event exactly once (no re-forwarding loop)"
+    else
+        fail "B applied chain-test event ${B_CHAIN_COUNT} times (expected 1)"
+    fi
+
+    # --- 11e: Restore full mesh + cleanup ---
+    step "11e. Restore full mesh + cleanup"
+
+    restore_full_mesh
+
+    # Clean up test files on originators, trigger sync for tombstone propagation
+    rm -f "${VAULT_PATH}/${CHAIN_FILE}"
+    ssh "$THIRD_PEER_SSH" "rm -f ${THIRD_PEER_VAULT_PATH}/${CHAIN_REV_FILE}" 2>/dev/null || true
+
+    # Trigger syncs to propagate tombstones
+    curl "${CURL_OPTS[@]}" -X POST "${BASE_URL}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+    ssh "$THIRD_PEER_SSH" "${THIRD_PEER_CURL} -X POST http://localhost:${API_PORT}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+    sleep 5
+    ssh "$PEER_SSH" "${PEER_CURL} -X POST http://localhost:${API_PORT}/koi-net/vault-sync/trigger" >/dev/null 2>&1 || true
+
+    # Verify all 3 nodes show peer_count >= 2 (full mesh restored)
+    sleep 5
+    A_FINAL_PC=$(curl "${CURL_OPTS[@]}" "${BASE_URL}/koi-net/vault-sync/status" 2>/dev/null \
+        | json_get ".get('peer_count', 0)" 2>/dev/null || echo "0")
+    C_FINAL_PC=$(ssh "$THIRD_PEER_SSH" "${THIRD_PEER_CURL} \
+        http://localhost:${API_PORT}/koi-net/vault-sync/status" 2>/dev/null \
+        | json_get ".get('peer_count', 0)" 2>/dev/null || echo "0")
+
+    if [[ "$A_FINAL_PC" -ge 2 ]]; then
+        pass "A peer_count=${A_FINAL_PC} (full mesh restored)"
+    else
+        fail "A peer_count=${A_FINAL_PC} (expected >= 2)"
+    fi
+    if [[ "$C_FINAL_PC" -ge 2 ]]; then
+        pass "C peer_count=${C_FINAL_PC} (full mesh restored)"
+    else
+        fail "C peer_count=${C_FINAL_PC} (expected >= 2)"
+    fi
+
+    # Clean up forwarded copies on B and C
+    ssh "$PEER_SSH" "rm -f ${PEER_VAULT_PATH}/${CHAIN_FILE} ${PEER_VAULT_PATH}/${CHAIN_REV_FILE}" 2>/dev/null || true
+    ssh "$THIRD_PEER_SSH" "rm -f ${THIRD_PEER_VAULT_PATH}/${CHAIN_FILE}" 2>/dev/null || true
+
+    fi  # end of C_RID check
+fi  # end of THREE_PEER
+
 # Cleanup runs via EXIT trap; exit non-zero if any test failed
 [[ $FAIL -eq 0 ]] || exit 1
