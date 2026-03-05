@@ -110,6 +110,7 @@ class HandshakeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["handshake"] = "handshake"
     profile: NodeProfile
+    defer_approval: bool = False  # When True, inbound edge stays PROPOSED (for invite flow SAS verification)
 
 
 class ConfirmEventsRequest(BaseModel):

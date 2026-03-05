@@ -182,7 +182,7 @@ PY
 }
 
 peer_registry_update_status() {
-    # Atomic status update by peer_name
+    # Atomic status update by peer_name (updates LAST live-status entry, not first)
     local peer_name="$1"
     local new_status="$2"
     local extra_field="${3:-}"  # e.g. "removed_at" for timestamp
@@ -198,18 +198,19 @@ peer_registry_update_status() {
 
             python3 -c "
 import json, sys
+LIVE = {'invited', 'approving', 'active'}
 reg = json.load(open('$PEER_REGISTRY'))
-found = False
-for p in reg:
-    if p['peer_name'] == '$peer_name':
-        p['status'] = '$new_status'
-        if '$extra_field' and '$extra_value':
-            p['$extra_field'] = '$extra_value'
-        found = True
-        break
-if not found:
-    print('Peer not found: $peer_name', file=sys.stderr)
+# Find last matching live entry (most recent append)
+target_idx = None
+for i, p in enumerate(reg):
+    if p['peer_name'] == '$peer_name' and p.get('status', '') in LIVE:
+        target_idx = i
+if target_idx is None:
+    print('Peer not found (live): $peer_name', file=sys.stderr)
     sys.exit(1)
+reg[target_idx]['status'] = '$new_status'
+if '$extra_field' and '$extra_value':
+    reg[target_idx]['$extra_field'] = '$extra_value'
 with open('$tmpfile', 'w') as f:
     json.dump(reg, f, indent=2)
 "
@@ -227,6 +228,7 @@ extra_field = os.environ["EXTRA_FIELD"]
 extra_value = os.environ["EXTRA_VALUE"]
 registry = os.environ["PEER_REGISTRY_PATH"]
 lockfile = os.environ["LOCKFILE_PATH"]
+LIVE = {"invited", "approving", "active"}
 
 os.makedirs(os.path.dirname(registry), exist_ok=True)
 if not os.path.exists(registry):
@@ -237,17 +239,17 @@ with open(lockfile, "w", encoding="utf-8") as lf:
     fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
     with open(registry, "r", encoding="utf-8") as rf:
         reg = json.load(rf)
-    found = False
-    for p in reg:
-        if p.get("peer_name") == peer_name:
-            p["status"] = new_status
-            if extra_field and extra_value:
-                p[extra_field] = extra_value
-            found = True
-            break
-    if not found:
-        print(f"Peer not found: {peer_name}", file=sys.stderr)
+    # Find last matching live entry (most recent append)
+    target_idx = None
+    for i, p in enumerate(reg):
+        if p.get("peer_name") == peer_name and p.get("status", "") in LIVE:
+            target_idx = i
+    if target_idx is None:
+        print(f"Peer not found (live): {peer_name}", file=sys.stderr)
         sys.exit(1)
+    reg[target_idx]["status"] = new_status
+    if extra_field and extra_value:
+        reg[target_idx][extra_field] = extra_value
     tmp = f"{registry}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as wf:
         json.dump(reg, wf, indent=2)
@@ -736,4 +738,62 @@ check_wg_tools() {
         return 1
     fi
     return 0
+}
+
+# ============================================
+# SAS VERIFICATION
+# ============================================
+
+compute_sas() {
+    # Canonical SAS: sort keys, SHA256, first 4 bytes as uint32 mod 1000000, zero-pad to 6 digits
+    # Args: <koi_pubkey_a> <koi_pubkey_b>
+    local key_a="$1" key_b="$2"
+    python3 -c "
+import hashlib
+keys = sorted(['$key_a', '$key_b'])
+digest = hashlib.sha256(f'{keys[0]}:{keys[1]}'.encode()).digest()
+num = int.from_bytes(digest[:4], 'big') % 1000000
+print(f'{num:06d}')
+"
+}
+
+# ============================================
+# INVITE TOKEN HELPERS
+# ============================================
+
+peer_registry_lookup_by_number() {
+    # Look up a peer by peer_number (WG IP last octet), output JSON entry
+    # Returns the most recent invited/approving/active entry (skips cancelled/removed)
+    local peer_number="$1"
+    peer_registry_init
+    python3 -c "
+import json, sys
+reg = json.load(open('$PEER_REGISTRY'))
+# Return last matching entry with a live status (most recent append wins)
+LIVE_STATUSES = {'invited', 'approving', 'active'}
+match = None
+for p in reg:
+    if p.get('peer_number') == $peer_number and p.get('status', '') in LIVE_STATUSES:
+        match = p
+if match:
+    json.dump(match, sys.stdout, indent=2)
+    sys.exit(0)
+sys.exit(1)
+" 2>/dev/null
+}
+
+decode_invite_token() {
+    # Peer-side: decode invite token payload (no HMAC verification)
+    # Args: <token_string>
+    local token_str="$1"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    python3 -c "
+import sys
+sys.path.insert(0, '$script_dir')
+from invite_token import decode_token
+import json
+payload = decode_token('$token_str')
+json.dump(payload, sys.stdout, indent=2)
+"
 }

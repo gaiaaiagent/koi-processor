@@ -500,7 +500,32 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 ---
 
 **Last Updated**: 2026-03-04
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Sync-1.5 COMPLETE + E2EE COMPLETE
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Sync-1.5 COMPLETE + E2EE COMPLETE + Invite-Token Onboarding
+
+---
+
+## Invite-Token Peer Onboarding (2026-03-04)
+
+One-command peer onboarding for KOI-net federation. Reduces interactive onboarding from ~30 min to ~5 min.
+
+**New flow:** Admin creates invite token → peer runs `bootstrap-node.sh --invite <token>` → admin approves WG key → SAS verification over Signal → edges approved.
+
+Key files:
+- `scripts/federation/invite_token.py` — Token format (KOI-INVITE-1), HMAC signing/verification, pure stdlib
+- `scripts/federation/create-invite.sh` — Admin generates invite token
+- `scripts/federation/compute-sas.sh` — Admin computes SAS code for identity verification
+- `scripts/federation/approve-peer-edges.sh` — Admin approves all PROPOSED edges to/from a peer
+- `scripts/federation/bootstrap-node.sh` — `--invite` flag for token-driven flow
+- `scripts/federation/approve-peer.sh` — `--pubkey-only` flag for invite flow approval
+- `scripts/federation/lib.sh` — `compute_sas()`, `peer_registry_lookup_by_number()`, `decode_invite_token()`
+- `api/koi_protocol.py` — `defer_approval` field on `HandshakeRequest`
+- `api/koi_net_router.py` — Conditional inbound edge status (PROPOSED when deferred)
+
+Trust model: Token carries config (relay info, IP) for convenience. Identity verification is SAS (6-digit code confirmed over Signal). HMAC is admin-side only (prevents forgery/tampering at creation time).
+
+Backward compatible: Manual flow (bootstrap without `--invite`, connect-peers.sh) unchanged.
+
+Runbook: `docs/runbooks/peer-onboarding.md` (updated with invite flow section)
 
 ---
 
@@ -513,3 +538,4 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 | `17263f5c` | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
 | `5ddd839e` | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
 | `684c3d97` | 2026-03-03 | koi-processor | E2EE for vault sync: X25519 + ChaCha20-Poly1305 encryption, zero new deps. Encrypt on send, decrypt on receive, backward-compatible plaintext fallback. Deployed to both nodes, migration 057 applied, handshake exchanged keys, verified ciphertext in event queue + plaintext delivery on NUC. Fixed koi-server start.sh (0.0.0.0 binding, increased health check retries). |
+| `8ef466d5` | 2026-03-04 | koi-processor | Invite-token peer onboarding: 4 new scripts + 5 modified files. Token format (KOI-INVITE-1 + HMAC-SHA256), SAS verification, defer_approval handshake, resume-safe bootstrap, peer registry status machine (invited→approving→active). |

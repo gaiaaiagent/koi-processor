@@ -27,7 +27,101 @@ This runbook walks through onboarding a new peer into the KOI-net E2EE vault syn
    └────────────┘  └────────────┘  └─────────────┘
 ```
 
-**Time estimate:** ~45 min for full setup (assuming prerequisites installed).
+**Time estimate:** ~45 min manual flow, ~5 min interactive time with invite flow.
+
+**Two onboarding paths:**
+- **Invite flow (recommended):** Admin creates a token, peer runs one command. Steps 1-8 below are replaced by a single `bootstrap-node.sh --invite` command. See [Invite Flow](#invite-flow-recommended) below.
+- **Manual flow:** Original 8-phase process, still fully supported. Useful for macOS peers or when the invite flow isn't available.
+
+---
+
+## Invite Flow (Recommended)
+
+The invite flow reduces peer onboarding to **one command** on the peer side. WireGuard config, handshake, and SAS verification are all automated. Linux peers only (macOS uses manual flow).
+
+### Step 1: Admin creates invite token
+
+```bash
+cd ~/projects/RegenAI/koi-processor
+./scripts/federation/create-invite.sh shawn-personal 3
+```
+
+Options: `--ttl <hours>` (default 24), `--vault-sync-folder <folder>` (default Shared), `--dry-run`.
+
+This outputs a single-line token starting with `KOI-INVITE-1:...`. Send it to the peer via Signal.
+
+### Step 2: Peer bootstraps with token
+
+```bash
+git clone https://github.com/gaiaaiagent/koi-processor.git ~/projects/RegenAI/koi-processor
+cd ~/projects/RegenAI/koi-processor
+
+./scripts/federation/bootstrap-node.sh --invite "KOI-INVITE-1:..." --yes
+```
+
+The script:
+1. Installs prerequisites, PostgreSQL, repo, Python venv (idempotent)
+2. Generates WireGuard keypair + KOI node identity
+3. Writes and activates WireGuard config (from token's relay info)
+4. **Prints WG public key** — peer sends this to admin via Signal
+5. **Blocks** waiting for relay to become reachable (admin must approve first)
+
+### Step 3: Admin approves WG key
+
+Admin receives the peer's WG public key via Signal:
+
+```bash
+./scripts/federation/approve-peer.sh --pubkey-only <wg-pubkey> 3
+```
+
+This adds the peer to the relay WireGuard config. The peer's bootstrap script detects the tunnel is up and continues automatically.
+
+### Step 4: SAS verification (mandatory)
+
+After handshake completes, bootstrap displays a 6-digit SAS code:
+
+```
+===================================
+  VERIFY THIS CODE WITH ADMIN
+  SAS: 482917
+===================================
+```
+
+Admin computes their side:
+
+```bash
+./scripts/federation/compute-sas.sh shawn-personal
+```
+
+Both compare codes over Signal. If they match, peer confirms `y`. If mismatch, peer says `n` — local state is cleaned up automatically.
+
+### Step 5: Admin approves edges
+
+```bash
+./scripts/federation/approve-peer-edges.sh shawn-personal
+```
+
+This approves all PROPOSED edges on the admin side. Vault sync and polling start flowing.
+
+### Step 6: Smoke test
+
+Same as [Phase 7](#phase-7-smoke-test) in the manual flow — create a test file, trigger sync, verify.
+
+### Resume on failure
+
+If bootstrap fails partway (timeout, SAS mismatch, network issue), re-run with the same token:
+
+```bash
+./scripts/federation/bootstrap-node.sh --invite "KOI-INVITE-1:..." --yes
+```
+
+All steps are idempotent — WG keys reuse existing, migrations skip applied, handshake uses `ON CONFLICT DO UPDATE`.
+
+A fresh invite is only needed if `remove-peer.sh` was run or the token expired.
+
+---
+
+## Manual Flow
 
 ## Prerequisites
 
