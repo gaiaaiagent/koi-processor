@@ -206,8 +206,10 @@ with open(lockfile, 'w') as lf:
     fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
     with open(registry) as rf:
         reg = json.load(rf)
-    for p in reg:
-        if p.get('peer_name') == '$PEER_NAME':
+    # Find the active entry (just set by peer_registry_update_status)
+    # Iterate in reverse to pick the latest entry if duplicates exist
+    for p in reversed(reg):
+        if p.get('peer_name') == '$PEER_NAME' and p.get('status') == 'active':
             p['consumed'] = True
             break
     tmp = registry + '.tmp.' + str(os.getpid())

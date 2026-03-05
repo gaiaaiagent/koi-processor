@@ -162,21 +162,15 @@ log_info "Reading admin node info..."
 ADMIN_WG_IP=""
 ADMIN_BASE_URL=""
 
+# Admin WG IP is convention: peer 2 in the 10.100.0.0/24 subnet.
+# Do NOT derive from /koi-net/health base_url — that may report a LAN IP.
+ADMIN_WG_IP="${ADMIN_WG_IP:-10.100.0.2}"
+ADMIN_BASE_URL="http://${ADMIN_WG_IP}:8351"
+
 if ! $DRY_RUN; then
-    HEALTH=$(curl -sf "http://127.0.0.1:8351/koi-net/health" 2>/dev/null) || \
+    # Verify admin API is reachable (on localhost — we are the admin)
+    curl -sf "http://127.0.0.1:8351/koi-net/health" >/dev/null 2>&1 || \
         log_fatal "Cannot reach local KOI-net API at http://127.0.0.1:8351/koi-net/health"
-    ADMIN_BASE_URL=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('node', d.get('profile', {}))['base_url'])" 2>/dev/null) || \
-        log_fatal "Cannot extract base_url from health response"
-    # Extract WG IP from base_url (http://10.100.0.X:8351)
-    ADMIN_WG_IP=$(echo "$ADMIN_BASE_URL" | python3 -c "
-import sys
-from urllib.parse import urlparse
-url = sys.stdin.read().strip()
-print(urlparse(url).hostname)
-" 2>/dev/null) || log_fatal "Cannot extract admin WG IP from base_url"
-else
-    ADMIN_BASE_URL="http://10.100.0.2:8351"
-    ADMIN_WG_IP="10.100.0.2"
 fi
 
 # ============================================
