@@ -99,8 +99,7 @@ if os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes'):
 # Configuration
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://darrenzal:@localhost:5432/personal_koi')
 KOI_MODE = os.getenv('KOI_MODE', 'personal')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-ada-002')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # kept for /chat LLM endpoint
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes')
 TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true', '1', 'yes')
@@ -112,8 +111,10 @@ TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true'
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
-openai_available: bool = False
-openai_client: Optional[Any] = None
+openai_client: Optional[Any] = None  # lazy init for /chat LLM calls
+
+from api.embedding_provider import EmbeddingProvider, create_embedding_provider
+embedding_provider: Optional[EmbeddingProvider] = None
 terminusdb_adapter: Optional[Any] = None  # TerminusDBAdapter instance (lazy init)
 
 
@@ -282,34 +283,12 @@ class ShortestPathResponse(BaseModel):
     nodes: List[GraphNode]
 
 
-# =============================================================================
-# OpenAI Embedding Service (same as production entity_resolver.py)
-# =============================================================================
-
 async def generate_embedding(text: str) -> Optional[List[float]]:
-    """Generate embedding using OpenAI API (same as production)"""
-    if not openai_available or not ENABLE_SEMANTIC_MATCHING or not openai_client:
+    """Generate embedding using the configured provider."""
+    if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
         return None
-
-    try:
-        # Normalize text before embedding (same as entity_resolver.py)
-        normalized = normalize_entity_text(text)
-
-        # Use asyncio.to_thread for sync OpenAI call
-        response = await asyncio.to_thread(
-            openai_client.embeddings.create,
-            model=EMBEDDING_MODEL,
-            input=normalized
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.warning(f"Error generating OpenAI embedding: {e}")
-        return None
-
-
-def check_openai_availability() -> bool:
-    """Check if OpenAI API key is configured"""
-    return bool(OPENAI_API_KEY)
+    normalized = normalize_entity_text(text)
+    return await embedding_provider.embed_or_none(normalized)
 
 
 # =============================================================================
@@ -893,7 +872,7 @@ async def resolve_entity(
         ), False
 
     # Tier 2b: Semantic match (OpenAI embeddings + pgvector)
-    if openai_available and ENABLE_SEMANTIC_MATCHING:
+    if embedding_provider and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
             semantic_threshold = schema.semantic_threshold
@@ -977,7 +956,7 @@ async def store_new_entity(
 
     # Generate embedding for new entity (enables future Tier 2 matching)
     embedding = None
-    if openai_available and ENABLE_SEMANTIC_MATCHING:
+    if embedding_provider and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
             logger.info(f"Generated embedding for new entity: {entity.name}")
@@ -1169,7 +1148,7 @@ async def enqueue_outbox(
 @app.on_event("startup")
 async def startup():
     """Initialize database connection pool and OpenAI client"""
-    global db_pool, openai_available, openai_client
+    global db_pool, openai_client, embedding_provider
     try:
         db_pool = await asyncpg.create_pool(
             DB_URL,
@@ -1179,32 +1158,43 @@ async def startup():
         )
         logger.info(f"Connected to database (mode: {KOI_MODE})")
 
-        # Ensure schema exists
+        # 1. Init embedding provider (reads env vars only, no API call)
+        embedding_provider = create_embedding_provider()
+
+        # 2. Dimension guard: check provider dim matches existing tables
+        if embedding_provider:
+            async with db_pool.acquire() as conn:
+                for table in ['entity_registry', 'session_chunks']:
+                    regclass = await conn.fetchval(
+                        "SELECT to_regclass($1)", table
+                    )
+                    if regclass is None:
+                        continue  # table doesn't exist yet (fresh install)
+                    existing_dim = await conn.fetchval("""
+                        SELECT atttypmod FROM pg_attribute
+                        WHERE attrelid = to_regclass($1)
+                        AND attname = 'embedding' AND atttypmod > 0
+                    """, table)
+                    if existing_dim is not None and existing_dim > 0 and existing_dim != embedding_provider.dimension:
+                        logger.fatal(
+                            f"DIMENSION MISMATCH: provider outputs {embedding_provider.dimension}-dim "
+                            f"but {table}.embedding is vector({existing_dim}). "
+                            f"Cannot start. Re-embed data or change EMBEDDING_PROVIDER."
+                        )
+                        raise SystemExit(1)
+            logger.info(f"Tier 2 semantic matching: ENABLED")
+        else:
+            logger.info("Tier 2 semantic matching: DISABLED (no embedding provider)")
+
+        # 3. Ensure schema (uses provider dimension for new tables)
+        dim = embedding_provider.dimension if embedding_provider else 1536
         async with db_pool.acquire() as conn:
-            await ensure_schema(conn)
+            await ensure_schema(conn, embedding_dim=dim)
 
         # Verify graph traversal indexes
         async with db_pool.acquire() as conn:
             from api.graph_queries import verify_indexes
             await verify_indexes(conn)
-
-        # Initialize OpenAI client if API key is available
-        openai_available = check_openai_availability()
-        if openai_available:
-            try:
-                from openai import OpenAI
-                openai_client = OpenAI(api_key=OPENAI_API_KEY)
-                logger.info(f"OpenAI client initialized (model: {EMBEDDING_MODEL})")
-                logger.info("Tier 2 semantic matching: ENABLED")
-            except ImportError:
-                logger.warning("OpenAI package not installed. Run: pip install openai")
-                openai_available = False
-            except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI client: {e}")
-                openai_available = False
-        else:
-            logger.warning("OPENAI_API_KEY not set")
-            logger.info("Tier 2 semantic matching: DISABLED (falling back to fuzzy matching)")
 
         # Mount capability-gated routers (after pool init)
         if _caps is not None:
@@ -1303,9 +1293,9 @@ async def shutdown():
         await db_pool.close()
 
 
-async def ensure_schema(conn: asyncpg.Connection):
+async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
     """Ensure the entity_registry table exists"""
-    await conn.execute("""
+    await conn.execute(f"""
         CREATE TABLE IF NOT EXISTS entity_registry (
             id SERIAL PRIMARY KEY,
             fuseki_uri TEXT UNIQUE NOT NULL,
@@ -1321,7 +1311,7 @@ async def ensure_schema(conn: asyncpg.Connection):
             source TEXT DEFAULT 'personal-vault',
             first_seen_rid TEXT,
             metadata JSONB,
-            embedding vector(1536),
+            embedding vector({embedding_dim}),
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         )
@@ -1336,6 +1326,12 @@ async def ensure_schema(conn: asyncpg.Connection):
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_entity_registry_type
         ON entity_registry(entity_type)
+    """)
+
+    # Create HNSW index for vector similarity search (matches migration 020)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_entity_vector
+        ON entity_registry USING hnsw (embedding vector_cosine_ops)
     """)
 
     # Create document_entity_links table
@@ -1622,16 +1618,17 @@ async def health_check():
             "status": "healthy",
             "mode": KOI_MODE,
             "database": "connected",
-            "openai_available": openai_available,
-            "embedding_model": EMBEDDING_MODEL if openai_available else None,
-            "semantic_matching": openai_available and ENABLE_SEMANTIC_MATCHING,
+            "embedding_available": embedding_provider is not None,
+            "embedding_model": embedding_provider.model_name if embedding_provider else None,
+            "embedding_dimension": embedding_provider.dimension if embedding_provider else None,
+            "semantic_matching": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,
             "entity_types": entity_types,
             "schema_version": get_schema_version(),
             "resolution_tiers": {
                 "tier1_exact": True,
                 "tier1x_fuzzy": True,
                 "tier15_contextual": True,
-                "tier2_semantic": openai_available and ENABLE_SEMANTIC_MATCHING,
+                "tier2_semantic": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,
                 "tier3_create": True
             }
         }
@@ -3294,7 +3291,7 @@ async def search_sessions(request: SearchSessionsRequest):
             )
         """)
 
-        if has_embeddings and openai_available and ENABLE_SEMANTIC_MATCHING:
+        if has_embeddings and embedding_provider and ENABLE_SEMANTIC_MATCHING:
             # Semantic search with embeddings
             query_embedding = await generate_embedding(request.query)
 
@@ -3382,7 +3379,7 @@ async def search_sessions(request: SearchSessionsRequest):
         "results": results,
         "count": len(results),
         "query": request.query,
-        "search_type": "semantic" if has_embeddings and openai_available else "text"
+        "search_type": "semantic" if has_embeddings and embedding_provider else "text"
     }
 
 
@@ -4259,11 +4256,22 @@ async def chat_endpoint(request: ChatRequest):
     """
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
-    if not openai_available or not openai_client:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM service not available (OpenAI key not configured)",
-        )
+    # Lazy init openai_client for /chat LLM calls (separate from embedding provider)
+    global openai_client
+    if not openai_client:
+        if not OPENAI_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM service not available (OPENAI_API_KEY not configured)",
+            )
+        try:
+            from openai import OpenAI
+            openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        except ImportError:
+            raise HTTPException(
+                status_code=503,
+                detail="openai package not installed",
+            )
 
     # ------------------------------------------------------------------
     # 1. Semantic search over entity embeddings to find relevant entities
@@ -4425,6 +4433,10 @@ async def chat_endpoint(request: ChatRequest):
             except (asyncpg.exceptions.UndefinedTableError,
                     asyncpg.exceptions.UndefinedColumnError):
                 pass  # koi_memory_chunks or expected columns not available
+            except asyncpg.exceptions.DataError as e:
+                # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
+                # while generate_embedding() may output a different dimension (e.g. 1536).
+                logger.warning(f"koi_memory_chunks vector dimension mismatch (BGE vs provider): {e}")
 
         # ------------------------------------------------------------------
         # 2c. Fetch web sources linked to matched entities (B1.3)
