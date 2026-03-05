@@ -724,19 +724,21 @@ async def handshake(request: Request):
             peer.ontology_version,
         )
 
-        # Create inbound POLL edge (APPROVED — we want to poll them)
+        # Create inbound POLL edge (APPROVED by default, PROPOSED when defer_approval=True)
+        inbound_status = 'PROPOSED' if req.defer_approval else 'APPROVED'
         edge_rid_inbound = f"orn:koi-net.edge:{peer.node_rid}>{_node_profile.node_rid}:poll"
         await conn.execute(
             """
             INSERT INTO koi_net_edges
                 (edge_rid, source_node, target_node, edge_type, status, rid_types)
-            VALUES ($1, $2, $3, 'POLL', 'APPROVED', $4)
+            VALUES ($1, $2, $3, 'POLL', $5, $4)
             ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW(), rid_types = EXCLUDED.rid_types
             """,
             edge_rid_inbound,
             peer.node_rid,
             _node_profile.node_rid,
             peer.provides.event if peer.provides else [],
+            inbound_status,
         )
 
         # Create outbound POLL edge (PROPOSED — peer wants to poll us, requires approval)
@@ -772,7 +774,7 @@ async def handshake(request: Request):
 
     logger.info(
         f"Handshake with {peer.node_rid} ({peer.node_name}) — "
-        f"inbound edge APPROVED, outbound edge PROPOSED, alias '{peer.node_name}'"
+        f"inbound edge {inbound_status}, outbound edge PROPOSED, alias '{peer.node_name}'"
         f"{', e2ee=yes' if peer.encryption_key else ''}"
     )
 
