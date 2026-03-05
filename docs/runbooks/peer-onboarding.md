@@ -108,7 +108,7 @@ Should show `peer_name`, `wg_public_key`, `koi_public_key`, `node_rid`, `key_fin
 Admin receives the join request content via Signal and saves it to a file.
 
 ```bash
-cd ~/projects/regenai/koi-processor
+cd ~/projects/RegenAI/koi-processor
 
 # Save the join request content to a file
 cat > /tmp/shawn-join-request.txt << 'EOF'
@@ -291,7 +291,7 @@ cd ~/projects/RegenAI/koi-processor
 ### Admin runs second:
 
 ```bash
-cd ~/projects/regenai/koi-processor
+cd ~/projects/RegenAI/koi-processor
 
 ./scripts/federation/connect-peers.sh http://10.100.0.3:8351 shawn
 ```

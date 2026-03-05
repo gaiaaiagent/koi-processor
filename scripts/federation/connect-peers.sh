@@ -373,14 +373,14 @@ if [[ -n "$PEER_ALIAS" ]]; then
         ADMIN_TOKEN="${KOI_ADMIN_TOKEN:-}"
         if [[ -z "$ADMIN_TOKEN" ]]; then
             KOI_STATE="${KOI_STATE_DIR:-$HOME/.config/personal-koi/koi-state}"
-            ADMIN_TOKEN=$(cat "$(dirname "$KOI_STATE")/admin_token" 2>/dev/null || true)
+            ADMIN_TOKEN=$(cat "$KOI_STATE/admin_token" 2>/dev/null || true)
         fi
         if [[ -n "$ADMIN_TOKEN" ]]; then
             echo "Configuring vault sync with $PEER_ALIAS (folder: $SHARED_FOLDER)..."
             curl -sf -X POST "${LOCAL_URL}/koi-net/vault-sync/configure" \
                 -H "Authorization: Bearer $ADMIN_TOKEN" \
                 -H "Content-Type: application/json" \
-                -d "{\"peer_alias\": \"$PEER_ALIAS\", \"shared_folder\": \"$SHARED_FOLDER\"}" \
+                -d "{\"peer\": \"$PEER_ALIAS\", \"shared_folder\": \"$SHARED_FOLDER\"}" \
                 && echo "  Vault sync configured." \
                 || echo "  WARNING: Failed to configure vault sync. You can do it manually later."
         else
