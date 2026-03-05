@@ -460,13 +460,22 @@ compute_koi_fingerprint() {
 
 run_migrations() {
     # Run pending SQL migrations with tracking
-    # Args: <postgres-url> <migrations-dir>
+    # Args: <postgres-url> <migrations-dir> [manifest-file]
     local pg_url="$1"
     local mig_dir="$2"
+    local manifest_path="${3:-}"
 
     if $DRY_RUN; then
-        echo "[DRY-RUN] Would run migrations from $mig_dir"
+        if [[ -n "$manifest_path" ]]; then
+            echo "[DRY-RUN] Would run migrations from manifest $manifest_path (dir=$mig_dir)"
+        else
+            echo "[DRY-RUN] Would run migrations from $mig_dir"
+        fi
         return 0
+    fi
+
+    if [[ -n "$manifest_path" && ! -f "$manifest_path" ]]; then
+        log_fatal "Migration manifest not found: $manifest_path"
     fi
 
     ensure_python_module "psycopg2" "psycopg2-binary"
@@ -476,6 +485,7 @@ import os, sys, glob, re, psycopg2
 
 pg_url = '$pg_url'
 mig_dir = '$mig_dir'
+manifest_path = '$manifest_path'
 
 conn = psycopg2.connect(pg_url)
 conn.autocommit = True
@@ -489,113 +499,155 @@ cur.execute('''
     )
 ''')
 
-# Migration files (sorted)
+# Migration files discovered on disk
 all_mig_files = sorted(glob.glob(os.path.join(mig_dir, '*.sql')))
-mig_files = all_mig_files
+if not all_mig_files:
+    print(f'[ERROR] No migration files found in {mig_dir}', file=sys.stderr)
+    sys.exit(1)
 
-# Baseline detection: if table was just created but schema tables exist
-cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
-count = cur.fetchone()[0]
+mig_files = []
 
-# Optional minimum migration number for federation-only bootstrap.
-# If set (e.g., KOI_MIGRATION_MIN_NUM=39), older migrations are marked baseline.
-min_num_raw = os.environ.get('KOI_MIGRATION_MIN_NUM', '').strip()
-min_num = 0
-if min_num_raw:
-    try:
-        min_num = int(min_num_raw)
-    except ValueError:
-        print(f'[WARN] Ignoring invalid KOI_MIGRATION_MIN_NUM={min_num_raw!r}')
-        min_num = 0
+if manifest_path:
+    # Manifest mode: explicit ordered list of migrations to run for federation setup.
+    manifest_entries = []
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            manifest_entries.append(line)
 
-if min_num > 0:
-    non_numeric = [mf for mf in mig_files if not re.match(r'^\\d+', os.path.basename(mf))]
-    if non_numeric:
-        print(f'[INFO] Federation bootstrap mode: skipping {len(non_numeric)} non-numbered migrations')
-    mig_files = [mf for mf in mig_files if re.match(r'^\\d+', os.path.basename(mf))]
+    if not manifest_entries:
+        print(f'[ERROR] Migration manifest is empty: {manifest_path}', file=sys.stderr)
+        sys.exit(1)
 
-    baseline_count = 0
-    for mf in mig_files:
-        fname = os.path.basename(mf)
-        m = re.match(r'(\\d+)', fname)
-        if m and int(m.group(1)) < min_num:
-            cur.execute(
-                \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
-                (fname,)
-            )
-            baseline_count += 1
-    print(f'[INFO] Federation bootstrap baseline enabled: ensured {baseline_count} migrations with number < {min_num} are marked as baseline')
+    by_name = {os.path.basename(p): p for p in all_mig_files}
+    missing = []
+    resolved = []
+    for entry in manifest_entries:
+        path = by_name.get(entry)
+        if path is None:
+            alt = os.path.join(mig_dir, entry)
+            if os.path.isfile(alt):
+                path = alt
+        if path is None:
+            missing.append(entry)
+        else:
+            resolved.append(path)
+
+    if missing:
+        print(f'[ERROR] Manifest references missing migration files: {missing}', file=sys.stderr)
+        sys.exit(1)
+
+    mig_files = resolved
+    print(f'[INFO] Federation migration manifest mode: {len(mig_files)} file(s)')
+else:
+    # Legacy numeric-baseline mode retained for backward compatibility.
+    mig_files = all_mig_files
+
+    # Baseline detection: if table was just created but schema tables exist
     cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
     count = cur.fetchone()[0]
 
-if count == 0:
-    # Check if this is a pre-tracking database
-    cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='koi_net_events')\")
-    if cur.fetchone()[0]:
-        print('[INFO] Pre-tracking database detected, recording baseline...')
-        # Only mark migrations as baseline if their target table already exists
-        # This prevents marking NEW migrations (like 045) as already applied
-        # First pass: find highest migration number whose CREATE TABLEs all exist
-        highest_existing_num = 0
-        for mf in mig_files:
-            fname = os.path.basename(mf)
-            sql_content = open(mf).read()
-            tables = re.findall(r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)', sql_content, re.IGNORECASE)
-            if tables:
-                all_exist = True
-                for tbl in tables:
-                    cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=%s)\", (tbl,))
-                    if not cur.fetchone()[0]:
-                        all_exist = False
-                        break
-                if all_exist:
-                    try:
-                        num = int(re.match(r'(\d+)', fname).group(1))
-                        highest_existing_num = max(highest_existing_num, num)
-                    except (AttributeError, ValueError):
-                        pass
-        print(f'[INFO] Baseline cutoff: migration number {highest_existing_num}')
+    # Optional minimum migration number for federation-only bootstrap.
+    # If set (e.g., KOI_MIGRATION_MIN_NUM=39), older migrations are marked baseline.
+    min_num_raw = os.environ.get('KOI_MIGRATION_MIN_NUM', '').strip()
+    min_num = 0
+    if min_num_raw:
+        try:
+            min_num = int(min_num_raw)
+        except ValueError:
+            print(f'[WARN] Ignoring invalid KOI_MIGRATION_MIN_NUM={min_num_raw!r}')
+            min_num = 0
 
-        # Second pass: mark baselines
+    if min_num > 0:
+        non_numeric = [mf for mf in mig_files if not re.match(r'^\\d+', os.path.basename(mf))]
+        if non_numeric:
+            print(f'[INFO] Federation bootstrap mode: skipping {len(non_numeric)} non-numbered migrations')
+        mig_files = [mf for mf in mig_files if re.match(r'^\\d+', os.path.basename(mf))]
+
         baseline_count = 0
         for mf in mig_files:
             fname = os.path.basename(mf)
-            # Read the SQL to check if its CREATE TABLE target already exists
-            sql_content = open(mf).read()
-            tables = re.findall(r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)', sql_content, re.IGNORECASE)
-            if tables:
-                # Check if ALL tables in this migration already exist
-                all_exist = True
-                for tbl in tables:
-                    cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=%s)\", (tbl,))
-                    if not cur.fetchone()[0]:
-                        all_exist = False
-                        break
-                if all_exist:
-                    cur.execute(
-                        \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
-                        (fname,)
-                    )
-                    baseline_count += 1
+            m = re.match(r'(\\d+)', fname)
+            if m and int(m.group(1)) < min_num:
+                cur.execute(
+                    \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
+                    (fname,)
+                )
+                baseline_count += 1
+        print(f'[INFO] Federation bootstrap baseline enabled: ensured {baseline_count} migrations with number < {min_num} are marked as baseline')
+        cur.execute(\"SELECT COUNT(*) FROM koi_schema_migrations\")
+        count = cur.fetchone()[0]
+
+    if count == 0:
+        # Check if this is a pre-tracking database
+        cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='koi_net_events')\")
+        if cur.fetchone()[0]:
+            print('[INFO] Pre-tracking database detected, recording baseline...')
+            # Only mark migrations as baseline if their target table already exists
+            # This prevents marking NEW migrations (like 045) as already applied
+            # First pass: find highest migration number whose CREATE TABLEs all exist
+            highest_existing_num = 0
+            for mf in mig_files:
+                fname = os.path.basename(mf)
+                sql_content = open(mf).read()
+                tables = re.findall(r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)', sql_content, re.IGNORECASE)
+                if tables:
+                    all_exist = True
+                    for tbl in tables:
+                        cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=%s)\", (tbl,))
+                        if not cur.fetchone()[0]:
+                            all_exist = False
+                            break
+                    if all_exist:
+                        try:
+                            num = int(re.match(r'(\d+)', fname).group(1))
+                            highest_existing_num = max(highest_existing_num, num)
+                        except (AttributeError, ValueError):
+                            pass
+            print(f'[INFO] Baseline cutoff: migration number {highest_existing_num}')
+
+            # Second pass: mark baselines
+            baseline_count = 0
+            for mf in mig_files:
+                fname = os.path.basename(mf)
+                # Read the SQL to check if its CREATE TABLE target already exists
+                sql_content = open(mf).read()
+                tables = re.findall(r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)', sql_content, re.IGNORECASE)
+                if tables:
+                    # Check if ALL tables in this migration already exist
+                    all_exist = True
+                    for tbl in tables:
+                        cur.execute(\"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=%s)\", (tbl,))
+                        if not cur.fetchone()[0]:
+                            all_exist = False
+                            break
+                    if all_exist:
+                        cur.execute(
+                            \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
+                            (fname,)
+                        )
+                        baseline_count += 1
+                    else:
+                        print(f'[INFO] Migration {fname} has new tables, will be applied')
                 else:
-                    print(f'[INFO] Migration {fname} has new tables, will be applied')
-            else:
-                # Non-CREATE-TABLE migrations (ALTER, INDEX, etc.)
-                # Only mark as baseline if their number is <= the highest CREATE-TABLE
-                # migration whose tables already exist. This avoids skipping new ALTERs.
-                try:
-                    file_num = int(re.match(r'(\d+)', fname).group(1))
-                except (AttributeError, ValueError):
-                    file_num = 999999
-                if file_num <= highest_existing_num:
-                    cur.execute(
-                        \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
-                        (fname,)
-                    )
-                    baseline_count += 1
-                else:
-                    print(f'[INFO] Migration {fname} (non-CREATE, num={file_num}) is newer than baseline cutoff ({highest_existing_num}), will be applied')
-        print(f'[INFO] Marked {baseline_count} existing migrations as baseline')
+                    # Non-CREATE-TABLE migrations (ALTER, INDEX, etc.)
+                    # Only mark as baseline if their number is <= the highest CREATE-TABLE
+                    # migration whose tables already exist. This avoids skipping new ALTERs.
+                    try:
+                        file_num = int(re.match(r'(\d+)', fname).group(1))
+                    except (AttributeError, ValueError):
+                        file_num = 999999
+                    if file_num <= highest_existing_num:
+                        cur.execute(
+                            \"INSERT INTO koi_schema_migrations (filename, applied_at) VALUES (%s, 'epoch') ON CONFLICT DO NOTHING\",
+                            (fname,)
+                        )
+                        baseline_count += 1
+                    else:
+                        print(f'[INFO] Migration {fname} (non-CREATE, num={file_num}) is newer than baseline cutoff ({highest_existing_num}), will be applied')
+            print(f'[INFO] Marked {baseline_count} existing migrations as baseline')
 
 # Get already-applied migrations
 cur.execute('SELECT filename FROM koi_schema_migrations')
@@ -677,6 +729,17 @@ require_cmd() {
     local cmd="$1"
     if ! command -v "$cmd" &>/dev/null; then
         log_fatal "Required command not found: $cmd"
+    fi
+}
+
+require_python_3_11() {
+    require_cmd python3
+    local version
+    version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    local major="${version%%.*}"
+    local minor="${version##*.}"
+    if (( major < 3 || (major == 3 && minor < 11) )); then
+        log_fatal "Python 3.11+ required for federation scripts (found ${version}). Upgrade python3 and retry."
     fi
 }
 

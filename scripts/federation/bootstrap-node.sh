@@ -238,6 +238,16 @@ setup_python_env() {
         log_warn "Detected broken virtualenv at $KOI_PATH/venv (missing bin/activate), recreating..."
         run_or_print "rm -rf \"$KOI_PATH/venv\""
     fi
+    if [[ -x "$KOI_PATH/venv/bin/python" ]]; then
+        local venv_py_version
+        venv_py_version="$("$KOI_PATH/venv/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "0.0")"
+        local venv_major="${venv_py_version%%.*}"
+        local venv_minor="${venv_py_version##*.}"
+        if (( venv_major < 3 || (venv_major == 3 && venv_minor < 11) )); then
+            log_warn "Existing virtualenv uses Python ${venv_py_version}; recreating with Python 3.11+"
+            run_or_print "rm -rf \"$KOI_PATH/venv\""
+        fi
+    fi
     if [[ ! -f "$KOI_PATH/venv/bin/activate" ]]; then
         run_or_print "python3 -m venv \"$KOI_PATH/venv\""
     fi
@@ -441,6 +451,8 @@ case "$(uname)" in
         log_fatal "Unsupported OS: $(uname)"
         ;;
 esac
+
+require_python_3_11
 
 log_info "Step 2: PostgreSQL bootstrap..."
 ensure_postgres

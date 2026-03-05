@@ -20,6 +20,7 @@ Example:
 What `bootstrap-node.sh` does:
 
 1. Installs prerequisites (`wireguard-tools`, Python venv/pip, PostgreSQL, `git`, `curl`, `jq`).
+   - Requires `python3 >= 3.11` (fails fast with guidance if older).
 2. Ensures local DB role/user + `personal_koi` database exist.
 3. Clones/updates `koi-processor` and checks out a target git ref.
 4. Creates `venv` and installs `requirements.txt`.
@@ -101,10 +102,13 @@ curl -sS "http://127.0.0.1:8351/koi-net/shared-with-me?since=2026-02-25T20:22:00
 
 Migration note:
 
-- `setup-node.sh` defaults `KOI_MIGRATION_MIN_NUM=40` for federation setup, so
-  federation-relevant migrations run without legacy pre-federation table
-  dependencies.
-- Override by exporting `KOI_MIGRATION_MIN_NUM` explicitly.
+- `setup-node.sh` defaults to federation manifest mode via:
+  `scripts/federation/migration-manifest-federation.txt`
+- This runs only KOI-net + vault-sync migrations in explicit order.
+- Override by exporting `KOI_FEDERATION_MIGRATION_MANIFEST=/path/to/manifest.txt`.
+- Legacy numeric mode remains available if no manifest is found
+  (or if you unset `KOI_FEDERATION_MIGRATION_MANIFEST` and set
+  `KOI_MIGRATION_MIN_NUM` explicitly).
 
 ## Vault Sync Smoke Test
 

@@ -131,7 +131,7 @@ A fresh invite is only needed if `remove-peer.sh` was run or the token expired.
 |-------------|---------|
 | Machine | macOS or Linux with sudo access |
 | Network | Outbound UDP to relay `37.27.48.12:51820` |
-| Software | git, Python 3.11+, PostgreSQL 14+ (`bootstrap-node.sh` installs these if missing) |
+| Software | git, Python 3.11+, PostgreSQL 14+ with `pgvector` extension available (`bootstrap-node.sh` installs base packages) |
 | Out-of-band channel | Signal or phone call for fingerprint verification |
 | Admin coordination | Admin must be available to run `approve-peer.sh` and `connect-peers.sh` |
 
@@ -202,6 +202,7 @@ Should show `peer_name`, `wg_public_key`, `koi_public_key`, `node_rid`, `key_fin
 | `apt-get` / `brew` fails | Run manually: `sudo apt install wireguard-tools python3-venv postgresql` (Linux) or `brew install wireguard-tools python postgresql` (macOS) |
 | `psql: FATAL: role "shawn" does not exist` | `sudo -u postgres createuser --superuser shawn` then re-run |
 | `psql: could not connect to server` | Start PostgreSQL: `sudo systemctl start postgresql` (Linux) or `brew services start postgresql` (macOS) |
+| `PostgreSQL extension 'vector' is unavailable` | Install pgvector for your PostgreSQL version, then re-run `setup-node.sh` |
 | Python deps fail | The script falls back to `requirements-bootstrap.txt`. If that also fails, check Python version: `python3 --version` (need 3.11+) |
 | Join request expired | Re-run `./scripts/federation/join-request.sh shawn-personal` to regenerate (24h expiry) |
 
@@ -323,7 +324,7 @@ cd ~/projects/RegenAI/koi-processor
 | 3 | Generate `personal.env` from template | Substitutes node name, WG IP, state dir |
 | 4 | Verify config settings | Checks `KOI_BASE_URL` is non-localhost, security flags enabled |
 | 5 | Configure API firewall rules | Port 8351 only on loopback + WireGuard interface |
-| 6 | Run database migrations (through 060) | `[INFO] Applying migration 040...` through `060` |
+| 6 | Run federation migration manifest | Applies files listed in `scripts/federation/migration-manifest-federation.txt` |
 | 7 | Install Python crypto deps | `pip install cryptography` |
 | 8 | Generate `start.sh` | At `~/.config/personal-koi/start.sh` |
 | 9 | Start service + wait for health | Polls `/health` for up to 30s |

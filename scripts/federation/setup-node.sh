@@ -70,6 +70,9 @@ log_info "Non-interactive: $NON_INTERACTIVE"
 log_info "Force overwrite: $FORCE_OVERWRITE"
 log_info "Skip firewall: $SKIP_FIREWALL"
 
+# Enforce runtime before any Python-based setup work.
+require_python_3_11
+
 # ============================================
 # STEP 1: Verify WireGuard tunnel
 # ============================================
@@ -277,12 +280,28 @@ log_info "Step 6: Running pending migrations..."
 
 POSTGRES_URL="${POSTGRES_URL:-postgresql:///personal_koi}"
 MIGRATIONS_DIR="$KOI_PATH/migrations"
+FEDERATION_MIGRATION_MANIFEST="${KOI_FEDERATION_MIGRATION_MANIFEST:-$SCRIPT_DIR/migration-manifest-federation.txt}"
 
-# Federation setup defaults to migration 040+ unless explicitly overridden.
-# This avoids legacy non-federation migrations that rely on historical tables.
-if [[ -z "${KOI_MIGRATION_MIN_NUM:-}" ]]; then
-    export KOI_MIGRATION_MIN_NUM=40
-    log_info "Using federation migration baseline: KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
+# Ensure required DB extensions are available before startup/migrations.
+# KOI API startup expects pgvector (`vector` type) to exist.
+log_info "Ensuring required PostgreSQL extensions..."
+if ! psql "$POSTGRES_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1; then
+    log_fatal "PostgreSQL extension 'vector' is unavailable. Install pgvector for your PostgreSQL version, then re-run setup."
+fi
+psql "$POSTGRES_URL" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" >/dev/null 2>&1 || true
+psql "$POSTGRES_URL" -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" >/dev/null 2>&1 || true
+
+# Federation setup defaults to explicit manifest mode for deterministic onboarding.
+# Legacy KOI_MIGRATION_MIN_NUM mode remains available as fallback if no manifest exists.
+if [[ -n "$FEDERATION_MIGRATION_MANIFEST" && -f "$FEDERATION_MIGRATION_MANIFEST" ]]; then
+    log_info "Using federation migration manifest: $FEDERATION_MIGRATION_MANIFEST"
+else
+    if [[ -z "${KOI_MIGRATION_MIN_NUM:-}" ]]; then
+        export KOI_MIGRATION_MIN_NUM=40
+        log_info "Manifest missing; using legacy KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
+    else
+        log_info "Manifest missing; using explicit KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
+    fi
 fi
 
 if [[ -d "$MIGRATIONS_DIR" ]]; then
@@ -293,7 +312,11 @@ if [[ -d "$MIGRATIONS_DIR" ]]; then
         source "$KOI_PATH/venv/bin/activate"
     fi
     ensure_python_module "psycopg2" "psycopg2-binary"
-    run_migrations "$POSTGRES_URL" "$MIGRATIONS_DIR"
+    if [[ -n "$FEDERATION_MIGRATION_MANIFEST" && -f "$FEDERATION_MIGRATION_MANIFEST" ]]; then
+        run_migrations "$POSTGRES_URL" "$MIGRATIONS_DIR" "$FEDERATION_MIGRATION_MANIFEST"
+    else
+        run_migrations "$POSTGRES_URL" "$MIGRATIONS_DIR"
+    fi
 else
     log_warn "Migrations directory not found: $MIGRATIONS_DIR"
 fi
@@ -379,7 +402,12 @@ from api.node_identity import load_or_create_identity, get_public_key_der_b64
 from base64 import b64encode, b64decode
 import hashlib
 
-private_key, profile = load_or_create_identity('$NODE_NAME')
+# load_or_create_identity may return (private_key, profile) or
+# (private_key, profile, encryption_private_key) depending on version.
+identity = load_or_create_identity('$NODE_NAME')
+if not isinstance(identity, tuple) or len(identity) < 2:
+    raise RuntimeError(f'Unexpected identity return shape: {type(identity)}')
+private_key, profile = identity[0], identity[1]
 koi_pubkey = get_public_key_der_b64(private_key)
 
 # Compute fingerprint: SHA256 of the actual DER bytes (not the base64 text)

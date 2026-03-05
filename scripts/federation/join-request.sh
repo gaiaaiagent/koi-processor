@@ -83,7 +83,7 @@ fi
 
 log_info "Step 4: Generating KOI node identity..."
 
-require_cmd python3
+require_python_3_11
 
 # Check for cryptography module (required for ECDSA key generation)
 if ! python3 -c "import cryptography" 2>/dev/null; then
@@ -113,7 +113,12 @@ os.environ['KOI_STATE_DIR'] = '$KOI_STATE'
 
 from api.node_identity import load_or_create_identity, get_public_key_der_b64
 
-private_key, profile = load_or_create_identity('$PEER_NAME')
+# load_or_create_identity may return (private_key, profile) or
+# (private_key, profile, encryption_private_key) depending on version.
+identity = load_or_create_identity('$PEER_NAME')
+if not isinstance(identity, tuple) or len(identity) < 2:
+    raise RuntimeError(f'Unexpected identity return shape: {type(identity)}')
+private_key, profile = identity[0], identity[1]
 koi_pubkey = get_public_key_der_b64(private_key)
 
 print(f'node_rid={profile.node_rid}')
