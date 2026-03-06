@@ -597,6 +597,19 @@ async def main():
             edge_time = time.time() - edge_start
             logger.info(f"Edges loaded in {edge_time:.1f}s: {edge_success} success, {edge_failed} failed")
 
+        # Post-processing: community detection + flow detection (non-fatal)
+        try:
+            from scripts.community_detection import detect_communities
+            from scripts.detect_flows import detect_flows
+            logger.info("Running post-processing: community detection...")
+            memberships = await detect_communities(conn, args.repo, extraction_run_id, STAGING_GRAPH)
+            logger.info("Running post-processing: flow detection...")
+            await detect_flows(conn, args.repo, extraction_run_id, memberships, STAGING_GRAPH)
+        except ImportError as ie:
+            logger.warning(f"Post-processing not available (missing dependency): {ie}")
+        except Exception as e:
+            logger.error(f"Post-processing failed (non-fatal, extraction results preserved): {e}")
+
         total_time = time.time() - start_time
 
         logger.info("=" * 50)

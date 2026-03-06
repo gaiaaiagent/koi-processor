@@ -2461,7 +2461,9 @@ app.post('/api/koi/graph', async (req, res) => {
       'get_module', 'keeper_for_msg', 'msgs_for_keeper', 'related_entities',
       'list_entity_types', 'get_entity_stats', 'list_concepts', 'explain_concept',
       'find_concept_for_query', 'find_callers', 'find_callees', 'find_call_graph',
-      'search_modules', 'module_entities', 'module_for_entity'
+      'search_modules', 'module_entities', 'module_for_entity',
+      'code_impact', 'list_communities', 'community_members', 'community_for_entity',
+      'list_flows', 'flow_steps', 'flows_for_entity', 'check_staleness'
     ];
 
     // If only 'query' is provided (OpenAPI compatibility), provide guidance
@@ -2728,6 +2730,245 @@ app.post('/api/koi/graph', async (req, res) => {
             LIMIT ${chainLimit}
           $$) as (chain agtype)`;
           break;
+
+        case 'code_impact': {
+          // Impact analysis: BFS traversal to find affected code at each depth
+          const impactTarget = params.entity_name || '';
+          const impactDirection = params.direction || 'upstream'; // upstream = who calls me, downstream = what I call
+          const impactMaxDepth = Math.min(params.max_depth || 3, 5);
+          const includeTests = params.include_tests || false;
+          const relationTypes = params.relation_types || ['CALLS'];
+
+          const testPatterns = ['/test/', '/tests/', '.test.', '.spec.', '_test.go', '_test.py', 'test_', '__tests__/'];
+
+          // Find target entity
+          const targetResult = await client.query(`SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WHERE n.name = '${impactTarget}'
+            RETURN n.entity_id, n.name, n.entity_type, n.file_path, n.line_start, n.repo
+            LIMIT 1
+          $$) as (entity_id agtype, name agtype, entity_type agtype, file_path agtype, line_start agtype, repo agtype)`);
+
+          if (targetResult.rows.length === 0) {
+            const envelope = createSuccessEnvelope(requestId, {
+              query_type: 'code_impact',
+              total_results: 0,
+              results: [],
+              target: null,
+              error: `Entity '${impactTarget}' not found`
+            });
+            return res.json(envelope);
+          }
+
+          const target = {
+            entity_id: JSON.parse(targetResult.rows[0].entity_id),
+            name: JSON.parse(targetResult.rows[0].name),
+            entity_type: JSON.parse(targetResult.rows[0].entity_type),
+            file_path: JSON.parse(targetResult.rows[0].file_path),
+            line_start: JSON.parse(targetResult.rows[0].line_start),
+            repo: JSON.parse(targetResult.rows[0].repo),
+          };
+
+          // BFS: iterative depth queries
+          const visited = new Set<string>([target.entity_id]);
+          const byDepth: Record<number, any[]> = {};
+          let frontier = [target.entity_id];
+
+          for (let depth = 1; depth <= impactMaxDepth; depth++) {
+            if (frontier.length === 0) break;
+
+            const depthResults: any[] = [];
+            for (const relType of relationTypes) {
+              // Build match pattern based on direction
+              // upstream: find who calls the frontier → (found)-[:CALLS]->(frontier)
+              // downstream: find what the frontier calls → (frontier)-[:CALLS]->(found)
+              const whereClause = frontier.map(id => `'${id}'`).join(', ');
+
+              const depthQuery = impactDirection === 'upstream'
+                ? `SELECT * FROM cypher('regen_graph', $$
+                    MATCH (found)-[:${relType}]->(target)
+                    WHERE target.entity_id IN [${whereClause}]
+                    RETURN found.entity_id, found.name, found.entity_type, found.file_path, found.line_start, found.repo
+                  $$) as (entity_id agtype, name agtype, entity_type agtype, file_path agtype, line_start agtype, repo agtype)`
+                : `SELECT * FROM cypher('regen_graph', $$
+                    MATCH (source)-[:${relType}]->(found)
+                    WHERE source.entity_id IN [${whereClause}]
+                    RETURN found.entity_id, found.name, found.entity_type, found.file_path, found.line_start, found.repo
+                  $$) as (entity_id agtype, name agtype, entity_type agtype, file_path agtype, line_start agtype, repo agtype)`;
+
+              try {
+                const result = await client.query(depthQuery);
+                for (const row of result.rows) {
+                  const entityId = JSON.parse(row.entity_id);
+                  if (visited.has(entityId)) continue;
+
+                  const filePath = JSON.parse(row.file_path) || '';
+                  // Filter test files unless included
+                  if (!includeTests && testPatterns.some(p => filePath.includes(p))) continue;
+
+                  visited.add(entityId);
+                  const entity = {
+                    entity_id: entityId,
+                    name: JSON.parse(row.name),
+                    entity_type: JSON.parse(row.entity_type),
+                    file_path: filePath,
+                    line_start: JSON.parse(row.line_start),
+                    repo: JSON.parse(row.repo),
+                    relationType: relType,
+                  };
+                  depthResults.push(entity);
+                }
+              } catch (e) {
+                console.error(`Impact analysis depth ${depth} error:`, e);
+              }
+            }
+
+            if (depthResults.length > 0) {
+              byDepth[depth] = depthResults;
+              frontier = depthResults.map(e => e.entity_id);
+            } else {
+              frontier = [];
+            }
+          }
+
+          // Calculate risk
+          const directCount = (byDepth[1] || []).length;
+          const totalCount = Object.values(byDepth).reduce((sum, arr) => sum + arr.length, 0);
+          const affectedModules = new Set(Object.values(byDepth).flat().map(e => {
+            const parts = (e.file_path || '').split('/');
+            return parts.length > 1 ? parts[0] : 'root';
+          }));
+
+          let risk = 'LOW';
+          if (directCount >= 30 || affectedModules.size >= 5) risk = 'CRITICAL';
+          else if (directCount >= 15 || affectedModules.size >= 3) risk = 'HIGH';
+          else if (directCount >= 5) risk = 'MEDIUM';
+
+          const depthLabels: Record<number, string> = {
+            1: 'WILL BREAK',
+            2: 'LIKELY AFFECTED',
+            3: 'MAY NEED TESTING',
+          };
+
+          const impactResults = Object.entries(byDepth).map(([depth, entities]) => ({
+            depth: parseInt(depth),
+            label: depthLabels[parseInt(depth)] || `DEPTH ${depth}`,
+            entities,
+          }));
+
+          const responseTime = Date.now() - startTime;
+          const envelope = createSuccessEnvelope(requestId, {
+            query_type: 'code_impact',
+            total_results: totalCount,
+            results: impactResults,
+            target,
+            direction: impactDirection,
+            risk,
+            summary: { direct: directCount, total: totalCount, modules: affectedModules.size },
+            byDepth,
+          }, {
+            tool_trace: [{
+              tool: 'graph_query',
+              params_summary: summarizeParams({ query_type, ...params }),
+              timestamp: new Date(startTime).toISOString(),
+              data_source: 'graph',
+              duration_ms: responseTime,
+            }],
+          });
+          // Don't release client here — the finally block handles it
+          return res.json(envelope);
+        }
+
+        case 'list_communities': {
+          const commRepo = params.repo_name || '';
+          const commLimit = params.limit || 50;
+          const repoWhere = commRepo ? `WHERE c.repo = '${commRepo}'` : '';
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (c:Community)
+            ${repoWhere}
+            RETURN properties(c) as community
+            ORDER BY c.symbol_count DESC
+            LIMIT ${commLimit}
+          $$) as (community agtype)`;
+          break;
+        }
+
+        case 'community_members': {
+          const commId = params.community_id || params.community_name || '';
+          const memberLimit = params.limit || 100;
+          // Match by community_id or name
+          const commMatch = commId.startsWith('comm_')
+            ? `{community_id: '${commId}'}`
+            : `{name: '${commId}'}`;
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)-[:MEMBER_OF]->(c:Community ${commMatch})
+            RETURN properties(n) as entity, properties(c) as community
+            LIMIT ${memberLimit}
+          $$) as (entity agtype, community agtype)`;
+          break;
+        }
+
+        case 'community_for_entity': {
+          const entityForComm = params.entity_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n {name: '${entityForComm}'})-[:MEMBER_OF]->(c:Community)
+            RETURN properties(n) as entity, properties(c) as community
+          $$) as (entity agtype, community agtype)`;
+          break;
+        }
+
+        case 'list_flows': {
+          const flowRepo = params.repo_name || '';
+          const flowLimit = params.limit || 50;
+          const flowRepoWhere = flowRepo ? `WHERE p.repo = '${flowRepo}'` : '';
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (p:Process)
+            ${flowRepoWhere}
+            RETURN properties(p) as process
+            ORDER BY p.step_count DESC
+            LIMIT ${flowLimit}
+          $$) as (process agtype)`;
+          break;
+        }
+
+        case 'flow_steps': {
+          const processId = params.process_id || params.process_name || '';
+          const procMatch = processId.startsWith('proc_')
+            ? `{process_id: '${processId}'}`
+            : `{name: '${processId}'}`;
+
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)-[s:STEP_IN_PROCESS]->(p:Process ${procMatch})
+            RETURN properties(n) as entity, s.step as step, properties(p) as process
+            ORDER BY s.step
+          $$) as (entity agtype, step agtype, process agtype)`;
+          break;
+        }
+
+        case 'flows_for_entity': {
+          const flowEntity = params.entity_name || '';
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n {name: '${flowEntity}'})-[s:STEP_IN_PROCESS]->(p:Process)
+            RETURN properties(p) as process, s.step as step
+            ORDER BY p.step_count DESC
+          $$) as (process agtype, step agtype)`;
+          break;
+        }
+
+        case 'check_staleness': {
+          // Check which repos have stale graph data by comparing extraction timestamps
+          cypherQuery = `SELECT * FROM cypher('regen_graph', $$
+            MATCH (n)
+            WHERE n.repo IS NOT NULL
+            WITH DISTINCT n.repo as repo, n.extraction_run_id as run_id, count(*) as entity_count
+            RETURN repo, run_id, entity_count
+            ORDER BY repo
+          $$) as (repo agtype, run_id agtype, entity_count agtype)`;
+          break;
+        }
 
         default:
           return res.status(400).json({ error: `Unknown query_type: ${query_type}` });
