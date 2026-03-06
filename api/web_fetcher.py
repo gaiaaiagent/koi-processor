@@ -58,7 +58,7 @@ MIN_WORD_COUNT = int(os.environ.get("MIN_WORD_COUNT", "100"))  # aiohttp->Playwr
 PLAYWRIGHT_WORD_THRESHOLD = 50  # Legacy alias (kept for backward compat)
 PLAYWRIGHT_TIMEOUT = 30000      # ms
 PLAYWRIGHT_WAIT = 3             # seconds after networkidle
-SCRAPLING_TIMEOUT = 90          # seconds — Cloudflare Turnstile solving can take ~30-40s
+SCRAPLING_TIMEOUT = 60          # seconds — Camoufox challenge solving can be slow
 
 # Rate limits
 RATE_LIMIT_PER_USER_HOUR = 5
@@ -370,27 +370,22 @@ def extract_best_content(html: str, soup: BeautifulSoup, url: str = "") -> str:
 def _is_cloudflare_challenge(html: str, status_code: int = 200) -> bool:
     """Detect Cloudflare managed challenge / Turnstile page.
 
-    Uses the <title>Just a moment...</title> tag as the primary signal — this only
-    appears on challenge pages, never on real content. CF infrastructure signals
-    (cdn-cgi, _cf_chl_opt) can appear on legitimate pages behind Cloudflare, so
-    they're only used as secondary confirmation on error status codes.
+    Checks for CF signals on 403/503 responses, or on any status if the page
+    title is the telltale "Just a moment..." (catches Playwright-rendered challenge pages).
     """
-    # Primary signal: challenge page title (definitive, never on real pages)
-    has_challenge_title = "<title>Just a moment...</title>" in html
-
-    if has_challenge_title:
-        return True
-
-    # On error status codes, also check for structural CF challenge signals
+    cf_signals = [
+        "cf-browser-verification",
+        "challenge-platform",
+        "cdn-cgi/challenge-platform",
+        "_cf_chl_opt",
+    ]
     if status_code in (403, 503):
-        cf_signals = [
-            "cf-browser-verification",
-            "cdn-cgi/challenge-platform",
-            "_cf_chl_opt",
-        ]
-        if any(s in html for s in cf_signals):
+        # On error status, any CF signal is sufficient
+        if "Just a moment..." in html or any(s in html for s in cf_signals):
             return True
-
+    # On any status, detect the challenge page by title + at least one structural signal
+    if "<title>Just a moment...</title>" in html and any(s in html for s in cf_signals):
+        return True
     return False
 
 
@@ -416,10 +411,7 @@ async def fetch_html_with_scrapling(url: str) -> Optional[str]:
         kwargs = {
             "headless": True,
             "network_idle": True,
-            "block_images": False,  # Must be False — Cloudflare Turnstile needs full resources
-            "solve_cloudflare": True,
-            "block_webrtc": True,
-            "wait": 10000,  # Extra wait after challenge solve for page load
+            "block_images": True,
         }
         if _PROXY_URL:
             kwargs["proxy"] = _PROXY_URL
@@ -753,8 +745,7 @@ async def fetch_and_preview(
             rendered_with = "scrapling"
 
             # Check if Scrapling also returned a Cloudflare challenge page
-            # Use status 200 — Scrapling resolved the HTTP layer, only check title signal
-            if html and _is_cloudflare_challenge(html, 200):
+            if html and _is_cloudflare_challenge(html, 403):
                 cloudflare_detected = True
                 logger.info(f"Scrapling also returned Cloudflare challenge for {url}")
                 html = None
@@ -801,7 +792,7 @@ async def fetch_and_preview(
         if word_count < MIN_WORD_COUNT and SCRAPLING_AVAILABLE and rendered_with != "scrapling":
             logger.info(f"Still sparse ({word_count} words), trying Scrapling for {url}")
             scr_html = await fetch_html_with_scrapling(url)
-            if scr_html and not _is_cloudflare_challenge(scr_html, 200):
+            if scr_html and not _is_cloudflare_challenge(scr_html, 403):
                 scr_soup = BeautifulSoup(scr_html, "html.parser")
                 scr_content = extract_best_content(scr_html, scr_soup, url)
                 scr_word_count = len(scr_content.split())
