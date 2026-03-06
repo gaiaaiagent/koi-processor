@@ -153,20 +153,50 @@ async def cleanup_old_flows(conn: asyncpg.Connection, repo: str, graph_name: str
 async def pull_call_graph(
     conn: asyncpg.Connection, repo: str, graph_name: str,
 ) -> Tuple[Dict[str, dict], Dict[str, List[str]], Dict[str, List[str]]]:
-    """Fetch callable nodes + CALLS edges. Returns (nodes, adj, rev_adj)."""
-    node_rows = await conn.fetch(f"""
-        SELECT * FROM cypher('{graph_name}', $$
-            MATCH (n)
-            WHERE n.repo = '{escape_cypher(repo)}'
-              AND (n.entity_type = 'Function' OR n.entity_type = 'Method'
-                   OR n.entity_type = 'Handler')
-            RETURN n.entity_id, n.name, n.entity_type, n.file_path, n.language, n.line_start
-        $$) as (entity_id agtype, name agtype, entity_type agtype,
-                file_path agtype, language agtype, line_start agtype);""")
+    """Fetch callable nodes + CALLS edges. Returns (nodes, adj, rev_adj).
+
+    Queries by both vertex label AND entity_type property since production
+    graph (regen_graph) uses labels while staging (regen_graph_v2) uses properties.
+    """
+    CALLABLE_TYPES = ("Function", "Method", "Handler")
+    repo_esc = escape_cypher(repo)
+
+    # Query by vertex label (production graph pattern)
+    all_rows = []
+    for ntype in CALLABLE_TYPES:
+        try:
+            rows = await conn.fetch(f"""
+                SELECT * FROM cypher('{graph_name}', $$
+                    MATCH (n:{ntype})
+                    WHERE n.repo = '{repo_esc}'
+                    RETURN n.entity_id, n.name, '{ntype}' as entity_type,
+                           n.file_path, n.language, n.line_start
+                $$) as (entity_id agtype, name agtype, entity_type agtype,
+                        file_path agtype, language agtype, line_start agtype);""")
+            all_rows.extend(rows)
+        except Exception:
+            pass  # Label may not exist
+
+    # Also query by entity_type property (staging graph pattern)
+    try:
+        prop_rows = await conn.fetch(f"""
+            SELECT * FROM cypher('{graph_name}', $$
+                MATCH (n)
+                WHERE n.repo = '{repo_esc}'
+                  AND (n.entity_type = 'Function' OR n.entity_type = 'Method'
+                       OR n.entity_type = 'Handler')
+                RETURN n.entity_id, n.name, n.entity_type, n.file_path, n.language, n.line_start
+            $$) as (entity_id agtype, name agtype, entity_type agtype,
+                    file_path agtype, language agtype, line_start agtype);""")
+        all_rows.extend(prop_rows)
+    except Exception:
+        pass
 
     nodes: Dict[str, dict] = {}
-    for row in node_rows:
+    for row in all_rows:
         eid = str(row["entity_id"]).strip('"')
+        if eid in nodes:
+            continue  # deduplicate
         nodes[eid] = {
             "entity_id": eid,
             "name": str(row["name"]).strip('"'),

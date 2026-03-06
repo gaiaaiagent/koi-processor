@@ -127,22 +127,51 @@ async def cleanup_old_communities(
 async def pull_graph_data(
     conn: asyncpg.Connection, repo: str, graph_name: str = "regen_graph",
 ) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]]]:
-    """Query AGE for eligible nodes and CALLS edges filtered by repo."""
-    repo_escaped = escape_cypher(repo)
-    type_clauses = " OR ".join(f"n.entity_type = '{t}'" for t in ELIGIBLE_NODE_TYPES)
+    """Query AGE for eligible nodes and CALLS edges filtered by repo.
 
-    node_rows = await conn.fetch(f"""
-    SELECT * FROM cypher('{graph_name}', $$
-        MATCH (n)
-        WHERE n.repo = '{repo_escaped}' AND ({type_clauses})
-        RETURN n.entity_id, n.name, n.file_path, n.entity_type
-    $$) as (entity_id agtype, name agtype, file_path agtype, entity_type agtype);
-    """)
+    Matches nodes by both vertex label AND entity_type property since the
+    production graph (regen_graph) uses labels while the staging graph
+    (regen_graph_v2) uses the entity_type property.
+    """
+    repo_escaped = escape_cypher(repo)
+
+    # Query each eligible label separately to handle AGE's label-based storage
+    all_node_rows = []
+    for node_type in ELIGIBLE_NODE_TYPES:
+        try:
+            rows = await conn.fetch(f"""
+            SELECT * FROM cypher('{graph_name}', $$
+                MATCH (n:{node_type})
+                WHERE n.repo = '{repo_escaped}'
+                RETURN n.entity_id, n.name, n.file_path, '{node_type}' as entity_type
+            $$) as (entity_id agtype, name agtype, file_path agtype, entity_type agtype);
+            """)
+            all_node_rows.extend(rows)
+        except Exception:
+            pass  # Label may not exist in this graph
+
+    # Also check entity_type property for graphs that store type as property
+    type_clauses = " OR ".join(f"n.entity_type = '{t}'" for t in ELIGIBLE_NODE_TYPES)
+    try:
+        prop_rows = await conn.fetch(f"""
+        SELECT * FROM cypher('{graph_name}', $$
+            MATCH (n)
+            WHERE n.repo = '{repo_escaped}' AND ({type_clauses})
+            RETURN n.entity_id, n.name, n.file_path, n.entity_type
+        $$) as (entity_id agtype, name agtype, file_path agtype, entity_type agtype);
+        """)
+        all_node_rows.extend(prop_rows)
+    except Exception:
+        pass
+
+    node_rows = all_node_rows
 
     nodes: List[Dict[str, Any]] = []
     node_ids_set: set = set()
     for row in node_rows:
         eid = str(row["entity_id"]).strip('"')
+        if eid in node_ids_set:
+            continue  # deduplicate across label and property queries
         nodes.append({
             "entity_id": eid,
             "name": str(row["name"]).strip('"'),
@@ -207,14 +236,23 @@ def build_igraph(
 # -- 5. Run Leiden ---------------------------------------------------------
 
 def run_leiden(graph: igraph.Graph, resolution: float = 1.0):
-    """Run Leiden community detection with ModularityVertexPartition."""
+    """Run Leiden community detection.
+
+    Uses RBConfigurationVertexPartition when resolution != 1.0 (for large
+    graphs) since ModularityVertexPartition doesn't support resolution_parameter.
+    """
     if graph.vcount() == 0:
         logger.warning("Empty graph, skipping Leiden")
         return None
-    partition = leidenalg.find_partition(
-        graph, leidenalg.ModularityVertexPartition,
-        resolution_parameter=resolution,
-    )
+    if resolution != 1.0:
+        partition = leidenalg.find_partition(
+            graph, leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=resolution,
+        )
+    else:
+        partition = leidenalg.find_partition(
+            graph, leidenalg.ModularityVertexPartition,
+        )
     logger.info(
         f"Leiden found {len(partition)} communities "
         f"(modularity={partition.modularity:.4f}, resolution={resolution})"
