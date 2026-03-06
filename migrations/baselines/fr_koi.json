@@ -145,6 +145,11 @@
       "id": "bkc:061_edge_status_index",
       "file": "061_edge_status_index.sql",
       "checksum": "caeb0efbb547f14f425361674abb5328377e9506a85964c0796eb63c1280cd47"
+    },
+    {
+      "id": "bkc:062_visibility_scope",
+      "file": "062_visibility_scope.sql",
+      "checksum": "6ab2c5d3cd53b6eed63de49eebfcf2b24b61cad883b61ab38f5e4ac6f5bf8d78"
     }
   ]
 }

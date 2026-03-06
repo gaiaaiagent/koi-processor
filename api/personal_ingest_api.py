@@ -26,6 +26,7 @@ import asyncio
 import asyncpg
 import hashlib
 import httpx
+import unicodedata
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Literal, Optional, Tuple
 from enum import Enum
@@ -103,6 +104,55 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # kept for /chat LLM endpoint
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes')
 TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true', '1', 'yes')
+QUARTZ_BASE_URL = os.getenv('QUARTZ_BASE_URL', '').rstrip('/')
+
+# Quartz URL generation
+QUARTZ_TYPE_PATHS = {
+    "Person": "People",
+    "Organization": "Organizations",
+    "Project": "Projects",
+    "Location": "Locations",
+    "Concept": "Concepts",
+    "Meeting": "Meetings",
+    "Practice": "Practices",
+    "Pattern": "Patterns",
+    "CaseStudy": "CaseStudies",
+    "Bioregion": "Bioregions",
+    "Protocol": "Protocols",
+    "Playbook": "Playbooks",
+    "Question": "Questions",
+    "Claim": "Claims",
+    "Evidence": "Evidence",
+    "Commitment": "Commitments",
+    "CommitmentPool": "CommitmentPools",
+    "CommitmentAction": "CommitmentActions",
+    "Source": "Sources",
+    "WorkItem": "WorkItems",
+    "Milestone": "Milestones",
+    "Initiative": "Initiatives",
+    "Decision": "Decisions",
+    "Risk": "Risks",
+    "Metric": "Metrics",
+    "Outcome": "Outcomes",
+}
+
+def quartz_slug(name: str) -> str:
+    """Convert entity name to Quartz-compatible URL slug."""
+    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    s = s.strip()
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"[^\w-]", "", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+def quartz_url(entity_type: str, name: str) -> Optional[str]:
+    """Build Quartz URL. Returns None for unknown entity types or if base URL not set."""
+    if not QUARTZ_BASE_URL:
+        return None
+    path = QUARTZ_TYPE_PATHS.get(entity_type)
+    if path is None:
+        return None
+    return f"{QUARTZ_BASE_URL}/{path}/{quartz_slug(name)}"
 
 # DEPRECATED: These are now loaded from vault schemas via entity_schema.py
 # Kept as fallback comments for reference
@@ -198,7 +248,9 @@ class RegisterEntityRequest(BaseModel):
     name: str
     properties: Dict[str, Any] = {}
     frontmatter: Optional[Dict[str, Any]] = None  # YAML frontmatter for relationship extraction
-    content_hash: str
+    content_hash: Optional[str] = None
+    publication_scope: Optional[str] = "local_graph"  # "local_graph" | "federated"
+    visibility_scope: Optional[str] = "public"  # "public" | "node_private"
 
 
 class RegisterEntityResponse(BaseModel):
@@ -209,6 +261,7 @@ class RegisterEntityResponse(BaseModel):
     vault_rid: str
     merged_with: Optional[str] = None
     collision_warning: Optional[str] = None
+    koi_rid: Optional[str] = None
 
 
 class VaultEntityMapping(BaseModel):
@@ -1612,7 +1665,7 @@ async def graph_version_endpoint():
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT
-                (SELECT COUNT(*) FROM entity_registry) AS entity_count,
+                (SELECT COUNT(*) FROM entity_registry WHERE NOT node_private) AS entity_count,
                 (SELECT COUNT(*) FROM entity_relationships) AS rel_count,
                 (SELECT COALESCE(MAX(updated_at), '1970-01-01'::timestamptz) FROM entity_registry) AS max_entity_updated,
                 (SELECT COALESCE(GREATEST(MAX(created_at), MAX(updated_at)), '1970-01-01'::timestamptz) FROM entity_relationships) AS max_rel_changed
@@ -1853,7 +1906,7 @@ async def list_entities(
             entities = await conn.fetch("""
                 SELECT fuseki_uri, entity_text, entity_type, source, created_at
                 FROM entity_registry
-                WHERE entity_type = $1
+                WHERE entity_type = $1 AND NOT node_private
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
             """, entity_type, limit, offset)
@@ -1861,6 +1914,7 @@ async def list_entities(
             entities = await conn.fetch("""
                 SELECT fuseki_uri, entity_text, entity_type, source, created_at
                 FROM entity_registry
+                WHERE NOT node_private
                 ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
             """, limit, offset)
@@ -1905,7 +1959,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2 AND entity_type = $3
+                WHERE normalized_text ILIKE $2 AND entity_type = $3 AND NOT node_private
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -1918,7 +1972,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2
+                WHERE normalized_text ILIKE $2 AND NOT node_private
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -1941,13 +1995,16 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
         results = []
         for row in rows:
             uri = row["fuseki_uri"]
+            entity_type = row["entity_type"]
+            entity_name = row["entity_text"]
             results.append({
                 "fuseki_uri": uri,
-                "name": row["entity_text"],
-                "entity_type": row["entity_type"],
+                "name": entity_name,
+                "entity_type": entity_type,
                 "similarity": float(row["similarity"]),
                 "aliases": list(row["aliases"] or []),
                 "relationship_count": rel_counts.get(uri, 0),
+                "quartz_url": quartz_url(entity_type, entity_name),
             })
 
     return {"results": results, "count": len(results)}
@@ -1976,8 +2033,17 @@ async def resolve_entity_get(
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, context=None)
 
-    if canonical is None:
-        return {"candidates": [], "is_new": False}
+        if canonical is None:
+            return {"candidates": [], "is_new": False}
+
+        # Hide node_private entities from public resolution
+        if not is_new:
+            is_private = await conn.fetchval(
+                "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+                canonical.uri
+            )
+            if is_private:
+                return {"candidates": [], "is_new": False}
 
     return {
         "candidates": [{
@@ -2018,8 +2084,17 @@ async def resolve_entity_post(request: ResolveRequest):
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, request.context)
 
-    if canonical is None:
-        return {"candidates": [], "is_new": False}
+        if canonical is None:
+            return {"candidates": [], "is_new": False}
+
+        # Hide node_private entities from public resolution
+        if not is_new:
+            is_private = await conn.fetchval(
+                "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+                canonical.uri
+            )
+            if is_private:
+                return {"candidates": [], "is_new": False}
 
     return {
         "candidates": [{
@@ -2106,6 +2181,14 @@ async def get_entity_mentioned_in(
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
+        # Reject queries for node_private entities
+        is_private = await conn.fetchval(
+            "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+            entity_uri
+        )
+        if is_private:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
         # Query document_entity_links for documents mentioning this entity
         rows = await conn.fetch("""
             SELECT del.document_rid, del.mention_count, del.created_at
@@ -2183,7 +2266,18 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
     results = {}
 
     async with db_pool.acquire() as conn:
+        # Filter out node_private entities from the batch
+        private_uris = set()
+        if request.uris:
+            private_rows = await conn.fetch(
+                "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = ANY($1) AND node_private",
+                request.uris
+            )
+            private_uris = {r['fuseki_uri'] for r in private_rows}
+
         for entity_uri in request.uris:
+            if entity_uri in private_uris:
+                continue
             # Query for each entity
             rows = await conn.fetch("""
                 SELECT del.document_rid, del.mention_count, del.created_at
@@ -2253,7 +2347,7 @@ async def get_entity(entity_uri: str):
             SELECT fuseki_uri, entity_text, entity_type, normalized_text,
                    source, first_seen_rid, metadata, created_at
             FROM entity_registry
-            WHERE fuseki_uri = $1
+            WHERE fuseki_uri = $1 AND NOT node_private
         """, entity_uri)
 
         if not entity:
@@ -2280,11 +2374,12 @@ async def get_stats():
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM entity_registry")
+        total = await conn.fetchval("SELECT COUNT(*) FROM entity_registry WHERE NOT node_private")
 
         by_type = await conn.fetch("""
             SELECT entity_type, COUNT(*) as count
             FROM entity_registry
+            WHERE NOT node_private
             GROUP BY entity_type
             ORDER BY count DESC
         """)
@@ -2292,6 +2387,7 @@ async def get_stats():
         recent = await conn.fetch("""
             SELECT entity_text, entity_type, created_at
             FROM entity_registry
+            WHERE NOT node_private
             ORDER BY created_at DESC
             LIMIT 10
         """)
@@ -2302,6 +2398,21 @@ async def get_stats():
             "recent_entities": [dict(r) for r in recent],
             "mode": KOI_MODE
         }
+
+
+async def _recompute_node_private(conn, canonical_uri: str):
+    """Set node_private=true only when ALL rid_mappings are node_private."""
+    row = await conn.fetchrow("""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE visibility_scope = 'node_private') AS private_count
+        FROM entity_rid_mappings
+        WHERE canonical_uri = $1
+    """, canonical_uri)
+    is_private = row['total'] > 0 and row['total'] == row['private_count']
+    await conn.execute(
+        "UPDATE entity_registry SET node_private = $1 WHERE fuseki_uri = $2",
+        is_private, canonical_uri
+    )
 
 
 @app.post("/register-entity", response_model=RegisterEntityResponse)
@@ -2364,8 +2475,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
             await conn.execute("""
                 INSERT INTO entity_rid_mappings (
                     vault_rid, vault_path, canonical_uri, entity_type,
-                    name, content_hash, sync_status, last_synced
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW())
+                    name, content_hash, sync_status, last_synced, visibility_scope
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW(), $7)
                 ON CONFLICT (vault_rid) DO UPDATE SET
                     vault_path = EXCLUDED.vault_path,
                     canonical_uri = EXCLUDED.canonical_uri,
@@ -2373,14 +2484,16 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     name = EXCLUDED.name,
                     content_hash = EXCLUDED.content_hash,
                     sync_status = 'linked',
-                    last_synced = NOW()
+                    last_synced = NOW(),
+                    visibility_scope = EXCLUDED.visibility_scope
             """,
                 request.vault_rid,
                 request.vault_path,
                 canonical.uri,
                 request.entity_type,
                 request.name,
-                request.content_hash
+                request.content_hash,
+                request.visibility_scope or "public"
             )
 
             # Update entity_registry with vault_rid if not set
@@ -2389,6 +2502,31 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 SET vault_rid = $1
                 WHERE fuseki_uri = $2 AND vault_rid IS NULL
             """, request.vault_rid, canonical.uri)
+
+            # Auto-assign koi_rid for federated publication scope
+            final_koi_rid = None
+            if request.publication_scope == "federated":
+                existing_koi_rid = await conn.fetchval(
+                    "SELECT koi_rid FROM entity_registry WHERE fuseki_uri = $1",
+                    canonical.uri
+                )
+                if not existing_koi_rid:
+                    import hashlib as _hashlib
+                    type_slug = request.entity_type.lower()
+                    h = _hashlib.sha256(canonical.uri.encode()).hexdigest()[:32]
+                    koi_rid = f"orn:koi-net.{type_slug}:{h}"
+                    await conn.execute(
+                        "UPDATE entity_registry SET koi_rid = $1 WHERE fuseki_uri = $2",
+                        koi_rid, canonical.uri
+                    )
+                    logger.info(f"Auto-assigned koi_rid for federated entity: {koi_rid}")
+                final_koi_rid = await conn.fetchval(
+                    "SELECT koi_rid FROM entity_registry WHERE fuseki_uri = $1",
+                    canonical.uri
+                )
+
+            # Recompute node_private flag based on all mappings for this entity
+            await _recompute_node_private(conn, canonical.uri)
 
             # Sync relationships from frontmatter if provided
             # Accept frontmatter OR properties (for older MCP clients)
@@ -2457,7 +2595,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 is_new=is_new,
                 vault_rid=request.vault_rid,
                 merged_with=canonical.merged_with,
-                collision_warning=collision_warning
+                collision_warning=collision_warning,
+                koi_rid=final_koi_rid if request.publication_scope == "federated" else None
             )
 
 
@@ -2474,7 +2613,7 @@ async def list_vault_entities(
 
     async with db_pool.acquire() as conn:
         # Build query with optional filters
-        conditions = []
+        conditions = ["COALESCE(visibility_scope, 'public') != 'node_private'"]
         params = []
         param_idx = 1
 
@@ -2506,12 +2645,13 @@ async def list_vault_entities(
 
         entities = await conn.fetch(query, *params)
 
-        # Get total count
+        # Get total count (exclude limit/offset params)
         count_query = f"SELECT COUNT(*) FROM entity_rid_mappings {where_clause}"
-        if params[:-2]:  # Exclude limit/offset for count
-            total = await conn.fetchval(count_query, *params[:-2])
+        count_params = params[:-2]  # Strip limit/offset
+        if count_params:
+            total = await conn.fetchval(count_query, *count_params)
         else:
-            total = await conn.fetchval("SELECT COUNT(*) FROM entity_rid_mappings")
+            total = await conn.fetchval(count_query)
 
         return {
             "entities": [
@@ -2545,6 +2685,7 @@ async def get_vault_entity(vault_rid: str):
                    name, sync_status, content_hash, last_synced, created_at
             FROM entity_rid_mappings
             WHERE vault_rid = $1
+              AND COALESCE(visibility_scope, 'public') != 'node_private'
         """, vault_rid)
 
         if not mapping:
@@ -2611,6 +2752,7 @@ async def resolve_canonical_to_vault(uris: List[str]):
                 SELECT vault_rid, vault_path, canonical_uri, entity_type, name
                 FROM entity_rid_mappings
                 WHERE canonical_uri = $1
+                  AND COALESCE(visibility_scope, 'public') != 'node_private'
                 LIMIT 1
             """, uri)
 
@@ -2676,6 +2818,7 @@ async def get_contextual_candidates_internal(
             FROM document_entity_links del
             JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
             WHERE er.entity_type = 'Project'
+              AND NOT er.node_private
               AND (LOWER(er.entity_text) LIKE $1
                    OR LOWER(er.normalized_text) LIKE $1)
         """, f"%{project_normalized}%")
@@ -2706,6 +2849,7 @@ async def get_contextual_candidates_internal(
                 FROM document_entity_links del
                 JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
                 WHERE er.entity_type = 'Person'
+                  AND NOT er.node_private
                   AND (LOWER(er.entity_text) LIKE $1
                        OR LOWER(er.normalized_text) LIKE $1)
             """, f"%{attendee_normalized}%")
@@ -2724,6 +2868,7 @@ async def get_contextual_candidates_internal(
                 FROM document_entity_links del
                 JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
                 WHERE er.entity_type = 'Concept'
+                  AND NOT er.node_private
                   AND (LOWER(er.entity_text) LIKE $1
                        OR LOWER(er.normalized_text) LIKE $1)
             """, f"%{topic_normalized}%")
@@ -2746,6 +2891,7 @@ async def get_contextual_candidates_internal(
             FROM entity_registry er
             JOIN document_entity_links del ON er.fuseki_uri = del.entity_uri
             WHERE er.entity_type = ANY($1)
+              AND NOT er.node_private
               AND del.document_rid = ANY($2)
         """, entity_types, related_docs_list)
 
@@ -2771,6 +2917,7 @@ async def get_contextual_candidates_internal(
             FROM entity_registry er
             LEFT JOIN entity_rid_mappings erm ON er.fuseki_uri = erm.canonical_uri
             WHERE er.entity_type = 'Person'
+              AND NOT er.node_private
               AND erm.vault_path IS NOT NULL
               AND er.fuseki_uri NOT IN (
                   SELECT entity_uri FROM document_entity_links
@@ -3122,22 +3269,34 @@ async def get_relationships_endpoint(
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
+        # Reject queries for node_private entities
+        is_private = await conn.fetchval(
+            "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+            entity_uri
+        )
+        if is_private:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
         relationships = await get_entity_relationships(conn, entity_uri, predicate, direction)
 
-        # Enrich with entity names
+        # Enrich with entity names, filtering out node_private neighbors
         enriched = []
         for rel in relationships:
             # Get subject name
             subject_row = await conn.fetchrow("""
-                SELECT entity_text, entity_type FROM entity_registry
+                SELECT entity_text, entity_type, node_private FROM entity_registry
                 WHERE fuseki_uri = $1
             """, rel['subject_uri'])
 
             # Get object name
             object_row = await conn.fetchrow("""
-                SELECT entity_text, entity_type FROM entity_registry
+                SELECT entity_text, entity_type, node_private FROM entity_registry
                 WHERE fuseki_uri = $1
             """, rel['object_uri'])
+
+            # Skip relationships where either endpoint is node_private
+            if (subject_row and subject_row['node_private']) or (object_row and object_row['node_private']):
+                continue
 
             enriched.append({
                 **rel,
@@ -4131,7 +4290,7 @@ async def _graph_guided_retrieval(
             SELECT id, fuseki_uri, entity_text, entity_type, metadata,
                    1 - (embedding <=> $1::vector) AS similarity
             FROM entity_registry
-            WHERE embedding IS NOT NULL
+            WHERE embedding IS NOT NULL AND NOT node_private
             ORDER BY embedding <=> $1::vector
             LIMIT $2
         """, embedding_str, top_k)
@@ -4153,7 +4312,7 @@ async def _graph_guided_retrieval(
                 SELECT id, fuseki_uri, entity_text, entity_type, metadata,
                        ({match_score})::float / {len(words)} AS similarity
                 FROM entity_registry
-                WHERE {conditions}
+                WHERE ({conditions}) AND NOT node_private
                 ORDER BY ({match_score}) DESC, created_at DESC
                 LIMIT ${len(words)+1}
             """, *params)
@@ -4200,7 +4359,7 @@ async def _graph_guided_retrieval(
                 egm.community_l1, egm.betweenness
             FROM entity_graph_metrics egm
             JOIN entity_registry er ON er.id = egm.entity_id
-            WHERE egm.community_l1 = ANY($1)
+            WHERE egm.community_l1 = ANY($1) AND NOT er.node_private
             ORDER BY egm.betweenness DESC
             LIMIT $2
         """, dominant_communities, top_k * 2)
@@ -4294,6 +4453,8 @@ async def _graph_guided_retrieval(
             FROM traverse t
             LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
             LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+            WHERE NOT COALESCE(s.node_private, false)
+              AND NOT COALESCE(o.node_private, false)
             ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
             LIMIT 50
         """, entity_uris)
@@ -4432,7 +4593,7 @@ async def chat_endpoint(request: ChatRequest):
                     SELECT fuseki_uri, entity_text, entity_type, metadata,
                            1 - (embedding <=> $1::vector) AS similarity
                     FROM entity_registry
-                    WHERE embedding IS NOT NULL
+                    WHERE embedding IS NOT NULL AND NOT node_private
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                 """, embedding_str, request.max_context_entities)
@@ -4454,7 +4615,7 @@ async def chat_endpoint(request: ChatRequest):
                         SELECT fuseki_uri, entity_text, entity_type, metadata,
                                ({match_score})::float / {len(words)} AS similarity
                         FROM entity_registry
-                        WHERE {conditions}
+                        WHERE ({conditions}) AND NOT node_private
                         ORDER BY ({match_score}) DESC, created_at DESC
                         LIMIT ${len(words)+1}
                     """, *params)
@@ -4475,7 +4636,7 @@ async def chat_endpoint(request: ChatRequest):
                     SELECT fuseki_uri, entity_text, entity_type, metadata,
                            ({match_score})::float / {len(words)} AS similarity
                     FROM entity_registry
-                    WHERE {conditions}
+                    WHERE ({conditions}) AND NOT node_private
                     ORDER BY ({match_score}) DESC, created_at DESC
                     LIMIT ${len(words)+1}
                 """, *params)
@@ -4495,6 +4656,7 @@ async def chat_endpoint(request: ChatRequest):
                 "entity_type": row['entity_type'],
                 "score": round(float(row['similarity']), 4),
                 "description": description,
+                "quartz_url": quartz_url(row['entity_type'], row['entity_text']),
             })
             entity_uris.append(row['fuseki_uri'])
 
@@ -4530,6 +4692,8 @@ async def chat_endpoint(request: ChatRequest):
                 FROM traverse t
                 LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
                 LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+                WHERE NOT COALESCE(s.node_private, false)
+                  AND NOT COALESCE(o.node_private, false)
                 ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
                 LIMIT 50
             """, entity_uris)

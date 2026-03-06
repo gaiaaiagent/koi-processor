@@ -366,7 +366,7 @@ def create_router(pool, caps):
         existing_entities = []
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT entity_text AS name, entity_type AS type FROM entity_registry LIMIT 200"
+                "SELECT entity_text AS name, entity_type AS type FROM entity_registry WHERE NOT node_private LIMIT 200"
             )
             existing_entities = [dict(r) for r in rows]
 
@@ -460,7 +460,7 @@ def create_router(pool, caps):
             existing_entities = []
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT entity_text AS name, entity_type AS type FROM entity_registry LIMIT 200"
+                    "SELECT entity_text AS name, entity_type AS type FROM entity_registry WHERE NOT node_private LIMIT 200"
                 )
                 existing_entities = [dict(r) for r in rows]
 
