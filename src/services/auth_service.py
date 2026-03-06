@@ -597,7 +597,7 @@ ACTIVATE_HTML = """
 
         {error_html}
 
-        <form method="POST" action="/activate">
+        <form method="POST" action="/api/koi/activate">
             <div class="form-group">
                 <label for="code">Device Code</label>
                 <input type="text" id="code" name="code" placeholder="XXXX-XXXX"

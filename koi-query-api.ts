@@ -1502,7 +1502,7 @@ async function triggerAdaptiveExtraction(
     };
 
     // Call Python adaptive extraction service
-    const response = await fetch('http://localhost:8350/extract', {
+    const response = await fetch('http://localhost:8350/process-koi-event', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1888,7 +1888,7 @@ app.post('/api/koi/query', async (req, res) => {
     const confidence = calculateConfidence(fusedResults);
     
     // Check if extraction should be triggered
-    const triggeredExtraction = shouldTriggerExtraction(confidence);
+    const triggeredExtraction = process.env.ENABLE_ADAPTIVE_EXTRACTION === 'true' && shouldTriggerExtraction(confidence);
     
     // Select documents for extraction if needed
     let selectedDocs = [];
