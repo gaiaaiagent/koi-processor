@@ -203,7 +203,7 @@ async def pull_call_graph(
             "entity_type": str(row["entity_type"]).strip('"'),
             "file_path": str(row["file_path"]).strip('"'),
             "language": str(row["language"]).strip('"'),
-            "line_start": int(str(row["line_start"])) if row["line_start"] else 0,
+            "line_start": int(str(row["line_start"]).strip('"')) if row["line_start"] else 0,
         }
     logger.info(f"Pulled {len(nodes)} callable nodes for {repo}")
 
