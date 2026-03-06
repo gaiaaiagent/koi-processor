@@ -43,6 +43,23 @@ REPO_PATHS = {
     "koi-research": BASE_PATH / "koi-research",
     "regen-koi-mcp": BASE_PATH / "regen-koi-mcp",
     "personal-koi-mcp": BASE_PATH / "personal-koi-mcp",
+    # Batch 1 - High priority new repos
+    "regen-compute": REGEN_REPOS_PATH / "regen-compute",
+    "revenue-hunter-cec": REGEN_REPOS_PATH / "revenue-hunter-cec",
+    "regen-ai-core": REGEN_REPOS_PATH / "regen-ai-core",
+    "regen-ai-claude": REGEN_REPOS_PATH / "regen-ai-claude",
+    # Batch 2 - Additional repos
+    "regen-js": REGEN_REPOS_PATH / "regen-js",
+    "agentic-tokenomics": REGEN_REPOS_PATH / "agentic-tokenomics",
+    "protocol-politicians": REGEN_REPOS_PATH / "protocol-politicians",
+    "regen-claude-config": REGEN_REPOS_PATH / "regen-claude-config",
+    "regenie-corpus": REGEN_REPOS_PATH / "regenie-corpus",
+    "mcp": REGEN_REPOS_PATH / "mcp",
+    "pacto-framework": REGEN_REPOS_PATH / "pacto-framework",
+    "koi-gov": REGEN_REPOS_PATH / "koi-gov",
+    # Already in sensor but need webhook mapping
+    "regen-registry-handbook": REGEN_REPOS_PATH / "regen-registry-handbook",
+    "regen-registry-methodology-library": REGEN_REPOS_PATH / "regen-registry-methodology-library",
 }
 
 TRACKED_BRANCHES = tuple(
