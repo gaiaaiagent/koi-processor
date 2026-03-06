@@ -97,6 +97,11 @@ federation-invite-*/
 # Ephemeral federation join request artifacts (generated during peering)
 scripts/federation/*-join-request.txt
 
+# MediaWiki import data artifacts (large generated files)
+data/mediawiki_*
+data/salish_sea_wiki*
+data/mediawiki_parsed/
+
 # Claude Code auto-generated context files (keep root CLAUDE.md only)
 **/CLAUDE.md
 !/CLAUDE.md
