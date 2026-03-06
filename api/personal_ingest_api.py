@@ -2113,6 +2113,25 @@ async def resolve_entity_post(request: ResolveRequest):
 # IMPORTANT: These must be defined BEFORE the generic /entity/{uri:path} route
 # =============================================================================
 
+class EvidenceItem(BaseModel):
+    subject_uri: str
+    subject_name: str
+    predicate: str
+    object_uri: str
+    object_name: str
+    confidence: Optional[float] = None
+    source: Optional[str] = None
+    source_section: Optional[str] = None
+    wiki_url: Optional[str] = None
+
+
+class EvidenceResponse(BaseModel):
+    entity_uri: str
+    entity_name: str
+    evidence: List[EvidenceItem]
+    total: int
+
+
 class MentionedInDocument(BaseModel):
     """A document that mentions an entity"""
     vault_path: str  # NO .md extension
@@ -2330,6 +2349,114 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
         results=results,
         total_entities=len(results)
     )
+
+
+# =============================================================================
+# Evidence Provenance Endpoint
+# =============================================================================
+
+@app.get("/entity/{entity_uri:path}/evidence", response_model=EvidenceResponse)
+async def get_entity_evidence(entity_uri: str):
+    """Get evidence provenance for an entity's relationships.
+
+    Returns all relationships involving this entity with source provenance,
+    including MediaWiki page links and wiki URLs where available.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Look up entity name
+        entity = await conn.fetchrow(
+            "SELECT entity_text FROM entity_registry WHERE fuseki_uri = $1 AND NOT node_private",
+            entity_uri
+        )
+        if not entity:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        entity_name = entity["entity_text"]
+
+        # Get wiki base URL (if any wiki is registered)
+        wiki_base_url = None
+        try:
+            wiki_base_url = await conn.fetchval(
+                "SELECT base_url FROM mediawiki_wikis ORDER BY id LIMIT 1"
+            )
+        except asyncpg.UndefinedTableError:
+            pass  # migration 063 not applied
+
+        # Query relationships with provenance
+        try:
+            rows = await conn.fetch("""
+                SELECT
+                    er.subject_uri,
+                    subj.entity_text AS subject_name,
+                    er.predicate,
+                    er.object_uri,
+                    obj.entity_text AS object_name,
+                    er.confidence,
+                    er.source,
+                    mpl.source_section,
+                    mps.title AS wiki_page_title
+                FROM entity_relationships er
+                JOIN entity_registry subj ON subj.fuseki_uri = er.subject_uri
+                JOIN entity_registry obj ON obj.fuseki_uri = er.object_uri
+                LEFT JOIN mediawiki_page_state mps ON mps.source_rid = er.source_rid
+                LEFT JOIN mediawiki_page_links mpl ON mpl.source_page_id = mps.id
+                    AND mpl.target_title = obj.entity_text
+                    AND mpl.predicate = er.predicate
+                WHERE (er.subject_uri = $1 OR er.object_uri = $1)
+                ORDER BY er.confidence DESC NULLS LAST
+                LIMIT 100
+            """, entity_uri)
+        except asyncpg.UndefinedTableError:
+            # mediawiki tables don't exist — fall back without provenance
+            rows = await conn.fetch("""
+                SELECT
+                    er.subject_uri,
+                    subj.entity_text AS subject_name,
+                    er.predicate,
+                    er.object_uri,
+                    obj.entity_text AS object_name,
+                    er.confidence,
+                    er.source,
+                    NULL::text AS source_section,
+                    NULL::text AS wiki_page_title
+                FROM entity_relationships er
+                JOIN entity_registry subj ON subj.fuseki_uri = er.subject_uri
+                JOIN entity_registry obj ON obj.fuseki_uri = er.object_uri
+                WHERE (er.subject_uri = $1 OR er.object_uri = $1)
+                ORDER BY er.confidence DESC NULLS LAST
+                LIMIT 100
+            """, entity_uri)
+
+        evidence = []
+        for row in rows:
+            wiki_url = None
+            if wiki_base_url and row["wiki_page_title"]:
+                page_path = row["wiki_page_title"].replace(" ", "_")
+                wiki_url = f"{wiki_base_url.rstrip('/')}/wiki/{page_path}"
+                if row["source_section"]:
+                    wiki_url += f"#{row['source_section']}"
+
+            evidence.append(EvidenceItem(
+                subject_uri=row["subject_uri"],
+                subject_name=row["subject_name"],
+                predicate=row["predicate"],
+                object_uri=row["object_uri"],
+                object_name=row["object_name"],
+                confidence=row["confidence"],
+                source=row["source"],
+                source_section=row["source_section"],
+                wiki_url=wiki_url,
+            ))
+
+        return EvidenceResponse(
+            entity_uri=entity_uri,
+            entity_name=entity_name,
+            evidence=evidence,
+            total=len(evidence),
+        )
 
 
 # =============================================================================
@@ -4466,16 +4593,19 @@ async def _graph_guided_retrieval(
     # ── Step 6: Document chunks (same as B1) ──
     try:
         chunk_rows = await conn.fetch("""
-            SELECT DISTINCT ON (c.document_rid)
+            SELECT
                 c.document_rid,
                 m.content->>'title' AS title,
                 LEFT(c.content->>'text', 500) AS chunk_text,
+                c.content->>'section_id' AS section_id,
+                c.content->>'section_title' AS section_title,
+                c.content->>'wiki_url' AS wiki_url,
                 1 - (c.embedding <=> $1::vector) AS similarity
             FROM koi_memory_chunks c
             JOIN koi_memories m ON m.rid = c.document_rid
             WHERE c.embedding IS NOT NULL
-            ORDER BY c.document_rid, c.embedding <=> $1::vector
-            LIMIT 5
+            ORDER BY c.embedding <=> $1::vector
+            LIMIT 8
         """, embedding_str)
         for cr in chunk_rows:
             if float(cr['similarity']) > 0.3:
@@ -4484,6 +4614,9 @@ async def _graph_guided_retrieval(
                     "title": cr['title'] or cr['document_rid'],
                     "text": cr['chunk_text'] or "",
                     "score": round(float(cr['similarity']), 4),
+                    "section_id": cr['section_id'],
+                    "section_title": cr['section_title'],
+                    "wiki_url": cr['wiki_url'],
                 })
                 sources.append({
                     "uri": cr['document_rid'],
@@ -4491,6 +4624,7 @@ async def _graph_guided_retrieval(
                     "entity_type": "Document",
                     "score": round(float(cr['similarity']), 4),
                     "description": (cr['chunk_text'] or "")[:200],
+                    "url": cr['wiki_url'],
                 })
     except Exception:
         pass
@@ -4709,16 +4843,19 @@ async def chat_endpoint(request: ChatRequest):
         if query_embedding:
             try:
                 chunk_rows = await conn.fetch("""
-                    SELECT DISTINCT ON (c.document_rid)
+                    SELECT
                         c.document_rid,
                         m.content->>'title' AS title,
                         LEFT(c.content->>'text', 500) AS chunk_text,
+                        c.content->>'section_id' AS section_id,
+                        c.content->>'section_title' AS section_title,
+                        c.content->>'wiki_url' AS wiki_url,
                         1 - (c.embedding <=> $1::vector) AS similarity
                     FROM koi_memory_chunks c
                     JOIN koi_memories m ON m.rid = c.document_rid
                     WHERE c.embedding IS NOT NULL
-                    ORDER BY c.document_rid, c.embedding <=> $1::vector
-                    LIMIT 5
+                    ORDER BY c.embedding <=> $1::vector
+                    LIMIT 8
                 """, embedding_str)
                 for cr in chunk_rows:
                     if float(cr['similarity']) > 0.3:
@@ -4727,6 +4864,9 @@ async def chat_endpoint(request: ChatRequest):
                             "title": cr['title'] or cr['document_rid'],
                             "text": cr['chunk_text'] or "",
                             "score": round(float(cr['similarity']), 4),
+                            "section_id": cr['section_id'],
+                            "section_title": cr['section_title'],
+                            "wiki_url": cr['wiki_url'],
                         })
                         sources.append({
                             "uri": cr['document_rid'],
@@ -4734,6 +4874,7 @@ async def chat_endpoint(request: ChatRequest):
                             "entity_type": "Document",
                             "score": round(float(cr['similarity']), 4),
                             "description": (cr['chunk_text'] or "")[:200],
+                            "url": cr['wiki_url'],
                         })
             except (asyncpg.exceptions.UndefinedTableError,
                     asyncpg.exceptions.UndefinedColumnError):
@@ -4793,7 +4934,10 @@ async def chat_endpoint(request: ChatRequest):
     rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
 
     doc_block = "\n".join(
-        f"- **{d['title']}**: {d['text'][:300]}"
+        f"- **{d['title']}**"
+        + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
+        + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
+        + f": {d['text'][:300]}"
         for d in doc_chunks
     ) if doc_chunks else ""
 
@@ -4808,6 +4952,7 @@ async def chat_endpoint(request: ChatRequest):
         "governance in bioregions. Answer the user's question using the entity, "
         "relationship, document, and web source context provided below. "
         "Cite specific entities and sources in your answer. "
+        "When referencing wiki sources, cite them as [Page > Section](url). "
         "If the context is insufficient, say so honestly. Be concise."
     )
 
