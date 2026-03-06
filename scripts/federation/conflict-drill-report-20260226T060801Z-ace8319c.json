@@ -1,0 +1,18 @@
+{
+  "timestamp": "20260226T060801Z",
+  "short_sha": "ace8319c",
+  "seed": 42,
+  "layer_a": {
+    "C1_conflicting_claims": "PASS",
+    "C2_provenance_replay": "PASS",
+    "C3_sovereign_edits": "PASS",
+    "replay_idempotency": "PASS"
+  },
+  "layer_b": {
+    "event_envelope_processing": "PASS",
+    "poller_idempotency": "PASS",
+    "provenance_from_envelope": "PASS",
+    "end_to_end_query": "PASS"
+  },
+  "overall": "PASS"
+}

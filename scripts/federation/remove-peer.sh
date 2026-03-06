@@ -51,7 +51,7 @@ if [[ -f "$PERSONAL_ENV" ]]; then
     set +a
 fi
 
-POSTGRES_URL="${POSTGRES_URL:-postgresql://${USER}:@localhost:5432/personal_koi}"
+POSTGRES_URL="${POSTGRES_URL:-postgresql:///personal_koi}"
 
 # DB operations below require psycopg2.
 ensure_python_module "psycopg2" "psycopg2-binary"

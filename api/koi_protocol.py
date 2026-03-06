@@ -30,7 +30,9 @@ class EventType(StrEnum):
 # =============================================================================
 
 class WireManifest(BaseModel):
-    """Strict KOI-net wire manifest: {rid, timestamp, sha256_hash} only."""
+    """KOI-net wire manifest: core fields + passthrough for extension fields."""
+    model_config = ConfigDict(extra="allow")
+
     rid: str
     timestamp: str  # ISO 8601 UTC with Z suffix
     sha256_hash: str  # JCS-canonical hash via rid-lib
@@ -65,6 +67,7 @@ class NodeProfile(BaseModel):
     base_url: Optional[str] = None  # None for PARTIAL nodes
     provides: NodeProvides
     public_key: Optional[str] = None  # DER-encoded, base64
+    encryption_key: Optional[str] = None  # X25519 public key, base64 (E2EE)
     ontology_uri: Optional[str] = None
     ontology_version: Optional[str] = None
 
@@ -107,6 +110,7 @@ class HandshakeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["handshake"] = "handshake"
     profile: NodeProfile
+    defer_approval: bool = False  # When True, inbound edge stays PROPOSED (for invite flow SAS verification)
 
 
 class ConfirmEventsRequest(BaseModel):
@@ -145,6 +149,8 @@ class HandshakeResponse(BaseModel):
     type: Literal["handshake_response"] = "handshake_response"
     profile: NodeProfile
     accepted: bool
+    edge_status: Optional[str] = None   # "APPROVED" or "PROPOSED" — inbound poll edge
+    edge_rid: Optional[str] = None      # inbound poll edge RID for admin reference
 
 
 class ConfirmEventsResponse(BaseModel):

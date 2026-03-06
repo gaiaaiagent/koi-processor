@@ -13,6 +13,8 @@ A comprehensive sensor-to-agent pipeline that processes real-time content from K
 - [Architecture](#architecture)
 - [Key Features](#key-features)
 - [Phase 1 TerminusDB Integration](#phase-1-terminusdb-integration)
+- [Federation Bootstrap (Blank Host)](#federation-bootstrap-blank-host)
+- [KOI-net Vault Sync Roadmap](#koi-net-vault-sync-roadmap)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -78,6 +80,86 @@ curl -s 'localhost:8351/relationships/orn:...?direction=outgoing'
 ```
 
 Auth: Restricted to localhost and WireGuard mesh (10.100.0.0/24). Tests: `tests/test_graph_traversal.py` (21 isolated fixture tests), `tests/test_graph_traversal_smoke.py` (12 live-DB smoke tests).
+
+## Federation Bootstrap (Blank Host)
+
+Federation onboarding scripts now support near one-command bootstrap for new peer machines (Ubuntu/macOS), including prerequisites, DB/venv setup, join-request generation, and validation.
+
+Runbook:
+
+- [`scripts/federation/README.md`](scripts/federation/README.md)
+
+Primary bootstrap command (peer host):
+
+```bash
+cd scripts/federation
+./bootstrap-node.sh --yes <node-name> <wireguard-ip> [koi-processor-path]
+```
+
+Post-setup validation:
+
+```bash
+./validate-node.sh --expect-wg-ip <wireguard-ip> --strict
+```
+
+Federation smoke validation (bidirectional share):
+
+```bash
+# Node A -> Node B
+curl -sS -X POST http://<node-a-wg-ip>:8351/koi-net/share \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "document_rid": "orn:personal-koi.testdoc:smoke-a-to-b-<ts>",
+    "recipient": "<peer-alias-on-node-a>",
+    "message": "smoke a->b",
+    "contents": {"title":"smoke","body":"federation test"}
+  }'
+
+# Verify on Node B (received inbox)
+curl -sS "http://<node-b-wg-ip>:8351/koi-net/shared-with-me?from_peer=<peer-alias-on-node-b>&limit=10"
+```
+
+Note: `since` on `/koi-net/shared-with-me` is ISO-8601 datetime (example: `2026-02-25T20:22:00Z`).
+
+## KOI-net Vault Sync
+
+Bidirectional markdown-folder sync between KOI-net peers. Phase Sync-1 validated (two-peer 15/15). Phase Sync-1.5 (hardening) implementation complete, 72h soak in progress.
+
+Canonical roadmap: [`docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`](docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md)
+
+### Operational Flags
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `VAULT_SYNC_ENABLED` | false | Enable vault sync subsystem |
+| `VAULT_SYNC_FOLDER` | Shared | Subfolder within vault to sync |
+| `VAULT_SYNC_WATCHER` | true | File watcher for low-latency change detection (fails open) |
+| `VAULT_SYNC_REPAIR_ENABLED` | false | Gate for reconcile repair mode (keep disabled until post-soak) |
+| `VAULT_SYNC_MAX_FILES_PER_SCAN` | 100 | Backpressure: file cap per cycle |
+| `VAULT_SYNC_MAX_BYTES_PER_SCAN` | 10MB | Backpressure: byte cap per cycle |
+| `VAULT_SYNC_MAX_EVENTS_PER_SCAN` | 200 | Backpressure: event cap per cycle |
+| `VAULT_SYNC_DELETE_EVENT_RESERVE` | 50 | Min budget reserved for delete events |
+| `VAULT_SYNC_WATCHER_DEBOUNCE_MS` | 500 | Debounce window for editor saves |
+
+### Default-safe production settings
+
+```bash
+VAULT_SYNC_ENABLED=true
+VAULT_SYNC_FOLDER=Shared
+VAULT_SYNC_REPAIR_ENABLED=false  # enable after soak
+# All other flags at defaults
+```
+
+### Key endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/koi-net/vault-sync/status` | GET | Dashboard: metrics, pending events, rejected counts |
+| `/koi-net/vault-sync/trigger` | POST | Force immediate scan cycle |
+| `/koi-net/vault-sync/configure` | POST | Set sync peer |
+| `/koi-net/vault-sync/reconcile` | POST | Drift detection (`{"mode":"detect"}`) or repair |
+
+All vault-sync endpoints require localhost + admin token.
 
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion

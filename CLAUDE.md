@@ -96,6 +96,75 @@ When schema mismatch is detected (`fuseki_uri` legacy schema), run:
 python -m scripts.terminusdb.import_from_postgres --fresh
 ```
 
+## Federation Validation Update (2026-02-25)
+
+Live peer validation completed between local Darren node and blank-slate NUC peer:
+
+- Bidirectional KOI-net edge approval and polling verified.
+- Bidirectional `/koi-net/share` smoke test verified with receipt in `/koi-net/shared-with-me`.
+- Bootstrap runbook validated on blank host path (`bootstrap-node.sh` + `setup-node.sh` + `validate-node.sh`).
+
+Bug fix shipped:
+
+- `GET /koi-net/shared-with-me?since=...` now binds `since` as `datetime` (previously `str`, causing asyncpg timestamptz binding 500s).
+
+## KOI-net Vault Sync — Phase Sync-1 VALIDATED (2026-02-25)
+
+Two-peer smoke test passes 15/15 between darren-personal and nuc-personal (Dobby).
+
+Key files:
+- `api/vault_sync.py` — VaultSyncManager (scan, trigger, apply, conflict, reconcile)
+- `api/koi_net_router.py` — vault sync endpoints (configure, trigger, status)
+- `api/koi_protocol.py` — WireManifest with `extra="allow"` for extension fields
+- `migrations/049_vault_sync.sql` — schema (vault_sync_state, vault_sync_config, vault_sync_applied_events)
+- `tests/test_vault_sync.py` — 39 unit tests (17 Sync-1 + 22 Sync-1.5)
+- `scripts/federation/smoke-vault-sync.sh` — two-peer smoke test (15 checks)
+- `scripts/federation/soak-check.sh` — periodic soak monitoring
+- `migrations/050_vault_sync_metrics.sql` — metrics persistence table
+
+Env vars: `VAULT_SYNC_ENABLED=true`, `VAULT_SYNC_FOLDER=Shared`, `VAULT_SYNC_REPAIR_ENABLED=false` (during soak)
+
+Bugs found and fixed during live two-peer testing:
+1. `WireManifest` Pydantic model stripped extension fields — `extra="allow"`.
+2. Poll endpoint manifest transformation dropped custom fields — preserve via `dict(m)`.
+3. FORGET `origin_seq` not incrementing — stale-event guard rejected deletes.
+4. Smoke test tilde expansion in SSH remote commands — unquote paths for remote `~` expansion.
+
+## KOI-net Vault Sync — Phase Sync-1.5 COMPLETE (2026-03-04)
+
+Soak PASSED. 6+ days (2026-02-26 → 2026-03-04), zero rejected events, zero reconcile drift on both peers.
+Runtime SHA: `5ddd839e` → `cf805a77` (E2EE upgrade during soak). 39/39 tests pass.
+
+Added in Sync-1.5:
+- SyncMetrics (23 fields, persisted to JSONB singleton table)
+- VaultWatcher (watchdog-based, debounce, fail-open)
+- Backpressure caps (file/byte/event per scan, delete reserve)
+- Reconcile endpoint (detect drift, gated repair mode)
+- Structured logging (key=value format)
+
+Soak runbook: `docs/runbooks/vault-sync-soak.md`
+Canonical phased roadmap: `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
+
+## KOI-net Vault Sync — E2EE (2026-03-03)
+
+End-to-end encryption for vault sync using X25519 + ChaCha20-Poly1305. Zero new dependencies
+(`cryptography>=42.0.0` already installed). File contents encrypted in event queue, transit, and relay —
+plaintext only on endpoints (Obsidian vault).
+
+Key files:
+- `api/koi_encryption.py` — Core E2EE module (keygen, ECDH, encrypt/decrypt)
+- `api/node_identity.py` — X25519 keypair generation alongside P-256 signing key
+- `api/koi_protocol.py` — `encryption_key` field on `NodeProfile`
+- `api/koi_net_router.py` — Peer encryption key stored on handshake
+- `api/vault_sync.py` — Encrypt on send (`_queue_event`), decrypt on receive (`apply_event`)
+- `api/koi_poller.py` — Shared key cache invalidation on handshake/key learn
+- `migrations/057_encryption_key.sql` — `encryption_key TEXT` column on `koi_net_nodes`
+
+Crypto stack: X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 (AEAD). AAD = event RID (path binding).
+Backward compatible: plaintext fallback when peer lacks encryption key.
+
+Env: No new env vars. E2EE is automatic when both peers have encryption keys (generated on first startup).
+
 ### Code↔Docs Bridge - COMPLETE
 
 | Component | Count |
@@ -114,6 +183,86 @@ python -m scripts.terminusdb.import_from_postgres --fresh
 | B1 | No ontology# types | ✅ 0 |
 | B2 | No ontology# predicates | ✅ 0 |
 | C | No self-ref triples | ✅ 0 |
+
+---
+
+## Runtime Convergence (2026-02-26)
+
+This repo is the **canonical** KOI runtime. The Octo deployment repo pins a specific commit via `vendor/pin.txt` and syncs code with `vendor/sync.sh`.
+
+### Capabilities Registry
+- `api/capabilities.py` — Central registry of feature flags, loaded from env vars or named profiles (`personal`, `bkc_coordinator`, `bkc_leaf`)
+- `DEPLOYMENT_PROFILE` env var selects which features are active
+
+### Router Modules
+Capability-gated endpoint groups, mounted conditionally at startup:
+- `api/routers/graph_router.py` — `/graph/*` traversal + temporal queries (assertion history)
+- `api/routers/web_router.py` — `/web/*` content curation (BKC only)
+- `api/routers/github_router.py` — `/github/*` repo scanning (BKC only)
+- `api/routers/vault_sync_router.py` — `/koi-net/vault-sync/*` (personal only)
+- `api/routers/network_router.py` — `/network/*` coordinator aggregation (BKC coordinator only)
+
+### Startup Profiles
+- `api/profiles/personal.py` — Vault sync, TerminusDB adapter
+- `api/profiles/bkc_coordinator.py` — Pipeline handlers, web/GitHub sensors
+- `api/profiles/bkc_leaf.py` — Minimal (federation only)
+
+### Migration Governance
+- `migrations/052_koi_migrations_registry.sql` — Registry table (`migration_id`, `checksum`, `applied_at`)
+- `migrations/baselines/` — Per-database manifests (`personal_koi.json`, `octo_koi.json`, `gv_koi.json`, `fr_koi.json`)
+- `scripts/stamp_baseline.py` — Stamp existing migrations into registry with checksum verification
+- Migration IDs are namespaced: `core:*`, `bkc:*`, `personal:*`
+
+### Commons Intake Pipeline (2026-02-26)
+
+Full intake workflow for federated knowledge contributions:
+- **State machine:** `staged → approved → ingesting → (ingested | needs_merge_review | failed)`
+- `api/commons_ingest_worker.py` — Async background worker (advisory locks, `FOR UPDATE SKIP LOCKED`, retry/backoff, stale lease reaper)
+- Entity resolution with confidence thresholds: auto-merge ≥0.95, ambiguous 0.85-0.95 → merge candidate queue
+- `COMMONS_INGEST_ENABLED=true` env var gates worker startup
+
+New endpoints (in `api/koi_net_router.py`):
+- `GET /koi-net/commons/intake` — List shares by status
+- `POST /koi-net/commons/intake/decide` — Approve/reject a staged share
+- `GET /koi-net/commons/intake/{share_id}/decisions` — Immutable decision audit trail
+- `GET /koi-net/commons/intake/{share_id}/merge-candidates` — Ambiguous entity matches
+- `POST /koi-net/commons/intake/{share_id}/resolve-merges` — Admin resolution of merge candidates
+
+New migrations:
+- `053_commons_decision_log.sql` — `koi_commons_decisions` table + expanded `intake_status` constraint
+- `054_commons_merge_candidates.sql` — `koi_commons_merge_candidates` table
+
+New env vars:
+- `COMMONS_INGEST_ENABLED` — Enable the async ingest worker (default: `false`)
+- `KOI_COMMONS_SERVICE_TOKEN` — Bearer token for remote BFF access to commons admin endpoints
+
+### Chat Endpoint (2026-02-26)
+
+`POST /chat` — RAG-powered conversational interface:
+- Semantic search over entity embeddings (pgvector)
+- Falls back to text search if no embedding available
+- Calls LLM (configurable via `CHAT_LLM_MODEL`, default: `gpt-4o-mini`) for grounded answer
+- Returns `{ answer, sources, intent }`
+- Requires `OPENAI_API_KEY`; returns 503 if unavailable
+
+### GraphRAG Export Validation (2026-02-26)
+
+Status: validated, ready to merge/deploy.
+
+Validated change:
+- `scripts/export_graph_hierarchy.py` now outputs full format (`entities`, `relationships`, `clusters`, `metadata`) to `graphrag_hierarchy.json` with hierarchical clustering and centrality fields.
+
+Smoke test evidence:
+1. Export run on live production DB (`max-entities=8000`) produced `/tmp/graphrag_hierarchy_candidate.json` (7362 entities, 13567 relationships, L1=233, L2=14).
+2. Headless load test of `GAIA/graph/GraphRAG3D_EmbeddingView.html` succeeded with candidate JSON as primary dataset.
+3. Core flows verified in browser automation: entity search/select, cluster focus, relationship line rendering.
+4. No JS runtime exceptions; only expected optional-layout 404s (graphsage/force/community summary sidecar files).
+
+### Contract Tests
+- `tests/test_contract.py` — Behavioral contract suite (run against any profile, live server)
+- `tests/test_interop_matrix.py` — Federation interop + commons correctness gates (C1-C3)
+
+Run: `BASE_URL=http://127.0.0.1:8351 pytest tests/test_contract.py -v -m core`
 
 ---
 
@@ -179,6 +328,7 @@ set -a; source .env; set +a
 - `docs/HYBRID_RAG_ARCHITECTURE.md` - Technical architecture
 - `docs/CODE_DOCS_BRIDGE.md` - Code↔Docs bridge documentation
 - `docs/CHANGELOG.md` - Version history
+- `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md` - Canonical phased vault-sync plan
 - `docs/archive/knowledge-graph-review-2026-01.md` - Current cycle tracking doc
 
 ---
@@ -349,8 +499,33 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
-**Last Updated**: 2026-02-25
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated
+**Last Updated**: 2026-03-04
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Sync-1.5 COMPLETE + E2EE COMPLETE + Invite-Token Onboarding
+
+---
+
+## Invite-Token Peer Onboarding (2026-03-04)
+
+One-command peer onboarding for KOI-net federation. Reduces interactive onboarding from ~30 min to ~5 min.
+
+**New flow:** Admin creates invite token → peer runs `bootstrap-node.sh --invite <token>` → admin approves WG key → SAS verification over Signal → edges approved.
+
+Key files:
+- `scripts/federation/invite_token.py` — Token format (KOI-INVITE-1), HMAC signing/verification, pure stdlib
+- `scripts/federation/create-invite.sh` — Admin generates invite token
+- `scripts/federation/compute-sas.sh` — Admin computes SAS code for identity verification
+- `scripts/federation/approve-peer-edges.sh` — Admin approves all PROPOSED edges to/from a peer
+- `scripts/federation/bootstrap-node.sh` — `--invite` flag for token-driven flow
+- `scripts/federation/approve-peer.sh` — `--pubkey-only` flag for invite flow approval
+- `scripts/federation/lib.sh` — `compute_sas()`, `peer_registry_lookup_by_number()`, `decode_invite_token()`
+- `api/koi_protocol.py` — `defer_approval` field on `HandshakeRequest`
+- `api/koi_net_router.py` — Conditional inbound edge status (PROPOSED when deferred)
+
+Trust model: Token carries config (relay info, IP) for convenience. Identity verification is SAS (6-digit code confirmed over Signal). HMAC is admin-side only (prevents forgery/tampering at creation time).
+
+Backward compatible: Manual flow (bootstrap without `--invite`, connect-peers.sh) unchanged.
+
+Runbook: `docs/runbooks/peer-onboarding.md` (updated with invite flow section)
 
 ---
 
@@ -359,4 +534,8 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 | Session ID | Date | Scope | Key Work |
 |------------|------|-------|----------|
 | `df92b730` | 2026-02-25 | koi-processor | Phase 1 TDB smoke test: fresh import, health/outbox/auth/fail-open/idempotency/reconciliation all pass. Fixed vault_parser.py SAVEPOINT bug. Created smoke_phase1.sh. Updated README + CLAUDE.md. Committed + pushed. |
-| current | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
+| `371b493e` | 2026-02-25 | koi-processor | Phase A graph traversal: neighborhood + shortest-path endpoints via PG recursive CTEs. Direction param on /relationships. 33/33 tests pass. EXPLAIN ANALYZE confirms sub-3ms latency. |
+| `17263f5c` | 2026-02-25 | koi-processor | Vault Sync Phase Sync-1: implemented VaultSyncManager, smoke test script, 17 unit tests. Two-peer smoke validated (15/15) between darren-personal ↔ nuc-personal. Fixed 3 bugs: WireManifest field stripping, poll manifest preservation, FORGET origin_seq monotonicity. |
+| `5ddd839e` | 2026-02-26 | koi-processor | Vault Sync Phase Sync-1.5: 5 WPs (metrics, logging, backpressure, watcher, reconcile). 39/39 tests. Deployed to both peers. 15/15 smoke (watcher off + on). Soak started 2026-02-26T04:31Z. |
+| `684c3d97` | 2026-03-03 | koi-processor | E2EE for vault sync: X25519 + ChaCha20-Poly1305 encryption, zero new deps. Encrypt on send, decrypt on receive, backward-compatible plaintext fallback. Deployed to both nodes, migration 057 applied, handshake exchanged keys, verified ciphertext in event queue + plaintext delivery on NUC. Fixed koi-server start.sh (0.0.0.0 binding, increased health check retries). |
+| `8ef466d5` | 2026-03-04 | koi-processor | Invite-token peer onboarding: 4 new scripts + 5 modified files. Token format (KOI-INVITE-1 + HMAC-SHA256), SAS verification, defer_approval handshake, resume-safe bootstrap, peer registry status machine (invited→approving→active). |

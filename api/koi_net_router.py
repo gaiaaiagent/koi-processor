@@ -65,6 +65,7 @@ from api.node_identity import (
     node_rid_suffix,
 )
 from api.event_queue import EventQueue
+from api.vault_sync import VaultSyncManager, VaultUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,13 @@ koi_net_router = APIRouter(tags=["koi-net"])
 
 # Module-level state (initialized in setup_koi_net)
 _private_key = None
+_encryption_private_key = None  # X25519 private key for E2EE
 _node_profile: Optional[NodeProfile] = None
 _event_queue: Optional[EventQueue] = None
 _db_pool: Optional[asyncpg.Pool] = None
 _poller: Optional[KOIPoller] = None
+_vault_sync: Optional[VaultSyncManager] = None
+_commons_ingest_worker = None  # Optional[CommonsIngestWorker]
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -186,13 +190,13 @@ def _manifest_sha256_hash(manifest: Dict[str, Any], contents: Optional[Dict[str,
 
 async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
     """Initialize KOI-net subsystem. Called from app startup."""
-    global _private_key, _node_profile, _event_queue, _db_pool, _poller
+    global _private_key, _encryption_private_key, _node_profile, _event_queue, _db_pool, _poller, _vault_sync, _commons_ingest_worker
     _db_pool = pool
 
     node_name = os.getenv("KOI_NODE_NAME", "darren-personal")
     base_url = os.getenv("KOI_BASE_URL")  # e.g. http://127.0.0.1:8351
 
-    _private_key, _node_profile = load_or_create_identity(
+    _private_key, _node_profile, _encryption_private_key = load_or_create_identity(
         node_name=node_name,
         base_url=base_url,
         node_type="FULL",
@@ -219,6 +223,22 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
     )
     await _poller.start()
 
+    # Initialize vault sync if enabled
+    vault_sync_enabled = _bool_env("VAULT_SYNC_ENABLED", False)
+    vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "~/Documents/Notes")
+    if vault_sync_enabled and vault_path:
+        _vault_sync = VaultSyncManager(
+            pool=pool,
+            node_rid=_node_profile.node_rid,
+            event_queue=_event_queue,
+            vault_path=vault_path,
+            encryption_private_key=_encryption_private_key,
+        )
+        _poller.vault_sync = _vault_sync
+        await _vault_sync.load_metrics()
+        _vault_sync.start_watcher()
+        logger.info(f"Vault sync enabled (vault={vault_path}, e2ee={'yes' if _encryption_private_key else 'no'})")
+
     policy = _security_policy()
     logger.info(
         "KOI-net validation policy: strict_mode=%s require_signed=%s "
@@ -233,12 +253,29 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
         policy["allow_b64_64"],
         policy["require_approved_edge_for_poll"],
     )
+    # Start commons ingest worker (for BKC profiles with commons intake)
+    commons_ingest_enabled = _bool_env("COMMONS_INGEST_ENABLED", False)
+    if commons_ingest_enabled:
+        try:
+            from api.commons_ingest_worker import CommonsIngestWorker
+            _commons_ingest_worker = CommonsIngestWorker(pool)
+            await _commons_ingest_worker.start()
+            logger.info("Commons ingest worker started")
+        except Exception as e:
+            logger.warning(f"Commons ingest worker failed to start: {e}")
+
     logger.info(f"KOI-net initialized: {_node_profile.node_rid}")
 
 
 async def shutdown_koi_net():
     """Stop poller and clean up. Called from app shutdown."""
-    global _poller
+    global _poller, _commons_ingest_worker
+    if _commons_ingest_worker:
+        await _commons_ingest_worker.stop()
+        _commons_ingest_worker = None
+    if _vault_sync:
+        _vault_sync.stop_watcher()
+        await _vault_sync.persist_metrics()
     if _poller:
         await _poller.stop()
         _poller = None
@@ -575,6 +612,68 @@ def _enforce_local_admin(request: Request) -> Optional[JSONResponse]:
     return None
 
 
+def _enforce_commons_admin(request: Request) -> Optional[JSONResponse]:
+    """Return protocol error if request is not authorized for commons admin endpoints.
+
+    Accepts:
+    - Localhost requests (same as _enforce_local_admin)
+    - Valid KOI_COMMONS_SERVICE_TOKEN bearer token (for BFF access from remote dashboard)
+
+    This guard is ONLY for /koi-net/commons/* endpoints. All other admin
+    endpoints continue using _enforce_local_admin (localhost-only).
+    """
+    client_host = request.client.host if request.client else None
+    is_localhost = client_host in ("127.0.0.1", "::1", "localhost")
+
+    # Check commons service token (scoped to commons endpoints only)
+    commons_token = os.getenv("KOI_COMMONS_SERVICE_TOKEN")
+    auth_header = request.headers.get("Authorization", "")
+    has_valid_commons_token = (
+        commons_token
+        and auth_header.startswith("Bearer ")
+        and auth_header[7:] == commons_token
+    )
+
+    if not is_localhost and not has_valid_commons_token:
+        return _protocol_error(403, "FORBIDDEN", "Endpoint requires localhost or valid commons service token")
+
+    # If localhost, also check admin token if configured (backward compat)
+    if is_localhost:
+        admin_token = _read_admin_token()
+        if admin_token:
+            if not auth_header.startswith("Bearer ") or auth_header[7:] not in (admin_token, commons_token or ""):
+                return _protocol_error(401, "UNAUTHORIZED", "Invalid or missing admin token")
+    return None
+
+
+# =============================================================================
+# Membrane Governance Helpers
+# =============================================================================
+
+async def _check_approved_edge(source_node: str, direction: str = "any") -> bool:
+    """Return True if source_node has an APPROVED edge relationship with us.
+
+    direction="poll": source polls us (source_node=source, target_node=us) — for fetch/poll gating
+    direction="any": any approved edge in either direction — for broadcast/confirm gating
+    """
+    if not _db_pool or not _node_profile:
+        return False
+    async with _db_pool.acquire() as conn:
+        if direction == "poll":
+            edge = await conn.fetchrow(
+                "SELECT 1 FROM koi_net_edges WHERE source_node = $1 AND target_node = $2 AND status = 'APPROVED'",
+                source_node, _node_profile.node_rid,
+            )
+        else:  # "any" — either direction
+            edge = await conn.fetchrow(
+                """SELECT 1 FROM koi_net_edges
+                   WHERE status = 'APPROVED'
+                   AND ((source_node = $1 AND target_node = $2) OR (source_node = $2 AND target_node = $1))""",
+                source_node, _node_profile.node_rid,
+            )
+        return edge is not None
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -622,16 +721,17 @@ async def handshake(request: Request):
         await conn.execute(
             """
             INSERT INTO koi_net_nodes
-                (node_rid, node_name, node_type, base_url, public_key,
+                (node_rid, node_name, node_type, base_url, public_key, encryption_key,
                  provides_event, provides_state, ontology_uri, ontology_version,
                  last_seen, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'active')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), 'active')
             ON CONFLICT (node_rid) DO UPDATE SET
                 node_name = EXCLUDED.node_name,
                 node_type = EXCLUDED.node_type,
                 base_url = EXCLUDED.base_url,
                 provides_event = EXCLUDED.provides_event,
                 provides_state = EXCLUDED.provides_state,
+                encryption_key = COALESCE(EXCLUDED.encryption_key, koi_net_nodes.encryption_key),
                 ontology_uri = COALESCE(EXCLUDED.ontology_uri, koi_net_nodes.ontology_uri),
                 ontology_version = COALESCE(EXCLUDED.ontology_version, koi_net_nodes.ontology_version),
                 last_seen = NOW(),
@@ -642,25 +742,41 @@ async def handshake(request: Request):
             peer.node_type,
             peer.base_url,
             peer.public_key,
+            peer.encryption_key,
             peer.provides.event if peer.provides else [],
             peer.provides.state if peer.provides else [],
             peer.ontology_uri,
             peer.ontology_version,
         )
 
-        # Create inbound POLL edge (APPROVED — we want to poll them)
+        # Server-side deferral for unknown nodes (membrane governance)
+        defer_for_unknown = _bool_env("KOI_NET_DEFER_UNKNOWN_HANDSHAKE", False)
+        is_known = await conn.fetchval(
+            "SELECT 1 FROM koi_net_nodes WHERE node_rid = $1", peer.node_rid
+        )
+        effective_defer = req.defer_approval or (defer_for_unknown and not is_known)
+        if effective_defer and not req.defer_approval and not is_known:
+            logger.warning(
+                "HANDSHAKE DEFERRED by server policy: unknown node %s (%s) — "
+                "inbound edge will be PROPOSED. Approve via POST /koi-net/edges/approve",
+                peer.node_rid, peer.node_name,
+            )
+
+        # Create inbound POLL edge (APPROVED by default, PROPOSED when deferred)
+        inbound_status = 'PROPOSED' if effective_defer else 'APPROVED'
         edge_rid_inbound = f"orn:koi-net.edge:{peer.node_rid}>{_node_profile.node_rid}:poll"
         await conn.execute(
             """
             INSERT INTO koi_net_edges
                 (edge_rid, source_node, target_node, edge_type, status, rid_types)
-            VALUES ($1, $2, $3, 'POLL', 'APPROVED', $4)
-            ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW()
+            VALUES ($1, $2, $3, 'POLL', $5, $4)
+            ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW(), rid_types = EXCLUDED.rid_types
             """,
             edge_rid_inbound,
             peer.node_rid,
             _node_profile.node_rid,
             peer.provides.event if peer.provides else [],
+            inbound_status,
         )
 
         # Create outbound POLL edge (PROPOSED — peer wants to poll us, requires approval)
@@ -670,7 +786,7 @@ async def handshake(request: Request):
             INSERT INTO koi_net_edges
                 (edge_rid, source_node, target_node, edge_type, status, rid_types)
             VALUES ($1, $2, $3, 'POLL', 'PROPOSED', $4)
-            ON CONFLICT (edge_rid) DO NOTHING
+            ON CONFLICT (edge_rid) DO UPDATE SET updated_at = NOW(), rid_types = EXCLUDED.rid_types
             """,
             edge_rid_outbound,
             _node_profile.node_rid,
@@ -690,14 +806,21 @@ async def handshake(request: Request):
                 peer.node_rid,
             )
 
+    # Invalidate cached E2EE shared key on handshake (key may have rotated)
+    if _vault_sync:
+        _vault_sync.invalidate_shared_key(peer.node_rid)
+
     logger.info(
         f"Handshake with {peer.node_rid} ({peer.node_name}) — "
-        f"inbound edge APPROVED, outbound edge PROPOSED, alias '{peer.node_name}'"
+        f"inbound edge {inbound_status}, outbound edge PROPOSED, alias '{peer.node_name}'"
+        f"{', e2ee=yes' if peer.encryption_key else ''}"
     )
 
     response = HandshakeResponse(
         profile=_node_profile,
         accepted=True,
+        edge_status=inbound_status,
+        edge_rid=edge_rid_inbound,
     )
     return JSONResponse(
         content=_wrap_response(response.model_dump(), peer.node_rid, signed)
@@ -714,6 +837,14 @@ async def events_broadcast(request: Request):
 
     if not payload:
         return _protocol_error(400, "EMPTY_PAYLOAD", "Empty payload")
+
+    # Membrane governance: gate write path for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            return _protocol_error(403, "IDENTITY_REQUIRED", "Signed envelope required for broadcast in strict mode")
+        if not await _check_approved_edge(source_node, direction="any"):
+            return _protocol_error(403, "UNAPPROVED_EDGE", f"No approved edge for {source_node}")
 
     events = payload.get("events", [])
     if not isinstance(events, list):
@@ -803,11 +934,12 @@ async def events_poll(request: Request):
         manifest = None
         if ev.get("manifest"):
             m = ev["manifest"]
-            manifest = {
-                "rid": m.get("rid", ev["rid"]),
-                "timestamp": timestamp_to_z_format(m.get("timestamp", "")),
-                "sha256_hash": _manifest_sha256_hash(m, ev.get("contents")),
-            }
+            # Preserve all original manifest fields (e.g. vault-sync content_hash,
+            # relative_path) and add/override wire-format fields.
+            manifest = dict(m)
+            manifest["rid"] = m.get("rid", ev["rid"])
+            manifest["timestamp"] = timestamp_to_z_format(m.get("timestamp", ""))
+            manifest["sha256_hash"] = _manifest_sha256_hash(m, ev.get("contents"))
         wire_events.append({
             "rid": ev["rid"],
             "event_type": ev["event_type"],
@@ -841,6 +973,15 @@ async def events_confirm(request: Request):
     if not confirming_node:
         return _protocol_error(400, "MISSING_CONFIRMING_NODE", "Cannot identify confirming node")
 
+    # Membrane governance: gate confirm for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("Confirm: unsigned request rejected — signed envelope required in strict mode")
+            return _protocol_error(403, "IDENTITY_REQUIRED", "Signed envelope required for confirm in strict mode")
+        if not await _check_approved_edge(confirming_node, direction="any"):
+            return _protocol_error(403, "UNAPPROVED_EDGE", f"No approved edge for {confirming_node}")
+
     confirmed = await _event_queue.confirm(event_ids, confirming_node)
     resp = ConfirmEventsResponse(confirmed=confirmed)
     return JSONResponse(
@@ -857,6 +998,18 @@ async def manifests_fetch(request: Request):
         return _envelope_error_response(exc)
 
     rids = payload.get("rids", []) if payload else []
+
+    # Membrane governance: gate fetch for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("manifests/fetch: unsigned request, returning empty (strict)")
+            resp = ManifestsPayloadResponse(manifests=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), None, False))
+        if not await _check_approved_edge(source_node, direction="poll"):
+            logger.info(f"manifests/fetch: no approved poll edge for {source_node}, returning empty (strict)")
+            resp = ManifestsPayloadResponse(manifests=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), source_node, signed))
 
     manifests = []
     async with _db_pool.acquire() as conn:
@@ -893,6 +1046,18 @@ async def bundles_fetch(request: Request):
         return _envelope_error_response(exc)
 
     rids = payload.get("rids", []) if payload else []
+
+    # Membrane governance: gate fetch for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("bundles/fetch: unsigned request, returning empty (strict)")
+            resp = BundlesPayloadResponse(bundles=[], not_found=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), None, False))
+        if not await _check_approved_edge(source_node, direction="poll"):
+            logger.info(f"bundles/fetch: no approved poll edge for {source_node}, returning empty (strict)")
+            resp = BundlesPayloadResponse(bundles=[], not_found=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), source_node, signed))
 
     bundles = []
     not_found = []
@@ -937,6 +1102,18 @@ async def rids_fetch(request: Request):
 
     rid_types = (payload or {}).get("rid_types")
 
+    # Membrane governance: gate fetch for unapproved/unknown nodes
+    policy = _security_policy()
+    if policy["require_approved_edge_for_poll"]:
+        if not source_node:
+            logger.info("rids/fetch: unsigned request, returning empty (strict)")
+            resp = RidsPayloadResponse(rids=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(), None, False))
+        if not await _check_approved_edge(source_node, direction="poll"):
+            logger.info(f"rids/fetch: no approved poll edge for {source_node}, returning empty (strict)")
+            resp = RidsPayloadResponse(rids=[])
+            return JSONResponse(content=_wrap_response(resp.model_dump(), source_node, signed))
+
     async with _db_pool.acquire() as conn:
         if rid_types:
             rows = await conn.fetch(
@@ -967,16 +1144,47 @@ async def rids_fetch(request: Request):
 
 
 @koi_net_router.get("/edges")
-async def koi_net_edges():
-    """Active federation edges (for dashboard visualization)."""
+async def koi_net_edges(request: Request, status: Optional[str] = None):
+    """Federation edges. Unauthenticated: APPROVED only. Admin: filter by status."""
     if not _db_pool:
         return {"edges": []}
-    async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
+
+    # Check if admin request (localhost + token)
+    is_admin = _enforce_local_admin(request) is None
+
+    if is_admin and status:
+        if status == "all":
+            query = (
+                "SELECT edge_rid, source_node, target_node, edge_type, status, "
+                "created_at, updated_at FROM koi_net_edges"
+            )
+            params = []
+        else:
+            query = (
+                "SELECT edge_rid, source_node, target_node, edge_type, status, "
+                "created_at, updated_at FROM koi_net_edges WHERE status = $1"
+            )
+            params = [status.upper()]
+    else:
+        # Unauthenticated: APPROVED only (backward compatible)
+        query = (
             "SELECT edge_rid, source_node, target_node, edge_type, status "
             "FROM koi_net_edges WHERE status = 'APPROVED'"
         )
-    return {"edges": [dict(r) for r in rows]}
+        params = []
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+
+    edges = []
+    for r in rows:
+        edge = dict(r)
+        # Serialize datetime fields for JSON
+        for field in ("created_at", "updated_at"):
+            if field in edge and edge[field] is not None:
+                edge[field] = edge[field].isoformat()
+        edges.append(edge)
+    return {"edges": edges}
 
 
 @koi_net_router.post("/edges/approve")
@@ -1019,6 +1227,63 @@ async def approve_edge(request: Request):
 
     logger.info(f"Approved edge: {edge_rid}")
     return {"status": "approved", "edge_rid": edge_rid}
+
+
+@koi_net_router.post("/edges/reject")
+async def reject_edge(request: Request):
+    """Reject a PROPOSED edge. Optionally deactivate the peer node.
+
+    Admin-only: requires localhost + admin token.
+    """
+    auth_err = _enforce_local_admin(request)
+    if auth_err:
+        return auth_err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _protocol_error(400, "INVALID_JSON", "Invalid JSON body")
+
+    edge_rid = body.get("edge_rid")
+    if not edge_rid:
+        return _protocol_error(400, "MISSING_EDGE_RID", "edge_rid is required")
+
+    deactivate_node = body.get("deactivate_node", False)
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    async with _db_pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE koi_net_edges SET status = 'REJECTED', updated_at = NOW()
+            WHERE edge_rid = $1 AND status = 'PROPOSED'
+            """,
+            edge_rid,
+        )
+        count = int(result.split()[-1])
+
+        if count == 0:
+            return _protocol_error(
+                404, "EDGE_NOT_FOUND",
+                f"No PROPOSED edge found with rid '{edge_rid}'"
+            )
+
+        if deactivate_node:
+            # Extract source_node from the edge to deactivate
+            source = await conn.fetchval(
+                "SELECT source_node FROM koi_net_edges WHERE edge_rid = $1",
+                edge_rid,
+            )
+            if source:
+                await conn.execute(
+                    "UPDATE koi_net_nodes SET status = 'rejected' WHERE node_rid = $1",
+                    source,
+                )
+                logger.info(f"Deactivated node: {source}")
+
+    logger.info(f"Rejected edge: {edge_rid}")
+    return {"status": "rejected", "edge_rid": edge_rid}
 
 
 @koi_net_router.get("/health")
@@ -1332,7 +1597,7 @@ async def share_document(req: ShareDocumentRequest):
 
 @koi_net_router.get("/shared-with-me")
 async def shared_with_me(
-    since: Optional[str] = None,
+    since: Optional[datetime] = None,
     from_peer: Optional[str] = None,
     limit: int = 50,
 ):
@@ -1468,21 +1733,26 @@ async def shared_with_me(
 
 @koi_net_router.get("/commons/intake")
 async def commons_intake(
+    request: Request,
     status: str = "staged",
     from_peer: Optional[str] = None,
     limit: int = 50,
 ):
     """List incoming commons shares and their intake status."""
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
     if not _db_pool:
         return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
 
     normalized_status = (status or "staged").strip().lower()
-    allowed_status = {"staged", "approved", "rejected", "all"}
+    allowed_status = {"staged", "approved", "ingesting", "needs_merge_review", "ingested", "failed", "rejected", "all"}
     if normalized_status not in allowed_status:
         return _protocol_error(
             400,
             "INVALID_INTAKE_STATUS",
-            f"Invalid status '{status}'. Valid statuses: staged, approved, rejected, all",
+            f"Invalid status '{status}'. Valid: staged, approved, ingesting, needs_merge_review, ingested, failed, rejected, all",
         )
 
     async with _db_pool.acquire() as conn:
@@ -1557,8 +1827,13 @@ async def commons_intake(
 
 @koi_net_router.post("/commons/intake/decide")
 async def commons_intake_decide(request: Request):
-    """Approve/reject a staged commons share entry (localhost admin only)."""
-    auth_err = _enforce_local_admin(request)
+    """Approve/reject a staged commons share entry.
+
+    Records an immutable decision in koi_commons_decisions, then updates
+    the mutable intake_status on koi_shared_documents. On approve, status
+    becomes 'approved' (async ingest worker picks it up later).
+    """
+    auth_err = _enforce_commons_admin(request)
     if auth_err:
         return auth_err
 
@@ -1597,69 +1872,82 @@ async def commons_intake_decide(request: Request):
             "action must be 'approve' or 'reject'",
         )
 
+    # approved = async ingest worker picks it up; rejected = terminal
     next_intake_status = "approved" if action == "approve" else "rejected"
-    next_status = "ingested" if action == "approve" else "received"
 
-    async with _db_pool.acquire() as conn:
-        try:
-            if req.share_id:
-                row = await conn.fetchrow(
+    row = None
+    try:
+        async with _db_pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Update mutable status on shared document
+                if req.share_id:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE koi_shared_documents
+                        SET intake_status = $2,
+                            reviewed_at = NOW(),
+                            reviewed_by = COALESCE($3, reviewed_by),
+                            review_notes = $4
+                        WHERE id = $1
+                          AND recipient_type = 'commons'
+                          AND status != 'retracted'
+                        RETURNING id, event_id, document_rid, sender_node, intake_status, status
+                        """,
+                        req.share_id,
+                        next_intake_status,
+                        req.reviewer,
+                        req.note,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE koi_shared_documents
+                        SET intake_status = $2,
+                            reviewed_at = NOW(),
+                            reviewed_by = COALESCE($3, reviewed_by),
+                            review_notes = $4
+                        WHERE event_id = $1::UUID
+                          AND recipient_type = 'commons'
+                          AND status != 'retracted'
+                        RETURNING id, event_id, document_rid, sender_node, intake_status, status
+                        """,
+                        parsed_event_id,
+                        next_intake_status,
+                        req.reviewer,
+                        req.note,
+                    )
+
+                if not row:
+                    # No-op UPDATE — raise to trigger rollback (nothing to commit)
+                    raise ValueError("INTAKE_NOT_FOUND")
+
+                # 2. INSERT immutable decision record (audit trail)
+                await conn.execute(
                     """
-                    UPDATE koi_shared_documents
-                    SET intake_status = $2,
-                        status = $3,
-                        reviewed_at = NOW(),
-                        reviewed_by = COALESCE($4, reviewed_by),
-                        review_notes = $5
-                    WHERE id = $1
-                      AND recipient_type = 'commons'
-                      AND status != 'retracted'
-                    RETURNING id, event_id, document_rid, sender_node, intake_status, status
+                    INSERT INTO koi_commons_decisions (share_id, event_id, action, reviewer, note)
+                    VALUES ($1, $2, $3, $4, $5)
                     """,
-                    req.share_id,
-                    next_intake_status,
-                    next_status,
+                    row["id"],
+                    row["event_id"],
+                    action,
                     req.reviewer,
                     req.note,
                 )
-            else:
-                row = await conn.fetchrow(
-                    """
-                    UPDATE koi_shared_documents
-                    SET intake_status = $2,
-                        status = $3,
-                        reviewed_at = NOW(),
-                        reviewed_by = COALESCE($4, reviewed_by),
-                        review_notes = $5
-                    WHERE event_id = $1::UUID
-                      AND recipient_type = 'commons'
-                      AND status != 'retracted'
-                    RETURNING id, event_id, document_rid, sender_node, intake_status, status
-                    """,
-                    parsed_event_id,
-                    next_intake_status,
-                    next_status,
-                    req.reviewer,
-                    req.note,
-                )
-        except asyncpg.PostgresError as exc:
-            if isinstance(
-                exc,
-                (asyncpg.exceptions.UndefinedColumnError, asyncpg.exceptions.UndefinedTableError),
-            ):
-                return _protocol_error(
-                    503,
-                    "COMMONS_INTAKE_SCHEMA_MISSING",
-                    "Commons intake fields are missing. Apply migration 047_shared_documents_intake.sql",
-                )
-            raise
-
-    if not row:
-        return _protocol_error(
-            404,
-            "INTAKE_NOT_FOUND",
-            "No matching commons intake entry found",
-        )
+    except ValueError as exc:
+        if str(exc) == "INTAKE_NOT_FOUND":
+            return _protocol_error(404, "INTAKE_NOT_FOUND", "No matching commons intake entry found")
+        raise
+    except asyncpg.PostgresError as exc:
+        if isinstance(
+            exc,
+            (asyncpg.exceptions.UndefinedColumnError, asyncpg.exceptions.UndefinedTableError),
+        ):
+            return _protocol_error(
+                503,
+                "COMMONS_INTAKE_SCHEMA_MISSING",
+                "Commons intake/decision tables are missing. Apply migrations 051 + 053.",
+            )
+        raise
 
     return {
         "status": "ok",
@@ -1670,6 +1958,196 @@ async def commons_intake_decide(request: Request):
         "sender_node": row["sender_node"],
         "intake_status": row["intake_status"],
         "record_status": row["status"],
+    }
+
+
+@koi_net_router.get("/commons/intake/{share_id}/decisions")
+async def commons_intake_decisions(request: Request, share_id: int):
+    """Get the immutable decision audit trail for a commons share."""
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    async with _db_pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT id, share_id, event_id, action, reviewer, note, decided_at
+                FROM koi_commons_decisions
+                WHERE share_id = $1
+                ORDER BY decided_at ASC
+                """,
+                share_id,
+            )
+        except asyncpg.PostgresError as exc:
+            if isinstance(exc, asyncpg.exceptions.UndefinedTableError):
+                return _protocol_error(
+                    503,
+                    "COMMONS_DECISIONS_SCHEMA_MISSING",
+                    "koi_commons_decisions table missing. Apply migration 053.",
+                )
+            raise
+
+    decisions = [
+        {
+            "id": str(r["id"]),
+            "share_id": r["share_id"],
+            "event_id": str(r["event_id"]) if r["event_id"] else None,
+            "action": r["action"],
+            "reviewer": r["reviewer"],
+            "note": r["note"],
+            "decided_at": r["decided_at"].isoformat() if r["decided_at"] else None,
+        }
+        for r in rows
+    ]
+
+    return {"decisions": decisions, "count": len(decisions), "share_id": share_id}
+
+
+@koi_net_router.get("/commons/intake/{share_id}/merge-candidates")
+async def commons_merge_candidates(request: Request, share_id: int):
+    """Get merge candidates for a commons share that needs merge review."""
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, share_id, remote_entity_label, remote_entity_type,
+                       local_entity_uri, local_entity_label, confidence,
+                       resolution, resolved_by, resolved_at, created_at
+                FROM koi_commons_merge_candidates
+                WHERE share_id = $1
+                ORDER BY resolution IS NOT NULL, confidence DESC
+                """,
+                share_id,
+            )
+    except asyncpg.PostgresError as exc:
+        if isinstance(exc, asyncpg.exceptions.UndefinedTableError):
+            return _protocol_error(
+                503,
+                "MERGE_CANDIDATES_SCHEMA_MISSING",
+                "koi_commons_merge_candidates table missing. Apply migration 054.",
+            )
+        raise
+
+    candidates = [
+        {
+            "id": r["id"],
+            "share_id": r["share_id"],
+            "remote_entity_label": r["remote_entity_label"],
+            "remote_entity_type": r["remote_entity_type"],
+            "local_entity_uri": r["local_entity_uri"],
+            "local_entity_label": r["local_entity_label"],
+            "confidence": r["confidence"],
+            "resolution": r["resolution"],
+            "resolved_by": r["resolved_by"],
+            "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+    unresolved = sum(1 for c in candidates if c["resolution"] is None)
+
+    return {
+        "candidates": candidates,
+        "count": len(candidates),
+        "unresolved": unresolved,
+        "share_id": share_id,
+    }
+
+
+@koi_net_router.post("/commons/intake/{share_id}/resolve-merges")
+async def commons_resolve_merges(request: Request, share_id: int):
+    """Resolve ambiguous entity merge candidates for a commons share.
+
+    After the ingest worker sets intake_status = 'needs_merge_review',
+    an admin resolves each candidate (merge, keep_separate, cross_ref).
+    When all candidates are resolved, the share transitions to 'ingested'.
+    """
+    auth_err = _enforce_commons_admin(request)
+    if auth_err:
+        return auth_err
+
+    if not _db_pool:
+        return _protocol_error(503, "NOT_INITIALIZED", "KOI-net not initialized")
+
+    try:
+        raw = await request.json()
+    except Exception:
+        return _protocol_error(400, "INVALID_JSON", "Invalid JSON body")
+
+    resolutions = raw.get("resolutions", [])
+    if not resolutions:
+        return _protocol_error(400, "NO_RESOLUTIONS", "Provide a list of resolutions")
+
+    # Validate all resolutions before entering transaction
+    valid_resolutions = ("merge", "keep_separate", "cross_ref")
+    for res in resolutions:
+        resolution = res.get("resolution")
+        if resolution not in valid_resolutions:
+            return _protocol_error(
+                400, "INVALID_RESOLUTION",
+                f"resolution must be merge, keep_separate, or cross_ref (got: {resolution})",
+            )
+
+    resolved_count = 0
+    unresolved = 0
+    async with _db_pool.acquire() as conn:
+        async with conn.transaction():
+            for res in resolutions:
+                candidate_id = res.get("candidate_id")
+                resolution = res.get("resolution")
+                resolved_by = res.get("resolved_by")
+
+                updated = await conn.execute(
+                    """
+                    UPDATE koi_commons_merge_candidates
+                    SET resolution = $2, resolved_by = $3, resolved_at = NOW()
+                    WHERE id = $1 AND share_id = $4 AND resolution IS NULL
+                    """,
+                    candidate_id, resolution, resolved_by, share_id,
+                )
+                if "UPDATE 1" in updated:
+                    resolved_count += 1
+
+            # Check if all candidates are now resolved
+            unresolved = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM koi_commons_merge_candidates
+                WHERE share_id = $1 AND resolution IS NULL
+                """,
+                share_id,
+            )
+
+            share_finalized = False
+            if unresolved == 0:
+                # All resolved — transition share to ingested
+                transition_result = await conn.execute(
+                    """
+                    UPDATE koi_shared_documents
+                    SET intake_status = 'ingested'
+                    WHERE id = $1 AND intake_status = 'needs_merge_review'
+                    """,
+                    share_id,
+                )
+                share_finalized = "UPDATE 1" in transition_result
+
+    return {
+        "status": "ok",
+        "share_id": share_id,
+        "resolved_count": resolved_count,
+        "remaining_unresolved": unresolved,
+        "share_finalized": share_finalized,
     }
 
 
@@ -1706,3 +2184,139 @@ async def _resolve_recipient(conn: asyncpg.Connection, recipient: str) -> Option
             return recipient
 
     return None
+
+
+# =====================================================================
+# VAULT SYNC ENDPOINTS
+# =====================================================================
+
+
+@koi_net_router.post("/vault-sync/configure")
+async def vault_sync_configure(request: Request):
+    """Configure vault sync for a peer."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)"},
+        )
+
+    body = await request.json()
+    peer = body.get("peer")
+    shared_folder = body.get("shared_folder", "Shared")
+    enabled = body.get("enabled", True)
+
+    if not peer:
+        return JSONResponse(status_code=400, content={"error": "peer is required"})
+
+    result = await _vault_sync.configure(peer, shared_folder, enabled)
+    if "error" in result:
+        return JSONResponse(status_code=404, content=result)
+    return JSONResponse(content=result)
+
+
+@koi_net_router.delete("/vault-sync/peers/{peer_name}")
+async def vault_sync_remove_peer(request: Request, peer_name: str):
+    """Disable/remove a vault sync peer."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)"},
+        )
+
+    result = await _vault_sync.unconfigure(peer_name)
+    if "error" in result:
+        return JSONResponse(status_code=404, content=result)
+    return JSONResponse(content=result)
+
+
+@koi_net_router.get("/vault-sync/status")
+async def vault_sync_status(request: Request):
+    """Get vault sync dashboard info."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(content={"enabled": False, "reason": "VAULT_SYNC_ENABLED not set"})
+
+    status = await _vault_sync.get_status()
+    return JSONResponse(content=status)
+
+
+@koi_net_router.post("/vault-sync/trigger")
+async def vault_sync_trigger(request: Request):
+    """Force an immediate sync cycle (for testing). Scans all configured peers."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled"},
+        )
+
+    result = await _vault_sync.trigger_sync()
+    return JSONResponse(content=result)
+
+
+def _bool_env_raw(name: str, default: bool = False) -> bool:
+    """Check env var as bool (standalone, no side effects)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@koi_net_router.post("/vault-sync/reconcile")
+async def vault_sync_reconcile(request: Request):
+    """Run reconciliation: detect or repair drift between DB and filesystem."""
+    err = _enforce_local_admin(request)
+    if err:
+        return err
+
+    if not _vault_sync:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Vault sync is not enabled"},
+        )
+
+    body = await request.json()
+    mode = body.get("mode", "detect")
+
+    if mode == "repair":
+        if not _bool_env_raw("VAULT_SYNC_REPAIR_ENABLED", False):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "repair mode disabled"},
+            )
+
+    if mode not in ("detect", "repair"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"invalid mode: {mode}. Use 'detect' or 'repair'."},
+        )
+
+    try:
+        result = await _vault_sync.reconcile(
+            mode=mode,
+            confirm=body.get("confirm", False),
+            paths=body.get("paths"),
+            max_actions=body.get("max_actions", 50),
+            peer_rid=body.get("peer"),
+        )
+    except VaultUnavailableError as e:
+        return JSONResponse(
+            status_code=503,
+            content={"error": str(e)},
+        )
+
+    return JSONResponse(content=result)

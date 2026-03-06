@@ -1,5 +1,10 @@
 # KOI-net Federation Next Session Plan (2026-02-25)
 
+## Canonical Roadmap Reference
+
+For phase-level vault sync planning, use:
+- `docs/planning/KOI_NET_VAULT_SYNC_ROADMAP.md`
+
 ## Scope
 
 Continue federation work from completed slices:

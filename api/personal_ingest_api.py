@@ -78,6 +78,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Load capabilities registry
+try:
+    from api.capabilities import Capabilities
+    _caps = Capabilities.from_env()
+    logging.getLogger(__name__).info(f"Capabilities loaded (profile={_caps.deployment_profile})")
+except ImportError:
+    _caps = None
+    logging.getLogger(__name__).info("Capabilities registry not available, using legacy startup")
+
 # Mount KOI-net federation router (if enabled)
 if os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes'):
     try:
@@ -90,8 +99,7 @@ if os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes'):
 # Configuration
 DB_URL = os.getenv('POSTGRES_URL', 'postgresql://darrenzal:@localhost:5432/personal_koi')
 KOI_MODE = os.getenv('KOI_MODE', 'personal')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-ada-002')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # kept for /chat LLM endpoint
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes')
 TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true', '1', 'yes')
@@ -103,8 +111,10 @@ TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true'
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
-openai_available: bool = False
-openai_client: Optional[Any] = None
+openai_client: Optional[Any] = None  # lazy init for /chat LLM calls
+
+from api.embedding_provider import EmbeddingProvider, create_embedding_provider
+embedding_provider: Optional[EmbeddingProvider] = None
 terminusdb_adapter: Optional[Any] = None  # TerminusDBAdapter instance (lazy init)
 
 
@@ -198,6 +208,7 @@ class RegisterEntityResponse(BaseModel):
     is_new: bool
     vault_rid: str
     merged_with: Optional[str] = None
+    collision_warning: Optional[str] = None
 
 
 class VaultEntityMapping(BaseModel):
@@ -269,33 +280,15 @@ class ShortestPathResponse(BaseModel):
 
 
 # =============================================================================
-# OpenAI Embedding Service (same as production entity_resolver.py)
+# Embedding Service (provider-agnostic)
 # =============================================================================
 
 async def generate_embedding(text: str) -> Optional[List[float]]:
-    """Generate embedding using OpenAI API (same as production)"""
-    if not openai_available or not ENABLE_SEMANTIC_MATCHING or not openai_client:
+    """Generate embedding using the configured provider."""
+    if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
         return None
-
-    try:
-        # Normalize text before embedding (same as entity_resolver.py)
-        normalized = normalize_entity_text(text)
-
-        # Use asyncio.to_thread for sync OpenAI call
-        response = await asyncio.to_thread(
-            openai_client.embeddings.create,
-            model=EMBEDDING_MODEL,
-            input=normalized
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.warning(f"Error generating OpenAI embedding: {e}")
-        return None
-
-
-def check_openai_availability() -> bool:
-    """Check if OpenAI API key is configured"""
-    return bool(OPENAI_API_KEY)
+    normalized = normalize_entity_text(text)
+    return await embedding_provider.embed_or_none(normalized)
 
 
 # =============================================================================
@@ -464,6 +457,13 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     # Get schema-driven config for multi-word token overlap
     schema = get_schema_for_type(entity_type)
     if not schema.require_token_overlap:
+        # Even with token overlap bypassed, guard against first-name inflation for
+        # 2-token full names (First Last): require the last tokens (family names)
+        # to have a minimum JW similarity so "Benjamin Life" ≠ "Benjamin Neal".
+        if len(tokens1) == 2 and len(tokens2) == 2:
+            last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
+            if last_jw < 0.75:
+                return False
         return True  # Schema says bypass multi-word token overlap check
 
     overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
@@ -878,8 +878,8 @@ async def resolve_entity(
             confidence=best_score
         ), False
 
-    # Tier 2b: Semantic match (OpenAI embeddings + pgvector)
-    if openai_available and ENABLE_SEMANTIC_MATCHING:
+    # Tier 2b: Semantic match (embeddings + pgvector)
+    if embedding_provider and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
             semantic_threshold = schema.semantic_threshold
@@ -948,7 +948,8 @@ async def store_new_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,
     canonical: CanonicalEntity,
-    document_rid: str
+    document_rid: str,
+    source: str = 'personal-vault'
 ) -> None:
     """Store a new entity in the registry with embedding and phonetic code"""
     normalized = normalize_entity_text(entity.name)
@@ -962,7 +963,7 @@ async def store_new_entity(
 
     # Generate embedding for new entity (enables future Tier 2 matching)
     embedding = None
-    if openai_available and ENABLE_SEMANTIC_MATCHING:
+    if embedding_provider and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
             logger.info(f"Generated embedding for new entity: {entity.name}")
@@ -989,7 +990,7 @@ async def store_new_entity(
             entity.name,
             entity.type,
             normalized,
-            'personal-vault',
+            source,
             document_rid,
             metadata,
             str(embedding),
@@ -1007,7 +1008,7 @@ async def store_new_entity(
             entity.name,
             entity.type,
             normalized,
-            'personal-vault',
+            source,
             document_rid,
             metadata,
             phonetic_code
@@ -1024,7 +1025,7 @@ async def store_new_entity(
         "aliases": [],
         "created_by": "darren-personal",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source": "personal-vault",
+        "source": source,
         "first_seen_rid": document_rid,
     }, rid=canonical.uri, source_rid=document_rid)
 
@@ -1153,8 +1154,8 @@ async def enqueue_outbox(
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database connection pool and OpenAI client"""
-    global db_pool, openai_available, openai_client
+    """Initialize database connection pool and embedding provider"""
+    global db_pool, openai_client, embedding_provider
     try:
         db_pool = await asyncpg.create_pool(
             DB_URL,
@@ -1164,32 +1165,92 @@ async def startup():
         )
         logger.info(f"Connected to database (mode: {KOI_MODE})")
 
-        # Ensure schema exists
+        # 1. Init embedding provider (reads env vars only, no API call)
+        embedding_provider = create_embedding_provider()
+
+        # 2. Dimension guard: check provider dim matches existing tables
+        if embedding_provider:
+            async with db_pool.acquire() as conn:
+                for table in ['entity_registry', 'session_chunks']:
+                    regclass = await conn.fetchval(
+                        "SELECT to_regclass($1)", table
+                    )
+                    if regclass is None:
+                        continue  # table doesn't exist yet (fresh install)
+                    existing_dim = await conn.fetchval("""
+                        SELECT atttypmod FROM pg_attribute
+                        WHERE attrelid = to_regclass($1)
+                        AND attname = 'embedding' AND atttypmod > 0
+                    """, table)
+                    if existing_dim is not None and existing_dim > 0 and existing_dim != embedding_provider.dimension:
+                        logger.fatal(
+                            f"DIMENSION MISMATCH: provider outputs {embedding_provider.dimension}-dim "
+                            f"but {table}.embedding is vector({existing_dim}). "
+                            f"Cannot start. Re-embed data or change EMBEDDING_PROVIDER."
+                        )
+                        raise SystemExit(1)
+            logger.info(f"Tier 2 semantic matching: ENABLED")
+        else:
+            logger.info("Tier 2 semantic matching: DISABLED (no embedding provider)")
+
+        # 3. Ensure schema (uses provider dimension for new tables)
+        dim = embedding_provider.dimension if embedding_provider else 1536
         async with db_pool.acquire() as conn:
-            await ensure_schema(conn)
+            await ensure_schema(conn, embedding_dim=dim)
 
         # Verify graph traversal indexes
         async with db_pool.acquire() as conn:
             from api.graph_queries import verify_indexes
             await verify_indexes(conn)
 
-        # Initialize OpenAI client if API key is available
-        openai_available = check_openai_availability()
-        if openai_available:
+        # Mount capability-gated routers (after pool init)
+        if _caps is not None:
+            # NOTE: graph_router is NOT mounted here because /graph/neighborhood
+            # and /graph/shortest-path are already defined inline on app (lines 3755, 3805).
+            # Mounting the router would create duplicate routes. The inline endpoints
+            # will be removed in a future phase when the router is fully validated.
+            # The router adds temporal endpoints (/graph/history, /graph/timeline) that
+            # don't overlap — mount only those when assertion_history is enabled.
+            if _caps.graph_queries and _caps.assertion_history:
+                try:
+                    from api.routers.graph_router import create_temporal_router
+                    app.include_router(create_temporal_router(db_pool, _caps))
+                    logger.info("Graph temporal router mounted (/graph/history, /graph/timeline)")
+                except Exception as e:
+                    logger.warning(f"Graph temporal router not mounted: {e}")
+
+            if _caps.web_sensor:
+                try:
+                    from api.routers.web_router import create_router as create_web_router
+                    app.include_router(create_web_router(db_pool, _caps))
+                    logger.info("Web router mounted")
+                except Exception as e:
+                    logger.warning(f"Web router not mounted: {e}")
+
+            # Commitment pooling router (always on, no capability gate)
             try:
-                from openai import OpenAI
-                openai_client = OpenAI(api_key=OPENAI_API_KEY)
-                logger.info(f"OpenAI client initialized (model: {EMBEDDING_MODEL})")
-                logger.info("Tier 2 semantic matching: ENABLED")
-            except ImportError:
-                logger.warning("OpenAI package not installed. Run: pip install openai")
-                openai_available = False
+                from api.routers.commitment_router import create_router as create_commitment_router, create_pool_router
+                app.include_router(create_commitment_router(db_pool))
+                app.include_router(create_pool_router(db_pool))
+                logger.info("Commitment routers mounted (/commitments/, /pools/)")
             except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI client: {e}")
-                openai_available = False
-        else:
-            logger.warning("OPENAI_API_KEY not set")
-            logger.info("Tier 2 semantic matching: DISABLED (falling back to fuzzy matching)")
+                logger.warning(f"Commitment routers not mounted: {e}")
+
+            if _caps.github_sensor:
+                try:
+                    from api.routers.github_router import create_router as create_github_router
+                    app.include_router(create_github_router(db_pool, _caps))
+                    logger.info("GitHub router mounted")
+                except Exception as e:
+                    logger.warning(f"GitHub router not mounted: {e}")
+
+            if _caps.coordinator_endpoints:
+                try:
+                    from api.routers.network_router import create_router as create_network_router
+                    app.include_router(create_network_router(db_pool, _caps))
+                    logger.info("Network router mounted")
+                except Exception as e:
+                    logger.warning(f"Network router not mounted: {e}")
 
         # Initialize KOI-net federation (if enabled)
         if KOI_NET_ENABLED:
@@ -1234,9 +1295,9 @@ async def shutdown():
         await db_pool.close()
 
 
-async def ensure_schema(conn: asyncpg.Connection):
+async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
     """Ensure the entity_registry table exists"""
-    await conn.execute("""
+    await conn.execute(f"""
         CREATE TABLE IF NOT EXISTS entity_registry (
             id SERIAL PRIMARY KEY,
             fuseki_uri TEXT UNIQUE NOT NULL,
@@ -1252,7 +1313,7 @@ async def ensure_schema(conn: asyncpg.Connection):
             source TEXT DEFAULT 'personal-vault',
             first_seen_rid TEXT,
             metadata JSONB,
-            embedding vector(1536),
+            embedding vector({embedding_dim}),
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         )
@@ -1267,6 +1328,12 @@ async def ensure_schema(conn: asyncpg.Connection):
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_entity_registry_type
         ON entity_registry(entity_type)
+    """)
+
+    # Create HNSW index for vector similarity search (matches migration 020)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_entity_vector
+        ON entity_registry USING hnsw (embedding vector_cosine_ops)
     """)
 
     # Create document_entity_links table
@@ -1354,7 +1421,10 @@ async def ensure_schema(conn: asyncpg.Connection):
             ('involves_organization', 'Project involves organization', ARRAY['Project'], ARRAY['Organization']),
             ('has_project', 'Organization has project', ARRAY['Organization'], ARRAY['Project']),
             ('attended', 'Person attended meeting', ARRAY['Person'], ARRAY['Meeting']),
-            ('located_in', 'Entity is located in place', NULL, ARRAY['Location'])
+            ('located_in', 'Entity is located in place', NULL, ARRAY['Location']),
+            ('assigned_to', 'Task assigned to person', ARRAY['Task'], ARRAY['Person']),
+            ('belongs_to_project', 'Task belongs to project', ARRAY['Task'], ARRAY['Project']),
+            ('sourced_from', 'Task sourced from document', ARRAY['Task'], ARRAY['Meeting'])
         ON CONFLICT (predicate) DO NOTHING
     """)
 
@@ -1510,16 +1580,17 @@ async def health_check():
             "status": "healthy",
             "mode": KOI_MODE,
             "database": "connected",
-            "openai_available": openai_available,
-            "embedding_model": EMBEDDING_MODEL if openai_available else None,
-            "semantic_matching": openai_available and ENABLE_SEMANTIC_MATCHING,
+            "embedding_available": embedding_provider is not None,
+            "embedding_model": embedding_provider.model_name if embedding_provider else None,
+            "embedding_dimension": embedding_provider.dimension if embedding_provider else None,
+            "semantic_matching": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,
             "entity_types": entity_types,
             "schema_version": get_schema_version(),
             "resolution_tiers": {
                 "tier1_exact": True,
                 "tier1x_fuzzy": True,
                 "tier15_contextual": True,
-                "tier2_semantic": openai_available and ENABLE_SEMANTIC_MATCHING,
+                "tier2_semantic": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,
                 "tier3_create": True
             }
         }
@@ -1528,6 +1599,32 @@ async def health_check():
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
         )
+
+
+@app.get("/graph-version")
+async def graph_version_endpoint():
+    """Return a deterministic hash of graph state for eval snapshot pinning.
+
+    Hash = SHA-256(entity_count:rel_count:max_entity_updated:max_rel_created)[:16]
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                (SELECT COUNT(*) FROM entity_registry) AS entity_count,
+                (SELECT COUNT(*) FROM entity_relationships) AS rel_count,
+                (SELECT COALESCE(MAX(updated_at), '1970-01-01'::timestamptz) FROM entity_registry) AS max_entity_updated,
+                (SELECT COALESCE(GREATEST(MAX(created_at), MAX(updated_at)), '1970-01-01'::timestamptz) FROM entity_relationships) AS max_rel_changed
+        """)
+        import hashlib as _hl
+        state = f"{row['entity_count']}:{row['rel_count']}:{row['max_entity_updated']}:{row['max_rel_changed']}"
+        version_hash = _hl.sha256(state.encode()).hexdigest()[:16]
+        return {
+            "graph_version": version_hash,
+            "entity_count": row['entity_count'],
+            "relationship_count": row['rel_count'],
+        }
 
 
 @app.get("/entity-types")
@@ -1606,6 +1703,7 @@ async def ingest_extraction(request: IngestRequest):
     new_count = 0
     resolved_count = 0
     failed_entities: List[dict] = []
+    entity_uri_map: Dict[str, str] = {}  # normalized_name → canonical URI
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -1630,10 +1728,11 @@ async def ingest_extraction(request: IngestRequest):
                     canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
                     logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
                     canonical_entities.append(canonical)
+                    entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
 
                     if is_new:
                         new_count += 1
-                        await store_new_entity(conn, entity, canonical, request.document_rid)
+                        await store_new_entity(conn, entity, canonical, request.document_rid, source=request.source)
                         logger.info(f"Stored new entity: {canonical.uri}")
                     else:
                         resolved_count += 1
@@ -1655,6 +1754,66 @@ async def ingest_extraction(request: IngestRequest):
                     failed_entities.append({"name": entity.name, "error": str(e)})
                     # Continue with other entities
 
+            # --- Process relationships (still inside conn.transaction()) ---
+            rel_count = 0
+            if request.relationships:
+                for rel in request.relationships:
+                    subj_key = normalize_entity_text(rel.subject)
+                    obj_key = normalize_entity_text(rel.object)
+                    subj_uri = entity_uri_map.get(subj_key)
+                    obj_uri = entity_uri_map.get(obj_key)
+
+                    # Fallback: look up pre-existing entities by exact normalized_text
+                    if not subj_uri:
+                        rows = await conn.fetch(
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
+                            subj_key)
+                        if len(rows) == 1:
+                            subj_uri = rows[0]["fuseki_uri"]
+                        elif len(rows) > 1:
+                            logger.warning(
+                                f"Ambiguous subject '{rel.subject}' in relationship "
+                                f"'{rel.subject} → {rel.predicate} → {rel.object}': "
+                                f"{len(rows)}+ matches, skipping")
+                    if not obj_uri:
+                        rows = await conn.fetch(
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
+                            obj_key)
+                        if len(rows) == 1:
+                            obj_uri = rows[0]["fuseki_uri"]
+                        elif len(rows) > 1:
+                            logger.warning(
+                                f"Ambiguous object '{rel.object}' in relationship "
+                                f"'{rel.subject} → {rel.predicate} → {rel.object}': "
+                                f"{len(rows)}+ matches, skipping")
+
+                    if not subj_uri or not obj_uri:
+                        logger.warning(
+                            f"Skipping relationship {rel.subject} → {rel.predicate} → {rel.object}: "
+                            f"subject={'found' if subj_uri else 'NOT found'}, "
+                            f"object={'found' if obj_uri else 'NOT found'}"
+                        )
+                        continue
+
+                    if subj_uri == obj_uri:
+                        logger.warning(
+                            f"Skipping self-referential relationship: {rel.subject} → {rel.predicate} → {rel.object}")
+                        continue
+
+                    try:
+                        await conn.execute("""
+                            INSERT INTO entity_relationships
+                                (subject_uri, predicate, object_uri, source, source_rid)
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+                        """, subj_uri, rel.predicate, obj_uri,
+                            request.source, request.document_rid)
+                        rel_count += 1
+                    except asyncpg.exceptions.ForeignKeyViolationError as e:
+                        logger.warning(f"Skipping relationship (FK violation): {e}")
+                    except asyncpg.exceptions.CheckViolationError as e:
+                        logger.warning(f"Skipping relationship (check violation): {e}")
+
     # Generate receipt RID
     receipt_rid = f"orn:personal-koi.receipt:{uuid.uuid4().hex[:16]}"
 
@@ -1663,7 +1822,7 @@ async def ingest_extraction(request: IngestRequest):
         entities_processed=len(request.entities),
         new_entities=new_count,
         resolved_entities=resolved_count,
-        relationships_processed=len(request.relationships),
+        relationships_processed=rel_count,
         failed_entities=len(failed_entities),
         errors=failed_entities if failed_entities else None
     )
@@ -1712,6 +1871,86 @@ async def list_entities(
             "limit": limit,
             "offset": offset
         }
+
+
+@app.api_route("/entity-search", methods=["GET", "POST"])
+async def entity_search(request: Request, query: str = None, limit: int = 20, entity_type: Optional[str] = None):
+    """Search entities by name (fuzzy text match + optional semantic).
+    GET: query params (?query=...&limit=20&entity_type=Project)
+    POST: JSON body ({"query": "...", "limit": 20, "entity_type": "Project"})
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # For POST, merge body params over query params
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            query = body.get("query", query)
+            limit = body.get("limit", limit)
+            entity_type = body.get("entity_type", entity_type)
+        except Exception:
+            pass
+
+    if not query:
+        return JSONResponse({"results": [], "count": 0})
+
+    normalized_query = normalize_entity_text(query)
+    async with db_pool.acquire() as conn:
+        # Text search: ILIKE on normalized_text
+        if entity_type:
+            rows = await conn.fetch("""
+                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases,
+                       CASE WHEN normalized_text = $1 THEN 1.0
+                            WHEN normalized_text ILIKE $2 THEN 0.9
+                            ELSE 0.7 END AS similarity
+                FROM entity_registry
+                WHERE normalized_text ILIKE $2 AND entity_type = $3
+                ORDER BY
+                    CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
+                    created_at DESC
+                LIMIT $4
+            """, normalized_query, f"%{normalized_query}%", entity_type, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases,
+                       CASE WHEN normalized_text = $1 THEN 1.0
+                            WHEN normalized_text ILIKE $2 THEN 0.9
+                            ELSE 0.7 END AS similarity
+                FROM entity_registry
+                WHERE normalized_text ILIKE $2
+                ORDER BY
+                    CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
+                    created_at DESC
+                LIMIT $3
+            """, normalized_query, f"%{normalized_query}%", limit)
+
+        # Get relationship counts for matched entities
+        uris = [r["fuseki_uri"] for r in rows]
+        rel_counts: Dict[str, int] = {}
+        if uris:
+            rel_rows = await conn.fetch("""
+                SELECT uri, COUNT(*) as cnt FROM (
+                    SELECT subject_uri AS uri FROM entity_relationships WHERE subject_uri = ANY($1)
+                    UNION ALL
+                    SELECT object_uri AS uri FROM entity_relationships WHERE object_uri = ANY($1)
+                ) sub GROUP BY uri
+            """, uris)
+            rel_counts = {r["uri"]: r["cnt"] for r in rel_rows}
+
+        results = []
+        for row in rows:
+            uri = row["fuseki_uri"]
+            results.append({
+                "fuseki_uri": uri,
+                "name": row["entity_text"],
+                "entity_type": row["entity_type"],
+                "similarity": float(row["similarity"]),
+                "aliases": list(row["aliases"] or []),
+                "relationship_count": rel_counts.get(uri, 0),
+            })
+
+    return {"results": results, "count": len(results)}
 
 
 @app.get("/entity/resolve")
@@ -2093,6 +2332,27 @@ async def register_vault_entity(request: RegisterEntityRequest):
             # Resolve against existing entities
             canonical, is_new = await resolve_entity(conn, entity)
 
+            # Check for URI collision with different vault file
+            collision_warning = None
+            if not is_new:
+                existing_mapping = await conn.fetchrow("""
+                    SELECT vault_path, name FROM entity_rid_mappings
+                    WHERE canonical_uri = $1 AND vault_path != $2
+                """, canonical.uri, request.vault_path)
+
+                suppress_types = {'Meeting', 'Task'}
+                suppress_paths = {'Tests/'}
+                is_suppressed = (
+                    request.entity_type in suppress_types
+                    or any(request.vault_path.startswith(p) for p in suppress_paths)
+                )
+                if existing_mapping and not is_suppressed:
+                    collision_warning = (
+                        f"URI collision: '{request.name}' ({request.vault_path}) "
+                        f"shares URI with '{existing_mapping['name']}' ({existing_mapping['vault_path']})"
+                    )
+                    logger.warning(collision_warning)
+
             if is_new:
                 # Store new entity
                 await store_new_entity(conn, entity, canonical, request.vault_rid)
@@ -2196,7 +2456,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 canonical_uri=canonical.uri,
                 is_new=is_new,
                 vault_rid=request.vault_rid,
-                merged_with=canonical.merged_with
+                merged_with=canonical.merged_with,
+                collision_warning=collision_warning
             )
 
 
@@ -2993,7 +3254,7 @@ async def search_sessions(request: SearchSessionsRequest):
             )
         """)
 
-        if has_embeddings and openai_available and ENABLE_SEMANTIC_MATCHING:
+        if has_embeddings and embedding_provider and ENABLE_SEMANTIC_MATCHING:
             # Semantic search with embeddings
             query_embedding = await generate_embedding(request.query)
 
@@ -3081,7 +3342,7 @@ async def search_sessions(request: SearchSessionsRequest):
         "results": results,
         "count": len(results),
         "query": request.query,
-        "search_type": "semantic" if has_embeddings and openai_available else "text"
+        "search_type": "semantic" if has_embeddings and embedding_provider else "text"
     }
 
 
@@ -3797,6 +4058,642 @@ async def graph_shortest_path(
         result = await get_shortest_path(conn, source, target, max_depth, direction)
 
     return result
+
+
+# =============================================================================
+# /chat Endpoint — RAG-powered conversational interface
+# =============================================================================
+
+CHAT_LLM_MODEL = os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini')
+
+
+# ── B2 GraphRAG: graph-guided retrieval ──────────────────────────────
+
+async def _compute_graph_version_hash(conn) -> str:
+    """Compute deterministic graph state hash for cache invalidation."""
+    import hashlib as _hashlib
+    row = await conn.fetchrow("""
+        SELECT
+            (SELECT COUNT(*) FROM entity_registry) AS ec,
+            (SELECT COUNT(*) FROM entity_relationships) AS rc,
+            (SELECT MAX(updated_at) FROM entity_registry) AS meu,
+            (SELECT GREATEST(MAX(created_at), MAX(updated_at)) FROM entity_relationships) AS mrc
+    """)
+    state = f"{row['ec']}:{row['rc']}:{row['meu']}:{row['mrc']}"
+    return _hashlib.sha256(state.encode()).hexdigest()[:16]
+
+
+async def _ensure_graph_metrics(conn) -> bool:
+    """Ensure entity_graph_metrics is populated and fresh. Returns True if available."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT graph_version, COUNT(*) as cnt FROM entity_graph_metrics GROUP BY graph_version LIMIT 1"
+        )
+        if not row or row['cnt'] == 0:
+            return False
+        current_version = await _compute_graph_version_hash(conn)
+        return row['graph_version'] == current_version
+    except Exception:
+        return False
+
+
+async def _graph_guided_retrieval(
+    query: str,
+    query_embedding: list,
+    conn,
+    top_k: int = 10,
+) -> tuple:
+    """B2 GraphRAG: community-aware, centrality-weighted retrieval.
+
+    Returns (sources, relationships_ctx, doc_chunks, web_sources) matching
+    the B1 interface so the LLM prompt builder works unchanged.
+
+    Strategy:
+    1. Semantic search for seed entities (same as B1)
+    2. Look up community_l1 + betweenness for each seed from entity_graph_metrics
+    3. Expand: entities in same L1 community, sorted by betweenness DESC
+    4. Follow edges from seeds via entity_relationships (predicate-aware)
+    5. Rank: semantic_score * 0.4 + centrality * 0.3 + community_overlap * 0.3
+    """
+    sources = []
+    relationships_ctx = []
+    doc_chunks = []
+    web_sources = []
+
+    if not query_embedding:
+        return sources, relationships_ctx, doc_chunks, web_sources
+
+    embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+
+    # ── Step 1: Seed entities via semantic search (like B1, with fallback) ──
+    try:
+        seed_rows = await conn.fetch("""
+            SELECT id, fuseki_uri, entity_text, entity_type, metadata,
+                   1 - (embedding <=> $1::vector) AS similarity
+            FROM entity_registry
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+        """, embedding_str, top_k)
+    except (asyncpg.exceptions.UndefinedColumnError,
+            asyncpg.exceptions.UndefinedFunctionError,
+            asyncpg.exceptions.DataError) as e:
+        logger.warning("entity_registry.embedding vector search failed, falling back to text search: %s", e)
+        # Fallback: text search when vector column/extension is unavailable
+        words = [w for w in query.lower().split() if len(w) >= 3]
+        if words:
+            conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+            match_score = " + ".join(
+                f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                for i in range(len(words))
+            )
+            params = [f"%{w}%" for w in words]
+            params.append(top_k)
+            seed_rows = await conn.fetch(f"""
+                SELECT id, fuseki_uri, entity_text, entity_type, metadata,
+                       ({match_score})::float / {len(words)} AS similarity
+                FROM entity_registry
+                WHERE {conditions}
+                ORDER BY ({match_score}) DESC, created_at DESC
+                LIMIT ${len(words)+1}
+            """, *params)
+        else:
+            seed_rows = []
+
+    if not seed_rows:
+        return sources, relationships_ctx, doc_chunks, web_sources
+
+    seed_ids = [r['id'] for r in seed_rows]
+    seed_uris = [r['fuseki_uri'] for r in seed_rows]
+    seed_scores = {r['id']: float(r['similarity']) for r in seed_rows}
+
+    # ── Step 2: Get community + centrality for seeds ──
+    metrics_available = await _ensure_graph_metrics(conn)
+    seed_communities = {}
+    seed_betweenness = {}
+
+    if metrics_available:
+        metric_rows = await conn.fetch("""
+            SELECT entity_id, community_l1, betweenness
+            FROM entity_graph_metrics
+            WHERE entity_id = ANY($1)
+        """, seed_ids)
+        for mr in metric_rows:
+            seed_communities[mr['entity_id']] = mr['community_l1']
+            seed_betweenness[mr['entity_id']] = mr['betweenness']
+
+    # Determine dominant communities from seeds
+    comm_counts = {}
+    for eid in seed_ids:
+        c = seed_communities.get(eid, -1)
+        if c >= 0:
+            comm_counts[c] = comm_counts.get(c, 0) + 1
+    dominant_communities = sorted(comm_counts, key=comm_counts.get, reverse=True)[:3]
+
+    # ── Step 3: Expand via community — get high-centrality entities in same communities ──
+    expanded_entities = {}  # id -> {uri, label, type, score, description}
+
+    if metrics_available and dominant_communities:
+        community_rows = await conn.fetch("""
+            SELECT
+                er.id, er.fuseki_uri, er.entity_text, er.entity_type, er.metadata,
+                egm.community_l1, egm.betweenness
+            FROM entity_graph_metrics egm
+            JOIN entity_registry er ON er.id = egm.entity_id
+            WHERE egm.community_l1 = ANY($1)
+            ORDER BY egm.betweenness DESC
+            LIMIT $2
+        """, dominant_communities, top_k * 2)
+
+        for cr in community_rows:
+            eid = cr['id']
+            if eid not in expanded_entities:
+                expanded_entities[eid] = {
+                    'id': eid,
+                    'uri': cr['fuseki_uri'],
+                    'label': cr['entity_text'],
+                    'type': cr['entity_type'],
+                    'metadata': cr['metadata'],
+                    'betweenness': float(cr['betweenness'] or 0),
+                    'community': cr['community_l1'],
+                    'semantic_score': seed_scores.get(eid, 0.0),
+                }
+
+    # Add seeds that might not be in expanded set
+    for row in seed_rows:
+        eid = row['id']
+        if eid not in expanded_entities:
+            meta = row['metadata'] or {}
+            if isinstance(meta, str):
+                meta = json_module_global.loads(meta)
+            expanded_entities[eid] = {
+                'id': eid,
+                'uri': row['fuseki_uri'],
+                'label': row['entity_text'],
+                'type': row['entity_type'],
+                'metadata': meta,
+                'betweenness': seed_betweenness.get(eid, 0.0),
+                'community': seed_communities.get(eid, -1),
+                'semantic_score': float(row['similarity']),
+            }
+
+    # ── Step 4: Composite ranking ──
+    # score = semantic * 0.4 + centrality * 0.3 + community_overlap * 0.3
+    max_bc = max((e['betweenness'] for e in expanded_entities.values()), default=1.0) or 1.0
+
+    for eid, ent in expanded_entities.items():
+        sem = ent['semantic_score']
+        bc_norm = ent['betweenness'] / max_bc
+        comm_overlap = 1.0 if ent['community'] in dominant_communities else 0.0
+        ent['composite_score'] = sem * 0.4 + bc_norm * 0.3 + comm_overlap * 0.3
+
+    # Sort by composite score, take top_k
+    ranked = sorted(expanded_entities.values(), key=lambda x: x['composite_score'], reverse=True)[:top_k]
+
+    # Build sources list
+    entity_uris = []
+    for ent in ranked:
+        meta = ent.get('metadata', {})
+        if isinstance(meta, str):
+            meta = json_module_global.loads(meta)
+        description = meta.get('description', '') if isinstance(meta, dict) else ''
+        sources.append({
+            "uri": ent['uri'],
+            "label": ent['label'],
+            "entity_type": ent['type'],
+            "score": round(ent['composite_score'], 4),
+            "description": description,
+            "retrieval_mode": "graphrag",
+            "community": ent.get('community', -1),
+            "betweenness": round(ent.get('betweenness', 0), 6),
+        })
+        entity_uris.append(ent['uri'])
+
+    # ── Step 5: Relationships — predicate-aware, community-guided ──
+    if entity_uris:
+        rel_rows = await conn.fetch("""
+            WITH RECURSIVE traverse AS (
+                SELECT r.subject_uri, r.object_uri, r.predicate, 1 AS depth
+                FROM entity_relationships r
+                WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
+                UNION
+                SELECT r2.subject_uri, r2.object_uri, r2.predicate, t.depth + 1
+                FROM traverse t
+                JOIN entity_relationships r2
+                    ON r2.subject_uri IN (t.subject_uri, t.object_uri)
+                    OR r2.object_uri IN (t.subject_uri, t.object_uri)
+                WHERE t.depth < 2
+            )
+            SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
+                t.subject_uri,
+                s.entity_text AS subject_label,
+                t.predicate,
+                t.object_uri,
+                o.entity_text AS object_label,
+                t.depth
+            FROM traverse t
+            LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
+            LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+            ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
+            LIMIT 50
+        """, entity_uris)
+        for rr in rel_rows:
+            subj = rr['subject_label'] or rr['subject_uri']
+            obj = rr['object_label'] or rr['object_uri']
+            relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+
+    # ── Step 6: Document chunks (same as B1) ──
+    try:
+        chunk_rows = await conn.fetch("""
+            SELECT DISTINCT ON (c.document_rid)
+                c.document_rid,
+                m.content->>'title' AS title,
+                LEFT(c.content->>'text', 500) AS chunk_text,
+                1 - (c.embedding <=> $1::vector) AS similarity
+            FROM koi_memory_chunks c
+            JOIN koi_memories m ON m.rid = c.document_rid
+            WHERE c.embedding IS NOT NULL
+            ORDER BY c.document_rid, c.embedding <=> $1::vector
+            LIMIT 5
+        """, embedding_str)
+        for cr in chunk_rows:
+            if float(cr['similarity']) > 0.3:
+                doc_chunks.append({
+                    "rid": cr['document_rid'],
+                    "title": cr['title'] or cr['document_rid'],
+                    "text": cr['chunk_text'] or "",
+                    "score": round(float(cr['similarity']), 4),
+                })
+                sources.append({
+                    "uri": cr['document_rid'],
+                    "label": cr['title'] or cr['document_rid'],
+                    "entity_type": "Document",
+                    "score": round(float(cr['similarity']), 4),
+                    "description": (cr['chunk_text'] or "")[:200],
+                })
+    except Exception:
+        pass
+
+    # ── Step 7: Web sources (same as B1) ──
+    if entity_uris:
+        try:
+            ws_rows = await conn.fetch("""
+                SELECT DISTINCT ON (ws.url) ws.url, ws.title, ws.description
+                FROM web_submissions ws
+                JOIN document_entity_links del ON del.document_rid = 'web:' || ws.rid::text
+                WHERE del.entity_uri = ANY($1) AND ws.status IN ('ingested', 'monitoring')
+                LIMIT 5
+            """, entity_uris)
+            for wr in ws_rows:
+                desc = wr['description'] or ""
+                web_sources.append({"url": wr['url'], "title": wr['title'] or wr['url'], "summary": desc})
+                sources.append({
+                    "uri": wr['url'],
+                    "label": wr['title'] or wr['url'],
+                    "entity_type": "WebSource",
+                    "score": 0.8,
+                    "description": desc[:200],
+                })
+        except Exception:
+            pass
+
+    return sources, relationships_ctx, doc_chunks, web_sources
+
+
+class ChatRequest(BaseModel):
+    """Request for RAG chat."""
+    query: str
+    max_context_entities: int = Field(default=5, ge=1, le=20)
+    retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
+
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    """
+    RAG chat: semantic-search the knowledge graph, build context from matched
+    entities (labels, types, descriptions, relationships), then call an LLM to
+    generate a grounded answer.
+
+    Returns ``{ answer, sources, intent }`` matching the web-dashboard
+    ChatResponse contract.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    # Lazy init openai_client for /chat LLM calls (separate from embedding provider)
+    global openai_client
+    if not openai_client:
+        if not OPENAI_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM service not available (OPENAI_API_KEY not configured)",
+            )
+        try:
+            from openai import OpenAI
+            openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        except ImportError:
+            raise HTTPException(
+                status_code=503,
+                detail="openai package not installed",
+            )
+
+    # ------------------------------------------------------------------
+    # 1. Semantic search over entity embeddings to find relevant entities
+    # ------------------------------------------------------------------
+    query_embedding = await generate_embedding(request.query)
+
+    # ── B2 GraphRAG dispatch ──
+    _use_graphrag = request.retrieval_mode == "graphrag"
+    _graphrag_done = False  # True when graphrag produced usable results
+
+    if _use_graphrag:
+        async with db_pool.acquire() as conn:
+            _gr_sources, _gr_rels, _gr_docs, _gr_web = await _graph_guided_retrieval(
+                request.query, query_embedding, conn, top_k=request.max_context_entities
+            )
+        # Only use graphrag results if it actually found sources;
+        # otherwise fall through to B1 so we don't serve empty context.
+        if _gr_sources:
+            sources = _gr_sources
+            relationships_ctx = _gr_rels
+            doc_chunks = _gr_docs
+            web_sources = _gr_web
+            _graphrag_done = True
+
+    # ── B1 hybrid retrieval (skipped when graphrag produced results) ──
+    if not _graphrag_done:
+        sources: List[Dict[str, Any]] = []
+
+    if not _graphrag_done:
+      async with db_pool.acquire() as conn:
+        if query_embedding:
+            embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+            try:
+                rows = await conn.fetch("""
+                    SELECT fuseki_uri, entity_text, entity_type, metadata,
+                           1 - (embedding <=> $1::vector) AS similarity
+                    FROM entity_registry
+                    WHERE embedding IS NOT NULL
+                    ORDER BY embedding <=> $1::vector
+                    LIMIT $2
+                """, embedding_str, request.max_context_entities)
+            except (asyncpg.exceptions.UndefinedColumnError,
+                    asyncpg.exceptions.UndefinedFunctionError,
+                    asyncpg.exceptions.DataError) as e:
+                logger.warning("entity_registry.embedding vector search failed, falling back to text search: %s", e)
+                # Extract meaningful words (3+ chars) from query for keyword matching
+                words = [w for w in request.query.lower().split() if len(w) >= 3]
+                if words:
+                    conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+                    match_score = " + ".join(
+                        f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                        for i in range(len(words))
+                    )
+                    params = [f"%{w}%" for w in words]
+                    params.append(request.max_context_entities)
+                    rows = await conn.fetch(f"""
+                        SELECT fuseki_uri, entity_text, entity_type, metadata,
+                               ({match_score})::float / {len(words)} AS similarity
+                        FROM entity_registry
+                        WHERE {conditions}
+                        ORDER BY ({match_score}) DESC, created_at DESC
+                        LIMIT ${len(words)+1}
+                    """, *params)
+                else:
+                    rows = []
+        else:
+            # Fallback: text search on entity names using keyword splitting
+            words = [w for w in request.query.lower().split() if len(w) >= 3]
+            if words:
+                conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+                match_score = " + ".join(
+                    f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                    for i in range(len(words))
+                )
+                params = [f"%{w}%" for w in words]
+                params.append(request.max_context_entities)
+                rows = await conn.fetch(f"""
+                    SELECT fuseki_uri, entity_text, entity_type, metadata,
+                           ({match_score})::float / {len(words)} AS similarity
+                    FROM entity_registry
+                    WHERE {conditions}
+                    ORDER BY ({match_score}) DESC, created_at DESC
+                    LIMIT ${len(words)+1}
+                """, *params)
+            else:
+                rows = []
+
+        # Build source list and collect URIs for relationship lookup
+        entity_uris = []
+        for row in rows:
+            meta = row['metadata'] or {}
+            if isinstance(meta, str):
+                meta = json_module_global.loads(meta)
+            description = meta.get('description', '') if isinstance(meta, dict) else ''
+            sources.append({
+                "uri": row['fuseki_uri'],
+                "label": row['entity_text'],
+                "entity_type": row['entity_type'],
+                "score": round(float(row['similarity']), 4),
+                "description": description,
+            })
+            entity_uris.append(row['fuseki_uri'])
+
+        # ------------------------------------------------------------------
+        # 2. Fetch 2-hop relationships for matched entities (richer context)
+        # ------------------------------------------------------------------
+        relationships_ctx: List[str] = []
+        if entity_uris:
+            rel_rows = await conn.fetch("""
+                WITH RECURSIVE traverse AS (
+                    SELECT
+                        r.subject_uri, r.object_uri, r.predicate,
+                        1 AS depth
+                    FROM entity_relationships r
+                    WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
+                    UNION
+                    SELECT
+                        r2.subject_uri, r2.object_uri, r2.predicate,
+                        t.depth + 1
+                    FROM traverse t
+                    JOIN entity_relationships r2
+                        ON r2.subject_uri IN (t.subject_uri, t.object_uri)
+                        OR r2.object_uri IN (t.subject_uri, t.object_uri)
+                    WHERE t.depth < 2
+                )
+                SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
+                    t.subject_uri,
+                    s.entity_text AS subject_label,
+                    t.predicate,
+                    t.object_uri,
+                    o.entity_text AS object_label,
+                    t.depth
+                FROM traverse t
+                LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
+                LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+                ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
+                LIMIT 50
+            """, entity_uris)
+            for rr in rel_rows:
+                subj = rr['subject_label'] or rr['subject_uri']
+                obj = rr['object_label'] or rr['object_uri']
+                relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+
+        # ------------------------------------------------------------------
+        # 2b. Search document chunks for grounding text (B1.1)
+        # ------------------------------------------------------------------
+        doc_chunks: List[Dict[str, Any]] = []
+        if query_embedding:
+            try:
+                chunk_rows = await conn.fetch("""
+                    SELECT DISTINCT ON (c.document_rid)
+                        c.document_rid,
+                        m.content->>'title' AS title,
+                        LEFT(c.content->>'text', 500) AS chunk_text,
+                        1 - (c.embedding <=> $1::vector) AS similarity
+                    FROM koi_memory_chunks c
+                    JOIN koi_memories m ON m.rid = c.document_rid
+                    WHERE c.embedding IS NOT NULL
+                    ORDER BY c.document_rid, c.embedding <=> $1::vector
+                    LIMIT 5
+                """, embedding_str)
+                for cr in chunk_rows:
+                    if float(cr['similarity']) > 0.3:
+                        doc_chunks.append({
+                            "rid": cr['document_rid'],
+                            "title": cr['title'] or cr['document_rid'],
+                            "text": cr['chunk_text'] or "",
+                            "score": round(float(cr['similarity']), 4),
+                        })
+                        sources.append({
+                            "uri": cr['document_rid'],
+                            "label": cr['title'] or cr['document_rid'],
+                            "entity_type": "Document",
+                            "score": round(float(cr['similarity']), 4),
+                            "description": (cr['chunk_text'] or "")[:200],
+                        })
+            except (asyncpg.exceptions.UndefinedTableError,
+                    asyncpg.exceptions.UndefinedColumnError):
+                pass  # koi_memory_chunks or expected columns not available
+            except asyncpg.exceptions.DataError as e:
+                # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
+                # while generate_embedding() may output a different dimension (e.g. 1536).
+                logger.warning(f"koi_memory_chunks vector dimension mismatch (BGE vs provider): {e}")
+                pass  # skip chunk results, /chat still works with entity context
+
+        # ------------------------------------------------------------------
+        # 2c. Fetch web sources linked to matched entities (B1.3)
+        # ------------------------------------------------------------------
+        web_sources: List[Dict[str, Any]] = []
+        if entity_uris:
+            try:
+                ws_rows = await conn.fetch("""
+                    SELECT DISTINCT ON (ws.url)
+                        ws.url,
+                        ws.title,
+                        ws.description
+                    FROM web_submissions ws
+                    JOIN document_entity_links del
+                        ON del.document_rid = 'web:' || ws.rid::text
+                    WHERE del.entity_uri = ANY($1)
+                      AND ws.status IN ('ingested', 'monitoring')
+                    LIMIT 5
+                """, entity_uris)
+                for wr in ws_rows:
+                    desc = wr['description'] or ""
+                    web_sources.append({
+                        "url": wr['url'],
+                        "title": wr['title'] or wr['url'],
+                        "summary": desc,
+                    })
+                    sources.append({
+                        "uri": wr['url'],
+                        "label": wr['title'] or wr['url'],
+                        "entity_type": "WebSource",
+                        "score": 0.8,
+                        "description": desc[:200],
+                    })
+            except (asyncpg.exceptions.UndefinedTableError,
+                    asyncpg.exceptions.UndefinedColumnError):
+                pass  # web_submissions or expected columns not available
+
+    # ------------------------------------------------------------------
+    # 3. Build LLM prompt with entity context
+    # ------------------------------------------------------------------
+    entity_block = "\n".join(
+        f"- {s['label']} ({s['entity_type']})"
+        + (f": {s['description']}" if s.get('description') else "")
+        for s in sources
+        if s['entity_type'] not in ('Document', 'WebSource')
+    ) or "(no matching entities found)"
+
+    rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
+
+    doc_block = "\n".join(
+        f"- **{d['title']}**: {d['text'][:300]}"
+        for d in doc_chunks
+    ) if doc_chunks else ""
+
+    web_block = "\n".join(
+        f"- [{w['title']}]({w['url']}): {w['summary'][:200]}"
+        for w in web_sources
+    ) if web_sources else ""
+
+    system_prompt = (
+        "You are a knowledgeable assistant for a bioregional knowledge commons "
+        "focused on ecological stewardship, regenerative practices, and community "
+        "governance in bioregions. Answer the user's question using the entity, "
+        "relationship, document, and web source context provided below. "
+        "Cite specific entities and sources in your answer. "
+        "If the context is insufficient, say so honestly. Be concise."
+    )
+
+    prompt_sections = [f"## Relevant Entities\n{entity_block}"]
+    prompt_sections.append(f"## Relationships\n{rel_block}")
+    if doc_block:
+        prompt_sections.append(f"## Relevant Documents\n{doc_block}")
+    if web_block:
+        prompt_sections.append(f"## Web Sources\n{web_block}")
+    prompt_sections.append(f"## Question\n{request.query}")
+    user_prompt = "\n\n".join(prompt_sections)
+
+    # ------------------------------------------------------------------
+    # 4. Call LLM
+    # ------------------------------------------------------------------
+    try:
+        llm_response = await asyncio.to_thread(
+            openai_client.chat.completions.create,
+            model=CHAT_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        answer = llm_response.choices[0].message.content or ""
+    except Exception as e:
+        logger.error(f"LLM call failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM call failed: {e}",
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Build intent object (lightweight classification)
+    # ------------------------------------------------------------------
+    entity_labels = [s['label'] for s in sources]
+    intent = {
+        "intent": "knowledge_query",
+        "entities": entity_labels,
+        "confidence": round(max((s['score'] for s in sources), default=0.0), 4),
+    }
+
+    return {
+        "answer": answer,
+        "sources": sources,
+        "intent": intent,
+        "retrieval_mode": request.retrieval_mode,
+    }
 
 
 if __name__ == "__main__":

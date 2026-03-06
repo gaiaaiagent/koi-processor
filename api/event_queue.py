@@ -44,7 +44,7 @@ class EventQueue:
         """Add an event to the queue. Returns the event_id.
 
         If event_id is provided (inbound from a peer), it is preserved and
-        used for dedup via the UNIQUE(source_node, event_id) index.
+        used for dedup via the UNIQUE(source_node, event_id, target_node) index.
         Returns None if the event was a duplicate (ON CONFLICT DO NOTHING).
 
         target_node: If set, only this node can receive the event (unicast).
@@ -60,7 +60,8 @@ class EventQueue:
                         (event_id, event_type, rid, manifest, contents, source_node, target_node, expires_at)
                     VALUES
                         ($1::UUID, $2, $3, $4, $5, $6, $7, NOW() + ($8 || ' hours')::INTERVAL)
-                    ON CONFLICT (source_node, event_id) WHERE event_id IS NOT NULL DO NOTHING
+                    ON CONFLICT (source_node, event_id, COALESCE(target_node, ''))
+                        WHERE event_id IS NOT NULL DO NOTHING
                     RETURNING event_id::TEXT
                     """,
                     event_id,
@@ -139,7 +140,7 @@ class EventQueue:
                     # RID format: orn:koi-net.{type}:{slug}+{hash}
                     rid = row["rid"]
                     rid_type = extract_rid_type(rid)
-                    if rid_type and rid_type not in rid_types:
+                    if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
                         continue
 
                 event = {
@@ -206,7 +207,7 @@ class EventQueue:
                 if rid_types:
                     rid = row["rid"]
                     rid_type = extract_rid_type(rid)
-                    if rid_type and rid_type not in rid_types:
+                    if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
                         continue
 
                 events.append({

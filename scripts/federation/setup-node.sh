@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # setup-node.sh — KOI-net node setup on peer's machine
 #
-# Usage: ./setup-node.sh <node-name> <wireguard-ip> [koi-processor-path]
-# Example: ./setup-node.sh shawn-personal 10.100.0.3 /home/shawn/koi-processor
+# Usage: ./setup-node.sh [--yes] [--force] [--skip-firewall] <node-name> <wireguard-ip> [koi-processor-path]
+# Example: ./setup-node.sh --yes shawn-personal 10.100.0.3 /home/shawn/koi-processor
 #
 # Run on the peer's machine after WireGuard tunnel is verified.
 
@@ -14,9 +14,42 @@ source "$SCRIPT_DIR/lib.sh"
 # PARSE ARGS
 # ============================================
 
+NON_INTERACTIVE=false
+FORCE_OVERWRITE=false
+SKIP_FIREWALL=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --yes|-y)
+            NON_INTERACTIVE=true
+            FORCE_OVERWRITE=true
+            shift
+            ;;
+        --force)
+            FORCE_OVERWRITE=true
+            shift
+            ;;
+        --skip-firewall)
+            SKIP_FIREWALL=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--yes] [--force] [--skip-firewall] <node-name> <wireguard-ip> [koi-processor-path]"
+            echo "Example: $0 --yes shawn-personal 10.100.0.3 /home/shawn/koi-processor"
+            exit 0
+            ;;
+        --*)
+            log_fatal "Unknown option: $1"
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <node-name> <wireguard-ip> [koi-processor-path]"
-    echo "Example: $0 shawn-personal 10.100.0.3 /home/shawn/koi-processor"
+    echo "Usage: $0 [--yes] [--force] [--skip-firewall] <node-name> <wireguard-ip> [koi-processor-path]"
+    echo "Example: $0 --yes shawn-personal 10.100.0.3 /home/shawn/koi-processor"
     exit 1
 fi
 
@@ -33,6 +66,12 @@ DB_USER="${USER:-$(whoami)}"
 log_info "Setting up KOI-net node: $NODE_NAME"
 log_info "WireGuard IP: $WG_IP"
 log_info "KOI processor: $KOI_PATH"
+log_info "Non-interactive: $NON_INTERACTIVE"
+log_info "Force overwrite: $FORCE_OVERWRITE"
+log_info "Skip firewall: $SKIP_FIREWALL"
+
+# Enforce runtime before any Python-based setup work.
+require_python_3_11
 
 # ============================================
 # STEP 1: Verify WireGuard tunnel
@@ -63,28 +102,39 @@ log_info "Step 3: Generating config/personal.env..."
 
 TEMPLATE="$SCRIPT_DIR/personal-env.template"
 TARGET="$KOI_PATH/config/personal.env"
+WRITE_ENV=true
 
 if [[ -f "$TARGET" ]]; then
     log_warn "personal.env already exists at $TARGET"
-    read -rp "Overwrite? [y/N]: " confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        log_info "Keeping existing personal.env"
-    else
+    if $FORCE_OVERWRITE; then
         cp "$TARGET" "${TARGET}.bak.$(date +%s)"
-        log_info "Backed up existing config"
+        log_info "Backed up existing config (force overwrite enabled)"
+    else
+        read -rp "Overwrite? [y/N]: " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            log_info "Keeping existing personal.env"
+            WRITE_ENV=false
+        else
+            cp "$TARGET" "${TARGET}.bak.$(date +%s)"
+            log_info "Backed up existing config"
+        fi
     fi
 fi
 
-if [[ -f "$TEMPLATE" ]]; then
+if $WRITE_ENV && [[ -f "$TEMPLATE" ]]; then
     sed \
         -e "s|{{NODE_NAME}}|$NODE_NAME|g" \
         -e "s|{{WG_IP}}|$WG_IP|g" \
         -e "s|{{STATE_DIR}}|$KOI_STATE|g" \
         -e "s|{{DB_USER}}|$DB_USER|g" \
         -e "s|{{OBSIDIAN_VAULT_PATH}}|~/Documents/Notes|g" \
-        -e "s|{{OPENAI_API_KEY}}|REPLACE_ME_WITH_YOUR_OPENAI_API_KEY|g" \
+        -e "s|{{EMBEDDING_PROVIDER}}||g" \
+        -e "s|{{EMBEDDING_MODEL}}||g" \
+        -e "s|{{OPENAI_API_KEY}}||g" \
         "$TEMPLATE" > "$TARGET"
     log_info "Generated personal.env"
+elif ! $WRITE_ENV; then
+    log_info "Skipped personal.env generation (using existing file)"
 else
     log_warn "Template not found at $TEMPLATE, skipping personal.env generation"
 fi
@@ -125,7 +175,9 @@ log_info "Step 5: Restricting API to WireGuard + loopback..."
 
 KOI_PORT="${KOI_API_PORT:-8351}"
 
-if [[ "$(uname)" == "Darwin" ]]; then
+if $SKIP_FIREWALL; then
+    log_warn "Skipping firewall setup (--skip-firewall)"
+elif [[ "$(uname)" == "Darwin" ]]; then
     # macOS: use pf (packet filter)
     PF_ANCHOR="/etc/pf.anchors/koi-net"
     PF_CONF="/etc/pf.conf"
@@ -138,7 +190,11 @@ if [[ "$(uname)" == "Darwin" ]]; then
         echo "  This requires sudo to modify /etc/pf.anchors/koi-net"
         echo "  Rules: allow port $KOI_PORT on lo0 and utun* only, block elsewhere"
         echo ""
-        read -rp "  Proceed with sudo? [y/N]: " confirm
+        if $NON_INTERACTIVE; then
+            confirm="y"
+        else
+            read -rp "  Proceed with sudo? [y/N]: " confirm
+        fi
         if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
             # Backup current state
             sudo pfctl -sa > "$STATE_DIR/pf-backup-$(date +%s).txt" 2>/dev/null || true
@@ -181,7 +237,11 @@ else
         log_info "iptables rules already exist, skipping"
     else
         log_info "Setting up Linux iptables rules for port $KOI_PORT..."
-        read -rp "  Proceed with sudo? [y/N]: " confirm
+        if $NON_INTERACTIVE; then
+            confirm="y"
+        else
+            read -rp "  Proceed with sudo? [y/N]: " confirm
+        fi
         if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
             # Backup
             sudo iptables-save > "$STATE_DIR/iptables-backup-$(date +%s).txt"
@@ -218,8 +278,31 @@ log_info "Firewall verification will be checked after service starts"
 
 log_info "Step 6: Running pending migrations..."
 
-POSTGRES_URL="${POSTGRES_URL:-postgresql://${DB_USER}:@localhost:5432/personal_koi}"
+POSTGRES_URL="${POSTGRES_URL:-postgresql:///personal_koi}"
 MIGRATIONS_DIR="$KOI_PATH/migrations"
+FEDERATION_MIGRATION_MANIFEST="${KOI_FEDERATION_MIGRATION_MANIFEST:-$SCRIPT_DIR/migration-manifest-federation.txt}"
+
+# Ensure required DB extensions are available before startup/migrations.
+# KOI API startup expects pgvector (`vector` type) to exist.
+log_info "Ensuring required PostgreSQL extensions..."
+if ! psql "$POSTGRES_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1; then
+    log_fatal "PostgreSQL extension 'vector' is unavailable. Install pgvector for your PostgreSQL version, then re-run setup."
+fi
+psql "$POSTGRES_URL" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" >/dev/null 2>&1 || true
+psql "$POSTGRES_URL" -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" >/dev/null 2>&1 || true
+
+# Federation setup defaults to explicit manifest mode for deterministic onboarding.
+# Legacy KOI_MIGRATION_MIN_NUM mode remains available as fallback if no manifest exists.
+if [[ -n "$FEDERATION_MIGRATION_MANIFEST" && -f "$FEDERATION_MIGRATION_MANIFEST" ]]; then
+    log_info "Using federation migration manifest: $FEDERATION_MIGRATION_MANIFEST"
+else
+    if [[ -z "${KOI_MIGRATION_MIN_NUM:-}" ]]; then
+        export KOI_MIGRATION_MIN_NUM=40
+        log_info "Manifest missing; using legacy KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
+    else
+        log_info "Manifest missing; using explicit KOI_MIGRATION_MIN_NUM=$KOI_MIGRATION_MIN_NUM"
+    fi
+fi
 
 if [[ -d "$MIGRATIONS_DIR" ]]; then
     require_cmd python3
@@ -229,7 +312,11 @@ if [[ -d "$MIGRATIONS_DIR" ]]; then
         source "$KOI_PATH/venv/bin/activate"
     fi
     ensure_python_module "psycopg2" "psycopg2-binary"
-    run_migrations "$POSTGRES_URL" "$MIGRATIONS_DIR"
+    if [[ -n "$FEDERATION_MIGRATION_MANIFEST" && -f "$FEDERATION_MIGRATION_MANIFEST" ]]; then
+        run_migrations "$POSTGRES_URL" "$MIGRATIONS_DIR" "$FEDERATION_MIGRATION_MANIFEST"
+    else
+        run_migrations "$POSTGRES_URL" "$MIGRATIONS_DIR"
+    fi
 else
     log_warn "Migrations directory not found: $MIGRATIONS_DIR"
 fi
@@ -315,7 +402,12 @@ from api.node_identity import load_or_create_identity, get_public_key_der_b64
 from base64 import b64encode, b64decode
 import hashlib
 
-private_key, profile = load_or_create_identity('$NODE_NAME')
+# load_or_create_identity may return (private_key, profile) or
+# (private_key, profile, encryption_private_key) depending on version.
+identity = load_or_create_identity('$NODE_NAME')
+if not isinstance(identity, tuple) or len(identity) < 2:
+    raise RuntimeError(f'Unexpected identity return shape: {type(identity)}')
+private_key, profile = identity[0], identity[1]
 koi_pubkey = get_public_key_der_b64(private_key)
 
 # Compute fingerprint: SHA256 of the actual DER bytes (not the base64 text)

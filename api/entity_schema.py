@@ -45,6 +45,17 @@ FOLDER_FALLBACKS = {
     'Question': 'Questions',
     'Claim': 'Claims',
     'Evidence': 'Evidence',
+    'Commitment': 'Commitments',
+    'CommitmentPool': 'CommitmentPools',
+    'CommitmentAction': 'CommitmentActions',
+    'Task': 'Tasks',
+    'Outcome': 'Outcomes',
+    'Initiative': 'Initiatives',
+    'WorkItem': 'WorkItems',
+    'Milestone': 'Milestones',
+    'Decision': 'Decisions',
+    'Risk': 'Risks',
+    'Metric': 'Metrics',
 }
 
 # Global default stopwords (union with per-type)
@@ -107,14 +118,14 @@ DEFAULT_SCHEMAS = {
         label='Organization',
         folder='Organizations',
         phonetic_matching=False,  # Opt-in, not default
-        similarity_threshold=0.90
+        similarity_threshold=0.85
     ),
     'Project': EntityTypeConfig(
         type_key='Project',
         label='Project',
         folder='Projects',
         phonetic_matching=False,  # Opt-in, not default
-        similarity_threshold=0.90
+        similarity_threshold=0.85
     ),
     'Location': EntityTypeConfig(
         type_key='Location',
@@ -129,9 +140,9 @@ DEFAULT_SCHEMAS = {
         label='Concept',
         folder='Concepts',
         phonetic_matching=False,
-        similarity_threshold=0.88,
+        similarity_threshold=0.75,
         semantic_threshold=0.88,
-        require_token_overlap=True
+        require_token_overlap=False
     ),
     'Meeting': EntityTypeConfig(
         type_key='Meeting',
@@ -220,6 +231,107 @@ DEFAULT_SCHEMAS = {
         phonetic_matching=False,
         similarity_threshold=0.80,
         semantic_threshold=0.90,
+        require_token_overlap=True,
+    ),
+    # ── Commitment pooling entity types ──────────────────────────────────
+    'Commitment': EntityTypeConfig(
+        type_key='Commitment',
+        label='Commitment',
+        folder='Commitments',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'CommitmentPool': EntityTypeConfig(
+        type_key='CommitmentPool',
+        label='Commitment Pool',
+        folder='CommitmentPools',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'CommitmentAction': EntityTypeConfig(
+        type_key='CommitmentAction',
+        label='Commitment Action',
+        folder='CommitmentActions',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Task': EntityTypeConfig(
+        type_key='Task',
+        label='Task',
+        folder='Tasks',
+        phonetic_matching=False,
+        similarity_threshold=0.88,
+        semantic_threshold=0.85,
+        require_token_overlap=True,
+    ),
+    # ── Roadmap entity types ──────────────────────────────────────────────
+    'Outcome': EntityTypeConfig(
+        type_key='Outcome',
+        label='Outcome',
+        folder='Outcomes',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Initiative': EntityTypeConfig(
+        type_key='Initiative',
+        label='Initiative',
+        folder='Initiatives',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'WorkItem': EntityTypeConfig(
+        type_key='WorkItem',
+        label='Work Item',
+        folder='WorkItems',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Milestone': EntityTypeConfig(
+        type_key='Milestone',
+        label='Milestone',
+        folder='Milestones',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Decision': EntityTypeConfig(
+        type_key='Decision',
+        label='Decision',
+        folder='Decisions',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Risk': EntityTypeConfig(
+        type_key='Risk',
+        label='Risk',
+        folder='Risks',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Metric': EntityTypeConfig(
+        type_key='Metric',
+        label='Metric',
+        folder='Metrics',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
         require_token_overlap=True,
     ),
 }

@@ -7,5 +7,12 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
-| #858 | 11:43 AM | 🔵 | Examined rollback procedures showing multiple event bridge versions and systemd services | ~451 |
+| #858 | 10:43 AM | 🔵 | Examined rollback procedures showing multiple event bridge versions and systemd services | ~451 |
+
+### Feb 26, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #10979 | 1:57 AM | ✅ | ADR Updated with Accelerated Rollout Evidence and Deployment Outcomes | ~558 |
+| #10978 | " | ✅ | ADR-001 Appendix B - Accelerated Rollout Evidence Documentation | ~327 |
 </claude-mem-context>

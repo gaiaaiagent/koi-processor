@@ -27,12 +27,23 @@ try:
 except ImportError:
     _CRYPTO_AVAILABLE = False
 
+try:
+    from api.koi_encryption import (
+        generate_encryption_keypair,
+        save_encryption_key,
+        load_encryption_key,
+        get_encryption_public_key_b64,
+    )
+    _ENCRYPTION_AVAILABLE = True
+except ImportError:
+    _ENCRYPTION_AVAILABLE = False
+
 
 # Personal-KOI entity types this node handles
-DEFAULT_EVENT_TYPES = ["Organization", "Person", "Project", "Concept", "Location"]
+DEFAULT_EVENT_TYPES = ["Organization", "Person", "Project", "Concept", "Location", "Vault-file"]
 DEFAULT_STATE_TYPES = [
     "Organization", "Person", "Project", "Concept", "Location",
-    "Meeting",
+    "Meeting", "Vault-file",
 ]
 
 # Key storage directory
@@ -44,6 +55,10 @@ KEY_STATE_DIR = os.environ.get(
 
 def _key_path(node_name: str) -> Path:
     return Path(KEY_STATE_DIR) / f"{node_name}_private_key.pem"
+
+
+def _encryption_key_path(node_name: str) -> Path:
+    return Path(KEY_STATE_DIR) / f"{node_name}_encryption_key"
 
 
 def generate_keypair():
@@ -188,6 +203,22 @@ def load_or_create_identity(
     node_rid = derive_node_rid(node_name, public_key)
     public_key_b64 = get_public_key_der_b64(private_key)
 
+    # E2EE: generate or load X25519 encryption keypair
+    encryption_key_b64 = None
+    encryption_private_key = None
+    if _ENCRYPTION_AVAILABLE:
+        enc_path = _encryption_key_path(node_name)
+        if enc_path.exists():
+            encryption_private_key = load_encryption_key(enc_path)
+            logger.info(f"Loaded encryption key from {enc_path}")
+        else:
+            encryption_private_key, _ = generate_encryption_keypair()
+            save_encryption_key(encryption_private_key, enc_path)
+            logger.info(f"Generated new encryption key at {enc_path}")
+        encryption_key_b64 = get_encryption_public_key_b64(
+            encryption_private_key.public_key()
+        )
+
     profile = NodeProfile(
         node_rid=node_rid,
         node_name=node_name,
@@ -198,7 +229,8 @@ def load_or_create_identity(
             state=DEFAULT_STATE_TYPES,
         ),
         public_key=public_key_b64,
+        encryption_key=encryption_key_b64,
     )
 
     logger.info(f"Node identity: {node_rid}")
-    return private_key, profile
+    return private_key, profile, encryption_private_key

@@ -77,6 +77,15 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
     'creator': ('has_founder', 'incoming', 'Person'),
     'lead': ('involves_person', 'outgoing', 'Person'),
 
+    # Task → Person (assignment)
+    'owner': ('assigned_to', 'outgoing', 'Person'),
+
+    # Task → Meeting/Document (source) — wikilink-only guard in sync loop
+    'sourcenote': ('sourced_from', 'outgoing', None),
+
+    # Task → Project
+    'project': ('belongs_to_project', 'outgoing', 'Project'),
+
     # Phase A: Knowledge Commoning
     'aggregatesinto': ('aggregates_into', 'outgoing', 'Pattern'),
     'aggregates_into': ('aggregates_into', 'outgoing', 'Pattern'),
@@ -115,6 +124,13 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
     'inspiredby': ('inspired_by', 'outgoing', None),
     'inspired_by': ('inspired_by', 'outgoing', None),
 }
+
+# Reverse mapping: predicate → first matching field name
+# Used by llm_enricher to validate extracted predicates
+PREDICATE_TO_FIELD: Dict[str, str] = {}
+for _field, (_pred, _dir, _hint) in FIELD_TO_PREDICATE.items():
+    if _pred not in PREDICATE_TO_FIELD:
+        PREDICATE_TO_FIELD[_pred] = _field
 
 # Symmetric predicates: when A knows B, also create B knows A
 SYMMETRIC_PREDICATES = {'knows', 'collaborates_with'}
@@ -188,6 +204,10 @@ def parse_wikilink(value: str) -> Tuple[str, Optional[str]]:
             'claims': 'Claim',
             'claim': 'Claim',
             'evidence': 'Evidence',
+            'tasks': 'Task',
+            'task': 'Task',
+            'meetings': 'Meeting',
+            'meeting': 'Meeting',
         }
         type_hint = folder_type_map.get(folder_lower)
     else:
@@ -295,7 +315,83 @@ async def batch_resolve_entities(
         for row in rows:
             result[(row['normalized_text'], None)] = row['fuseki_uri']
 
+    # Alias fallback: for any still-unresolved targets, check aliases array
+    all_requested = set((n.lower(), t) for n, t in targets)
+    unresolved = all_requested - set(result.keys())
+    if unresolved:
+        unresolved_names = list(set(n for n, t in unresolved))
+        rows = await conn.fetch("""
+            SELECT e.normalized_text, e.entity_type, e.fuseki_uri, alias
+            FROM entity_registry e, unnest(e.aliases) AS alias
+            WHERE LOWER(alias) = ANY($1)
+        """, unresolved_names)
+        for row in rows:
+            alias_lower = row['alias'].lower()
+            # Try typed match first
+            typed_key = (alias_lower, row['entity_type'])
+            if typed_key in unresolved:
+                result[typed_key] = row['fuseki_uri']
+            # Also try untyped
+            untyped_key = (alias_lower, None)
+            if untyped_key in unresolved:
+                result[untyped_key] = row['fuseki_uri']
+
     return result
+
+
+async def batch_resolve_by_vault_path(
+    conn: asyncpg.Connection,
+    vault_paths: List[str]  # e.g., ["Meetings/2026-02-04 IndigenomicsAI Meeting.md"]
+) -> Dict[str, str]:
+    """
+    Resolve entity URIs by vault_path via entity_rid_mappings.
+
+    Fallback for cases where name-based resolution fails (e.g., meeting names
+    with dates that don't match normalized_text in entity_registry).
+
+    Args:
+        conn: Database connection
+        vault_paths: List of vault paths (with .md extension)
+
+    Returns:
+        Dict mapping vault_path → canonical_uri
+    """
+    if not vault_paths:
+        return {}
+
+    rows = await conn.fetch("""
+        SELECT vault_path, canonical_uri
+        FROM entity_rid_mappings
+        WHERE vault_path = ANY($1)
+    """, vault_paths)
+
+    return {row['vault_path']: row['canonical_uri'] for row in rows}
+
+
+def extract_vault_path_from_wikilink(raw_value: str) -> Optional[str]:
+    """
+    Extract vault_path from a wikilink value for vault_path-based resolution.
+
+    Only returns a path when the wikilink has a folder prefix (e.g., Meetings/...).
+    Appends .md extension for matching against entity_rid_mappings.
+
+    Returns:
+        vault_path string (e.g., "Meetings/2026-02-04 IndigenomicsAI Meeting.md") or None
+    """
+    raw_value = raw_value.strip().strip('"').strip("'")
+    match = re.match(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', raw_value)
+    if not match:
+        return None
+
+    path = match.group(1)
+    if '/' not in path:
+        return None
+
+    # Add .md extension if not present
+    if not path.endswith('.md'):
+        path = path + '.md'
+
+    return path
 
 
 # =============================================================================
@@ -393,6 +489,9 @@ async def sync_vault_relationships(
     targets_to_process: List[Tuple[str, Optional[str], str, str, str, str]] = []
     # Structure: (target_name, type_hint, field_key, predicate, direction, raw_value)
 
+    # Fields that require wikilink syntax — plain text values would create bad edges
+    wikilink_only_fields = {'sourcenote'}
+
     for field_key, field_value in frontmatter.items():
         field_lower = field_key.lower()
         if field_lower not in FIELD_TO_PREDICATE:
@@ -402,6 +501,10 @@ async def sync_vault_relationships(
         values = parse_yaml_values(field_value)
 
         for raw_value in values:
+            # Skip non-wikilink values for fields that may contain plain text
+            if field_lower in wikilink_only_fields and '[[' not in raw_value:
+                continue
+
             target_name, type_hint = parse_wikilink(raw_value)
             if not target_name:
                 continue
@@ -414,6 +517,25 @@ async def sync_vault_relationships(
     # Step 3: Batch resolve all targets in one query
     target_tuples = list(set((t[0], t[1]) for t in targets_to_process))
     resolved_uris = await batch_resolve_entities(conn, target_tuples)
+
+    # Step 3b: Vault-path fallback for unresolved wikilinks
+    # Wikilinks like [[Meetings/2026-02-04 IndigenomicsAI Meeting]] contain
+    # the exact vault path, which may not match entity_registry.normalized_text
+    # but does match entity_rid_mappings.vault_path deterministically.
+    unresolved_paths: Dict[str, Tuple[str, Optional[str]]] = {}  # vault_path → (name, type_hint)
+    for target_name, type_hint, field_key, predicate, direction, raw_value in targets_to_process:
+        key = (target_name.lower(), type_hint)
+        if key not in resolved_uris:
+            vpath = extract_vault_path_from_wikilink(raw_value)
+            if vpath:
+                unresolved_paths[vpath] = key
+
+    if unresolved_paths:
+        path_uris = await batch_resolve_by_vault_path(conn, list(unresolved_paths.keys()))
+        for vpath, uri in path_uris.items():
+            key = unresolved_paths[vpath]
+            resolved_uris[key] = uri
+            logger.info(f"Resolved via vault_path: {vpath} → {uri}")
 
     # Step 4: Insert relationships using resolved URIs
     for target_name, type_hint, field_key, predicate, direction, raw_value in targets_to_process:
