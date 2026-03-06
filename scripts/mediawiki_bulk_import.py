@@ -482,7 +482,7 @@ async def process_entity_bearing_page(
     # Delete existing mediawiki_import edges for this page (idempotent re-import)
     await conn.execute("""
         DELETE FROM entity_relationships
-        WHERE source LIKE 'mediawiki_import:%'
+        WHERE source = 'mediawiki_import'
         AND source_rid = $1
     """, source_rid)
 
@@ -526,7 +526,7 @@ async def process_entity_bearing_page(
                 predicate,
                 target_canonical.uri,
                 se["confidence"],
-                f"mediawiki_import:{source_rid}",
+                "mediawiki_import",
                 source_rid,
             )
             counters["edges_promoted"] += 1
@@ -589,7 +589,7 @@ async def process_entity_bearing_page(
                 predicate,
                 target_canonical.uri,
                 ee["confidence"],
-                f"mediawiki_import:{source_rid}",
+                "mediawiki_import",
                 source_rid,
             )
             counters["edges_promoted"] += 1
