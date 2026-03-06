@@ -1297,6 +1297,21 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"GitHub router not mounted: {e}")
 
+            if _caps.mediawiki_sensor:
+                try:
+                    from api.mediawiki_sensor import MediaWikiSensor
+                    mw_sensor = MediaWikiSensor(pool=db_pool, event_queue=getattr(app.state, 'event_queue', None))
+                    await mw_sensor.start()
+                    app.state.mediawiki_sensor = mw_sensor
+                except Exception as e:
+                    logger.warning(f"MediaWiki sensor not started: {e}")
+                try:
+                    from api.routers.mediawiki_router import create_router as create_mw_router
+                    app.include_router(create_mw_router(db_pool, getattr(app.state, 'mediawiki_sensor', None)))
+                    logger.info("MediaWiki router mounted")
+                except Exception as e:
+                    logger.warning(f"MediaWiki router not mounted: {e}")
+
             if _caps.coordinator_endpoints:
                 try:
                     from api.routers.network_router import create_router as create_network_router

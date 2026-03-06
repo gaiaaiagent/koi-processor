@@ -55,14 +55,16 @@ sys.path.insert(0, _PROJECT_ROOT)
 from scripts.mediawiki_bulk_import import (
     get_db_connection,
     load_page_json,
-    process_entity_bearing_page,
     read_manifest,
-    _title_to_slug,
     upsert_wiki,
     create_import_run,
     finalize_import_run,
+)
+from api.mediawiki_ingest import (
+    process_entity_bearing_page,
     upsert_page_state,
     store_page_links,
+    _title_to_slug,
 )
 
 logger = logging.getLogger("mediawiki_review")

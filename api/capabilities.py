@@ -23,6 +23,7 @@ def _flag(var_name: str, default: bool = False) -> bool:
 class Capabilities:
     web_sensor: bool = False
     github_sensor: bool = False
+    mediawiki_sensor: bool = False
     llm_enrichment: bool = False
     vault_sync: bool = False
     terminusdb: bool = False
@@ -42,6 +43,7 @@ class Capabilities:
         return cls(
             web_sensor=_flag("WEB_SENSOR_ENABLED"),
             github_sensor=_flag("GITHUB_SENSOR_ENABLED"),
+            mediawiki_sensor=_flag("MEDIAWIKI_SENSOR_ENABLED"),
             llm_enrichment=_flag("LLM_ENRICHMENT_ENABLED"),
             vault_sync=_flag("VAULT_SYNC_ENABLED"),
             terminusdb=_flag("TERMINUSDB_ENABLED"),
@@ -66,6 +68,7 @@ class Capabilities:
             "bkc_coordinator": cls(
                 web_sensor=True,
                 github_sensor=True,
+                mediawiki_sensor=True,
                 llm_enrichment=True,
                 pipeline=True,
                 coordinator_endpoints=True,

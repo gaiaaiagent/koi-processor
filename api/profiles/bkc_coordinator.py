@@ -54,3 +54,16 @@ async def on_startup(app, pool, caps):
             logger.info("GitHub sensor started (stub)")
         except Exception:
             logger.exception("Failed to start GitHub sensor")
+
+    if caps.mediawiki_sensor:
+        try:
+            from api.mediawiki_sensor import MediaWikiSensor
+            sensor = MediaWikiSensor(
+                pool=pool,
+                event_queue=getattr(app.state, 'event_queue', None),
+            )
+            await sensor.start()
+            app.state.mediawiki_sensor = sensor
+            logger.info("MediaWiki sensor started")
+        except Exception:
+            logger.exception("Failed to start MediaWiki sensor")
