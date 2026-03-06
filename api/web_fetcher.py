@@ -5,6 +5,7 @@ Extracts content extraction patterns from RegenAI's website_sensor.py into
 a lightweight module for on-demand URL preview and ingestion.
 """
 
+import os
 import re
 import hashlib
 import logging
@@ -20,6 +21,14 @@ import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 
+# Trafilatura — high-quality content extraction (optional but preferred)
+try:
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+except ImportError:
+    trafilatura = None
+    TRAFILATURA_AVAILABLE = False
+
 # Playwright is optional — used as fallback for JS-rendered pages
 try:
     from playwright.async_api import async_playwright
@@ -27,6 +36,14 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     async_playwright = None
+
+# Scrapling is optional — used as Tier 3 for anti-bot bypass (Cloudflare, etc.)
+try:
+    from scrapling.fetchers import StealthyFetcher
+    SCRAPLING_AVAILABLE = True
+except ImportError:
+    StealthyFetcher = None
+    SCRAPLING_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +53,12 @@ MAX_TEXT_CHARS = 100_000           # 100 KB extracted text
 FETCH_TIMEOUT = 30                 # seconds
 USER_AGENT = "Octo/1.0 (Salish Sea Knowledge Agent; bioregional knowledge commons)"
 
-# Playwright fallback
-PLAYWRIGHT_WORD_THRESHOLD = 50  # If aiohttp gets fewer words, retry with Playwright
+# Content extraction escalation
+MIN_WORD_COUNT = int(os.environ.get("MIN_WORD_COUNT", "100"))  # aiohttp->Playwright threshold
+PLAYWRIGHT_WORD_THRESHOLD = 50  # Legacy alias (kept for backward compat)
 PLAYWRIGHT_TIMEOUT = 30000      # ms
 PLAYWRIGHT_WAIT = 3             # seconds after networkidle
+SCRAPLING_TIMEOUT = 90          # seconds — Cloudflare Turnstile solving can take ~30-40s
 
 # Rate limits
 RATE_LIMIT_PER_USER_HOUR = 5
@@ -141,7 +160,7 @@ class WebPreview:
     metadata: PageMetadata
     matching_entities: List[MatchingEntity] = field(default_factory=list)
     fetch_error: Optional[str] = None
-    rendered_with: str = "aiohttp"  # "aiohttp" or "playwright"
+    rendered_with: str = "aiohttp"  # "aiohttp", "playwright", or "scrapling"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -296,6 +315,141 @@ def extract_clean_content(soup: BeautifulSoup) -> str:
     return text_content
 
 
+def extract_content_trafilatura(html: str, url: str = "") -> Optional[str]:
+    """Extract content using trafilatura (higher quality than BS4 for articles).
+
+    Returns extracted text or None if trafilatura unavailable or extraction fails.
+    """
+    if not TRAFILATURA_AVAILABLE:
+        return None
+    try:
+        text = trafilatura.extract(
+            html,
+            url=url,
+            include_comments=False,
+            include_tables=True,
+            favor_recall=True,
+            deduplicate=True,
+        )
+        return text
+    except Exception as e:
+        logger.warning(f"Trafilatura extraction failed: {e}")
+        return None
+
+
+def extract_best_content(html: str, soup: BeautifulSoup, url: str = "") -> str:
+    """Try trafilatura first, fall back to BS4 extract_clean_content.
+
+    Returns whichever extraction yields more content.
+    """
+    bs4_content = extract_clean_content(soup)
+    bs4_words = len(bs4_content.split())
+
+    traf_content = extract_content_trafilatura(html, url)
+    if traf_content:
+        traf_words = len(traf_content.split())
+        if traf_words > bs4_words:
+            logger.info(f"Trafilatura extracted {traf_words} words vs BS4's {bs4_words}")
+            # Prepend title if not present
+            title_tag = soup.find("title")
+            if title_tag:
+                title = title_tag.get_text().strip()
+                if title and title not in traf_content[:200]:
+                    traf_content = f"# {title}\n\n{traf_content}"
+            return traf_content
+        else:
+            logger.info(f"BS4 extracted {bs4_words} words vs trafilatura's {traf_words}, using BS4")
+
+    return bs4_content
+
+
+# =============================================================================
+# Cloudflare Detection
+# =============================================================================
+
+def _is_cloudflare_challenge(html: str, status_code: int = 200) -> bool:
+    """Detect Cloudflare managed challenge / Turnstile page.
+
+    Uses the <title>Just a moment...</title> tag as the primary signal — this only
+    appears on challenge pages, never on real content. CF infrastructure signals
+    (cdn-cgi, _cf_chl_opt) can appear on legitimate pages behind Cloudflare, so
+    they're only used as secondary confirmation on error status codes.
+    """
+    # Primary signal: challenge page title (definitive, never on real pages)
+    has_challenge_title = "<title>Just a moment...</title>" in html
+
+    if has_challenge_title:
+        return True
+
+    # On error status codes, also check for structural CF challenge signals
+    if status_code in (403, 503):
+        cf_signals = [
+            "cf-browser-verification",
+            "cdn-cgi/challenge-platform",
+            "_cf_chl_opt",
+        ]
+        if any(s in html for s in cf_signals):
+            return True
+
+    return False
+
+
+# =============================================================================
+# Scrapling / StealthyFetcher (Tier 3 — anti-bot bypass)
+# =============================================================================
+
+# Optional residential proxy for improved IP reputation
+_PROXY_URL = os.environ.get("SCRAPING_PROXY_URL", "")
+
+
+async def fetch_html_with_scrapling(url: str) -> Optional[str]:
+    """Fetch a page using Scrapling's StealthyFetcher (Camoufox) for anti-bot bypass.
+
+    Used as Tier 3 when Cloudflare or similar anti-bot protection is detected.
+    Runs synchronously in a thread pool to avoid blocking the event loop.
+    """
+    if not SCRAPLING_AVAILABLE:
+        logger.warning("Scrapling not installed, cannot bypass anti-bot protection")
+        return None
+
+    def _fetch_sync():
+        kwargs = {
+            "headless": True,
+            "network_idle": True,
+            "block_images": False,  # Must be False — Cloudflare Turnstile needs full resources
+            "solve_cloudflare": True,
+            "block_webrtc": True,
+            "wait": 10000,  # Extra wait after challenge solve for page load
+        }
+        if _PROXY_URL:
+            kwargs["proxy"] = _PROXY_URL
+
+        try:
+            page = StealthyFetcher.fetch(url, **kwargs)
+            html = page.html_content
+            if html and len(html.strip()) > 100:
+                return html
+            return None
+        except Exception as e:
+            logger.warning(f"Scrapling fetch failed for {url}: {e}")
+            return None
+
+    try:
+        html = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _fetch_sync),
+            timeout=SCRAPLING_TIMEOUT,
+        )
+        if html:
+            logger.info(f"Scrapling (Camoufox) rendered {len(html)} chars for {url}")
+        return html
+    except asyncio.TimeoutError:
+        logger.warning(f"Scrapling timed out after {SCRAPLING_TIMEOUT}s for {url}")
+        return None
+    except Exception as e:
+        logger.warning(f"Scrapling executor failed for {url}: {e}")
+        return None
+
+
 # =============================================================================
 # Entity Scanning
 # =============================================================================
@@ -409,6 +563,37 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
         await page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_TIMEOUT)
         await asyncio.sleep(PLAYWRIGHT_WAIT)
 
+        # Dismiss cookie consent banners (common patterns)
+        for selector in [
+            'button:has-text("Accept")', 'button:has-text("Accept All")',
+            'button:has-text("Got it")', 'button:has-text("I agree")',
+            '[id*="cookie"] button', '[class*="cookie"] button',
+            '[class*="consent"] button',
+        ]:
+            try:
+                btn = page.locator(selector).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    await asyncio.sleep(0.5)
+                    break
+            except Exception:
+                continue
+
+        # Scroll to bottom to trigger lazy-loaded content
+        await page.evaluate("""async () => {
+            const delay = ms => new Promise(r => setTimeout(r, ms));
+            const height = () => document.body.scrollHeight;
+            let prev = 0;
+            for (let i = 0; i < 5; i++) {
+                window.scrollTo(0, height());
+                await delay(800);
+                if (height() === prev) break;
+                prev = height();
+            }
+            window.scrollTo(0, 0);
+        }""")
+        await asyncio.sleep(1)
+
         # First try: get page.content() (works for normal JS-rendered pages)
         html = await page.content()
 
@@ -478,8 +663,8 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
 # Main Fetch + Preview
 # =============================================================================
 
-async def _fetch_html_aiohttp(url: str) -> Optional[str]:
-    """Fetch raw HTML with aiohttp. Returns HTML string or None on error."""
+async def _fetch_html_aiohttp(url: str) -> tuple[Optional[str], int]:
+    """Fetch raw HTML with aiohttp. Returns (HTML string or None, HTTP status code)."""
     try:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -489,19 +674,21 @@ async def _fetch_html_aiohttp(url: str) -> Optional[str]:
                 max_redirects=5,
                 allow_redirects=True,
             ) as response:
-                if response.status != 200:
-                    return None
-
                 content_type = response.headers.get("Content-Type", "")
                 if not any(ct in content_type for ct in ("text/html", "application/xhtml")):
-                    return None
+                    return None, response.status
 
                 html_bytes = await response.content.read(MAX_HTML_BYTES)
-                return html_bytes.decode("utf-8", errors="replace")
+                html = html_bytes.decode("utf-8", errors="replace")
+
+                if response.status != 200:
+                    return html, response.status  # Return HTML for CF detection
+
+                return html, response.status
 
     except Exception as e:
         logger.warning(f"aiohttp fetch failed for {url}: {e}")
-        return None
+        return None, 0
 
 
 async def fetch_and_preview(
@@ -534,47 +721,97 @@ async def fetch_and_preview(
         )
 
     # Step 1: Try aiohttp (fast, lightweight)
-    html = await _fetch_html_aiohttp(url)
+    html, status = await _fetch_html_aiohttp(url)
     rendered_with = "aiohttp"
+    cloudflare_detected = False
 
-    if html is None:
-        # aiohttp failed entirely — try Playwright directly
-        if PLAYWRIGHT_AVAILABLE:
-            logger.info(f"aiohttp failed for {url}, trying Playwright")
+    if html and _is_cloudflare_challenge(html, status):
+        cloudflare_detected = True
+        logger.info(f"Cloudflare challenge detected for {url} (status={status})")
+        html = None  # Force escalation
+
+    if html is None or status != 200:
+        # aiohttp failed or Cloudflare — try Playwright (unless CF detected)
+        if not cloudflare_detected and PLAYWRIGHT_AVAILABLE:
+            logger.info(f"aiohttp failed for {url} (status={status}), trying Playwright")
             html = await fetch_html_with_playwright(url)
             rendered_with = "playwright"
 
+            # Check if Playwright also got a Cloudflare page
+            if html and _is_cloudflare_challenge(html, 200):
+                cloudflare_detected = True
+                logger.info(f"Playwright also hit Cloudflare challenge for {url}")
+                html = None
+
+        # If still no content (or Cloudflare detected), try Scrapling
+        if html is None and SCRAPLING_AVAILABLE:
+            logger.info(
+                f"Escalating to Scrapling (Camoufox) for {url}"
+                + (" [Cloudflare detected]" if cloudflare_detected else "")
+            )
+            html = await fetch_html_with_scrapling(url)
+            rendered_with = "scrapling"
+
+            # Check if Scrapling also returned a Cloudflare challenge page
+            # Use status 200 — Scrapling resolved the HTTP layer, only check title signal
+            if html and _is_cloudflare_challenge(html, 200):
+                cloudflare_detected = True
+                logger.info(f"Scrapling also returned Cloudflare challenge for {url}")
+                html = None
+
         if html is None:
-            return _make_error("Failed to fetch URL")
+            error_msg = "Failed to fetch URL"
+            if cloudflare_detected:
+                error_msg = (
+                    "Site is behind Cloudflare protection that could not be bypassed. "
+                    "A residential proxy (SCRAPING_PROXY_URL) may help."
+                )
+            return _make_error(error_msg)
 
     soup = BeautifulSoup(html, "html.parser")
     metadata = extract_page_metadata(soup)
-    content_text = extract_clean_content(soup)
+    content_text = extract_best_content(html, soup, url)
     word_count = len(content_text.split())
 
-    # Step 2: If content is sparse, retry with Playwright
-    if word_count < PLAYWRIGHT_WORD_THRESHOLD and rendered_with == "aiohttp" and PLAYWRIGHT_AVAILABLE:
-        logger.info(
-            f"Sparse content ({word_count} words) from aiohttp, "
-            f"retrying {url} with Playwright"
-        )
-        pw_html = await fetch_html_with_playwright(url)
-        if pw_html:
-            pw_soup = BeautifulSoup(pw_html, "html.parser")
-            pw_metadata = extract_page_metadata(pw_soup)
-            pw_content = extract_clean_content(pw_soup)
-            pw_word_count = len(pw_content.split())
+    # Step 2: If content is sparse, retry with better rendering
+    if word_count < MIN_WORD_COUNT and rendered_with == "aiohttp":
+        if PLAYWRIGHT_AVAILABLE:
+            logger.info(
+                f"Sparse content ({word_count} words) from aiohttp, "
+                f"retrying {url} with Playwright"
+            )
+            pw_html = await fetch_html_with_playwright(url)
+            if pw_html:
+                pw_soup = BeautifulSoup(pw_html, "html.parser")
+                pw_metadata = extract_page_metadata(pw_soup)
+                pw_content = extract_best_content(pw_html, pw_soup, url)
+                pw_word_count = len(pw_content.split())
 
-            # Only use Playwright result if it got more content
-            if pw_word_count > word_count:
-                logger.info(
-                    f"Playwright got {pw_word_count} words vs aiohttp's {word_count}"
-                )
-                soup = pw_soup
-                metadata = pw_metadata
-                content_text = pw_content
-                word_count = pw_word_count
-                rendered_with = "playwright"
+                if pw_word_count > word_count:
+                    logger.info(
+                        f"Playwright got {pw_word_count} words vs aiohttp's {word_count}"
+                    )
+                    soup = pw_soup
+                    metadata = pw_metadata
+                    content_text = pw_content
+                    word_count = pw_word_count
+                    rendered_with = "playwright"
+
+        # If still sparse after Playwright, try Scrapling
+        if word_count < MIN_WORD_COUNT and SCRAPLING_AVAILABLE and rendered_with != "scrapling":
+            logger.info(f"Still sparse ({word_count} words), trying Scrapling for {url}")
+            scr_html = await fetch_html_with_scrapling(url)
+            if scr_html and not _is_cloudflare_challenge(scr_html, 200):
+                scr_soup = BeautifulSoup(scr_html, "html.parser")
+                scr_content = extract_best_content(scr_html, scr_soup, url)
+                scr_word_count = len(scr_content.split())
+                if scr_word_count > word_count:
+                    logger.info(f"Scrapling got {scr_word_count} words vs {word_count}")
+                    soup = scr_soup
+                    metadata = extract_page_metadata(scr_soup)
+                    content_text = scr_content
+                    word_count = scr_word_count
+                    rendered_with = "scrapling"
 
     content_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
 
