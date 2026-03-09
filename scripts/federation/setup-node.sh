@@ -388,6 +388,169 @@ else
 fi
 
 # ============================================
+# STEP 9b: Auto-start on boot + koi-sync CLI
+# ============================================
+
+log_info "Step 9b: Setting up auto-start and CLI tools..."
+
+# --- koi-sync convenience script ---
+KOI_SYNC_SCRIPT="$STATE_DIR/koi-sync"
+cat > "$KOI_SYNC_SCRIPT" <<'KOISYNC_INNER'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="@@STATE_DIR@@"
+KOI_PORT="@@KOI_PORT@@"
+TOKEN=$(cat "$STATE_DIR/admin_token" 2>/dev/null || echo "")
+AUTH=""
+[[ -n "$TOKEN" ]] && AUTH="-H \"Authorization: Bearer $TOKEN\""
+
+usage() {
+    echo "Usage: koi-sync [command]"
+    echo ""
+    echo "Commands:"
+    echo "  status    Show vault sync status"
+    echo "  sync      Trigger immediate sync cycle"
+    echo "  start     Start koi-server"
+    echo "  stop      Stop koi-server"
+    echo "  restart   Restart koi-server"
+    echo "  logs      Tail koi-server logs"
+    echo "  health    Check server health"
+    echo ""
+    echo "No command = trigger sync"
+}
+
+case "${1:-sync}" in
+    status)
+        eval curl -sf $AUTH "http://127.0.0.1:${KOI_PORT}/koi-net/vault-sync/status" | python3 -m json.tool
+        ;;
+    sync)
+        eval curl -sf -X POST $AUTH "http://127.0.0.1:${KOI_PORT}/koi-net/vault-sync/trigger" | python3 -m json.tool
+        ;;
+    start)
+        "$STATE_DIR/start.sh"
+        ;;
+    stop)
+        "$STATE_DIR/stop.sh"
+        ;;
+    restart)
+        "$STATE_DIR/stop.sh" 2>/dev/null || true
+        sleep 1
+        "$STATE_DIR/start.sh"
+        ;;
+    logs)
+        tail -f "$STATE_DIR/koi-server.log"
+        ;;
+    health)
+        curl -sf "http://127.0.0.1:${KOI_PORT}/health" | python3 -m json.tool
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
+KOISYNC_INNER
+
+# Substitute actual paths
+sed -i.bak \
+    -e "s|@@STATE_DIR@@|$STATE_DIR|g" \
+    -e "s|@@KOI_PORT@@|$KOI_PORT|g" \
+    "$KOI_SYNC_SCRIPT"
+rm -f "${KOI_SYNC_SCRIPT}.bak"
+chmod +x "$KOI_SYNC_SCRIPT"
+
+# Symlink to PATH
+if [[ -d "$HOME/.local/bin" ]]; then
+    ln -sf "$KOI_SYNC_SCRIPT" "$HOME/.local/bin/koi-sync"
+    log_info "Installed koi-sync to ~/.local/bin/koi-sync"
+elif [[ -d /usr/local/bin && -w /usr/local/bin ]]; then
+    ln -sf "$KOI_SYNC_SCRIPT" /usr/local/bin/koi-sync
+    log_info "Installed koi-sync to /usr/local/bin/koi-sync"
+else
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$KOI_SYNC_SCRIPT" "$HOME/.local/bin/koi-sync"
+    log_info "Installed koi-sync to ~/.local/bin/koi-sync (add ~/.local/bin to PATH if needed)"
+fi
+
+# --- Auto-start on boot ---
+if [[ "$(uname)" == "Linux" ]] && command -v systemctl >/dev/null 2>&1; then
+    # systemd user service for koi-server
+    SYSTEMD_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$SYSTEMD_DIR"
+    cat > "$SYSTEMD_DIR/koi-server.service" <<SYSTEMD_EOF
+[Unit]
+Description=KOI-net personal server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$STATE_DIR/start.sh
+ExecStop=$STATE_DIR/stop.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+SYSTEMD_EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable koi-server.service 2>/dev/null || true
+    log_info "Enabled koi-server systemd user service (auto-start on login)"
+
+    # WireGuard auto-start (system service, needs sudo)
+    WG_CONF="$STATE_DIR/../wireguard/wg-koi.conf"
+    if [[ -f "$WG_CONF" ]]; then
+        # Copy config to system location for wg-quick@
+        if [[ ! -f /etc/wireguard/wg-koi.conf ]]; then
+            sudo cp "$WG_CONF" /etc/wireguard/wg-koi.conf 2>/dev/null && \
+            sudo chmod 600 /etc/wireguard/wg-koi.conf 2>/dev/null && \
+            sudo systemctl enable wg-quick@wg-koi 2>/dev/null && \
+            log_info "Enabled WireGuard auto-start on boot (wg-quick@wg-koi)" || \
+            log_warn "Could not enable WireGuard auto-start (run: sudo systemctl enable wg-quick@wg-koi)"
+        else
+            sudo systemctl enable wg-quick@wg-koi 2>/dev/null || true
+            log_info "WireGuard auto-start already configured"
+        fi
+    fi
+
+elif [[ "$(uname)" == "Darwin" ]]; then
+    # macOS LaunchAgent for koi-server
+    LAUNCH_DIR="$HOME/Library/LaunchAgents"
+    mkdir -p "$LAUNCH_DIR"
+    PLIST="$LAUNCH_DIR/com.koi-net.server.plist"
+    cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.koi-net.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$STATE_DIR/start.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>$STATE_DIR/koi-server-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>$STATE_DIR/koi-server-launchd.log</string>
+</dict>
+</plist>
+PLIST_EOF
+    launchctl bootout gui/$(id -u) "$PLIST" 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) "$PLIST" 2>/dev/null && \
+        log_info "Enabled koi-server LaunchAgent (auto-start on login)" || \
+        log_warn "Could not load LaunchAgent — load manually: launchctl bootstrap gui/\$(id -u) $PLIST"
+fi
+
+# ============================================
 # STEP 10: Verify KOI key continuity
 # ============================================
 
