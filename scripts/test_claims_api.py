@@ -111,9 +111,11 @@ def test_setup_claimant():
 def test_create_claim(claimant_uri: str):
     """Test claim creation."""
     print("\n[1] Create claim")
+    # Unique statement per run to avoid idempotency returning stale state
+    ts = int(time.time())
     body = {
         "claimant_uri": claimant_uri,
-        "statement": "Test organization restored 50 hectares of degraded wetland in the Salish Sea bioregion between 2023-2025",
+        "statement": f"Test organization restored 50 hectares of degraded wetland in the Salish Sea bioregion (run {ts})",
         "claim_type": "ecological",
         "metadata": {
             "quantity": 50,
@@ -227,9 +229,100 @@ def test_entity_graph(claimant_uri: str, rid: str):
               f"found {len(makes_claim)} makes_claim edges")
 
 
+def test_link_evidence(rid: str):
+    """Test evidence linking — both type enforcement and happy path."""
+    print("\n[7a] Link evidence — reject non-Evidence entity type")
+    # Try linking a non-Evidence entity (the claimant is an Organization/Concept, not Evidence)
+    status, data = _req("GET", f"/claims/{rid}")
+    claimant_uri = data.get("claimant_uri", "")
+    if claimant_uri:
+        status2, data2 = _req("POST", f"/claims/{rid}/evidence", {
+            "evidence_uri": claimant_uri,
+            "actor": "test_script",
+        })
+        check("rejects non-Evidence type", status2 == 422, f"status={status2} data={data2}")
+
+    print("\n[7b] Link evidence — create Evidence entity and link")
+    # Create an Evidence entity via /ingest
+    ts = int(time.time())
+    ev_status, ev_data = _req("POST", "/ingest", {
+        "document_rid": f"test://smoke-evidence-{ts}",
+        "source": "test_claims_api",
+        "entities": [{
+            "name": f"Test Wetland Restoration Report {ts}",
+            "type": "Evidence",
+            "mentions": [f"Test Wetland Restoration Report {ts}"],
+            "confidence": 1.0,
+        }],
+        "relationships": [],
+    })
+    evidence_uri = None
+    if ev_status == 200 and ev_data.get("canonical_entities"):
+        evidence_uri = ev_data["canonical_entities"][0].get("uri")
+
+    if evidence_uri:
+        status3, data3 = _req("POST", f"/claims/{rid}/evidence", {
+            "evidence_uri": evidence_uri,
+            "actor": "test_script",
+        })
+        check("evidence link succeeds", status3 == 200, f"status={status3} data={data3}")
+
+        # Verify evidence appears in get_claim
+        status4, data4 = _req("GET", f"/claims/{rid}")
+        evidence_list = data4.get("evidence") or []
+        ev_uris = [e.get("uri") for e in evidence_list]
+        check("evidence in get response", evidence_uri in ev_uris,
+              f"expected {evidence_uri} in {ev_uris}")
+    else:
+        check("evidence entity created", False, f"status={ev_status} data={ev_data}")
+
+
+def test_ledger_anchored_blocked(rid: str):
+    """Test that ledger_anchored transition is blocked without ledger_iri."""
+    print("\n[7c] Block ledger_anchored without actual anchor")
+    # First advance to verified
+    _req("PATCH", f"/claims/{rid}/verify", {
+        "new_level": "verified",
+        "actor": "test_script",
+        "reason": "test advancement",
+    })
+    # Try to go to ledger_anchored — should be blocked
+    status, data = _req("PATCH", f"/claims/{rid}/verify", {
+        "new_level": "ledger_anchored",
+        "actor": "test_script",
+    })
+    check("ledger_anchored blocked without anchor", status == 409, f"status={status} data={data}")
+
+
+def test_extract_endpoint():
+    """Test the extraction endpoint (Finding 3 — verify surface works)."""
+    print("\n[12] Extract claims endpoint")
+    body = {
+        "document_text": "The Community Environmental Council has partnered with 22 farms across "
+                         "Santa Barbara County since 2021, transitioning 450 acres from conventional "
+                         "to regenerative practices. This initiative has measurably improved soil health "
+                         "metrics across all participating farms, with an average 35% increase in soil "
+                         "organic matter content documented through independent laboratory analysis.",
+        "source_document": "test://smoke-test-document",
+        "auto_create": False,
+        "confidence_threshold": 0.5,
+    }
+    status, data = _req("POST", "/claims/extract", body)
+    check("extract status 200", status == 200, f"status={status}")
+    check("has candidates field", "candidates" in data, str(data.keys()))
+    check("has candidate_count", "candidate_count" in data, str(data.keys()))
+    check("source preserved", data.get("source_document") == "test://smoke-test-document",
+          f"got {data.get('source_document')}")
+    # Candidates may be empty if ANTHROPIC_API_KEY is not set — that's OK for smoke test
+    if data.get("candidates"):
+        c = data["candidates"][0]
+        check("candidate has statement", bool(c.get("statement")), str(c))
+        check("candidate has confidence", "confidence" in c, str(c))
+
+
 def test_not_found():
     """Test 404 for non-existent claim."""
-    print("\n[11] Not found")
+    print("\n[13] Not found")
     status, data = _req("GET", "/claims/orn:koi-net.claim:doesnotexist")
     check("status 404", status == 404, f"status={status}")
 
@@ -263,6 +356,8 @@ def main():
     test_list_claims()
     test_verify_claim(rid)
     test_invalid_transition(rid)
+    test_link_evidence(rid)
+    test_ledger_anchored_blocked(rid)
     test_history(rid)
     test_prepare_anchor(rid)
 
@@ -272,6 +367,7 @@ def main():
     except ImportError:
         print("\n[10] Skipped (urllib.parse not available)")
 
+    test_extract_endpoint()
     test_not_found()
 
     print("\n" + "=" * 50)
