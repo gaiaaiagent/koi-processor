@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import asyncpg
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -201,66 +202,79 @@ def create_router(pool, caps=None):
                 logger.info(f"claim.idempotent_hit rid={claim_rid}")
                 return _row_to_claim(existing)
 
-            # All writes in a single transaction — no partial state on failure
-            async with conn.transaction():
-                # 4. Register claim as entity (URI derived from RID for version isolation)
-                entity_uri = generate_entity_uri(claim_rid, 'Claim')
-                await conn.execute("""
-                    INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text)
-                    VALUES ($1, $2, 'Claim', $3)
-                    ON CONFLICT (fuseki_uri) DO NOTHING
-                """, entity_uri, body.statement[:200], normalize_entity_text(body.statement[:200]))
+            # All writes in a single transaction — no partial state on failure.
+            # Catch UniqueViolationError for concurrent-request idempotency:
+            # two identical POSTs can both pass the preflight check; the loser
+            # hits the unique constraint and falls through to return the winner's row.
+            try:
+                async with conn.transaction():
+                    # 4. Register claim as entity (URI derived from RID for version isolation)
+                    entity_uri = generate_entity_uri(claim_rid, 'Claim')
+                    await conn.execute("""
+                        INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text)
+                        VALUES ($1, $2, 'Claim', $3)
+                        ON CONFLICT (fuseki_uri) DO NOTHING
+                    """, entity_uri, body.statement[:200], normalize_entity_text(body.statement[:200]))
 
-                # 5. Write makes_claim relationship edge
-                await conn.execute("""
-                    INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
-                    VALUES ($1, 'makes_claim', $2, 1.0, 'claims_engine')
-                    ON CONFLICT DO NOTHING
-                """, body.claimant_uri, entity_uri)
+                    # 5. Write makes_claim relationship edge
+                    await conn.execute("""
+                        INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
+                        VALUES ($1, 'makes_claim', $2, 1.0, 'claims_engine')
+                        ON CONFLICT DO NOTHING
+                    """, body.claimant_uri, entity_uri)
 
-                # 6. Optional: link claim to subject entity via 'about' predicate
-                if body.about_uri:
-                    target = await conn.fetchrow(
-                        "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
-                        body.about_uri,
+                    # 6. Optional: link claim to subject entity via 'about' predicate
+                    if body.about_uri:
+                        target = await conn.fetchrow(
+                            "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                            body.about_uri,
+                        )
+                        if target:
+                            await conn.execute("""
+                                INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
+                                VALUES ($1, 'about', $2, 1.0, 'claims_engine')
+                                ON CONFLICT DO NOTHING
+                            """, entity_uri, body.about_uri)
+
+                    # 7. Handle versioning — link to superseded claim
+                    if body.supersedes_rid:
+                        old = await conn.fetchrow(
+                            "SELECT entity_uri FROM claims WHERE claim_rid = $1", body.supersedes_rid
+                        )
+                        if old and old['entity_uri']:
+                            await conn.execute("""
+                                INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
+                                VALUES ($1, 'supersedes_claim', $2, 1.0, 'claims_engine')
+                                ON CONFLICT DO NOTHING
+                            """, entity_uri, old['entity_uri'])
+
+                    # 8. Insert claim row
+                    row = await conn.fetchrow("""
+                        INSERT INTO claims (claim_rid, entity_uri, claimant_uri, statement,
+                                            claim_type, source_document, ai_confidence,
+                                            supersedes_rid, metadata, created_by)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+                        RETURNING *
+                    """,
+                        claim_rid, entity_uri, body.claimant_uri, body.statement,
+                        body.claim_type, body.source_document, body.ai_confidence,
+                        body.supersedes_rid, _json_dumps(body.metadata), body.created_by,
                     )
-                    if target:
-                        await conn.execute("""
-                            INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
-                            VALUES ($1, 'about', $2, 1.0, 'claims_engine')
-                            ON CONFLICT DO NOTHING
-                        """, entity_uri, body.about_uri)
 
-                # 7. Handle versioning — link to superseded claim
-                if body.supersedes_rid:
-                    old = await conn.fetchrow(
-                        "SELECT entity_uri FROM claims WHERE claim_rid = $1", body.supersedes_rid
-                    )
-                    if old and old['entity_uri']:
-                        await conn.execute("""
-                            INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
-                            VALUES ($1, 'supersedes_claim', $2, 1.0, 'claims_engine')
-                            ON CONFLICT DO NOTHING
-                        """, entity_uri, old['entity_uri'])
-
-                # 8. Insert claim row
-                row = await conn.fetchrow("""
-                    INSERT INTO claims (claim_rid, entity_uri, claimant_uri, statement,
-                                        claim_type, source_document, ai_confidence,
-                                        supersedes_rid, metadata, created_by)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-                    RETURNING *
-                """,
-                    claim_rid, entity_uri, body.claimant_uri, body.statement,
-                    body.claim_type, body.source_document, body.ai_confidence,
-                    body.supersedes_rid, _json_dumps(body.metadata), body.created_by,
+                    # 9. Log initial state
+                    await conn.execute("""
+                        INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
+                        VALUES ($1, NULL, 'self_reported', $2, 'created')
+                    """, claim_rid, body.created_by)
+            except asyncpg.UniqueViolationError:
+                # Concurrent insert won the race — return the winner's row
+                logger.info(f"claim.concurrent_idempotent rid={claim_rid}")
+                existing = await conn.fetchrow(
+                    "SELECT * FROM claims WHERE claim_rid = $1", claim_rid
                 )
-
-                # 9. Log initial state
-                await conn.execute("""
-                    INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
-                    VALUES ($1, NULL, 'self_reported', $2, 'created')
-                """, claim_rid, body.created_by)
+                if existing:
+                    return _row_to_claim(existing)
+                raise  # should not happen — unique violation implies the row exists
 
         logger.info(f"claim.create rid={claim_rid} claimant={body.claimant_uri} type={body.claim_type}")
         return _row_to_claim(row)
@@ -363,27 +377,29 @@ def create_router(pool, caps=None):
         """Advance claim verification level. Validates state machine transitions."""
         new_level = body.new_level.lower()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM claims WHERE claim_rid = $1", rid
-            )
-            if not row:
-                raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
-
-            current = row["verification"]
-            allowed = _VALID_TRANSITIONS.get(current, set())
-            if new_level not in allowed:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Invalid transition {current} → {new_level}. Allowed: {sorted(allowed) or 'none (terminal state)'}",
-                )
-
-            # Check preconditions (e.g. ledger_anchored requires content_hash + ledger_iri)
-            if new_level in _TRANSITION_PRECONDITIONS:
-                ok, msg = _TRANSITION_PRECONDITIONS[new_level](row)
-                if not ok:
-                    raise HTTPException(status_code=409, detail=msg)
-
+            # All reads and writes in one transaction with row lock
             async with conn.transaction():
+                # FOR UPDATE locks the row — concurrent verify calls serialize here
+                row = await conn.fetchrow(
+                    "SELECT * FROM claims WHERE claim_rid = $1 FOR UPDATE", rid
+                )
+                if not row:
+                    raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
+
+                current = row["verification"]
+                allowed = _VALID_TRANSITIONS.get(current, set())
+                if new_level not in allowed:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Invalid transition {current} → {new_level}. Allowed: {sorted(allowed) or 'none (terminal state)'}",
+                    )
+
+                # Check preconditions (e.g. ledger_anchored requires content_hash + ledger_iri)
+                if new_level in _TRANSITION_PRECONDITIONS:
+                    ok, msg = _TRANSITION_PRECONDITIONS[new_level](row)
+                    if not ok:
+                        raise HTTPException(status_code=409, detail=msg)
+
                 updated = await conn.fetchrow("""
                     UPDATE claims
                     SET verification = $2, updated_at = NOW()
