@@ -1220,6 +1220,14 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"Web router not mounted: {e}")
 
+            # Claims engine router (always on, no capability gate)
+            try:
+                from api.routers.claims_router import create_router as create_claims_router
+                app.include_router(create_claims_router(db_pool))
+                logger.info("Claims router mounted (/claims/)")
+            except Exception as e:
+                logger.warning(f"Claims router not mounted: {e}")
+
             if _caps.github_sensor:
                 try:
                     from api.routers.github_router import create_router as create_github_router
