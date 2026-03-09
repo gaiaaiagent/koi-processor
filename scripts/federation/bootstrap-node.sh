@@ -161,16 +161,6 @@ run_or_print() {
 }
 
 install_linux_prereqs() {
-    local packages=(
-        wireguard-tools
-        python3-venv
-        python3-pip
-        postgresql
-        postgresql-contrib
-        git
-        curl
-        jq
-    )
     if command -v wg >/dev/null 2>&1 \
        && command -v psql >/dev/null 2>&1 \
        && command -v jq >/dev/null 2>&1 \
@@ -178,16 +168,37 @@ install_linux_prereqs() {
        && command -v curl >/dev/null 2>&1 \
        && python3 -m venv --help >/dev/null 2>&1 \
        && python3 -m pip --version >/dev/null 2>&1; then
-        log_info "Linux prerequisites already present; skipping apt install"
+        log_info "Linux prerequisites already present; skipping install"
         return 0
     fi
 
     log_info "Installing Linux prerequisites..."
-    if ! confirm_or_exit "Install missing packages with sudo apt-get?"; then
-        log_fatal "Aborted by user (missing prerequisites)"
+
+    if command -v pacman >/dev/null 2>&1; then
+        # Arch / CachyOS / Manjaro
+        local packages=(wireguard-tools python python-pip postgresql git curl jq)
+        if ! confirm_or_exit "Install missing packages with sudo pacman?"; then
+            log_fatal "Aborted by user (missing prerequisites)"
+        fi
+        run_or_print "sudo pacman -S --needed --noconfirm ${packages[*]}"
+    elif command -v apt-get >/dev/null 2>&1; then
+        # Debian / Ubuntu
+        local packages=(wireguard-tools python3-venv python3-pip postgresql postgresql-contrib git curl jq)
+        if ! confirm_or_exit "Install missing packages with sudo apt-get?"; then
+            log_fatal "Aborted by user (missing prerequisites)"
+        fi
+        run_or_print "sudo apt-get update -qq"
+        run_or_print "sudo apt-get install -y -qq ${packages[*]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        # Fedora / RHEL
+        local packages=(wireguard-tools python3 python3-pip postgresql-server postgresql git curl jq)
+        if ! confirm_or_exit "Install missing packages with sudo dnf?"; then
+            log_fatal "Aborted by user (missing prerequisites)"
+        fi
+        run_or_print "sudo dnf install -y -q ${packages[*]}"
+    else
+        log_fatal "Unsupported package manager. Install manually: wireguard-tools python3 python3-pip postgresql git curl jq"
     fi
-    run_or_print "sudo apt-get update -qq"
-    run_or_print "sudo apt-get install -y -qq ${packages[*]}"
 }
 
 install_macos_prereqs() {
@@ -207,6 +218,12 @@ ensure_postgres() {
         if psql -d personal_koi -Atc "SELECT 1" >/dev/null 2>&1; then
             log_info "PostgreSQL already ready (personal_koi reachable via local socket)"
             return 0
+        fi
+        # Arch/CachyOS: PostgreSQL requires manual initdb before first start
+        local pgdata="/var/lib/postgres/data"
+        if command -v pacman >/dev/null 2>&1 && [[ ! -f "$pgdata/PG_VERSION" ]]; then
+            log_info "Arch Linux detected — initializing PostgreSQL data directory..."
+            run_or_print "sudo -u postgres initdb -D '$pgdata'"
         fi
         run_or_print "sudo systemctl enable --now postgresql"
         run_or_print "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\" | grep -q 1 || sudo -u postgres createuser -s '${DB_USER}'"
