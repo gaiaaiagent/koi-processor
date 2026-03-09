@@ -97,6 +97,15 @@ _VALID_TRANSITIONS = {
     "withdrawn":       set(),              # terminal
 }
 
+# Transitions that require preconditions beyond just the state machine
+_TRANSITION_PRECONDITIONS = {
+    "ledger_anchored": lambda row: (
+        bool(row.get("content_hash") and row.get("ledger_iri")),
+        "Cannot transition to ledger_anchored: requires content_hash and ledger_iri "
+        "(call prepare-anchor first, then actual anchoring when service account is funded)"
+    ),
+}
+
 
 def _canonical_json(claimant_uri: str, statement: str, claim_type: str, metadata: dict) -> str:
     """Deterministic JSON serialization of claim content fields."""
@@ -173,7 +182,7 @@ def create_router(pool, caps=None):
         normalize_entity_text = helpers['normalize_entity_text']
 
         async with pool.acquire() as conn:
-            # 1. Verify claimant exists
+            # 1. Verify claimant exists (before transaction — read-only)
             claimant = await conn.fetchrow(
                 "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
                 body.claimant_uri,
@@ -184,7 +193,7 @@ def create_router(pool, caps=None):
             # 2. Generate content-addressable RID
             claim_rid = _claim_rid(body.claimant_uri, body.statement, body.claim_type, body.metadata)
 
-            # 3. Idempotency check
+            # 3. Idempotency check (before transaction — read-only)
             existing = await conn.fetchrow(
                 "SELECT * FROM claims WHERE claim_rid = $1", claim_rid
             )
@@ -192,73 +201,66 @@ def create_router(pool, caps=None):
                 logger.info(f"claim.idempotent_hit rid={claim_rid}")
                 return _row_to_claim(existing)
 
-            # 4. Register claim as entity (URI derived from RID for version isolation)
-            entity_uri = generate_entity_uri(claim_rid, 'Claim')
-            await conn.execute("""
-                INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text)
-                VALUES ($1, $2, 'Claim', $3)
-                ON CONFLICT (fuseki_uri) DO NOTHING
-            """, entity_uri, body.statement[:200], normalize_entity_text(body.statement[:200]))
+            # All writes in a single transaction — no partial state on failure
+            async with conn.transaction():
+                # 4. Register claim as entity (URI derived from RID for version isolation)
+                entity_uri = generate_entity_uri(claim_rid, 'Claim')
+                await conn.execute("""
+                    INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text)
+                    VALUES ($1, $2, 'Claim', $3)
+                    ON CONFLICT (fuseki_uri) DO NOTHING
+                """, entity_uri, body.statement[:200], normalize_entity_text(body.statement[:200]))
 
-            # 5. Write makes_claim relationship edge
-            try:
+                # 5. Write makes_claim relationship edge
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
                     VALUES ($1, 'makes_claim', $2, 1.0, 'claims_engine')
                     ON CONFLICT DO NOTHING
                 """, body.claimant_uri, entity_uri)
-            except Exception as e:
-                logger.warning(f"Failed to create makes_claim relationship: {e}")
 
-            # 6. Optional: link claim to subject entity via 'about' predicate
-            if body.about_uri:
-                target = await conn.fetchrow(
-                    "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
-                    body.about_uri,
-                )
-                if target:
-                    try:
+                # 6. Optional: link claim to subject entity via 'about' predicate
+                if body.about_uri:
+                    target = await conn.fetchrow(
+                        "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                        body.about_uri,
+                    )
+                    if target:
                         await conn.execute("""
                             INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
                             VALUES ($1, 'about', $2, 1.0, 'claims_engine')
                             ON CONFLICT DO NOTHING
                         """, entity_uri, body.about_uri)
-                    except Exception as e:
-                        logger.warning(f"Failed to create about relationship: {e}")
 
-            # 7. Handle versioning — link to superseded claim
-            if body.supersedes_rid:
-                old = await conn.fetchrow(
-                    "SELECT entity_uri FROM claims WHERE claim_rid = $1", body.supersedes_rid
-                )
-                if old and old['entity_uri']:
-                    try:
+                # 7. Handle versioning — link to superseded claim
+                if body.supersedes_rid:
+                    old = await conn.fetchrow(
+                        "SELECT entity_uri FROM claims WHERE claim_rid = $1", body.supersedes_rid
+                    )
+                    if old and old['entity_uri']:
                         await conn.execute("""
                             INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
                             VALUES ($1, 'supersedes_claim', $2, 1.0, 'claims_engine')
                             ON CONFLICT DO NOTHING
                         """, entity_uri, old['entity_uri'])
-                    except Exception as e:
-                        logger.warning(f"Failed to create supersedes_claim relationship: {e}")
 
-            # 8. Insert claim row
-            row = await conn.fetchrow("""
-                INSERT INTO claims (claim_rid, entity_uri, claimant_uri, statement,
-                                    claim_type, source_document, ai_confidence,
-                                    supersedes_rid, metadata, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-                RETURNING *
-            """,
-                claim_rid, entity_uri, body.claimant_uri, body.statement,
-                body.claim_type, body.source_document, body.ai_confidence,
-                body.supersedes_rid, _json_dumps(body.metadata), body.created_by,
-            )
+                # 8. Insert claim row
+                row = await conn.fetchrow("""
+                    INSERT INTO claims (claim_rid, entity_uri, claimant_uri, statement,
+                                        claim_type, source_document, ai_confidence,
+                                        supersedes_rid, metadata, created_by)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+                    RETURNING *
+                """,
+                    claim_rid, entity_uri, body.claimant_uri, body.statement,
+                    body.claim_type, body.source_document, body.ai_confidence,
+                    body.supersedes_rid, _json_dumps(body.metadata), body.created_by,
+                )
 
-            # 9. Log initial state
-            await conn.execute("""
-                INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
-                VALUES ($1, NULL, 'self_reported', $2, 'created')
-            """, claim_rid, body.created_by)
+                # 9. Log initial state
+                await conn.execute("""
+                    INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
+                    VALUES ($1, NULL, 'self_reported', $2, 'created')
+                """, claim_rid, body.created_by)
 
         logger.info(f"claim.create rid={claim_rid} claimant={body.claimant_uri} type={body.claim_type}")
         return _row_to_claim(row)
@@ -375,17 +377,24 @@ def create_router(pool, caps=None):
                     detail=f"Invalid transition {current} → {new_level}. Allowed: {sorted(allowed) or 'none (terminal state)'}",
                 )
 
-            updated = await conn.fetchrow("""
-                UPDATE claims
-                SET verification = $2, updated_at = NOW()
-                WHERE claim_rid = $1
-                RETURNING *
-            """, rid, new_level)
+            # Check preconditions (e.g. ledger_anchored requires content_hash + ledger_iri)
+            if new_level in _TRANSITION_PRECONDITIONS:
+                ok, msg = _TRANSITION_PRECONDITIONS[new_level](row)
+                if not ok:
+                    raise HTTPException(status_code=409, detail=msg)
 
-            await conn.execute("""
-                INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
-                VALUES ($1, $2, $3, $4, $5)
-            """, rid, current, new_level, body.actor, body.reason)
+            async with conn.transaction():
+                updated = await conn.fetchrow("""
+                    UPDATE claims
+                    SET verification = $2, updated_at = NOW()
+                    WHERE claim_rid = $1
+                    RETURNING *
+                """, rid, new_level)
+
+                await conn.execute("""
+                    INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, rid, current, new_level, body.actor, body.reason)
 
         logger.info(f"claim.verify rid={rid} {current}→{new_level} actor={body.actor}")
         return _row_to_claim(updated)
@@ -404,36 +413,39 @@ def create_router(pool, caps=None):
             if not row:
                 raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
 
-            # Verify evidence entity exists
+            # Verify evidence entity exists AND is type Evidence (Finding 5)
             evidence = await conn.fetchrow(
-                "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                "SELECT fuseki_uri, entity_type FROM entity_registry WHERE fuseki_uri = $1",
                 body.evidence_uri,
             )
             if not evidence:
                 raise HTTPException(status_code=404, detail=f"Evidence entity not found: {body.evidence_uri}")
+            if evidence["entity_type"] != "Evidence":
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Entity {body.evidence_uri} is type '{evidence['entity_type']}', not 'Evidence'. "
+                           f"Only Evidence entities can be linked via evidences_claim.",
+                )
 
-            # Write evidences_claim relationship
-            try:
+            async with conn.transaction():
+                # Write evidences_claim relationship
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
                     VALUES ($1, 'evidences_claim', $2, 1.0, 'claims_engine')
                     ON CONFLICT DO NOTHING
                 """, body.evidence_uri, row["entity_uri"])
-            except Exception as e:
-                logger.warning(f"Failed to create evidences_claim relationship: {e}")
-                raise HTTPException(status_code=500, detail=f"Failed to link evidence: {e}")
 
-            # Log the action
-            await conn.execute("""
-                INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
-                VALUES ($1, $2, $2, $3, 'evidence linked', $4::jsonb)
-            """, rid, row["verification"], body.actor,
-                _json_dumps({"evidence_uri": body.evidence_uri}))
+                # Log the action
+                await conn.execute("""
+                    INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
+                    VALUES ($1, $2, $2, $3, 'evidence linked', $4::jsonb)
+                """, rid, row["verification"], body.actor,
+                    _json_dumps({"evidence_uri": body.evidence_uri}))
 
-            # Update timestamp
-            updated = await conn.fetchrow("""
-                UPDATE claims SET updated_at = NOW() WHERE claim_rid = $1 RETURNING *
-            """, rid)
+                # Update timestamp
+                updated = await conn.fetchrow("""
+                    UPDATE claims SET updated_at = NOW() WHERE claim_rid = $1 RETURNING *
+                """, rid)
 
         logger.info(f"claim.link_evidence rid={rid} evidence={body.evidence_uri}")
         return _row_to_claim(updated)
@@ -493,27 +505,46 @@ def create_router(pool, caps=None):
         if body.auto_create and candidates:
             for candidate in candidates:
                 try:
-                    # Resolve claimant to entity URI
                     async with pool.acquire() as conn:
+                        # Resolve claimant to entity URI
+                        claimant_name = candidate.get("claimant_name", "").strip()
                         claimant = await conn.fetchrow("""
                             SELECT fuseki_uri FROM entity_registry
                             WHERE normalized_text = $1 OR entity_text ILIKE $2
                             LIMIT 1
-                        """, candidate.get("claimant_name", "").lower().strip(),
-                            f"%{candidate.get('claimant_name', '')}%")
+                        """, claimant_name.lower(),
+                            f"%{claimant_name}%") if claimant_name else None
 
-                        if claimant:
-                            create_body = ClaimCreateRequest(
-                                claimant_uri=claimant["fuseki_uri"],
-                                statement=candidate["statement"],
-                                claim_type=candidate.get("claim_type", "ecological"),
-                                source_document=body.source_document,
-                                ai_confidence=candidate.get("confidence"),
-                                metadata=candidate.get("metadata", {}),
-                            )
-                            # Reuse create endpoint logic
-                            result = await create_claim(create_body)
-                            created_claims.append(result.claim_rid)
+                        if not claimant:
+                            continue
+
+                        # Resolve about_uri from extracted metadata (Finding 4)
+                        about_uri = None
+                        meta = candidate.get("metadata", {})
+                        subject_location = meta.get("subject_location", "")
+                        if subject_location:
+                            loc = await conn.fetchrow("""
+                                SELECT fuseki_uri FROM entity_registry
+                                WHERE entity_type IN ('Location', 'Bioregion')
+                                  AND (normalized_text = $1 OR entity_text ILIKE $2)
+                                LIMIT 1
+                            """, subject_location.lower().strip(),
+                                f"%{subject_location}%")
+                            if loc:
+                                about_uri = loc["fuseki_uri"]
+
+                        create_body = ClaimCreateRequest(
+                            claimant_uri=claimant["fuseki_uri"],
+                            statement=candidate["statement"],
+                            claim_type=candidate.get("claim_type", "ecological"),
+                            about_uri=about_uri,
+                            source_document=body.source_document,
+                            ai_confidence=candidate.get("confidence"),
+                            metadata=meta,
+                        )
+                        # Reuse create endpoint logic
+                        result = await create_claim(create_body)
+                        created_claims.append(result.claim_rid)
                 except Exception as e:
                     logger.warning(f"Failed to auto-create extracted claim: {e}")
 
