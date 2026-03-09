@@ -108,20 +108,27 @@ _TRANSITION_PRECONDITIONS = {
 }
 
 
-def _canonical_json(claimant_uri: str, statement: str, claim_type: str, metadata: dict) -> str:
-    """Deterministic JSON serialization of claim content fields."""
+def _canonical_json(claimant_uri: str, statement: str, claim_type: str,
+                    about_uri: str | None, metadata: dict) -> str:
+    """Deterministic JSON serialization of claim content fields.
+
+    Includes about_uri so that identical statements about different entities
+    produce distinct RIDs instead of collapsing into the same claim.
+    """
     obj = {
+        "about_uri": about_uri or "",
         "claimant_uri": claimant_uri,
-        "statement": statement,
         "claim_type": claim_type,
         "metadata": metadata,
+        "statement": statement,
     }
     return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
 
 
-def _claim_rid(claimant_uri: str, statement: str, claim_type: str, metadata: dict) -> str:
-    """Content-addressable RID: hash of all content fields."""
-    canonical = _canonical_json(claimant_uri, statement, claim_type, metadata)
+def _claim_rid(claimant_uri: str, statement: str, claim_type: str,
+               about_uri: str | None, metadata: dict) -> str:
+    """Content-addressable RID: hash of all content fields including about_uri."""
+    canonical = _canonical_json(claimant_uri, statement, claim_type, about_uri, metadata)
     h = hashlib.sha256(canonical.encode()).hexdigest()[:16]
     return f"orn:koi-net.claim:{h}"
 
@@ -191,8 +198,9 @@ def create_router(pool, caps=None):
             if not claimant:
                 raise HTTPException(status_code=404, detail=f"Claimant entity not found: {body.claimant_uri}")
 
-            # 2. Generate content-addressable RID
-            claim_rid = _claim_rid(body.claimant_uri, body.statement, body.claim_type, body.metadata)
+            # 2. Generate content-addressable RID (includes about_uri in identity)
+            claim_rid = _claim_rid(body.claimant_uri, body.statement, body.claim_type,
+                                   body.about_uri, body.metadata)
 
             # 3. Idempotency check (before transaction — read-only)
             existing = await conn.fetchrow(
