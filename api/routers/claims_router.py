@@ -198,7 +198,16 @@ def create_router(pool, caps=None):
             if not claimant:
                 raise HTTPException(status_code=404, detail=f"Claimant entity not found: {body.claimant_uri}")
 
-            # 2. Generate content-addressable RID (includes about_uri in identity)
+            # 2. Validate about_uri before it enters the RID hash
+            if body.about_uri:
+                about_exists = await conn.fetchrow(
+                    "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                    body.about_uri,
+                )
+                if not about_exists:
+                    raise HTTPException(status_code=404, detail=f"About entity not found: {body.about_uri}")
+
+            # 3. Generate content-addressable RID (includes about_uri in identity)
             claim_rid = _claim_rid(body.claimant_uri, body.statement, body.claim_type,
                                    body.about_uri, body.metadata)
 
@@ -231,18 +240,13 @@ def create_router(pool, caps=None):
                         ON CONFLICT DO NOTHING
                     """, body.claimant_uri, entity_uri)
 
-                    # 6. Optional: link claim to subject entity via 'about' predicate
+                    # 6. Link claim to subject entity via 'about' predicate (already validated above)
                     if body.about_uri:
-                        target = await conn.fetchrow(
-                            "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
-                            body.about_uri,
-                        )
-                        if target:
-                            await conn.execute("""
-                                INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
-                                VALUES ($1, 'about', $2, 1.0, 'claims_engine')
-                                ON CONFLICT DO NOTHING
-                            """, entity_uri, body.about_uri)
+                        await conn.execute("""
+                            INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
+                            VALUES ($1, 'about', $2, 1.0, 'claims_engine')
+                            ON CONFLICT DO NOTHING
+                        """, entity_uri, body.about_uri)
 
                     # 7. Handle versioning — link to superseded claim
                     if body.supersedes_rid:

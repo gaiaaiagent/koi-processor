@@ -72,8 +72,10 @@ self_reported → peer_reviewed → verified → ledger_anchored (terminal)
 ## RID Strategy
 
 Content-addressable, append-only:
-- `claim_rid = orn:koi-net.claim:{sha256(canonical_json(claimant, statement, type, metadata))[:16]}`
-- Same content → same RID → idempotent
+- `claim_rid = orn:koi-net.claim:{sha256(canonical_json(about_uri, claimant, claim_type, metadata, statement))[:16]}`
+- `about_uri` is part of the identity — same statement about different entities produces distinct RIDs
+- `about_uri` is validated (must exist in entity_registry) before entering the hash
+- Same content → same RID → idempotent (concurrent duplicates caught via unique constraint)
 - Any field change → new RID → new row + `supersedes_rid` link
 
 ## MCP Tools (personal-koi-mcp)

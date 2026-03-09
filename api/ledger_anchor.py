@@ -23,6 +23,8 @@ def _canonical_claim_json(row) -> str:
         meta = json.loads(meta)
 
     obj = {
+        "claim_rid": row["claim_rid"],
+        "entity_uri": row.get("entity_uri") or "",
         "claimant_uri": row["claimant_uri"],
         "statement": row["statement"],
         "claim_type": row["claim_type"],
@@ -30,7 +32,7 @@ def _canonical_claim_json(row) -> str:
         "metadata": meta or {},
     }
 
-    # Include evidence and versioning if present
+    # Include versioning if present
     if row.get("supersedes_rid"):
         obj["supersedes_rid"] = row["supersedes_rid"]
 
