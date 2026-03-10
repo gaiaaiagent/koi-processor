@@ -128,6 +128,9 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
     2. Broadcasts MsgAnchor transaction via regen CLI
     3. Polls for tx confirmation
     4. Returns anchoring result with IRI and timestamp
+
+    On timeout: returns ready_to_anchor=False with tx_hash so the caller
+    can persist and reconcile later (NOT ready_to_anchor=True).
     """
     regen_bin = _check_regen_cli()
 
@@ -201,7 +204,17 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
                 )
 
     if ledger_timestamp is None:
-        logger.warning(f"ledger_anchor.timeout rid={claim_rid} txhash={tx_hash} — tx may still confirm")
+        logger.warning(f"ledger_anchor.timeout rid={claim_rid} txhash={tx_hash}")
+        return {
+            "claim_rid": claim_rid,
+            "content_hash": content_hash,
+            "ready_to_anchor": False,
+            "reason": f"Tx broadcast but confirmation timed out. tx_hash={tx_hash}. "
+                      f"Run POST /claims/{claim_rid}/reconcile to check on-chain status.",
+            "ledger_iri": iri,
+            "ledger_timestamp": None,
+            "tx_hash": tx_hash,
+        }
 
     return {
         "claim_rid": claim_rid,
@@ -211,3 +224,52 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
         "ledger_timestamp": str(ledger_timestamp) if ledger_timestamp else None,
         "tx_hash": tx_hash,
     }
+
+
+def verify_anchor_onchain(ledger_iri: str) -> bool:
+    """Check if an anchor exists on-chain via the Regen REST API.
+
+    Returns True if the anchor is queryable, False otherwise.
+    """
+    import urllib.request
+    verify_url = f"{REGEN_REST_URL}/regen/data/v2/anchor-by-iri/{ledger_iri}"
+    try:
+        with urllib.request.urlopen(verify_url, timeout=10) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def query_tx_status(tx_hash: str) -> dict:
+    """Query a transaction by hash on-chain.
+
+    Returns dict with:
+      - found: bool (whether the tx was found)
+      - code: int or None (0 = success, >0 = failure, None if not found)
+      - raw_log: str (on-chain log, empty if not found)
+      - timestamp: str or None
+
+    Never raises — returns found=False on any error (including missing CLI).
+    """
+    try:
+        regen_bin = _check_regen_cli()
+    except RuntimeError as e:
+        return {"found": False, "code": None, "raw_log": str(e), "timestamp": None}
+    try:
+        result = subprocess.run(
+            [regen_bin, "query", "tx", tx_hash,
+             "--node", REGEN_RPC_URL,
+             "--output", "json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return {"found": False, "code": None, "raw_log": result.stderr.strip(), "timestamp": None}
+        data = json.loads(result.stdout)
+        return {
+            "found": True,
+            "code": data.get("code", -1),
+            "raw_log": data.get("raw_log", ""),
+            "timestamp": data.get("timestamp") or data.get("height"),
+        }
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError) as e:
+        return {"found": False, "code": None, "raw_log": str(e), "timestamp": None}
