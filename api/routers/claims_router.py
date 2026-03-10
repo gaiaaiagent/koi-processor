@@ -99,6 +99,12 @@ _VALID_TRANSITIONS = {
 }
 
 # Transitions that require preconditions beyond just the state machine
+# Allowed entity types for the 'about' predicate on claims
+_ABOUT_ALLOWED_TYPES = {
+    "Practice", "Pattern", "CaseStudy", "Concept", "Project",
+    "Bioregion", "Location", "Organization", "Person",
+}
+
 _TRANSITION_PRECONDITIONS = {
     "ledger_anchored": lambda row: (
         bool(row.get("content_hash") and row.get("ledger_iri")),
@@ -198,14 +204,20 @@ def create_router(pool, caps=None):
             if not claimant:
                 raise HTTPException(status_code=404, detail=f"Claimant entity not found: {body.claimant_uri}")
 
-            # 2. Validate about_uri before it enters the RID hash
+            # 2. Validate about_uri exists and has an allowed type before it enters the RID hash
             if body.about_uri:
-                about_exists = await conn.fetchrow(
-                    "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                about_entity = await conn.fetchrow(
+                    "SELECT fuseki_uri, entity_type FROM entity_registry WHERE fuseki_uri = $1",
                     body.about_uri,
                 )
-                if not about_exists:
+                if not about_entity:
                     raise HTTPException(status_code=404, detail=f"About entity not found: {body.about_uri}")
+                if about_entity["entity_type"] not in _ABOUT_ALLOWED_TYPES:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Entity {body.about_uri} is type '{about_entity['entity_type']}', "
+                               f"not valid for 'about' predicate. Allowed: {sorted(_ABOUT_ALLOWED_TYPES)}",
+                    )
 
             # 3. Generate content-addressable RID (includes about_uri in identity)
             claim_rid = _claim_rid(body.claimant_uri, body.statement, body.claim_type,

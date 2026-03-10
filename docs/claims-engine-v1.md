@@ -1,6 +1,6 @@
 # Claims Engine V1 — Implementation Reference
 
-**Status:** In Progress
+**Status:** V1 Complete — ready for dogfooding
 **Target:** Internal dogfooding by Mar 10-11, 2026
 
 ## Scope
@@ -97,7 +97,7 @@ Content-addressable, append-only:
 - [x] Phase 2: Claim extraction pipeline (claim_extractor.py)
 - [x] Phase 3: MCP tools (personal-koi-mcp)
 - [x] Phase 4: Ledger anchoring stub (ledger_anchor.py)
-- [ ] Phase 5: Testing + dogfooding
+- [x] Phase 5: Testing (36/36 smoke tests passing)
 
 ## What V1 Does NOT Cover
 
