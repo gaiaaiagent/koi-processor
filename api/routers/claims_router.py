@@ -17,6 +17,7 @@ Claims are first-class KOI entities with graph edges (makes_claim, about, eviden
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -82,8 +83,17 @@ class ClaimExtractRequest(BaseModel):
 class AnchorPrepareResponse(BaseModel):
     claim_rid: str
     content_hash: str
+    predicted_ledger_iri: Optional[str] = None
     ready_to_anchor: bool
     reason: Optional[str] = None
+
+
+class AnchorResponse(BaseModel):
+    claim_rid: str
+    content_hash: str
+    ledger_iri: str
+    ledger_timestamp: Optional[str] = None
+    tx_hash: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -601,8 +611,11 @@ def create_router(pool, caps=None):
 
     @router.post("/{rid}/prepare-anchor", response_model=AnchorPrepareResponse)
     async def prepare_anchor(rid: str):
-        """Compute content hash for ledger anchoring. Broadcast is stubbed for V1."""
-        from api.ledger_anchor import compute_content_hash
+        """Non-broadcasting preflight: compute content hash and derive predicted IRI.
+
+        Persists content_hash to the claim but does NOT broadcast to the blockchain.
+        """
+        from api.ledger_anchor import compute_content_hash, derive_ledger_iri
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -619,12 +632,105 @@ def create_router(pool, caps=None):
                 WHERE claim_rid = $1
             """, rid, content_hash)
 
-        logger.info(f"claim.prepare_anchor rid={rid} hash={content_hash[:16]}...")
+        # Derive predicted IRI via CLI (non-fatal if regen binary not available)
+        predicted_iri = None
+        reason = None
+        try:
+            predicted_iri = derive_ledger_iri(content_hash)
+        except RuntimeError as e:
+            reason = str(e)
+        except Exception as e:
+            reason = f"IRI derivation failed: {e}"
+
+        logger.info(f"claim.prepare_anchor rid={rid} hash={content_hash[:16]}... iri={predicted_iri}")
         return AnchorPrepareResponse(
             claim_rid=rid,
             content_hash=content_hash,
-            ready_to_anchor=False,
-            reason="Service account not configured. Ledger anchoring will be enabled when funded.",
+            predicted_ledger_iri=predicted_iri,
+            ready_to_anchor=predicted_iri is not None,
+            reason=reason,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Anchor (Phase 4 — live broadcast)                                    #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/{rid}/anchor", response_model=AnchorResponse)
+    async def anchor_claim(rid: str):
+        """Anchor a verified claim on the Regen Ledger testnet.
+
+        Precondition: claim must be at 'verified' state.
+        Requires content_hash (call prepare-anchor first if missing).
+        """
+        from api.ledger_anchor import broadcast_anchor, compute_content_hash
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM claims WHERE claim_rid = $1", rid
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
+
+            # Precondition: must be at 'verified' state
+            if row["verification"] != "verified":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Claim must be at 'verified' state to anchor "
+                           f"(current: {row['verification']}). "
+                           f"State path: self_reported → peer_reviewed → verified → ledger_anchored",
+                )
+
+            # Ensure content_hash exists
+            content_hash = row.get("content_hash")
+            if not content_hash:
+                content_hash = compute_content_hash(row)
+                await conn.execute("""
+                    UPDATE claims SET content_hash = $2, updated_at = NOW()
+                    WHERE claim_rid = $1
+                """, rid, content_hash)
+
+        # Broadcast anchor via CLI (blocking — may take up to 30s for confirmation)
+        result = await broadcast_anchor(rid, content_hash)
+
+        if not result.get("ready_to_anchor"):
+            raise HTTPException(
+                status_code=503,
+                detail=result.get("reason", "Anchoring not available"),
+            )
+
+        # On success: update claim with ledger data and transition state
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # FOR UPDATE lock for concurrent safety
+                row = await conn.fetchrow(
+                    "SELECT * FROM claims WHERE claim_rid = $1 FOR UPDATE", rid
+                )
+
+                await conn.execute("""
+                    UPDATE claims
+                    SET ledger_iri = $2, ledger_timestamp = $3, content_hash = $4,
+                        verification = 'ledger_anchored', updated_at = NOW()
+                    WHERE claim_rid = $1
+                """, rid, result["ledger_iri"], result.get("ledger_timestamp"),
+                    content_hash)
+
+                await conn.execute("""
+                    INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
+                    VALUES ($1, 'verified', 'ledger_anchored', 'ledger_anchor_service',
+                            'Anchored on Regen Ledger testnet', $2::jsonb)
+                """, rid, json.dumps({
+                    "tx_hash": result.get("tx_hash"),
+                    "ledger_iri": result["ledger_iri"],
+                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-upgrade"),
+                }))
+
+        logger.info(f"claim.anchored rid={rid} iri={result['ledger_iri']} tx={result.get('tx_hash')}")
+        return AnchorResponse(
+            claim_rid=rid,
+            content_hash=content_hash,
+            ledger_iri=result["ledger_iri"],
+            ledger_timestamp=result.get("ledger_timestamp"),
+            tx_hash=result.get("tx_hash"),
         )
 
     return router
