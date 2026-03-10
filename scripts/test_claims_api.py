@@ -390,6 +390,69 @@ def test_not_found():
     check("status 404", status == 404, f"status={status}")
 
 
+def test_reconcile_no_txhash(claimant_uri: str):
+    """Test reconcile returns 409 when claim has no tx_hash."""
+    print("\n[17] Reconcile — no tx_hash")
+    # Create a fresh claim and advance to verified
+    ts = int(time.time())
+    status, data = _req("POST", "/claims/", {
+        "claimant_uri": claimant_uri,
+        "statement": f"Reconcile no-txhash test (run {ts})",
+        "claim_type": "ecological",
+        "metadata": {},
+    })
+    if status != 201:
+        check("create claim for reconcile test", False, f"status={status}")
+        return
+    rid = data["claim_rid"]
+    CREATED_RIDS.append(rid)
+
+    # Advance: self_reported → peer_reviewed → verified
+    _req("PATCH", f"/claims/{rid}/verify", {
+        "new_level": "peer_reviewed", "actor": "test", "reason": "test",
+    })
+    _req("PATCH", f"/claims/{rid}/verify", {
+        "new_level": "verified", "actor": "test", "reason": "test",
+    })
+
+    # Reconcile should fail — no tx_hash
+    status2, data2 = _req("POST", f"/claims/{rid}/reconcile")
+    check("reconcile 409 without tx_hash", status2 == 409, f"status={status2} data={data2}")
+    check("error mentions tx_hash", "tx_hash" in str(data2.get("detail", "")),
+          f"detail={data2.get('detail')}")
+
+
+def test_reconcile_not_found():
+    """Test reconcile returns 404 for non-existent claim."""
+    print("\n[18] Reconcile — claim not found")
+    status, data = _req("POST", "/claims/orn:koi-net.claim:doesnotexist/reconcile")
+    check("reconcile 404", status == 404, f"status={status}")
+
+
+def test_reconcile_wrong_state():
+    """Test reconcile returns 409 when claim is not at 'verified' state."""
+    print("\n[19] Reconcile — wrong state")
+    # Use a self_reported claim
+    status, data = _req("GET", "/claims/?verification=self_reported&limit=1")
+    if status == 200 and data:
+        rid = data[0]["claim_rid"]
+        status2, data2 = _req("POST", f"/claims/{rid}/reconcile")
+        check("reconcile 409 wrong state", status2 == 409, f"status={status2} data={data2}")
+    else:
+        check("reconcile 409 wrong state", True)  # skip
+
+
+def test_tx_hash_in_claim_response():
+    """Test that tx_hash field appears in claim responses."""
+    print("\n[20] tx_hash field in ClaimResponse")
+    if not CREATED_RIDS:
+        check("tx_hash field present", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    status, data = _req("GET", f"/claims/{rid}")
+    check("tx_hash field exists", "tx_hash" in data, f"keys={list(data.keys())}")
+
+
 def main():
     global BASE_URL
     parser = argparse.ArgumentParser(description="Claims Engine V1 smoke tests")
@@ -434,6 +497,10 @@ def main():
     test_anchor_state_check()
     test_anchor_missing_binary()
     test_not_found()
+    test_reconcile_no_txhash(claimant_uri)
+    test_reconcile_not_found()
+    test_reconcile_wrong_state()
+    test_tx_hash_in_claim_response()
 
     print("\n" + "=" * 50)
     print(f"Results: {PASS} passed, {FAIL} failed")

@@ -1,4 +1,4 @@
-"""Claims Engine V1 endpoints: create, search, verify, evidence linking, extraction, anchoring.
+"""Claims Engine V1 endpoints: create, search, verify, evidence linking, extraction, anchoring, reconcile.
 
 Implements the Claims Engine API:
   POST /claims/           — create a new impact claim (entity + graph edges + SQL)
@@ -9,6 +9,8 @@ Implements the Claims Engine API:
   GET  /claims/{rid}/history — verification audit log
   POST /claims/extract    — AI extraction from document text
   POST /claims/{rid}/prepare-anchor — compute content hash for ledger anchoring
+  POST /claims/{rid}/anchor — broadcast anchor to Regen Ledger
+  POST /claims/{rid}/reconcile — check on-chain status of timed-out broadcast
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
@@ -55,6 +57,7 @@ class ClaimResponse(BaseModel):
     ai_confidence: Optional[float]
     content_hash: Optional[str]
     ledger_iri: Optional[str]
+    tx_hash: Optional[str] = None
     supersedes_rid: Optional[str]
     metadata: Dict[str, Any]
     evidence: Optional[List[Dict[str, Any]]] = None
@@ -94,6 +97,24 @@ class AnchorResponse(BaseModel):
     ledger_iri: str
     ledger_timestamp: Optional[str] = None
     tx_hash: Optional[str] = None
+
+
+class AnchorPendingResponse(BaseModel):
+    claim_rid: str
+    content_hash: str
+    tx_hash: Optional[str] = None
+    ledger_iri: Optional[str] = None
+    status: str = "pending"
+    message: str = ""
+
+
+class ReconcileResponse(BaseModel):
+    claim_rid: str
+    status: str  # "anchored", "pending", "failed"
+    tx_hash: Optional[str] = None
+    ledger_iri: Optional[str] = None
+    ledger_timestamp: Optional[str] = None
+    message: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +189,7 @@ def _row_to_claim(row, evidence=None) -> ClaimResponse:
         ai_confidence=float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
         content_hash=row.get("content_hash"),
         ledger_iri=row.get("ledger_iri"),
+        tx_hash=row.get("tx_hash"),
         supersedes_rid=row.get("supersedes_rid"),
         metadata=meta or {},
         evidence=evidence,
@@ -655,14 +677,21 @@ def create_router(pool, caps=None):
     # Anchor (Phase 4 — live broadcast)                                    #
     # ------------------------------------------------------------------ #
 
-    @router.post("/{rid}/anchor", response_model=AnchorResponse)
+    @router.post("/{rid}/anchor", responses={
+        200: {"model": AnchorResponse, "description": "Anchor confirmed on-chain"},
+        202: {"model": AnchorPendingResponse, "description": "Tx broadcast but on-chain verification pending"},
+    })
     async def anchor_claim(rid: str):
         """Anchor a verified claim on the Regen Ledger testnet.
 
         Precondition: claim must be at 'verified' state.
         Requires content_hash (call prepare-anchor first if missing).
+
+        Returns AnchorResponse (200) on full success, or
+        AnchorPendingResponse (202) if tx broadcast succeeded but on-chain
+        verification is not yet available.
         """
-        from api.ledger_anchor import broadcast_anchor, compute_content_hash
+        from api.ledger_anchor import broadcast_anchor, compute_content_hash, verify_anchor_onchain
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -693,12 +722,60 @@ def create_router(pool, caps=None):
         result = await broadcast_anchor(rid, content_hash)
 
         if not result.get("ready_to_anchor"):
+            # Timeout or pre-broadcast failure — persist tx_hash + ledger_iri if available
+            tx_hash = result.get("tx_hash")
+            ledger_iri = result.get("ledger_iri")
+            if tx_hash:
+                # Broadcast happened but confirmation timed out — save for reconciliation
+                async with pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE claims SET tx_hash = $2, ledger_iri = $3, updated_at = NOW()
+                        WHERE claim_rid = $1
+                    """, rid, tx_hash, ledger_iri)
+                from starlette.responses import JSONResponse
+                return JSONResponse(
+                    status_code=202,
+                    content=AnchorPendingResponse(
+                        claim_rid=rid,
+                        content_hash=content_hash,
+                        tx_hash=tx_hash,
+                        ledger_iri=ledger_iri,
+                        status="pending",
+                        message=result.get("reason", "Tx broadcast but confirmation timed out. "
+                                f"Call POST /claims/{rid}/reconcile to finalize."),
+                    ).model_dump(),
+                )
+            # Pre-broadcast failure (key not found, insufficient funds, etc.)
             raise HTTPException(
                 status_code=503,
                 detail=result.get("reason", "Anchoring not available"),
             )
 
-        # On success: update claim with ledger data and transition state
+        # Broadcast succeeded and tx confirmed — verify anchor on-chain before transitioning
+        anchor_verified = verify_anchor_onchain(result["ledger_iri"])
+
+        if not anchor_verified:
+            # Tx confirmed but anchor not yet queryable (indexing lag)
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claims SET tx_hash = $2, ledger_iri = $3, updated_at = NOW()
+                    WHERE claim_rid = $1
+                """, rid, result.get("tx_hash"), result["ledger_iri"])
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                status_code=202,
+                content=AnchorPendingResponse(
+                    claim_rid=rid,
+                    content_hash=content_hash,
+                    tx_hash=result.get("tx_hash"),
+                    ledger_iri=result["ledger_iri"],
+                    status="pending",
+                    message=f"Tx broadcast succeeded but on-chain verification not yet available. "
+                            f"Call POST /claims/{rid}/reconcile to finalize.",
+                ).model_dump(),
+            )
+
+        # Full success: update claim with ledger data and transition state
         # Parse ledger_timestamp string to datetime for TIMESTAMPTZ column
         from datetime import datetime as _dt
         ledger_ts = None
@@ -719,9 +796,9 @@ def create_router(pool, caps=None):
                 await conn.execute("""
                     UPDATE claims
                     SET ledger_iri = $2, ledger_timestamp = $3, content_hash = $4,
-                        verification = 'ledger_anchored', updated_at = NOW()
+                        tx_hash = $5, verification = 'ledger_anchored', updated_at = NOW()
                     WHERE claim_rid = $1
-                """, rid, result["ledger_iri"], ledger_ts, content_hash)
+                """, rid, result["ledger_iri"], ledger_ts, content_hash, result.get("tx_hash"))
 
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
@@ -740,6 +817,139 @@ def create_router(pool, caps=None):
             ledger_iri=result["ledger_iri"],
             ledger_timestamp=result.get("ledger_timestamp"),
             tx_hash=result.get("tx_hash"),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Reconcile (check on-chain status of timed-out broadcasts)            #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/{rid}/reconcile", response_model=ReconcileResponse)
+    async def reconcile_claim(rid: str):
+        """Check on-chain status of a claim with a pending broadcast.
+
+        For claims that have a tx_hash but haven't transitioned to ledger_anchored
+        (e.g., broadcast timed out). Queries the tx on-chain and finalizes state.
+        """
+        from api.ledger_anchor import query_tx_status, verify_anchor_onchain
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM claims WHERE claim_rid = $1", rid
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
+
+            if row["verification"] != "verified":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Reconcile requires claim at 'verified' state "
+                           f"(current: {row['verification']})",
+                )
+
+            tx_hash = row.get("tx_hash")
+            if not tx_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No tx_hash on this claim. Nothing to reconcile. "
+                           "Use POST /claims/{rid}/anchor to broadcast.",
+                )
+
+        # Query tx status on-chain
+        tx_status = query_tx_status(tx_hash)
+
+        if not tx_status["found"]:
+            # Tx not yet indexed — could be propagation delay
+            return ReconcileResponse(
+                claim_rid=rid,
+                status="pending",
+                tx_hash=tx_hash,
+                ledger_iri=row.get("ledger_iri"),
+                message="Transaction not yet indexed on-chain. Retry reconcile later.",
+            )
+
+        if tx_status["code"] != 0:
+            # Tx definitively failed on-chain — clear tx_hash + ledger_iri, allow re-anchor
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claims SET tx_hash = NULL, ledger_iri = NULL, updated_at = NOW()
+                    WHERE claim_rid = $1
+                """, rid)
+            return ReconcileResponse(
+                claim_rid=rid,
+                status="failed",
+                tx_hash=tx_hash,
+                message=f"Transaction failed on-chain (code={tx_status['code']}). "
+                        f"tx_hash and ledger_iri cleared. You may re-anchor.",
+            )
+
+        # Tx confirmed (code=0) — verify anchor presence via REST
+        ledger_iri = row.get("ledger_iri")
+        if not ledger_iri:
+            # Shouldn't happen (we store ledger_iri on broadcast), but handle gracefully
+            return ReconcileResponse(
+                claim_rid=rid,
+                status="pending",
+                tx_hash=tx_hash,
+                message="Tx confirmed but ledger_iri not stored. Re-anchor to derive IRI.",
+            )
+
+        anchor_present = verify_anchor_onchain(ledger_iri)
+        if not anchor_present:
+            # Tx confirmed but anchor not yet queryable via REST (indexing lag)
+            return ReconcileResponse(
+                claim_rid=rid,
+                status="pending",
+                tx_hash=tx_hash,
+                ledger_iri=ledger_iri,
+                message="Tx confirmed but anchor not yet indexed via REST. Retry reconcile.",
+            )
+
+        # Full success — transition to ledger_anchored
+        from datetime import datetime as _dt
+        ledger_ts = None
+        ts_raw = tx_status.get("timestamp")
+        if ts_raw:
+            try:
+                ledger_ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                ledger_ts = datetime.now(timezone.utc)
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT * FROM claims WHERE claim_rid = $1 FOR UPDATE", rid
+                )
+                if row["verification"] != "verified":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Claim state changed during reconcile (now: {row['verification']})",
+                    )
+
+                await conn.execute("""
+                    UPDATE claims
+                    SET ledger_timestamp = $2, verification = 'ledger_anchored', updated_at = NOW()
+                    WHERE claim_rid = $1
+                """, rid, ledger_ts)
+
+                await conn.execute("""
+                    INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
+                    VALUES ($1, 'verified', 'ledger_anchored', 'reconcile_service',
+                            'Reconciled: tx confirmed and anchor verified on-chain', $2::jsonb)
+                """, rid, json.dumps({
+                    "tx_hash": tx_hash,
+                    "ledger_iri": ledger_iri,
+                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-upgrade"),
+                    "reconciled": True,
+                }))
+
+        logger.info(f"claim.reconciled rid={rid} iri={ledger_iri} tx={tx_hash}")
+        return ReconcileResponse(
+            claim_rid=rid,
+            status="anchored",
+            tx_hash=tx_hash,
+            ledger_iri=ledger_iri,
+            ledger_timestamp=str(ts_raw) if ts_raw else None,
+            message="Claim successfully reconciled and transitioned to ledger_anchored.",
         )
 
     return router
