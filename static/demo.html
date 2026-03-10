@@ -315,8 +315,13 @@
 
     async function loadOrgs() {
       try {
-        const { data } = await api('/entities?entity_type=Organization&limit=200');
-        const entities = data.entities || data;
+        let { data } = await api('/entities?entity_type=Organization&limit=200');
+        let entities = data.entities || data;
+        // Prod DB uses UPPERCASE entity types; fall back if mixed-case returns nothing
+        if (entities.length === 0) {
+          ({ data } = await api('/entities?entity_type=ORGANIZATION&limit=200'));
+          entities = data.entities || data;
+        }
         orgList = entities.map(e => ({ uri: e.fuseki_uri, name: e.entity_text })).sort((a, b) => a.name.localeCompare(b.name));
         orgMap = Object.fromEntries(orgList.map(o => [o.uri, o.name]));
         populateOrgDropdowns();
@@ -772,8 +777,12 @@ Zero Foodprint awarded $450,000 in grants to 15 farms across California in 2023 
         let claimantUri = null;
         if (c.claimant_name) {
           try {
-            const { data } = await api(`/entity-search?query=${encodeURIComponent(c.claimant_name)}&entity_type=Organization&limit=1`);
-            const results = data.results || data;
+            let { data } = await api(`/entity-search?query=${encodeURIComponent(c.claimant_name)}&entity_type=Organization&limit=1`);
+            let results = data.results || data;
+            if (results.length === 0) {
+              ({ data } = await api(`/entity-search?query=${encodeURIComponent(c.claimant_name)}&entity_type=ORGANIZATION&limit=1`));
+              results = data.results || data;
+            }
             if (results.length > 0) claimantUri = results[0].fuseki_uri || results[0].uri;
           } catch (e) { /* ignore */ }
         }
