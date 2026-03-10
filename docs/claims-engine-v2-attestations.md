@@ -3,6 +3,7 @@
 **Status:** Design Document (Mar 10, 2026)
 **Prerequisite:** Claims Engine V1 + V2 Hardening (deployed Mar 9, 2026)
 **Author:** Darren Zal
+**See also:** [Claims Engine V1 — Current State & Roadmap](claims-engine-v1.md)
 
 ---
 

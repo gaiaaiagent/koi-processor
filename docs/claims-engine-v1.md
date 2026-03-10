@@ -3,6 +3,7 @@
 **Status:** V1 Complete + V2 Hardening Deployed (Mar 9, 2026)
 **Environment:** Live on `regen-upgrade` testnet
 **Dogfooding:** 49 claims across 3 organizations (CEC, Blue Forest, ZFP)
+**Next:** [V2 Attestation Layer Design](claims-engine-v2-attestations.md)
 
 ---
 
