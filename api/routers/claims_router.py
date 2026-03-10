@@ -699,6 +699,16 @@ def create_router(pool, caps=None):
             )
 
         # On success: update claim with ledger data and transition state
+        # Parse ledger_timestamp string to datetime for TIMESTAMPTZ column
+        from datetime import datetime as _dt
+        ledger_ts = None
+        ts_str = result.get("ledger_timestamp")
+        if ts_str:
+            try:
+                ledger_ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                ledger_ts = datetime.now(timezone.utc)
+
         async with pool.acquire() as conn:
             async with conn.transaction():
                 # FOR UPDATE lock for concurrent safety
@@ -711,8 +721,7 @@ def create_router(pool, caps=None):
                     SET ledger_iri = $2, ledger_timestamp = $3, content_hash = $4,
                         verification = 'ledger_anchored', updated_at = NOW()
                     WHERE claim_rid = $1
-                """, rid, result["ledger_iri"], result.get("ledger_timestamp"),
-                    content_hash)
+                """, rid, result["ledger_iri"], ledger_ts, content_hash)
 
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)

@@ -206,12 +206,16 @@ def test_history(rid: str):
 
 
 def test_prepare_anchor(rid: str):
-    """Test content hash computation."""
+    """Test content hash computation and IRI prediction."""
     print("\n[9] Prepare anchor")
     status, data = _req("POST", f"/claims/{rid}/prepare-anchor")
     check("status 200", status == 200, f"status={status}")
     check("content_hash present", bool(data.get("content_hash")), str(data))
-    check("ready_to_anchor=false", data.get("ready_to_anchor") is False, str(data))
+    # ready_to_anchor depends on whether regen CLI is available
+    if data.get("predicted_ledger_iri"):
+        check("ready_to_anchor=true (regen CLI available)", data.get("ready_to_anchor") is True, str(data))
+    else:
+        check("ready_to_anchor=false (no regen CLI)", data.get("ready_to_anchor") is False, str(data))
 
 
 def test_entity_graph(claimant_uri: str, rid: str):
