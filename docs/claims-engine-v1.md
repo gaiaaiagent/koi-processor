@@ -1,7 +1,7 @@
-# Claims Engine V1 — Implementation Reference
+# Claims Engine — Implementation Reference
 
-**Status:** V1 Complete + Testnet Anchoring — live on regen-upgrade
-**Target:** Internal dogfooding by Mar 10-11, 2026
+**Status:** V1 Complete + V2 Hardening Deployed (Mar 9, 2026) — live on regen-upgrade testnet
+**Target:** Internal dogfooding (Phase 3)
 
 ## Scope
 
@@ -59,7 +59,8 @@ Three authoritative sources:
 | GET | /claims/{rid}/history | Verification audit log |
 | POST | /claims/extract | AI extraction from document text |
 | POST | /claims/{rid}/prepare-anchor | Compute content hash + predict IRI (non-broadcasting) |
-| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger testnet |
+| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger testnet (returns 200 or 202 pending) |
+| POST | /claims/{rid}/reconcile | Check on-chain status of timed-out broadcast |
 
 ## Verification State Machine
 
@@ -90,6 +91,7 @@ Content-addressable, append-only:
 | extract_claims | POST /claims/extract |
 | link_evidence | POST /claims/{rid}/evidence |
 | anchor_claim | POST /claims/{rid}/anchor |
+| reconcile_claim | POST /claims/{rid}/reconcile |
 
 ## Build Status
 
@@ -99,7 +101,8 @@ Content-addressable, append-only:
 - [x] Phase 2: Claim extraction pipeline (claim_extractor.py)
 - [x] Phase 3: MCP tools (personal-koi-mcp)
 - [x] Phase 4: Ledger anchoring — live testnet via regen CLI (ledger_anchor.py)
-- [x] Phase 5: Testing (40+ smoke tests passing)
+- [x] Phase 5: Testing (46 smoke tests + 16 pytest passing)
+- [x] Phase 6: V2 Hardening — ghost anchor fix, reconcile endpoint, 202 pending responses
 
 ## Ledger Anchoring
 
@@ -118,6 +121,57 @@ Claims at `verified` state can be anchored on the Regen Ledger `regen-upgrade` t
 - `REGEN_KEY_NAME=claims-service`
 
 **Verification:** `GET https://api-regen-upgrade.vitwit.com/regen/data/v2/anchor-by-iri/{iri}`
+
+## V2 Hardening (Mar 9, 2026)
+
+### Ghost Anchor Bug Fix
+
+**Problem:** `broadcast_anchor()` polled for tx confirmation up to 30s. On timeout, it returned `ready_to_anchor: True` with `ledger_timestamp: None`. The router then transitioned the claim to `ledger_anchored` without confirming the tx landed on-chain — creating ghost anchors.
+
+**Fix:** Timeout now returns `ready_to_anchor: False` with `tx_hash` for later reconciliation. The claim stays at `verified` state.
+
+### Reconcile Endpoint
+
+`POST /claims/{rid}/reconcile` — for claims with a `tx_hash` but still at `verified` state:
+
+| On-chain status | Action | Response |
+|-----------------|--------|----------|
+| Tx confirmed + anchor queryable | Transition to `ledger_anchored` | `status: "anchored"` |
+| Tx confirmed + anchor not indexed | Preserve tx_hash, don't transition | `status: "pending"` |
+| Tx failed (code != 0) | Clear tx_hash + ledger_iri | `status: "failed"` |
+| Tx not found (not indexed yet) | Preserve tx_hash | `status: "pending"` |
+
+### 202 Pending Response
+
+`/anchor` now returns `AnchorPendingResponse` (HTTP 202) when:
+- Broadcast succeeded but polling timed out (tx_hash present, no confirmation)
+- Broadcast succeeded and tx confirmed, but REST anchor query fails (indexing lag)
+
+Client calls `/reconcile` to finalize.
+
+### Schema Changes
+
+- Migration 065: `ALTER TABLE claims ADD COLUMN IF NOT EXISTS tx_hash TEXT`
+- `tx_hash` exposed in `ClaimResponse` model and MCP `get_claim` tool
+
+### Key Files
+
+| File | Changes |
+|------|---------|
+| `api/ledger_anchor.py` | Timeout fix, `verify_anchor_onchain()`, `query_tx_status()` (never raises) |
+| `api/routers/claims_router.py` | `AnchorPendingResponse`, `ReconcileResponse`, `/reconcile` endpoint, 202 paths |
+| `tests/test_claims_reconcile.py` | 16 pytest tests (in-process ASGI + monkeypatch) |
+| `scripts/test_claims_api.py` | 4 HTTP smoke tests (tests 17-20) |
+
+### Testing
+
+```bash
+# Pytest (monkeypatched, no live network needed)
+pytest tests/test_claims_reconcile.py -v
+
+# HTTP smoke suite (requires running server)
+python -m scripts.test_claims_api --base-url http://localhost:8351
+```
 
 ## What V1 Does NOT Cover
 

@@ -504,6 +504,32 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
+## Claims Engine V2 Hardening (2026-03-09)
+
+Status: deployed to koi-server (`server/stable` @ `1903b9a9`), 62 tests passing.
+
+**Ghost anchor bug fix:** `broadcast_anchor()` timeout now returns `ready_to_anchor=False` with `tx_hash`. Claim stays at `verified` — no ghost `ledger_anchored` transitions.
+
+**New endpoint:** `POST /claims/{rid}/reconcile` — checks on-chain tx status for claims with pending broadcasts. Four outcomes: `anchored` (transition), `pending` (retry later), `failed` (clear tx_hash, re-anchor), `pending` (tx not indexed yet).
+
+**202 pending response:** `/anchor` returns `AnchorPendingResponse` (HTTP 202) when broadcast succeeds but on-chain confirmation times out or REST verify fails (indexing lag).
+
+Key files:
+- `api/ledger_anchor.py` — `verify_anchor_onchain()`, `query_tx_status()` (never raises)
+- `api/routers/claims_router.py` — `AnchorPendingResponse`, `ReconcileResponse`, `/reconcile` endpoint
+- `migrations/065_claims_tx_hash.sql` — `tx_hash TEXT` column on claims table
+- `tests/test_claims_reconcile.py` — 16 pytest tests (in-process ASGI + monkeypatch)
+- `scripts/test_claims_api.py` — 4 new HTTP smoke tests (tests 17-20)
+
+MCP changes (personal-koi-mcp):
+- `reconcile_claim` tool added
+- `anchor_claim` handler updated for 202 pending responses
+- `evals/claims_smoke.ts` — 8-tool MCP smoke test
+
+Docs: [`docs/claims-engine-v1.md`](docs/claims-engine-v1.md)
+
+---
+
 ## Session History
 
 | Session ID | Date | Scope | Key Work |
