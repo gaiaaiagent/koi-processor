@@ -161,6 +161,43 @@ VAULT_SYNC_REPAIR_ENABLED=false  # enable after soak
 
 All vault-sync endpoints require localhost + admin token.
 
+## Claims Engine
+
+Lightweight, ledger-anchored impact claim system with Regen Ledger testnet integration.
+
+### Features
+
+- Verification state machine: `self_reported → peer_reviewed → verified → ledger_anchored`
+- Content-addressable RIDs (BLAKE2b-256 hash)
+- Entity graph integration (claims as first-class KOI entities)
+- AI-powered claim extraction from documents
+- Live ledger anchoring via `regen` CLI with async 202 pending responses
+- Reconciliation endpoint for blockchain drift detection
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /claims/ | Create claim |
+| GET | /claims/{rid} | Get claim with evidence |
+| GET | /claims/ | Search/filter claims |
+| PATCH | /claims/{rid}/verify | Advance verification level |
+| POST | /claims/{rid}/evidence | Attach evidence entity |
+| POST | /claims/{rid}/anchor | Anchor on Regen Ledger (200 success or 202 pending) |
+| POST | /claims/{rid}/reconcile | Check on-chain status of pending broadcast |
+
+### Testing
+
+```bash
+# Monkeypatched pytest (no live network needed)
+pytest tests/test_claims_reconcile.py -v
+
+# HTTP smoke suite (requires running server)
+python -m scripts.test_claims_api --base-url http://localhost:8351
+```
+
+Docs: [`docs/claims-engine-v1.md`](docs/claims-engine-v1.md)
+
 ### What's New in v2
 - ✅ **RID-based Deduplication**: Prevents duplicate content ingestion
 - ✅ **Version Control**: Tracks content updates with full audit trail
