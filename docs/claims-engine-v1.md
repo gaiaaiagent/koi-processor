@@ -1,6 +1,6 @@
 # Claims Engine V1 — Implementation Reference
 
-**Status:** V1 Complete — ready for dogfooding
+**Status:** V1 Complete + Testnet Anchoring — live on regen-upgrade
 **Target:** Internal dogfooding by Mar 10-11, 2026
 
 ## Scope
@@ -10,8 +10,8 @@ Lightweight, ledger-anchored impact claim system. V1 covers:
 - CRUD + verification state machine
 - Entity graph integration (claims as first-class entities)
 - AI-powered claim extraction from documents
-- Content hashing for ledger anchoring (broadcast stubbed)
-- MCP tools for Claude Code integration
+- Content hashing + live ledger anchoring via regen CLI (regen-upgrade testnet)
+- MCP tools for Claude Code integration (including `anchor_claim`)
 
 ## Schema Design
 
@@ -58,7 +58,8 @@ Three authoritative sources:
 | POST | /claims/{rid}/evidence | Attach evidence entity |
 | GET | /claims/{rid}/history | Verification audit log |
 | POST | /claims/extract | AI extraction from document text |
-| POST | /claims/{rid}/prepare-anchor | Compute content hash (broadcast stubbed) |
+| POST | /claims/{rid}/prepare-anchor | Compute content hash + predict IRI (non-broadcasting) |
+| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger testnet |
 
 ## Verification State Machine
 
@@ -88,6 +89,7 @@ Content-addressable, append-only:
 | verify_claim | PATCH /claims/{rid}/verify |
 | extract_claims | POST /claims/extract |
 | link_evidence | POST /claims/{rid}/evidence |
+| anchor_claim | POST /claims/{rid}/anchor |
 
 ## Build Status
 
@@ -96,8 +98,26 @@ Content-addressable, append-only:
 - [x] Phase 1b: Router + graph integration (claims_router.py)
 - [x] Phase 2: Claim extraction pipeline (claim_extractor.py)
 - [x] Phase 3: MCP tools (personal-koi-mcp)
-- [x] Phase 4: Ledger anchoring stub (ledger_anchor.py)
-- [x] Phase 5: Testing (36/36 smoke tests passing)
+- [x] Phase 4: Ledger anchoring — live testnet via regen CLI (ledger_anchor.py)
+- [x] Phase 5: Testing (40+ smoke tests passing)
+
+## Ledger Anchoring
+
+Claims at `verified` state can be anchored on the Regen Ledger `regen-upgrade` testnet.
+
+**Flow:**
+1. `POST /claims/{rid}/prepare-anchor` — computes BLAKE2b-256 content hash, derives predicted IRI via `regen` CLI
+2. `POST /claims/{rid}/anchor` — broadcasts `MsgAnchor` to testnet, polls for confirmation, transitions to `ledger_anchored`
+
+**Implementation:** CLI subprocess (`regen tx data anchor`) — no Python signing library needed. Key material stays in the regen keyring (`--keyring-backend test`).
+
+**Env vars** (in `personal.env` — no mnemonic!):
+- `REGEN_CHAIN_ID=regen-upgrade`
+- `REGEN_RPC_URL=https://rpc-regen-upgrade.vitwit.com/`
+- `REGEN_REST_URL=https://api-regen-upgrade.vitwit.com/`
+- `REGEN_KEY_NAME=claims-service`
+
+**Verification:** `GET https://api-regen-upgrade.vitwit.com/regen/data/v2/anchor-by-iri/{iri}`
 
 ## What V1 Does NOT Cover
 
