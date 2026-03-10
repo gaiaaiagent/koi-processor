@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Staging Graph Loader - Phase 1 (Optimized with Batch Inserts)
-Loads tree-sitter extracted entities and edges to regen_graph_v2 (staging)
+Graph Loader - Phase 1 (Optimized with Batch Inserts)
+Loads tree-sitter extracted entities and edges to regen_graph (production)
 
-IMPORTANT: This writes to staging graph ONLY, never to production (regen_graph)
+Previously wrote to regen_graph_v2 (staging). Repointed to regen_graph for graph alignment.
 
 Usage (on server):
     python scripts/load_to_staging.py --repo regen-ledger --path /opt/projects/regen-repos/regen-ledger
@@ -41,7 +41,7 @@ DB_CONFIG = {
     "password": os.environ.get("KOI_DB_PASSWORD", "postgres"),
 }
 
-STAGING_GRAPH = "regen_graph_v2"
+STAGING_GRAPH = "regen_graph"
 BATCH_SIZE = 100  # Entities per batch insert
 
 
