@@ -60,6 +60,7 @@ class ClaimResponse(BaseModel):
     tx_hash: Optional[str] = None
     supersedes_rid: Optional[str]
     metadata: Dict[str, Any]
+    created_by: Optional[str] = None
     evidence: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     updated_at: datetime
@@ -192,6 +193,7 @@ def _row_to_claim(row, evidence=None) -> ClaimResponse:
         tx_hash=row.get("tx_hash"),
         supersedes_rid=row.get("supersedes_rid"),
         metadata=meta or {},
+        created_by=row.get("created_by"),
         evidence=evidence,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
