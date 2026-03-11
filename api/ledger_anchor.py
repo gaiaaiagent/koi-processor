@@ -39,7 +39,6 @@ def _canonical_claim_json(row) -> str:
         "claimant_uri": row["claimant_uri"],
         "statement": row["statement"],
         "claim_type": row["claim_type"],
-        "verification": row["verification"],
         "metadata": meta or {},
     }
 
