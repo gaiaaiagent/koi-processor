@@ -274,7 +274,7 @@ async def handle_ledger_entity_event(conn: asyncpg.Connection, event) -> bool:
             ledger_id,
             metadata_iri,
             admin_address,
-            json.dumps(aliases) if isinstance(aliases, list) else aliases,
+            aliases if isinstance(aliases, list) else [],
             jurisdiction,
             class_id,
             json.dumps({
