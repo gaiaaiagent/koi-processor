@@ -1,7 +1,7 @@
 # Claims Engine Dogfood Results
 
-**Date:** 2026-03-10 (deployed to production 2026-03-11)
-**Status:** V2 Phase 1 deployed to production — Phases A-G complete, first claim anchored on-chain
+**Date:** 2026-03-11
+**Status:** V2 Phase 2 deployed — attestation anchoring + proof-pack download live on mainnet
 
 ## Phase A-D Summary (completed 2026-03-09)
 
@@ -78,10 +78,58 @@ First claim successfully anchored on Regen Ledger mainnet (`regen-1`).
 ### Production Discovery: Entity Type Case Mismatch
 Production `eliza` DB uses UPPERCASE entity types (`PERSON`, `ORGANIZATION`) while local `personal_koi` uses mixed-case (`Person`, `Organization`). Fixed claims router to use case-insensitive comparison (`.lower()`). The `aliases` column is also `jsonb` on prod vs `TEXT[]` locally — causes `ANY(aliases)` to fail. This is a pre-existing issue affecting entity creation via `/ingest`, not claims-specific.
 
-### Open Items for V2 Phase 2
-- ~~Regen CLI installation~~ — ✅ completed (v7.2.0, `~/bin/regen`)
-- Attestation anchoring (individual attestation tx_hash)
+### Open Items for V2 Phase 3
 - Multi-org attestation requirements (cross-org review)
 - Attestation expiry / time-bounded validity
-- Proof pack export (bundle claim + attestations + evidence for verification)
-- ~~Fix production `aliases` column type (`jsonb` → `TEXT[]`)~~ — ✅ fixed (migration 036 applied, event bridge updated, views recreated)
+
+## Phase H — V2 Phase 2: Attestation Anchoring + Proof-Pack (2026-03-11)
+
+**Status:** COMPLETE
+
+**Deployed:** `a916ed71` + `4823bfa9` to prod, migration 069 applied (`graph_iri` → `ledger_iri`).
+
+### Attestation Anchoring
+
+4 attestations anchored on Regen Ledger mainnet (`regen-1`). All took the direct 200 path (no 202→reconcile needed).
+
+| Attestation RID | Claim RID | Content Hash | Tx Hash | Ledger IRI |
+|-----------------|-----------|-------------|---------|------------|
+| `fbd74f0429d608ff` | `d209853096489f32` | `2d44876d90eb...` | `4EFDEED7D687EDBD87CD073CD5D252C99181376E7B330DFBC21D505EA6E7E0AF` | `regen:113HgUmoMx9ewQjRxgTQZ5M2cG46RDRrsj3yDU6yfcabqN7ZtAKd.json` |
+| `85c4f34f5b2008bb` | `d209853096489f32` | `bc111318c9d0...` | `51C1A648EE5ABA992910D916C711A45AAB79E42A622DC13E3253110C0C72974C` | `regen:114Na66L34mTgfXabMCNovZUjiCi4Sx4Rk6xMqnasRZ5o1bfksZ3.json` |
+| `83b7b015ec89c5ce` | `a26c6445b5a202eb` | `f05224d83abd...` | `4684C17996280659BD3CEE911B540D35BB65F60F6243B17820FDC9B068734B94` | `regen:114marLTTyGdjtNSTN1SfynLbzjnekybDZzt5trG2cvZsR6VhhqY.json` |
+| `729daddb0ad68910` | `a26c6445b5a202eb` | `8e203e5d8e4e...` | `B21624533698D6E889022D3F48658634EAEA2CFC9071AF34D03D3B36F09CE5A8` | `regen:1142LbQAVK8u2jKEaca7LHcjGfZECXA9gnshkQJLyESQhCfhY9rk.json` |
+
+Attestor address: `regen15eexs5vt9klzf304v2fczfh2823lwgz8g4apt9`
+
+### Proof-Pack Download
+
+Both claims have downloadable proof-packs via `GET /claims/{rid}/proof-pack?format=download`:
+
+| Claim | Filename | Version | Chain ID | Attestation Hashes Verified |
+|-------|----------|---------|----------|-----------------------------|
+| `d209853096489f32` | `proof-pack-d20985309648-2026-03-11.json` | 2.0 | regen-1 | claim ✅ attest 2/2 ✅ |
+| `a26c6445b5a202eb` | `proof-pack-a26c6445b5a2-2026-03-11.json` | 2.0 | regen-1 | claim ✅ attest 2/2 ✅ |
+
+### Content Hash Fix (`4823bfa9`)
+
+Original `_canonical_claim_json` included the mutable `verification` field. When a claim transitions from `verified` → `ledger_anchored`, recomputing the hash produces a different value, causing `claim_content_hash_verified: False`. Fixed by:
+
+1. **Removed `verification` from canonical JSON** — it's mutable state, not content
+2. **Anchored claims**: proof-pack verifies `derive_ledger_iri(stored_hash) == stored_ledger_iri` (pinned hash matches on-chain IRI)
+3. **Non-anchored claims**: proof-pack recomputes hash from fields as before
+4. **Backfilled** non-anchored claim hashes on both local (27) and prod (3)
+
+The 2 on-chain claim anchors (`D64BCE...`, `C02343...`) remain valid — their `content_hash` → `ledger_iri` derivation is correct and immutable. The hash algorithm change only affects future anchors.
+
+### Known Test Issues (unrelated to Phase 2)
+
+2 of 16 `test_claims_reconcile.py` tests fail (`test_anchor_verify_fail_returns_202`, `test_reconcile_tx_confirmed_anchor_not_indexed`). These are pre-existing failures from a prior decision to treat tx confirmation as sufficient without requiring REST IRI verification. Not caused by Phase 2 changes.
+
+### V2 Phase 2 Metrics
+- 6 new pytest tests (attestation anchoring + proof-pack)
+- 5 new HTTP smoke tests (tests 21-25)
+- Migration 069 applied (column rename `graph_iri` → `ledger_iri`)
+- 4 attestations anchored on mainnet (all direct 200 path)
+- Lazy `content_hash` backfill confirmed (all 4 attestations had NULL content_hash before anchor)
+- `compute_attestation_hash()` produces deterministic BLAKE2b-256 hashes
+- `get_signing_address()` correctly resolves from local keyring
