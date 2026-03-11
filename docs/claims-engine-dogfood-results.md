@@ -47,8 +47,9 @@ First claim successfully anchored on Regen Ledger testnet (`regen-upgrade`).
 | Claim RID | Content Hash | Tx Hash | Ledger IRI | Status |
 |-----------|-------------|---------|------------|--------|
 | `d209853096489f32` | `17b5eb3dd51d...` | `D64BCE8E6A928253D17581D9AD0A9A5CB0779D94D381F56EC2F705422357C28B` | `regen:1138BqHBPtQ9u8NH6q9kZCaMfT7MB8Zj5bJYtVLjGEaRgzaoBMTL.json` | anchored |
+| `a26c6445b5a202eb` | `c68b2b907fc9...` | `C023433392F529FD6982655D42D89F3B2B90B07F5A4631A8A41D6789AFB03727` | `regen:114TBi1Y15xYqYpN7kpgnFUCmvxwnDc7ePxPTve6yvKjmQamm64A.json` | anchored |
 
-**Pipeline validated:** `prepare-anchor` → `ready_to_anchor: true` → `/anchor` → HTTP 200 with tx_hash + ledger_iri + timestamp (`2026-03-11T06:23:14Z`). Took the direct 200 path (no 202→reconcile needed).
+**Pipeline validated:** Both claims took the direct 200 path (no 202→reconcile needed). First anchor: `2026-03-11T06:23:14Z`. Second anchor (CEC claim): `2026-03-11T07:59:29Z`.
 
 ## Phase G — Observations
 
@@ -69,7 +70,7 @@ First claim successfully anchored on Regen Ledger testnet (`regen-upgrade`).
 ### V2 Phase 1 Metrics
 - 11 new pytest tests (attestation CRUD + policy gates)
 - 16 existing reconcile tests — no regressions
-- 53/54 HTTP smoke tests passing on production (1 failure: evidence entity creation — pre-existing `aliases` column type mismatch on prod DB, not claims-related)
+- 56/56 HTTP smoke tests passing on production (aliases column type mismatch fixed: `jsonb` → `TEXT[]`)
 - Migration 052 + 066 applied to production `eliza` DB
 - 5 attestations created across 3 claims (2 reviewers)
 - Grandfathering cutoff: `2026-03-11T05:36:36Z`
@@ -83,4 +84,4 @@ Production `eliza` DB uses UPPERCASE entity types (`PERSON`, `ORGANIZATION`) whi
 - Multi-org attestation requirements (cross-org review)
 - Attestation expiry / time-bounded validity
 - Proof pack export (bundle claim + attestations + evidence for verification)
-- Fix production `aliases` column type (`jsonb` → `TEXT[]`)
+- ~~Fix production `aliases` column type (`jsonb` → `TEXT[]`)~~ — ✅ fixed (migration 036 applied, event bridge updated, views recreated)
