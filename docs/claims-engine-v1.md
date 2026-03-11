@@ -1,9 +1,10 @@
 # Claims Engine — Current State & Roadmap
 
-**Status:** V1 Complete + V2 Hardening Deployed (Mar 9, 2026)
+**Status:** V1 Complete + V2 Attestations (Phase 1+2) + Steel Thread Phase B Deployed (Mar 11, 2026)
 **Environment:** Live on `regen-upgrade` testnet
-**Dogfooding:** 49 claims across 3 organizations (CEC, Blue Forest, ZFP)
-**Next:** [V2 Attestation Layer Design](claims-engine-v2-attestations.md)
+**Dogfooding:** 49+ claims across 3 organizations (CEC, Blue Forest, ZFP)
+**Steel Thread:** Phase A (22/22) + Phase B (25/25) proven on Octo with on-chain anchors
+**Next:** [V2 Attestation Layer Design](claims-engine-v2-attestations.md) — Phase 3 (on-chain attestation)
 
 ---
 
@@ -260,6 +261,11 @@ This returns a list of extracted claims with `ai_confidence` scores. Each extrac
 | POST | /claims/{rid}/prepare-anchor | Compute content hash + predict IRI |
 | POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger testnet |
 | POST | /claims/{rid}/reconcile | Check on-chain status of timed-out broadcast |
+| GET | /claims/{rid}/proof-pack | Synthesized verification artifact (requires ledger_anchored) |
+| POST | /claims/evidence-from-artifacts | Create Evidence entity from published artifacts (Pattern/Protocol/CaseStudy/Practice) |
+| POST | /claims/{rid}/attestations | Create/update attestation (UPSERT) |
+| GET | /claims/{rid}/attestations | List attestations for a claim |
+| GET | /claims/{rid}/attestations/{att_rid} | Get single attestation |
 
 ### MCP Tools (personal-koi-mcp)
 
@@ -311,6 +317,9 @@ Content-addressable, append-only:
 | evidences_claim | Evidence → Claim | Evidence attachment |
 | supersedes_claim | Claim → Claim | Version chain |
 | about | Claim → Location/Org/etc | Claim subject |
+| derived_from | Evidence → Pattern/Protocol/etc | Evidence provenance from source artifacts |
+| attests_claim | Person → Claim | Attestation relationship (V2) |
+| operates_claim | Person → Claim | Operator tracking (V2) |
 
 ---
 
@@ -359,6 +368,9 @@ V2 introduces:
 - [x] Phase 5: Testing (46 smoke tests + 16 pytest passing)
 - [x] Phase 6: V2 Hardening — ghost anchor fix, reconcile endpoint, 202 pending responses
 - [x] Phase 7: V2 Design Doc — attestation layer architecture
+- [x] Phase 8: V2 Attestations Phase 1+2 — migration 066, attestation CRUD, operator_uri, policy gates, graph edges, grandfathering
+- [x] Phase 9: Steel Thread Phase A — end-to-end proof (Evidence → claim → attestations → anchor → proof pack). 22/22 on Local, Octo, FR.
+- [x] Phase 10: Steel Thread Phase B — evidence-from-artifacts transformation (interview artifacts → Evidence → claim → anchor). Migration 067 (`derived_from`). 25/25 on Local + Octo.
 
 ## Key Files
 
@@ -370,8 +382,13 @@ V2 introduces:
 | `migrations/065_claims_tx_hash.sql` | tx_hash column for reconciliation |
 | `tests/test_claims_reconcile.py` | 16 pytest tests (in-process ASGI) |
 | `scripts/test_claims_api.py` | 20 HTTP smoke tests |
+| `migrations/066_claims_v2_attestations.sql` | V2 attestation schema + operator_uri |
+| `migrations/067_evidence_from_artifacts.sql` | `derived_from` predicate for Phase B |
+| `tests/test_steel_thread_phase_a.sh` | 22-check end-to-end steel thread proof |
+| `tests/test_steel_thread_phase_b.sh` | 25-check voice-to-graph pipeline proof |
+| `tests/test_consent_leakage.sh` | 18-check consent leakage smoke test |
 | `docs/claims-engine-v2-attestations.md` | V2 attestation layer design |
 
 ---
 
-*Last updated: March 10, 2026*
+*Last updated: March 11, 2026*

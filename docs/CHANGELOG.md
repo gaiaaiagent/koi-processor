@@ -5,6 +5,30 @@ All notable changes to the KOI Processor project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-03-11
+
+### Added
+- **Steel Thread Phase B — Evidence-from-artifacts endpoint**:
+  - `POST /claims/evidence-from-artifacts` creates Evidence entities from published interview artifacts (Pattern, Protocol, CaseStudy, Practice)
+  - Visibility scope inherited from source artifacts (most-restrictive wins: any `node_private` source → `node_private` Evidence)
+  - Bioregion-aware naming and URI generation (distinct canonical URIs per bioregion)
+  - Delegates to existing `/register-entity` path for full entity resolution behavior
+  - Creates `derived_from` graph edges linking Evidence to source artifacts
+  - Idempotent via vault_rid
+- **Migration 067**: `derived_from` predicate in `allowed_predicates`
+- **Consent leakage smoke test** (`tests/test_consent_leakage.sh`): 18 checks across all 15 public endpoints verifying `node_private` entity invisibility
+- **Steel Thread Phase B test** (`tests/test_steel_thread_phase_b.sh`): 25 checks — full pipeline from published artifacts → Evidence → claim → attestations → anchor → proof pack
+- **Data Classification Matrix v0.1**: 34 query sites across 15 public endpoints reconciled. Consent leakage verified. T2 enforcement deferred to Horizon 3.
+
+### Changed
+- Claims Engine V1 doc updated with Phase B endpoints, predicates, build history, and key files
+
+### Verified
+- Steel Thread Phase A: 22/22 on Local, Octo, FR
+- Steel Thread Phase B: 25/25 on Local + Octo (real published interview data from BKC CoIP Call session)
+- Consent leakage: 18/18 on Local
+- On-chain anchor TX: `84BCCDA873F39E65C43D885F6808A24107E1F85FD4A32A81CB182D47A35D6FEB`
+
 ## [3.3.2] - 2026-02-25
 
 ### Added
