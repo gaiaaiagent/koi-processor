@@ -1062,29 +1062,9 @@ def create_router(pool, caps=None):
                 detail=result.get("reason", "Anchoring not available"),
             )
 
-        # Broadcast succeeded and tx confirmed — verify anchor on-chain before transitioning
-        anchor_verified = verify_anchor_onchain(result["ledger_iri"])
-
-        if not anchor_verified:
-            # Tx confirmed but anchor not yet queryable (indexing lag)
-            async with pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE claims SET tx_hash = $2, ledger_iri = $3, updated_at = NOW()
-                    WHERE claim_rid = $1
-                """, rid, result.get("tx_hash"), result["ledger_iri"])
-            from starlette.responses import JSONResponse
-            return JSONResponse(
-                status_code=202,
-                content=AnchorPendingResponse(
-                    claim_rid=rid,
-                    content_hash=content_hash,
-                    tx_hash=result.get("tx_hash"),
-                    ledger_iri=result["ledger_iri"],
-                    status="pending",
-                    message=f"Tx broadcast succeeded but on-chain verification not yet available. "
-                            f"Call POST /claims/{rid}/reconcile to finalize.",
-                ).model_dump(),
-            )
+        # Broadcast succeeded and tx confirmed (code=0).
+        # Skip IRI verification via REST — most public endpoints don't support
+        # the regen data module query. Tx confirmation is sufficient.
 
         # Full success: update claim with ledger data and transition state
         # Parse ledger_timestamp string to datetime for TIMESTAMPTZ column
@@ -1206,16 +1186,16 @@ def create_router(pool, caps=None):
 
         anchor_present = verify_anchor_onchain(ledger_iri)
         if not anchor_present:
-            # Tx confirmed but anchor not yet queryable via REST (indexing lag)
-            return ReconcileResponse(
-                claim_rid=rid,
-                status="pending",
-                tx_hash=tx_hash,
-                ledger_iri=ledger_iri,
-                message="Tx confirmed but anchor not yet indexed via REST. Retry reconcile.",
+            # Tx confirmed (code=0) but IRI not queryable via REST.
+            # Many public REST endpoints don't support the data module query,
+            # so treat tx confirmation as sufficient for finalization.
+            import logging as _logging
+            _logging.getLogger("claims").warning(
+                f"Anchor IRI {ledger_iri} not queryable via REST "
+                f"(tx {tx_hash} confirmed code=0). Proceeding with finalization."
             )
 
-        # Full success — transition to ledger_anchored
+        # Tx confirmed — transition to ledger_anchored
         from datetime import datetime as _dt
         ledger_ts = None
         ts_raw = tx_status.get("timestamp")
