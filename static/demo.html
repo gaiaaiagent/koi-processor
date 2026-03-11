@@ -539,7 +539,7 @@
           <h3 class="text-xs font-semibold text-yellow-800 uppercase mb-2">Blockchain Anchor</h3>
           ${claim.content_hash ? `<div class="text-xs mb-1"><span class="text-yellow-700 font-medium">Content Hash:</span> <code class="text-yellow-900">${claim.content_hash.substring(0, 24)}...</code></div>` : ''}
           ${claim.ledger_iri ? `<div class="text-xs mb-1"><span class="text-yellow-700 font-medium">Ledger IRI:</span> <code class="text-yellow-900">${escHtml(claim.ledger_iri)}</code></div>` : ''}
-          ${claim.tx_hash ? `<div class="text-xs"><span class="text-yellow-700 font-medium">Tx Hash:</span> <a href="https://regen.aneka.io/txs/${claim.tx_hash}" target="_blank" class="text-blue-600 hover:underline"><code>${claim.tx_hash.substring(0, 24)}...</code></a></div>` : ''}
+          ${claim.tx_hash ? `<div class="text-xs"><span class="text-yellow-700 font-medium">Tx Hash:</span> <a href="https://www.mintscan.io/regen/tx/${claim.tx_hash}" target="_blank" class="text-blue-600 hover:underline"><code>${claim.tx_hash.substring(0, 24)}...</code></a></div>` : ''}
         </div>` : ''}
 
         <!-- Evidence -->
