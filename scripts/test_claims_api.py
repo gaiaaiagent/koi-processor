@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claims Engine V1 — API smoke tests.
+"""Claims Engine V2 — API smoke tests.
 
 Run: python -m scripts.test_claims_api [--base-url http://localhost:8351]
 
@@ -8,7 +8,7 @@ Tests:
 2. Idempotency: same body → same claim_rid
 3. Get claim by RID → includes evidence field
 4. List claims → results include created claim
-5. Verify claim → state transition + audit log
+5. Verify claim → state transition + audit log (V2: requires attestation)
 6. Reject invalid transition → 409
 7. Link evidence → evidences_claim edge
 8. History → audit trail
@@ -73,39 +73,103 @@ def test_health():
         sys.exit(1)
 
 
+def _resolve_or_create_entity(name: str, entity_type: str):
+    """Resolve an existing entity or create via /ingest. Returns URI or None.
+
+    IMPORTANT: /entity/resolve returns is_new=true when the entity doesn't exist
+    in entity_registry (URI is only a proposed deterministic slug). We must check
+    is_new=false before treating a resolve result as a real persisted entity.
+    """
+    # Step 1: Try to resolve existing entity (with type_hint)
+    status, data = _req("POST", "/entity/resolve", {
+        "label": name, "type_hint": entity_type,
+    })
+    if status == 200 and data.get("candidates") and not data.get("is_new"):
+        return data["candidates"][0]["uri"]
+
+    # Step 2: Create via /ingest (the actual entity creation surface)
+    ts = int(time.time())
+    status, data = _req("POST", "/ingest", {
+        "document_rid": f"test:claims-smoke-{entity_type.lower()}-{ts}",
+        "source": "test_claims_api",
+        "entities": [{"name": name, "type": entity_type}],
+    })
+    if status == 200 and data.get("canonical_entities"):
+        uri = data["canonical_entities"][0].get("uri")
+        if uri:
+            return uri
+    return None
+
+
 def test_setup_claimant():
     """Ensure a test claimant entity exists. Returns its URI."""
     print("\n[0b] Setup: ensure test claimant entity exists")
-    # Check if a test entity exists by searching
-    status, data = _req("POST", "/entity/resolve", {"label": "Claims Engine Test Org"})
-    if status == 200 and data.get("candidates"):
-        uri = data["candidates"][0]["uri"]
-        check("test claimant found", True)
+    uri = _resolve_or_create_entity("Claims Engine Test Org", "Organization")
+    if uri:
+        check("test claimant ready", True)
         return uri
 
-    # Create one via the entity registry
-    status, data = _req("POST", "/entities/register", {
-        "entities": [{
-            "name": "Claims Engine Test Org",
-            "type": "Organization",
-            "source": "test_claims_api",
-        }]
-    })
-    if status == 200 and data.get("results"):
-        uri = data["results"][0].get("uri")
-        if uri:
-            check("test claimant created", True)
-            return uri
-
     # Fallback: try to find any existing organization
-    status, data = _req("POST", "/entity/resolve", {"label": "Regen Network", "type_hint": "Organization"})
-    if status == 200 and data.get("candidates"):
+    status, data = _req("POST", "/entity/resolve", {
+        "label": "Regen Network", "type_hint": "Organization",
+    })
+    if status == 200 and data.get("candidates") and not data.get("is_new"):
         uri = data["candidates"][0]["uri"]
         check("fallback claimant found", True)
         return uri
 
     check("test claimant setup", False, "Could not create or find a test entity")
     return None
+
+
+def test_setup_reviewers():
+    """Create two test reviewer entities for attestation policy compliance.
+
+    Names must be very distinct to avoid entity resolution merging them.
+    """
+    print("\n[0c] Setup: ensure test reviewer entities exist")
+    reviewers = []
+    names = ["Alice Nakamoto Reviewer", "Bob Finney Attestor"]
+    for name in names:
+        uri = _resolve_or_create_entity(name, "Person")
+        if uri:
+            # Verify we got a unique URI (not merged with previous reviewer)
+            if uri not in reviewers:
+                reviewers.append(uri)
+                check(f"reviewer '{name}' ready", True)
+            else:
+                # Entity resolution merged — create with unique document_rid
+                ts = int(time.time())
+                status, data = _req("POST", "/ingest", {
+                    "document_rid": f"test:claims-reviewer-{ts}-{len(reviewers)}",
+                    "source": "test_claims_api",
+                    "entities": [{"name": f"{name} {ts}", "type": "Person"}],
+                })
+                if status == 200 and data.get("canonical_entities"):
+                    alt_uri = data["canonical_entities"][0].get("uri")
+                    if alt_uri and alt_uri not in reviewers:
+                        reviewers.append(alt_uri)
+                        check(f"reviewer '{name}' ready (distinct)", True)
+                    else:
+                        check(f"reviewer '{name}' distinct", False, "still merged")
+                else:
+                    check(f"reviewer '{name}' fallback", False, f"status={status}")
+        else:
+            check(f"reviewer '{name}' setup", False, "could not resolve or create")
+    check("reviewers ready", len(reviewers) == 2, f"got {len(reviewers)}, uris={reviewers}")
+    return reviewers
+
+
+def _ensure_attestations(rid: str, reviewer_uris: list, count: int = 1):
+    """Create `count` approved attestations on a claim for policy compliance."""
+    for i in range(min(count, len(reviewer_uris))):
+        status, data = _req("POST", f"/claims/{rid}/attestations", {
+            "reviewer_uri": reviewer_uris[i],
+            "verdict": "approved",
+            "rationale": f"Smoke test attestation {i+1}",
+        })
+        check(f"attestation {i+1} for {rid[:40]}", status in (200, 201),
+              f"status={status} data={data}")
 
 
 def test_create_claim(claimant_uri: str):
@@ -390,7 +454,7 @@ def test_not_found():
     check("status 404", status == 404, f"status={status}")
 
 
-def test_reconcile_no_txhash(claimant_uri: str):
+def test_reconcile_no_txhash(claimant_uri: str, reviewer_uris: list):
     """Test reconcile returns 409 when claim has no tx_hash."""
     print("\n[17] Reconcile — no tx_hash")
     # Create a fresh claim and advance to verified
@@ -406,6 +470,9 @@ def test_reconcile_no_txhash(claimant_uri: str):
         return
     rid = data["claim_rid"]
     CREATED_RIDS.append(rid)
+
+    # V2: create attestations before verify
+    _ensure_attestations(rid, reviewer_uris, count=2)
 
     # Advance: self_reported → peer_reviewed → verified
     _req("PATCH", f"/claims/{rid}/verify", {
@@ -460,7 +527,7 @@ def main():
     args = parser.parse_args()
     BASE_URL = args.base_url
 
-    print(f"Claims Engine V1 — Smoke Tests")
+    print(f"Claims Engine V2 — Smoke Tests")
     print(f"Base URL: {BASE_URL}")
     print("=" * 50)
 
@@ -472,6 +539,11 @@ def main():
         sys.exit(1)
     print(f"  Using claimant: {claimant_uri}")
 
+    reviewer_uris = test_setup_reviewers()
+    if len(reviewer_uris) < 2:
+        print("\nCannot proceed without 2 reviewer entities. Exiting.")
+        sys.exit(1)
+
     rid, body = test_create_claim(claimant_uri)
     if not rid:
         print("\nClaim creation failed. Exiting.")
@@ -480,8 +552,14 @@ def main():
     test_idempotency(claimant_uri, body, rid)
     test_get_claim(rid)
     test_list_claims()
+
+    # V2: create 1 attestation before test 5 (peer_reviewed needs >= 1)
+    _ensure_attestations(rid, reviewer_uris, count=1)
     test_verify_claim(rid)
     test_invalid_transition(rid)
+
+    # V2: create 2nd attestation before test 7c (verified needs >= 2)
+    _ensure_attestations(rid, reviewer_uris, count=2)
     test_link_evidence(rid)
     test_ledger_anchored_blocked(rid)
     test_history(rid)
@@ -497,7 +575,7 @@ def main():
     test_anchor_state_check()
     test_anchor_missing_binary()
     test_not_found()
-    test_reconcile_no_txhash(claimant_uri)
+    test_reconcile_no_txhash(claimant_uri, reviewer_uris)
     test_reconcile_not_found()
     test_reconcile_wrong_state()
     test_tx_hash_in_claim_response()

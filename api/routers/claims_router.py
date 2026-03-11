@@ -1,19 +1,24 @@
-"""Claims Engine V1 endpoints: create, search, verify, evidence linking, extraction, anchoring, reconcile.
+"""Claims Engine V2 endpoints: create, search, verify, evidence linking, extraction, anchoring, reconcile, attestations.
 
 Implements the Claims Engine API:
   POST /claims/           — create a new impact claim (entity + graph edges + SQL)
   GET  /claims/           — list/search claims with filters
   GET  /claims/{rid}      — get claim with linked evidence entities
-  PATCH /claims/{rid}/verify — advance verification level
+  PATCH /claims/{rid}/verify — advance verification level (V2: attestation policy gate)
   POST /claims/{rid}/evidence — attach evidence entity
   GET  /claims/{rid}/history — verification audit log
   POST /claims/extract    — AI extraction from document text
   POST /claims/{rid}/prepare-anchor — compute content hash for ledger anchoring
   POST /claims/{rid}/anchor — broadcast anchor to Regen Ledger
   POST /claims/{rid}/reconcile — check on-chain status of timed-out broadcast
+  GET  /claims/{rid}/proof-pack — synthesized verification artifact (requires ledger_anchored)
+  POST /claims/{rid}/attestations — create/update attestation (UPSERT)
+  GET  /claims/{rid}/attestations — list attestations for a claim
+  GET  /claims/{rid}/attestations/{att_rid} — get single attestation
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
+V2 adds identity-bound attestations: reviewer_uri FK, attestation policy gates, operator tracking.
 """
 
 import hashlib
@@ -43,6 +48,7 @@ class ClaimCreateRequest(BaseModel):
     ai_confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="AI extraction confidence (NULL if manual)")
     supersedes_rid: Optional[str] = Field(None, description="Previous version claim_rid (for versioning)")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible fields: quantity, unit, dates, SDGs, methodology, etc.")
+    operator_uri: Optional[str] = Field(None, description="entity_registry.fuseki_uri of the operator who entered the claim")
     created_by: Optional[str] = None
 
 
@@ -50,6 +56,7 @@ class ClaimResponse(BaseModel):
     claim_rid: str
     entity_uri: Optional[str]
     claimant_uri: str
+    claimant_name: Optional[str] = None
     statement: str
     claim_type: str
     verification: str
@@ -61,6 +68,9 @@ class ClaimResponse(BaseModel):
     supersedes_rid: Optional[str]
     metadata: Dict[str, Any]
     created_by: Optional[str] = None
+    operator_uri: Optional[str] = None
+    attestation_count: int = 0
+    attestation_summary: Optional[Dict[str, int]] = None
     evidence: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     updated_at: datetime
@@ -118,6 +128,57 @@ class ReconcileResponse(BaseModel):
     message: Optional[str] = None
 
 
+class ProofPackResponse(BaseModel):
+    """Synthesized verification artifact for an anchored claim."""
+    claim_rid: str
+    verification: str
+    claim: Dict[str, Any]
+    evidence: List[Dict[str, Any]]
+    history: List[Dict[str, Any]]
+    anchor: Dict[str, Any]
+    attestations: List[Dict[str, Any]]
+    assembled_at: str
+    version: str = "1.0"
+
+
+class EvidenceFromArtifactsRequest(BaseModel):
+    source_uris: List[str] = Field(..., min_length=1, description="URIs of published artifacts (Pattern, Protocol, CaseStudy, Practice)")
+    name: str = Field(..., min_length=3, max_length=500, description="Name for the Evidence entity")
+    description: str = Field(..., min_length=10, max_length=5000, description="Description summarizing the evidence")
+    bioregion: Optional[str] = Field(None, description="Bioregion name for path prefix (e.g. 'Salish Sea')")
+
+
+class EvidenceFromArtifactsResponse(BaseModel):
+    evidence_uri: str
+    vault_rid: str
+    vault_path: str
+    is_new: bool
+    visibility_scope: str
+    source_artifacts: List[Dict[str, Any]]
+
+
+class AttestationCreateRequest(BaseModel):
+    reviewer_uri: str
+    verdict: str = "pending"  # pending|approved|rejected|needs_info
+    rationale: Optional[str] = None
+    evidence_uris: Optional[List[str]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AttestationResponse(BaseModel):
+    attestation_rid: str
+    claim_rid: str
+    reviewer_uri: str
+    reviewer_name: Optional[str] = None
+    verdict: str
+    rationale: Optional[str]
+    evidence_uris: Optional[List[str]]
+    content_hash: Optional[str] = None
+    attest_tx_hash: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Valid verification transitions (progressive, per Smith/Bennetts)
 # ---------------------------------------------------------------------------
@@ -133,8 +194,8 @@ _VALID_TRANSITIONS = {
 # Transitions that require preconditions beyond just the state machine
 # Allowed entity types for the 'about' predicate on claims
 _ABOUT_ALLOWED_TYPES = {
-    "Practice", "Pattern", "CaseStudy", "Concept", "Project",
-    "Bioregion", "Location", "Organization", "Person",
+    "practice", "pattern", "casestudy", "concept", "project",
+    "bioregion", "location", "organization", "person",
 }
 
 _TRANSITION_PRECONDITIONS = {
@@ -175,7 +236,68 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj)
 
 
-def _row_to_claim(row, evidence=None) -> ClaimResponse:
+def _attestation_rid(claim_rid: str, reviewer_uri: str) -> str:
+    """Stable attestation RID derived from (claim_rid, reviewer_uri) only.
+
+    Same reviewer + claim always yields the same RID, making UPSERT safe.
+    Verdict changes are mutations on the same record, not new records.
+    """
+    obj = {"claim_rid": claim_rid, "reviewer_uri": reviewer_uri}
+    canonical = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:16]
+    return f"orn:koi-net.attestation:{h}"
+
+
+async def _check_attestation_policy(conn, claim_rid: str, target_level: str, claim_created_at) -> tuple:
+    """Check attestation policy gate for post-migration claims.
+
+    Returns (ok: bool, message: str). Pre-V2 claims are grandfathered.
+    """
+    # Check if claim_attestations table exists (graceful for pre-migration DBs)
+    table_exists = await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'claim_attestations')"
+    )
+    if not table_exists:
+        return True, ""
+
+    # Grandfathering: exempt pre-V2 claims
+    migration_ts = await conn.fetchval(
+        "SELECT applied_at FROM koi_migrations WHERE migration_id = '066_attestations'"
+    )
+    if migration_ts is None:
+        return True, ""
+    if claim_created_at < migration_ts:
+        return True, ""  # Pre-V2 claim, exempt from policy
+
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM claim_attestations WHERE claim_rid=$1 AND verdict='approved'",
+        claim_rid,
+    )
+    if target_level == "peer_reviewed" and count < 1:
+        return False, f"Attestation policy: need >= 1 approved attestation for peer_reviewed (have {count})"
+    if target_level == "verified" and count < 2:
+        return False, f"Attestation policy: need >= 2 approved attestations for verified (have {count})"
+    return True, ""
+
+
+async def _get_attestation_summary(conn, claim_rid: str) -> tuple:
+    """Return (count, summary_dict) for a claim's attestations."""
+    try:
+        rows = await conn.fetch(
+            "SELECT verdict, COUNT(*) AS cnt FROM claim_attestations WHERE claim_rid = $1 GROUP BY verdict",
+            claim_rid,
+        )
+        if not rows:
+            return 0, None
+        summary = {r["verdict"]: r["cnt"] for r in rows}
+        total = sum(summary.values())
+        return total, summary
+    except Exception:
+        # Table may not exist yet (pre-migration)
+        return 0, None
+
+
+def _row_to_claim(row, evidence=None, attestation_count=0, attestation_summary=None) -> ClaimResponse:
     meta = row["metadata"]
     if isinstance(meta, str):
         meta = json.loads(meta)
@@ -183,6 +305,7 @@ def _row_to_claim(row, evidence=None) -> ClaimResponse:
         claim_rid=row["claim_rid"],
         entity_uri=row.get("entity_uri"),
         claimant_uri=row["claimant_uri"],
+        claimant_name=row.get("claimant_name"),
         statement=row["statement"],
         claim_type=row["claim_type"],
         verification=row["verification"],
@@ -194,6 +317,9 @@ def _row_to_claim(row, evidence=None) -> ClaimResponse:
         supersedes_rid=row.get("supersedes_rid"),
         metadata=meta or {},
         created_by=row.get("created_by"),
+        operator_uri=row.get("operator_uri"),
+        attestation_count=attestation_count,
+        attestation_summary=attestation_summary,
         evidence=evidence,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -218,6 +344,17 @@ def create_router(pool, caps=None):
             _entity_helpers['normalize_entity_text'] = normalize_entity_text
         return _entity_helpers
 
+    async def _fetch_enriched_claim(conn, rid: str) -> ClaimResponse:
+        """Re-fetch a claim with claimant name join and attestation summary."""
+        row = await conn.fetchrow("""
+            SELECT c.*, er.entity_text AS claimant_name
+            FROM claims c
+            LEFT JOIN entity_registry er ON c.claimant_uri = er.fuseki_uri
+            WHERE c.claim_rid = $1
+        """, rid)
+        att_count, att_summary = await _get_attestation_summary(conn, rid)
+        return _row_to_claim(row, attestation_count=att_count, attestation_summary=att_summary)
+
     # ------------------------------------------------------------------ #
     # Create claim                                                         #
     # ------------------------------------------------------------------ #
@@ -238,6 +375,15 @@ def create_router(pool, caps=None):
             if not claimant:
                 raise HTTPException(status_code=404, detail=f"Claimant entity not found: {body.claimant_uri}")
 
+            # 2a. Validate operator_uri if provided
+            if body.operator_uri:
+                operator = await conn.fetchrow(
+                    "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                    body.operator_uri,
+                )
+                if not operator:
+                    raise HTTPException(status_code=404, detail=f"Operator entity not found: {body.operator_uri}")
+
             # 2. Validate about_uri exists and has an allowed type before it enters the RID hash
             if body.about_uri:
                 about_entity = await conn.fetchrow(
@@ -246,7 +392,7 @@ def create_router(pool, caps=None):
                 )
                 if not about_entity:
                     raise HTTPException(status_code=404, detail=f"About entity not found: {body.about_uri}")
-                if about_entity["entity_type"] not in _ABOUT_ALLOWED_TYPES:
+                if about_entity["entity_type"].lower() not in _ABOUT_ALLOWED_TYPES:
                     raise HTTPException(
                         status_code=422,
                         detail=f"Entity {body.about_uri} is type '{about_entity['entity_type']}', "
@@ -263,7 +409,7 @@ def create_router(pool, caps=None):
             )
             if existing:
                 logger.info(f"claim.idempotent_hit rid={claim_rid}")
-                return _row_to_claim(existing)
+                return await _fetch_enriched_claim(conn, claim_rid)
 
             # All writes in a single transaction — no partial state on failure.
             # Catch UniqueViolationError for concurrent-request idempotency:
@@ -310,14 +456,23 @@ def create_router(pool, caps=None):
                     row = await conn.fetchrow("""
                         INSERT INTO claims (claim_rid, entity_uri, claimant_uri, statement,
                                             claim_type, source_document, ai_confidence,
-                                            supersedes_rid, metadata, created_by)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+                                            supersedes_rid, metadata, created_by, operator_uri)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
                         RETURNING *
                     """,
                         claim_rid, entity_uri, body.claimant_uri, body.statement,
                         body.claim_type, body.source_document, body.ai_confidence,
                         body.supersedes_rid, _json_dumps(body.metadata), body.created_by,
+                        body.operator_uri,
                     )
+
+                    # 8b. Write operates_claim edge if operator provided
+                    if body.operator_uri:
+                        await conn.execute("""
+                            INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
+                            VALUES ($1, 'operates_claim', $2, 1.0, 'claims_engine')
+                            ON CONFLICT DO NOTHING
+                        """, body.operator_uri, entity_uri)
 
                     # 9. Log initial state
                     await conn.execute("""
@@ -327,15 +482,10 @@ def create_router(pool, caps=None):
             except asyncpg.UniqueViolationError:
                 # Concurrent insert won the race — return the winner's row
                 logger.info(f"claim.concurrent_idempotent rid={claim_rid}")
-                existing = await conn.fetchrow(
-                    "SELECT * FROM claims WHERE claim_rid = $1", claim_rid
-                )
-                if existing:
-                    return _row_to_claim(existing)
-                raise  # should not happen — unique violation implies the row exists
+                return await _fetch_enriched_claim(conn, claim_rid)
 
-        logger.info(f"claim.create rid={claim_rid} claimant={body.claimant_uri} type={body.claim_type}")
-        return _row_to_claim(row)
+            logger.info(f"claim.create rid={claim_rid} claimant={body.claimant_uri} type={body.claim_type}")
+            return await _fetch_enriched_claim(conn, claim_rid)
 
     # ------------------------------------------------------------------ #
     # List / search claims                                                 #
@@ -380,13 +530,19 @@ def create_router(pool, caps=None):
             params.extend([limit, offset])
 
             rows = await conn.fetch(f"""
-                SELECT c.* FROM claims c
+                SELECT c.*, er.entity_text AS claimant_name
+                FROM claims c
+                LEFT JOIN entity_registry er ON c.claimant_uri = er.fuseki_uri
                 {where}
                 ORDER BY c.created_at DESC
                 LIMIT ${i} OFFSET ${i+1}
             """, *params)
 
-        return [_row_to_claim(r) for r in rows]
+            results = []
+            for r in rows:
+                att_count, att_summary = await _get_attestation_summary(conn, r["claim_rid"])
+                results.append(_row_to_claim(r, attestation_count=att_count, attestation_summary=att_summary))
+            return results
 
     # ------------------------------------------------------------------ #
     # Get claim by RID (with evidence)                                     #
@@ -396,9 +552,12 @@ def create_router(pool, caps=None):
     async def get_claim(rid: str):
         """Fetch a claim by RID, including linked evidence entities."""
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM claims WHERE claim_rid = $1", rid
-            )
+            row = await conn.fetchrow("""
+                SELECT c.*, er.entity_text AS claimant_name
+                FROM claims c
+                LEFT JOIN entity_registry er ON c.claimant_uri = er.fuseki_uri
+                WHERE c.claim_rid = $1
+            """, rid)
             if not row:
                 raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
 
@@ -424,7 +583,10 @@ def create_router(pool, caps=None):
                     for ev in ev_rows
                 ]
 
-        return _row_to_claim(row, evidence=evidence or None)
+            att_count, att_summary = await _get_attestation_summary(conn, rid)
+
+        return _row_to_claim(row, evidence=evidence or None,
+                             attestation_count=att_count, attestation_summary=att_summary)
 
     # ------------------------------------------------------------------ #
     # Verify (advance verification level)                                  #
@@ -458,6 +620,14 @@ def create_router(pool, caps=None):
                     if not ok:
                         raise HTTPException(status_code=409, detail=msg)
 
+                # V2: Attestation policy gate (post-migration claims only)
+                if new_level in ("peer_reviewed", "verified"):
+                    policy_ok, policy_msg = await _check_attestation_policy(
+                        conn, rid, new_level, row["created_at"]
+                    )
+                    if not policy_ok:
+                        raise HTTPException(status_code=409, detail=policy_msg)
+
                 updated = await conn.fetchrow("""
                     UPDATE claims
                     SET verification = $2, updated_at = NOW()
@@ -470,8 +640,8 @@ def create_router(pool, caps=None):
                     VALUES ($1, $2, $3, $4, $5)
                 """, rid, current, new_level, body.actor, body.reason)
 
-        logger.info(f"claim.verify rid={rid} {current}→{new_level} actor={body.actor}")
-        return _row_to_claim(updated)
+            logger.info(f"claim.verify rid={rid} {current}→{new_level} actor={body.actor}")
+            return await _fetch_enriched_claim(conn, rid)
 
     # ------------------------------------------------------------------ #
     # Link evidence                                                        #
@@ -517,12 +687,12 @@ def create_router(pool, caps=None):
                     _json_dumps({"evidence_uri": body.evidence_uri}))
 
                 # Update timestamp
-                updated = await conn.fetchrow("""
-                    UPDATE claims SET updated_at = NOW() WHERE claim_rid = $1 RETURNING *
+                await conn.execute("""
+                    UPDATE claims SET updated_at = NOW() WHERE claim_rid = $1
                 """, rid)
 
-        logger.info(f"claim.link_evidence rid={rid} evidence={body.evidence_uri}")
-        return _row_to_claim(updated)
+            logger.info(f"claim.link_evidence rid={rid} evidence={body.evidence_uri}")
+            return await _fetch_enriched_claim(conn, rid)
 
     # ------------------------------------------------------------------ #
     # History (audit log)                                                  #
@@ -628,6 +798,145 @@ def create_router(pool, caps=None):
             "source_document": body.source_document,
             "auto_created": created_claims if body.auto_create else None,
         }
+
+    # ------------------------------------------------------------------ #
+    # Evidence from artifacts (Steel Thread Phase B)                        #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/evidence-from-artifacts", response_model=EvidenceFromArtifactsResponse, status_code=201)
+    async def evidence_from_artifacts(body: EvidenceFromArtifactsRequest):
+        """Create an Evidence entity from published interview artifacts.
+
+        Bundles published Pattern/Protocol/CaseStudy/Practice entities into a
+        citable Evidence entity. Delegates registration to the existing
+        /register-entity path (entity resolution, collision detection,
+        visibility recompute) so that all shared registration behavior
+        is inherited.
+
+        Visibility scope is inherited as most-restrictive of source artifacts:
+        if ANY source entity has node_private=true, Evidence is node_private.
+        """
+        async with pool.acquire() as conn:
+            # 1. Validate all source URIs exist and collect metadata
+            source_artifacts = []
+            any_private = False
+            for uri in body.source_uris:
+                row = await conn.fetchrow(
+                    "SELECT fuseki_uri, entity_text, entity_type, node_private "
+                    "FROM entity_registry WHERE fuseki_uri = $1",
+                    uri,
+                )
+                if not row:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Source artifact not found: {uri}",
+                    )
+                if row["entity_type"] not in (
+                    "Practice", "Pattern", "Protocol", "CaseStudy",
+                    "PatternCandidate", "ProtocolCandidate",
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Source entity '{uri}' is type '{row['entity_type']}', "
+                        f"expected Practice/Pattern/Protocol/CaseStudy",
+                    )
+                if row["node_private"]:
+                    any_private = True
+                source_artifacts.append({
+                    "uri": row["fuseki_uri"],
+                    "name": row["entity_text"],
+                    "type": row["entity_type"],
+                    "node_private": row["node_private"],
+                })
+
+            visibility_scope = "node_private" if any_private else "public"
+
+            # 2. Build bioregion-qualified entity name for distinct canonical URIs
+            evidence_name = body.name.strip()
+            if body.bioregion:
+                evidence_name = f"{body.bioregion.strip()} — {evidence_name}"
+
+            # 3. Generate vault_rid and vault_path
+            safe_name = body.name.strip().replace(" ", "-").replace("'", "")[:80]
+            if body.bioregion:
+                safe_bio = body.bioregion.strip().replace(" ", "-")[:30]
+                vault_rid = f"orn:openclaw.entity:Evidence/{safe_bio}--{safe_name}"
+                vault_path = f"Evidence/{evidence_name}.md"
+            else:
+                vault_rid = f"orn:openclaw.entity:Evidence/{safe_name}"
+                vault_path = f"Evidence/{evidence_name}.md"
+
+            # 4. Generate markdown content for vault note
+            source_lines = []
+            for art in source_artifacts:
+                source_lines.append(f"- **{art['type']}:** {art['name']} (`{art['uri']}`)")
+            source_uris_yaml = "\n".join(
+                f'  - "{art["uri"]}"' for art in source_artifacts
+            )
+            markdown_content = (
+                f'---\n'
+                f'"@type": Evidence\n'
+                f'name: "{evidence_name}"\n'
+                f'description: "{body.description.strip()}"\n'
+                f'source_artifact_uris:\n'
+                f'{source_uris_yaml}\n'
+                f'---\n\n'
+                f'# {evidence_name}\n\n'
+                f'{body.description.strip()}\n\n'
+                f'## Source Artifacts\n\n'
+                + "\n".join(source_lines)
+                + "\n"
+            )
+
+            content_hash = hashlib.sha256(markdown_content.encode()).hexdigest()
+
+        # 5. Register via /register-entity path (entity resolution,
+        #    collision detection, alias handling, node_private recompute)
+        from api.personal_ingest_api import register_vault_entity, RegisterEntityRequest
+
+        reg_request = RegisterEntityRequest(
+            vault_rid=vault_rid,
+            vault_path=vault_path,
+            entity_type="Evidence",
+            name=evidence_name,
+            content_hash=content_hash,
+            visibility_scope=visibility_scope,
+            publication_scope="local_graph",
+            frontmatter={
+                "@type": "Evidence",
+                "name": evidence_name,
+                "description": body.description.strip(),
+                "source_artifact_uris": [art["uri"] for art in source_artifacts],
+            },
+        )
+
+        reg_response = await register_vault_entity(reg_request)
+        evidence_uri = reg_response.canonical_uri
+        is_new = reg_response.is_new
+
+        # 6. Create derived_from edges (not part of /register-entity)
+        async with pool.acquire() as conn:
+            for art in source_artifacts:
+                await conn.execute("""
+                    INSERT INTO entity_relationships
+                        (subject_uri, predicate, object_uri, confidence, source)
+                    VALUES ($1, 'derived_from', $2, 1.0, 'evidence-from-artifacts')
+                    ON CONFLICT DO NOTHING
+                """, evidence_uri, art["uri"])
+
+        logger.info(
+            f"Evidence from artifacts: uri={evidence_uri} is_new={is_new} "
+            f"sources={len(source_artifacts)} visibility={visibility_scope}"
+        )
+
+        return EvidenceFromArtifactsResponse(
+            evidence_uri=evidence_uri,
+            vault_rid=vault_rid,
+            vault_path=vault_path,
+            is_new=is_new,
+            visibility_scope=visibility_scope,
+            source_artifacts=source_artifacts,
+        )
 
     # ------------------------------------------------------------------ #
     # Prepare anchor (Phase 4)                                             #
@@ -952,6 +1261,339 @@ def create_router(pool, caps=None):
             ledger_iri=ledger_iri,
             ledger_timestamp=str(ts_raw) if ts_raw else None,
             message="Claim successfully reconciled and transitioned to ledger_anchored.",
+        )
+
+    # ------------------------------------------------------------------ #
+    # Proof pack (synthesized verification artifact)                       #
+    # ------------------------------------------------------------------ #
+
+    @router.get("/{rid}/proof-pack", response_model=ProofPackResponse)
+    async def get_proof_pack(rid: str):
+        """Assemble a proof pack for a claim.
+
+        Synthesizes claim data, linked evidence, full audit history, anchor
+        fields, and attestations into a single archivable verification artifact.
+        The claim must be at ledger_anchored state.
+        """
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT c.*, er.entity_text AS claimant_name
+                FROM claims c
+                LEFT JOIN entity_registry er ON c.claimant_uri = er.fuseki_uri
+                WHERE c.claim_rid = $1
+            """, rid)
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
+
+            if row["verification"] != "ledger_anchored":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Proof pack requires ledger_anchored state "
+                           f"(current: {row['verification']}). "
+                           f"Anchor the claim first via POST /claims/{rid}/anchor",
+                )
+
+            # Fetch linked evidence entities
+            evidence = []
+            if row.get("entity_uri"):
+                ev_rows = await conn.fetch("""
+                    SELECT er.fuseki_uri, er.entity_text, er.entity_type,
+                           rel.confidence, rel.source
+                    FROM entity_relationships rel
+                    JOIN entity_registry er ON er.fuseki_uri = rel.subject_uri
+                    WHERE rel.predicate = 'evidences_claim'
+                      AND rel.object_uri = $1
+                """, row["entity_uri"])
+                evidence = [
+                    {
+                        "uri": ev["fuseki_uri"],
+                        "name": ev["entity_text"],
+                        "type": ev["entity_type"],
+                        "confidence": float(ev["confidence"]) if ev.get("confidence") is not None else None,
+                        "source": ev.get("source"),
+                    }
+                    for ev in ev_rows
+                ]
+
+            # Fetch full audit history
+            history_rows = await conn.fetch("""
+                SELECT * FROM claim_state_log
+                WHERE claim_rid = $1
+                ORDER BY created_at ASC
+            """, rid)
+            history = [
+                {
+                    "from_state": r.get("from_state"),
+                    "to_state": r["to_state"],
+                    "actor": r.get("actor"),
+                    "reason": r.get("reason"),
+                    "metadata": json.loads(r["metadata"]) if r.get("metadata") and isinstance(r["metadata"], str) else r.get("metadata"),
+                    "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                }
+                for r in history_rows
+            ]
+
+            # Fetch about_uri (claim subject) from graph edge
+            about_uri = None
+            if row.get("entity_uri"):
+                about_row = await conn.fetchrow("""
+                    SELECT object_uri FROM entity_relationships
+                    WHERE subject_uri = $1 AND predicate = 'about'
+                    LIMIT 1
+                """, row["entity_uri"])
+                if about_row:
+                    about_uri = about_row["object_uri"]
+
+            # Fetch attestations
+            attestations = []
+            try:
+                att_rows = await conn.fetch("""
+                    SELECT a.*, er.entity_text AS reviewer_name
+                    FROM claim_attestations a
+                    LEFT JOIN entity_registry er ON a.reviewer_uri = er.fuseki_uri
+                    WHERE a.claim_rid = $1
+                    ORDER BY a.created_at ASC
+                """, rid)
+                attestations = [
+                    {
+                        "attestation_rid": a["attestation_rid"],
+                        "reviewer_uri": a["reviewer_uri"],
+                        "reviewer_name": a.get("reviewer_name"),
+                        "verdict": a["verdict"],
+                        "rationale": a.get("rationale"),
+                        "evidence_uris": a.get("evidence_uris"),
+                        "created_at": a["created_at"].isoformat() if a.get("created_at") else None,
+                    }
+                    for a in att_rows
+                ]
+            except Exception:
+                pass  # Pre-migration DB — no attestations table
+
+        meta = row["metadata"]
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+
+        return ProofPackResponse(
+            claim_rid=rid,
+            verification=row["verification"],
+            claim={
+                "claim_rid": row["claim_rid"],
+                "entity_uri": row.get("entity_uri"),
+                "claimant_uri": row["claimant_uri"],
+                "claimant_name": row.get("claimant_name"),
+                "statement": row["statement"],
+                "claim_type": row["claim_type"],
+                "about_uri": about_uri,
+                "source_document": row.get("source_document"),
+                "ai_confidence": float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
+                "supersedes_rid": row.get("supersedes_rid"),
+                "metadata": meta or {},
+                "operator_uri": row.get("operator_uri"),
+                "created_by": row.get("created_by"),
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+            },
+            evidence=evidence,
+            history=history,
+            anchor={
+                "content_hash": row.get("content_hash"),
+                "ledger_iri": row.get("ledger_iri"),
+                "tx_hash": row.get("tx_hash"),
+                "ledger_timestamp": row["ledger_timestamp"].isoformat() if row.get("ledger_timestamp") else None,
+                "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-upgrade"),
+            },
+            attestations=attestations,
+            assembled_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Attestations (V2 Phase 1)                                           #
+    # ------------------------------------------------------------------ #
+
+    _VALID_VERDICTS = {"pending", "approved", "rejected", "needs_info"}
+
+    @router.post("/{rid}/attestations", response_model=AttestationResponse, status_code=201)
+    async def create_attestation(rid: str, body: AttestationCreateRequest):
+        """Create or update an attestation on a claim (UPSERT by reviewer_uri).
+
+        Same reviewer + claim always yields the same attestation_rid.
+        Re-submitting updates verdict/rationale rather than creating a new record.
+        """
+        if body.verdict not in _VALID_VERDICTS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid verdict '{body.verdict}'. Must be one of: {sorted(_VALID_VERDICTS)}",
+            )
+
+        att_rid = _attestation_rid(rid, body.reviewer_uri)
+
+        async with pool.acquire() as conn:
+            # Verify claim exists
+            claim = await conn.fetchrow(
+                "SELECT claim_rid, claimant_uri, entity_uri FROM claims WHERE claim_rid = $1", rid
+            )
+            if not claim:
+                raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
+
+            # Verify reviewer exists and is an allowed type (Person or Organization)
+            reviewer = await conn.fetchrow(
+                "SELECT fuseki_uri, entity_text, entity_type FROM entity_registry WHERE fuseki_uri = $1",
+                body.reviewer_uri,
+            )
+            if not reviewer:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Reviewer entity not found: {body.reviewer_uri}",
+                )
+            _REVIEWER_ALLOWED_TYPES = {"person", "organization"}
+            if reviewer["entity_type"].lower() not in _REVIEWER_ALLOWED_TYPES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Reviewer {body.reviewer_uri} is type '{reviewer['entity_type']}', "
+                           f"not valid for attestation. Allowed: {sorted(_REVIEWER_ALLOWED_TYPES)}",
+                )
+
+            # Non-self-attestation guard
+            if body.reviewer_uri == claim["claimant_uri"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Self-attestation not allowed: reviewer_uri cannot be the claimant",
+                )
+
+            async with conn.transaction():
+                # UPSERT attestation
+                row = await conn.fetchrow("""
+                    INSERT INTO claim_attestations
+                        (attestation_rid, claim_rid, reviewer_uri, verdict, rationale,
+                         evidence_uris, metadata, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
+                    ON CONFLICT (claim_rid, reviewer_uri)
+                    DO UPDATE SET verdict = EXCLUDED.verdict,
+                                  rationale = EXCLUDED.rationale,
+                                  evidence_uris = EXCLUDED.evidence_uris,
+                                  metadata = EXCLUDED.metadata,
+                                  updated_at = NOW()
+                    RETURNING *
+                """,
+                    att_rid, rid, body.reviewer_uri, body.verdict,
+                    body.rationale, body.evidence_uris,
+                    _json_dumps(body.metadata),
+                )
+
+                # Create attests_claim edge (idempotent)
+                if claim.get("entity_uri"):
+                    await conn.execute("""
+                        INSERT INTO entity_relationships
+                            (subject_uri, predicate, object_uri, confidence, source)
+                        VALUES ($1, 'attests_claim', $2, 1.0, 'claims_engine')
+                        ON CONFLICT DO NOTHING
+                    """, body.reviewer_uri, claim["entity_uri"])
+
+                # Log to claim_state_log
+                await conn.execute("""
+                    INSERT INTO claim_state_log
+                        (claim_rid, from_state, to_state, actor, reason, metadata)
+                    VALUES ($1, $2, $2, $3, $4, $5::jsonb)
+                """,
+                    rid,
+                    (await conn.fetchval("SELECT verification FROM claims WHERE claim_rid = $1", rid)),
+                    body.reviewer_uri,
+                    f"attestation:{body.verdict}",
+                    _json_dumps({
+                        "attestation_rid": att_rid,
+                        "verdict": body.verdict,
+                        "rationale": body.rationale,
+                    }),
+                )
+
+        logger.info(f"claim.attestation rid={rid} att={att_rid} reviewer={body.reviewer_uri} verdict={body.verdict}")
+        return AttestationResponse(
+            attestation_rid=row["attestation_rid"],
+            claim_rid=row["claim_rid"],
+            reviewer_uri=row["reviewer_uri"],
+            reviewer_name=reviewer["entity_text"] if reviewer else None,
+            verdict=row["verdict"],
+            rationale=row.get("rationale"),
+            evidence_uris=row.get("evidence_uris"),
+            content_hash=row.get("content_hash"),
+            attest_tx_hash=row.get("attest_tx_hash"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @router.get("/{rid}/attestations", response_model=List[AttestationResponse])
+    async def list_attestations(
+        rid: str,
+        verdict: Optional[str] = Query(None, description="Filter by verdict"),
+    ):
+        """List all attestations for a claim."""
+        async with pool.acquire() as conn:
+            # Verify claim exists
+            claim = await conn.fetchrow(
+                "SELECT claim_rid FROM claims WHERE claim_rid = $1", rid
+            )
+            if not claim:
+                raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
+
+            if verdict:
+                rows = await conn.fetch("""
+                    SELECT a.*, er.entity_text AS reviewer_name
+                    FROM claim_attestations a
+                    LEFT JOIN entity_registry er ON a.reviewer_uri = er.fuseki_uri
+                    WHERE a.claim_rid = $1 AND a.verdict = $2
+                    ORDER BY a.created_at DESC
+                """, rid, verdict)
+            else:
+                rows = await conn.fetch("""
+                    SELECT a.*, er.entity_text AS reviewer_name
+                    FROM claim_attestations a
+                    LEFT JOIN entity_registry er ON a.reviewer_uri = er.fuseki_uri
+                    WHERE a.claim_rid = $1
+                    ORDER BY a.created_at DESC
+                """, rid)
+
+        return [
+            AttestationResponse(
+                attestation_rid=r["attestation_rid"],
+                claim_rid=r["claim_rid"],
+                reviewer_uri=r["reviewer_uri"],
+                reviewer_name=r.get("reviewer_name"),
+                verdict=r["verdict"],
+                rationale=r.get("rationale"),
+                evidence_uris=r.get("evidence_uris"),
+                content_hash=r.get("content_hash"),
+                attest_tx_hash=r.get("attest_tx_hash"),
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
+
+    @router.get("/{rid}/attestations/{att_rid}", response_model=AttestationResponse)
+    async def get_attestation(rid: str, att_rid: str):
+        """Get a single attestation by RID."""
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT a.*, er.entity_text AS reviewer_name
+                FROM claim_attestations a
+                LEFT JOIN entity_registry er ON a.reviewer_uri = er.fuseki_uri
+                WHERE a.claim_rid = $1 AND a.attestation_rid = $2
+            """, rid, att_rid)
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Attestation not found: {att_rid}")
+
+        return AttestationResponse(
+            attestation_rid=row["attestation_rid"],
+            claim_rid=row["claim_rid"],
+            reviewer_uri=row["reviewer_uri"],
+            reviewer_name=row.get("reviewer_name"),
+            verdict=row["verdict"],
+            rationale=row.get("rationale"),
+            evidence_uris=row.get("evidence_uris"),
+            content_hash=row.get("content_hash"),
+            attest_tx_hash=row.get("attest_tx_hash"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     return router

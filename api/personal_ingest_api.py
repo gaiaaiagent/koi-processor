@@ -79,6 +79,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Serve static files (demo portal)
+from fastapi.staticfiles import StaticFiles
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+@app.get("/demo")
+async def demo_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/static/demo.html")
+
 # Load capabilities registry
 try:
     from api.capabilities import Capabilities

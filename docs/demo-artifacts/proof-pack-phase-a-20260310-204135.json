@@ -1,0 +1,139 @@
+{
+    "claim_rid": "orn:koi-net.claim:ac520faeafd4a9ba",
+    "verification": "ledger_anchored",
+    "claim": {
+        "claim_rid": "orn:koi-net.claim:ac520faeafd4a9ba",
+        "entity_uri": "orn:personal-koi.entity:claim-orn:koi-net.claim:ac520faeafd4a9ba-478c2ba8cbc2",
+        "claimant_uri": "orn:personal-koi.entity:person-darren-zal-42986b9bf8c0",
+        "claimant_name": "Darren Zal",
+        "statement": "Steel Thread Phase A test: The Salish Sea Knowledge Garden demonstrates bioregional knowledge commoning practices including federation, consent-aware data governance, and community-driven entity curation across four connected nodes.",
+        "claim_type": "ecological",
+        "about_uri": "orn:personal-koi.entity:organization-regen-network-74d0e2a08367",
+        "source_document": null,
+        "ai_confidence": null,
+        "supersedes_rid": null,
+        "metadata": {
+            "test_run": true,
+            "methodology": "steel_thread_phase_a",
+            "generated_at": "2026-03-11T03:41:27Z"
+        },
+        "operator_uri": null,
+        "created_by": "steel-thread-test",
+        "created_at": "2026-03-11T03:41:27.323094+00:00",
+        "updated_at": "2026-03-11T03:41:34.805877+00:00"
+    },
+    "evidence": [
+        {
+            "uri": "orn:personal-koi.entity:evidence-steel-thread-test-evidence-1773200326-b9adcb40ef24",
+            "name": "Steel Thread Test Evidence 1773200326",
+            "type": "Evidence",
+            "confidence": 1.0,
+            "source": "claims_engine"
+        }
+    ],
+    "history": [
+        {
+            "from_state": null,
+            "to_state": "self_reported",
+            "actor": "steel-thread-test",
+            "reason": "created",
+            "metadata": null,
+            "created_at": "2026-03-11T03:41:27.323094+00:00"
+        },
+        {
+            "from_state": "self_reported",
+            "to_state": "self_reported",
+            "actor": "steel-thread-test",
+            "reason": "evidence linked",
+            "metadata": {
+                "evidence_uri": "orn:personal-koi.entity:evidence-steel-thread-test-evidence-1773200326-b9adcb40ef24"
+            },
+            "created_at": "2026-03-11T03:41:27.377396+00:00"
+        },
+        {
+            "from_state": "self_reported",
+            "to_state": "self_reported",
+            "actor": "orn:personal-koi.entity:person-gregory-landua-5e190492c454",
+            "reason": "attestation:approved",
+            "metadata": {
+                "verdict": "approved",
+                "rationale": "Steel thread Phase A test \u2014 first attestation",
+                "attestation_rid": "orn:koi-net.attestation:3f49fb02439a9e0d"
+            },
+            "created_at": "2026-03-11T03:41:27.419250+00:00"
+        },
+        {
+            "from_state": "self_reported",
+            "to_state": "peer_reviewed",
+            "actor": "steel-thread-test",
+            "reason": "Phase A test: first attestation received",
+            "metadata": null,
+            "created_at": "2026-03-11T03:41:27.460743+00:00"
+        },
+        {
+            "from_state": "peer_reviewed",
+            "to_state": "peer_reviewed",
+            "actor": "orn:personal-koi.entity:person-regen-707e629423a3",
+            "reason": "attestation:approved",
+            "metadata": {
+                "verdict": "approved",
+                "rationale": "Steel thread Phase A test \u2014 second attestation",
+                "attestation_rid": "orn:koi-net.attestation:e68f7f52a5594bae"
+            },
+            "created_at": "2026-03-11T03:41:27.513532+00:00"
+        },
+        {
+            "from_state": "peer_reviewed",
+            "to_state": "verified",
+            "actor": "steel-thread-test",
+            "reason": "Phase A test: ready for anchoring",
+            "metadata": null,
+            "created_at": "2026-03-11T03:41:27.545476+00:00"
+        },
+        {
+            "from_state": "verified",
+            "to_state": "ledger_anchored",
+            "actor": "ledger_anchor_service",
+            "reason": "Anchored on Regen Ledger testnet",
+            "metadata": {
+                "tx_hash": "FCAF21E1FD30155EEF1C45C14C7CFEAD740834EB296448F56DBA6F39C9AF5503",
+                "chain_id": "regen-upgrade",
+                "ledger_iri": "regen:114W6uJwPgh3jMxHhNZVmf4H9tDtEawpGFnRmdQNaCkVwPBe5FRK.json"
+            },
+            "created_at": "2026-03-11T03:41:34.805877+00:00"
+        }
+    ],
+    "anchor": {
+        "content_hash": "cd2ad9b5481b4edd683a901db459d1cb0f5adb6d50a7859f8c7bc72a51877f46",
+        "ledger_iri": "regen:114W6uJwPgh3jMxHhNZVmf4H9tDtEawpGFnRmdQNaCkVwPBe5FRK.json",
+        "tx_hash": "FCAF21E1FD30155EEF1C45C14C7CFEAD740834EB296448F56DBA6F39C9AF5503",
+        "ledger_timestamp": "2026-03-11T03:41:28+00:00",
+        "chain_id": "regen-upgrade"
+    },
+    "attestations": [
+        {
+            "attestation_rid": "orn:koi-net.attestation:3f49fb02439a9e0d",
+            "reviewer_uri": "orn:personal-koi.entity:person-gregory-landua-5e190492c454",
+            "reviewer_name": "Gregory Landua",
+            "verdict": "approved",
+            "rationale": "Steel thread Phase A test \u2014 first attestation",
+            "evidence_uris": [
+                "orn:personal-koi.entity:evidence-steel-thread-test-evidence-1773200326-b9adcb40ef24"
+            ],
+            "created_at": "2026-03-11T03:41:27.419250+00:00"
+        },
+        {
+            "attestation_rid": "orn:koi-net.attestation:e68f7f52a5594bae",
+            "reviewer_uri": "orn:personal-koi.entity:person-regen-707e629423a3",
+            "reviewer_name": "Regen",
+            "verdict": "approved",
+            "rationale": "Steel thread Phase A test \u2014 second attestation",
+            "evidence_uris": [
+                "orn:personal-koi.entity:evidence-steel-thread-test-evidence-1773200326-b9adcb40ef24"
+            ],
+            "created_at": "2026-03-11T03:41:27.513532+00:00"
+        }
+    ],
+    "assembled_at": "2026-03-11T03:41:35.010991+00:00",
+    "version": "1.0"
+}

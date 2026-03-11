@@ -70,9 +70,8 @@ ssh darren@202.61.196.119 "nohup /opt/projects/koi-processor/start-claims-api.sh
 **Story:** "You can also create claims manually, with entity resolution matching organizations from the knowledge graph."
 
 - Click **Create Claim** tab
-- Type "Regen" in the **Organization** field — typeahead suggestions appear
-- Select **Regen Network**
-- Statement: "Regen Network facilitated the retirement of 10,000 carbon credits in Q1 2026"
+- Select an organization from the **Claimant Organization** dropdown (e.g., "Community Environmental Council")
+- Statement: "CEC reduced methane emissions by 800 tons CO2e through composting in Q4 2025"
 - Type: "ecological"
 - Click **Create Claim**
 - Switch to Dashboard — count should now be 4

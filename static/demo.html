@@ -45,7 +45,7 @@
           <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
         </div>
         <h1 class="text-lg font-semibold text-gray-900">Claims Engine</h1>
-        <span class="text-xs bg-regen-100 text-regen-700 px-2 py-0.5 rounded-full font-medium">v1</span>
+        <span class="text-xs bg-regen-100 text-regen-700 px-2 py-0.5 rounded-full font-medium">v2</span>
       </div>
       <div class="flex items-center gap-2 text-sm text-gray-500">
         <span class="inline-block w-2 h-2 bg-green-500 rounded-full"></span>
@@ -285,6 +285,16 @@
     // ==================== INIT ====================
     document.addEventListener('DOMContentLoaded', async () => {
       await Promise.all([loadAllClaims(), loadOrgs()]);
+      // Enrich orgList/orgMap from claims so claimants appear in dropdowns
+      // even if their entity_type isn't ORGANIZATION
+      allClaims.forEach(c => {
+        if (c.claimant_name && c.claimant_uri && !orgMap[c.claimant_uri]) {
+          orgMap[c.claimant_uri] = c.claimant_name;
+          orgList.push({ uri: c.claimant_uri, name: c.claimant_name });
+        }
+      });
+      orgList.sort((a, b) => a.name.localeCompare(b.name));
+      populateOrgDropdowns();
       renderDashboard();
     });
 
@@ -315,14 +325,19 @@
 
     async function loadOrgs() {
       try {
-        let { data } = await api('/entities?entity_type=Organization&limit=200');
-        let entities = data.entities || data;
-        // Prod DB uses UPPERCASE entity types; fall back if mixed-case returns nothing
-        if (entities.length === 0) {
-          ({ data } = await api('/entities?entity_type=ORGANIZATION&limit=200'));
-          entities = data.entities || data;
+        const [res1, res2] = await Promise.all([
+          api('/entities?entity_type=Organization&limit=200').catch(() => ({ data: { entities: [] } })),
+          api('/entities?entity_type=ORGANIZATION&limit=200').catch(() => ({ data: { entities: [] } })),
+        ]);
+        const entities1 = res1.data.entities || res1.data || [];
+        const entities2 = res2.data.entities || res2.data || [];
+        const seen = new Set();
+        const merged = [];
+        for (const e of [...entities1, ...entities2]) {
+          if (!seen.has(e.fuseki_uri)) { seen.add(e.fuseki_uri); merged.push(e); }
         }
-        orgList = entities.map(e => ({ uri: e.fuseki_uri, name: e.entity_text })).sort((a, b) => a.name.localeCompare(b.name));
+        orgList = merged.map(e => ({ uri: e.fuseki_uri, name: e.entity_text }))
+          .sort((a, b) => a.name.localeCompare(b.name));
         orgMap = Object.fromEntries(orgList.map(o => [o.uri, o.name]));
         populateOrgDropdowns();
       } catch (e) {
@@ -348,8 +363,9 @@
       });
     }
 
-    function resolveOrgName(uri) {
+    function resolveOrgName(uri, claim) {
       if (!uri) return 'Unknown';
+      if (claim && claim.claimant_name) return claim.claimant_name;
       if (orgMap[uri]) return orgMap[uri];
       // Extract readable name from URI
       const match = uri.match(/(?:organization|concept)-(.+?)-[a-f0-9]+$/);
@@ -364,7 +380,7 @@
       const byType = countBy(allClaims, 'claim_type');
       const byOrg = {};
       allClaims.forEach(c => {
-        const name = resolveOrgName(c.claimant_uri);
+        const name = resolveOrgName(c.claimant_uri, c);
         byOrg[name] = (byOrg[name] || 0) + 1;
       });
       const aiCount = allClaims.filter(c => c.ai_confidence != null).length;
@@ -438,15 +454,18 @@
       empty.classList.add('hidden');
 
       tbody.innerHTML = claims.map(c => `
-        <tr class="hover:bg-gray-50 cursor-pointer transition" onclick="openDetail('${c.claim_rid}')">
+        <tr class="hover:bg-gray-50 cursor-pointer transition" data-rid="${escAttr(c.claim_rid)}">
           <td class="px-4 py-3 text-sm text-gray-900 max-w-xs truncate">${escHtml(c.statement.substring(0, 100))}${c.statement.length > 100 ? '...' : ''}</td>
-          <td class="px-4 py-3 text-sm text-gray-600">${escHtml(resolveOrgName(c.claimant_uri))}</td>
+          <td class="px-4 py-3 text-sm text-gray-600">${escHtml(resolveOrgName(c.claimant_uri, c))}</td>
           <td class="px-4 py-3"><span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium ${typeColor(c.claim_type)}">${formatLabel(c.claim_type)}</span></td>
           <td class="px-4 py-3"><span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(c.verification)}">${formatLabel(c.verification)}</span></td>
           <td class="px-4 py-3 text-sm text-gray-600">${c.ai_confidence != null ? (c.ai_confidence * 100).toFixed(0) + '%' : '—'}</td>
           <td class="px-4 py-3 text-sm text-gray-500">${formatDate(c.created_at)}</td>
         </tr>
       `).join('');
+      tbody.querySelectorAll('tr[data-rid]').forEach(tr => {
+        tr.addEventListener('click', () => openDetail(tr.dataset.rid));
+      });
     }
 
     // ==================== CLAIM DETAIL ====================
@@ -460,19 +479,22 @@
       content.innerHTML = '<div class="text-center py-12"><div class="spinner mx-auto mb-2"></div>Loading...</div>';
 
       try {
-        const [claimRes, historyRes] = await Promise.all([
+        const [claimRes, historyRes, attRes] = await Promise.all([
           api(`/claims/${encodeURIComponent(rid)}`),
           api(`/claims/${encodeURIComponent(rid)}/history`),
+          api(`/claims/${encodeURIComponent(rid)}/attestations`).catch(() => ({ data: [] })),
         ]);
         const claim = claimRes.data;
         const history = historyRes.data;
-        renderDetail(claim, history);
+        const attestations = attRes.data || [];
+        renderDetail(claim, history, attestations);
       } catch (e) {
         content.innerHTML = `<p class="text-red-500">Error: ${escHtml(e.message)}</p>`;
       }
     }
 
-    function renderDetail(claim, history) {
+    function renderDetail(claim, history, attestations) {
+      attestations = attestations || [];
       const content = document.getElementById('detail-content');
       const transitions = history.transitions || [];
       const evidence = claim.evidence || [];
@@ -496,7 +518,7 @@
           </div>
           <div>
             <h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">Organization</h3>
-            <p class="text-sm text-gray-700">${escHtml(resolveOrgName(claim.claimant_uri))}</p>
+            <p class="text-sm text-gray-700">${escHtml(resolveOrgName(claim.claimant_uri, claim))}</p>
           </div>
           <div>
             <h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">AI Confidence</h3>
@@ -529,6 +551,23 @@
               <div class="text-xs text-gray-500 mt-1">${escHtml(e.type || '')} ${e.confidence != null ? `· Confidence: ${(e.confidence * 100).toFixed(0)}%` : ''}</div>
             </div>
           `).join('') : '<p class="text-sm text-gray-400">No evidence linked yet.</p>'}
+        </div>
+
+        <!-- Attestations (V2) -->
+        <div>
+          <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Attestations (${attestations.length})</h3>
+          ${renderAttestationPolicy(claim, attestations)}
+          ${attestations.length ? attestations.map(a => `
+            <div class="bg-gray-50 rounded-lg p-3 mb-2 text-sm">
+              <div class="flex items-center justify-between">
+                <span class="font-medium text-gray-800">${escHtml(a.reviewer_name || a.reviewer_uri)}</span>
+                <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium ${verdictColor(a.verdict)}">${escHtml(a.verdict)}</span>
+              </div>
+              ${a.rationale ? `<div class="text-xs text-gray-500 mt-1">${escHtml(a.rationale)}</div>` : ''}
+              <div class="text-xs text-gray-400 mt-1">${formatDateTime(a.created_at)}</div>
+            </div>
+          `).join('') : '<p class="text-sm text-gray-400 mb-2">No attestations yet.</p>'}
+          ${renderAttestationForm(claim)}
         </div>
 
         <!-- Audit Trail -->
@@ -571,6 +610,18 @@
           <code class="text-xs text-gray-500 break-all">${escHtml(claim.claim_rid)}</code>
         </div>
       `;
+      // Bind action buttons (XSS-safe: no inline onclick with unsanitized strings)
+      content.querySelectorAll('[data-action][data-rid]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const rid = btn.dataset.rid;
+          const action = btn.dataset.action;
+          if (action === 'verify') verifyClaim(rid);
+          else if (action === 'prepare') prepareAnchor(rid);
+          else if (action === 'broadcast') broadcastAnchor(rid);
+          else if (action === 'reconcile') reconcileAnchor(rid);
+          else if (action === 'attest') submitAttestation(rid);
+        });
+      });
     }
 
     function renderVerifyActions(claim) {
@@ -593,7 +644,7 @@
             </select>
             <input id="verify-actor" type="text" value="David Fortson" placeholder="Reviewer name" class="w-full border border-blue-300 rounded px-2 py-1.5 text-sm">
             <textarea id="verify-reason" rows="2" placeholder="Reason for transition..." class="w-full border border-blue-300 rounded px-2 py-1.5 text-sm"></textarea>
-            <button onclick="verifyClaim('${claim.claim_rid}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-blue-700 transition w-full">Advance State</button>
+            <button data-action="verify" data-rid="${escAttr(claim.claim_rid)}" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-blue-700 transition w-full">Advance State</button>
           </div>
         </div>
       `;
@@ -608,18 +659,147 @@
           <h4 class="text-xs font-semibold text-yellow-800 mb-2">Blockchain Anchoring</h4>
           <div class="space-y-2">
             ${!claim.content_hash ? `
-              <button onclick="prepareAnchor('${claim.claim_rid}')" class="bg-yellow-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-yellow-700 transition w-full">1. Prepare Anchor (Compute Hash)</button>
+              <button data-action="prepare" data-rid="${escAttr(claim.claim_rid)}" class="bg-yellow-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-yellow-700 transition w-full">1. Prepare Anchor (Compute Hash)</button>
             ` : `
               <div class="text-xs text-yellow-700 mb-1">Content hash: <code>${claim.content_hash.substring(0, 20)}...</code></div>
               ${!claim.tx_hash ? `
-                <button onclick="broadcastAnchor('${claim.claim_rid}')" class="bg-yellow-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-yellow-700 transition w-full">2. Broadcast to Regen Ledger</button>
+                <button data-action="broadcast" data-rid="${escAttr(claim.claim_rid)}" class="bg-yellow-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-yellow-700 transition w-full">2. Broadcast to Regen Ledger</button>
               ` : `
-                <button onclick="reconcileAnchor('${claim.claim_rid}')" class="bg-yellow-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-yellow-700 transition w-full">3. Reconcile</button>
+                <button data-action="reconcile" data-rid="${escAttr(claim.claim_rid)}" class="bg-yellow-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-yellow-700 transition w-full">3. Reconcile</button>
               `}
             `}
           </div>
         </div>
       `;
+    }
+
+    function verdictColor(v) {
+      const map = {
+        approved: 'bg-green-100 text-green-700',
+        rejected: 'bg-red-100 text-red-700',
+        pending: 'bg-yellow-100 text-yellow-700',
+        needs_info: 'bg-blue-100 text-blue-700',
+      };
+      return map[v] || 'bg-gray-100 text-gray-600';
+    }
+
+    function renderAttestationPolicy(claim, attestations) {
+      const approved = attestations.filter(a => a.verdict === 'approved').length;
+      const needed = claim.verification === 'self_reported' ? 1
+                   : claim.verification === 'peer_reviewed' ? 2
+                   : 0;
+      if (needed === 0) return '';
+      const nextState = claim.verification === 'self_reported' ? 'peer_reviewed' : 'verified';
+      const pct = Math.min(100, Math.round(approved / needed * 100));
+      return `
+        <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-2 text-xs">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-medium text-indigo-700">${approved}/${needed} approved for ${formatLabel(nextState)}</span>
+            <span class="text-indigo-500">${pct}%</span>
+          </div>
+          <div class="w-full h-1.5 bg-indigo-100 rounded-full overflow-hidden">
+            <div class="h-full rounded-full bg-indigo-500 transition-all" style="width:${pct}%"></div>
+          </div>
+        </div>`;
+    }
+
+    function renderAttestationForm(claim) {
+      if (claim.verification === 'ledger_anchored' || claim.verification === 'withdrawn') return '';
+      return `
+        <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-4 mt-2">
+          <h4 class="text-xs font-semibold text-indigo-800 mb-2">Add Attestation</h4>
+          <div class="space-y-2">
+            <div class="relative">
+              <input id="att-reviewer-search" type="text" placeholder="Search reviewer (Person or Organization)..."
+                class="w-full border border-indigo-300 rounded px-2 py-1.5 text-sm bg-white"
+                oninput="debounceReviewerSearch(this.value, '${escAttr(claim.claim_rid)}')">
+              <input id="att-reviewer-uri" type="hidden">
+              <div id="att-reviewer-dropdown" class="absolute z-10 w-full bg-white border border-gray-200 rounded-lg shadow-lg mt-1 hidden max-h-40 overflow-y-auto"></div>
+            </div>
+            <select id="att-verdict" class="w-full border border-indigo-300 rounded px-2 py-1.5 text-sm bg-white">
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="needs_info">Needs Info</option>
+              <option value="pending">Pending</option>
+            </select>
+            <textarea id="att-rationale" rows="2" placeholder="Rationale..." class="w-full border border-indigo-300 rounded px-2 py-1.5 text-sm"></textarea>
+            <button data-action="attest" data-rid="${escAttr(claim.claim_rid)}" class="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-indigo-700 transition w-full">Submit Attestation</button>
+          </div>
+        </div>`;
+    }
+
+    let _reviewerSearchTimer = null;
+    function debounceReviewerSearch(query, claimRid) {
+      clearTimeout(_reviewerSearchTimer);
+      if (query.length < 2) {
+        document.getElementById('att-reviewer-dropdown').classList.add('hidden');
+        return;
+      }
+      _reviewerSearchTimer = setTimeout(() => searchReviewers(query), 300);
+    }
+
+    async function searchReviewers(query) {
+      const dropdown = document.getElementById('att-reviewer-dropdown');
+      try {
+        const [r1, r2] = await Promise.all([
+          api(`/entity-search?query=${encodeURIComponent(query)}&entity_type=Person&limit=10`).catch(() => ({ data: { results: [] } })),
+          api(`/entity-search?query=${encodeURIComponent(query)}&entity_type=Organization&limit=10`).catch(() => ({ data: { results: [] } })),
+        ]);
+        const results1 = r1.data?.results || r1.data?.entities || [];
+        const results2 = r2.data?.results || r2.data?.entities || [];
+        const seen = new Set();
+        const merged = [...results1, ...results2].filter(e => {
+          const uri = e.uri || e.fuseki_uri;
+          if (seen.has(uri)) return false;
+          seen.add(uri);
+          return true;
+        });
+        if (merged.length === 0) {
+          dropdown.classList.add('hidden');
+          return;
+        }
+        dropdown.innerHTML = merged.map(e => {
+          const uri = e.uri || e.fuseki_uri;
+          const name = e.name || e.entity_text || uri;
+          const type = e.type || e.entity_type || '';
+          return `<div class="px-3 py-2 hover:bg-gray-100 cursor-pointer text-sm" data-uri="${escAttr(uri)}" data-name="${escAttr(name)}">
+            <span class="font-medium">${escHtml(name)}</span>
+            <span class="text-xs text-gray-400 ml-1">${escHtml(type)}</span>
+          </div>`;
+        }).join('');
+        dropdown.classList.remove('hidden');
+        dropdown.querySelectorAll('[data-uri]').forEach(el => {
+          el.addEventListener('click', () => {
+            document.getElementById('att-reviewer-search').value = el.dataset.name;
+            document.getElementById('att-reviewer-uri').value = el.dataset.uri;
+            dropdown.classList.add('hidden');
+          });
+        });
+      } catch (e) {
+        dropdown.classList.add('hidden');
+      }
+    }
+
+    async function submitAttestation(rid) {
+      const reviewerUri = document.getElementById('att-reviewer-uri').value;
+      const verdict = document.getElementById('att-verdict').value;
+      const rationale = document.getElementById('att-rationale').value;
+      if (!reviewerUri) {
+        toast('Please select a reviewer from the search results', 'error');
+        return;
+      }
+      try {
+        await api(`/claims/${encodeURIComponent(rid)}/attestations`, {
+          method: 'POST',
+          body: JSON.stringify({ reviewer_uri: reviewerUri, verdict, rationale }),
+        });
+        toast(`Attestation submitted: ${verdict}`, 'success');
+        await loadAllClaims();
+        renderDashboard();
+        openDetail(rid);
+      } catch (e) {
+        toast('Attestation failed: ' + e.message, 'error');
+      }
     }
 
     function closeDetail() {

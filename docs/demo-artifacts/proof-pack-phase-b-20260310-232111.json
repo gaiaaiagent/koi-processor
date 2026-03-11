@@ -1,0 +1,140 @@
+{
+    "claim_rid": "orn:koi-net.claim:9a3b33b327e95922",
+    "verification": "ledger_anchored",
+    "claim": {
+        "claim_rid": "orn:koi-net.claim:9a3b33b327e95922",
+        "entity_uri": "orn:personal-koi.entity:claim-orn:koi-net.claim:9a3b33b327e95922-773a120dce89",
+        "claimant_uri": "orn:personal-koi.entity:person-darren-zal-42986b9bf8c0",
+        "claimant_name": "Darren Zal",
+        "statement": "Steel Thread Phase B: Interview participants in the Salish Sea bioregion have documented knowledge commoning practices including pattern recognition for community coordination and protocol development for facilitated knowledge sharing, demonstrating active bioregional knowledge stewardship.",
+        "claim_type": "social",
+        "about_uri": "orn:personal-koi.entity:bioregion-salish-sea-1a680eed1248",
+        "source_document": null,
+        "ai_confidence": null,
+        "supersedes_rid": null,
+        "metadata": {
+            "test_run": true,
+            "methodology": "steel_thread_phase_b",
+            "source_type": "interview_artifacts",
+            "generated_at": "2026-03-11T06:21:03Z"
+        },
+        "operator_uri": null,
+        "created_by": "steel-thread-phase-b",
+        "created_at": "2026-03-11T06:21:03.277921+00:00",
+        "updated_at": "2026-03-11T06:21:11.696152+00:00"
+    },
+    "evidence": [
+        {
+            "uri": "orn:personal-koi.entity:evidence-interview-evidence-\u2014-bioregional-knowledge-practic-cd3dc2607048",
+            "name": "Interview Evidence \u2014 Bioregional Knowledge Practices 1773210063",
+            "type": "Evidence",
+            "confidence": 1.0,
+            "source": "claims_engine"
+        }
+    ],
+    "history": [
+        {
+            "from_state": null,
+            "to_state": "self_reported",
+            "actor": "steel-thread-phase-b",
+            "reason": "created",
+            "metadata": null,
+            "created_at": "2026-03-11T06:21:03.277921+00:00"
+        },
+        {
+            "from_state": "self_reported",
+            "to_state": "self_reported",
+            "actor": "steel-thread-phase-b",
+            "reason": "evidence linked",
+            "metadata": {
+                "evidence_uri": "orn:personal-koi.entity:evidence-interview-evidence-\u2014-bioregional-knowledge-practic-cd3dc2607048"
+            },
+            "created_at": "2026-03-11T06:21:03.345153+00:00"
+        },
+        {
+            "from_state": "self_reported",
+            "to_state": "self_reported",
+            "actor": "orn:personal-koi.entity:person-gregory-landua-5e190492c454",
+            "reason": "attestation:approved",
+            "metadata": {
+                "verdict": "approved",
+                "rationale": "Steel thread Phase B \u2014 interview artifacts reviewed",
+                "attestation_rid": "orn:koi-net.attestation:c8a396946a3520a4"
+            },
+            "created_at": "2026-03-11T06:21:03.486231+00:00"
+        },
+        {
+            "from_state": "self_reported",
+            "to_state": "peer_reviewed",
+            "actor": "steel-thread-phase-b",
+            "reason": "Phase B: interview evidence reviewed",
+            "metadata": null,
+            "created_at": "2026-03-11T06:21:03.530615+00:00"
+        },
+        {
+            "from_state": "peer_reviewed",
+            "to_state": "peer_reviewed",
+            "actor": "orn:personal-koi.entity:organization-regen-network-74d0e2a08367",
+            "reason": "attestation:approved",
+            "metadata": {
+                "verdict": "approved",
+                "rationale": "Steel thread Phase B \u2014 second attestation",
+                "attestation_rid": "orn:koi-net.attestation:e2c960d9d2e02649"
+            },
+            "created_at": "2026-03-11T06:21:03.688138+00:00"
+        },
+        {
+            "from_state": "peer_reviewed",
+            "to_state": "verified",
+            "actor": "steel-thread-phase-b",
+            "reason": "Phase B: ready for anchoring",
+            "metadata": null,
+            "created_at": "2026-03-11T06:21:03.724524+00:00"
+        },
+        {
+            "from_state": "verified",
+            "to_state": "ledger_anchored",
+            "actor": "ledger_anchor_service",
+            "reason": "Anchored on Regen Ledger testnet",
+            "metadata": {
+                "tx_hash": "8AFE4CBF651E72A692F89626B7DC3E2D04B8E9FCF67446ED639F4E38D043DBE5",
+                "chain_id": "regen-upgrade",
+                "ledger_iri": "regen:1148AfLCUT3F41arTizDqCxZdfUUXCSWSp8mXTGp1yTvCGW6KwFG.json"
+            },
+            "created_at": "2026-03-11T06:21:11.696152+00:00"
+        }
+    ],
+    "anchor": {
+        "content_hash": "9b5c60d8cd8122fd7c5cfe27796ad2debc3c38c25a6fd025eb2361c87c0e74e2",
+        "ledger_iri": "regen:1148AfLCUT3F41arTizDqCxZdfUUXCSWSp8mXTGp1yTvCGW6KwFG.json",
+        "tx_hash": "8AFE4CBF651E72A692F89626B7DC3E2D04B8E9FCF67446ED639F4E38D043DBE5",
+        "ledger_timestamp": "2026-03-11T06:21:03+00:00",
+        "chain_id": "regen-upgrade"
+    },
+    "attestations": [
+        {
+            "attestation_rid": "orn:koi-net.attestation:c8a396946a3520a4",
+            "reviewer_uri": "orn:personal-koi.entity:person-gregory-landua-5e190492c454",
+            "reviewer_name": "Gregory Landua",
+            "verdict": "approved",
+            "rationale": "Steel thread Phase B \u2014 interview artifacts reviewed",
+            "evidence_uris": [
+                "orn:personal-koi.entity:evidence-interview-evidence-\u2014-bioregional-knowledge-practic-cd3dc2607048"
+            ],
+            "created_at": "2026-03-11T06:21:03.486231+00:00"
+        },
+        {
+            "attestation_rid": "orn:koi-net.attestation:e2c960d9d2e02649",
+            "reviewer_uri": "orn:personal-koi.entity:organization-regen-network-74d0e2a08367",
+            "reviewer_name": "Regen Network",
+            "verdict": "approved",
+            "rationale": "Steel thread Phase B \u2014 second attestation",
+            "evidence_uris": [
+                "orn:personal-koi.entity:evidence-interview-evidence-\u2014-bioregional-knowledge-practic-cd3dc2607048"
+            ],
+            "created_at": "2026-03-11T06:21:03.688138+00:00"
+        }
+    ],
+    "assembled_at": "2026-03-11T06:21:11.867575+00:00",
+    "version": "1.0"
+}
