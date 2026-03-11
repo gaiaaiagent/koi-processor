@@ -1427,11 +1427,24 @@ def create_router(pool, caps=None):
             meta = json.loads(meta)
 
         # Verify claim content hash
+        # For anchored claims with a pinned hash (pre-v2 hashes included mutable
+        # 'verification' field), verify that the stored hash matches the on-chain
+        # IRI instead of recomputing from fields.
         claim_hash_verified = False
         if row.get("content_hash"):
             from api.ledger_anchor import compute_content_hash
-            recomputed = compute_content_hash(row)
-            claim_hash_verified = (recomputed == row["content_hash"])
+            if row.get("ledger_iri") and row.get("tx_hash"):
+                # Anchored: verify stored hash → IRI derivation matches
+                from api.ledger_anchor import derive_ledger_iri
+                try:
+                    derived_iri = derive_ledger_iri(row["content_hash"])
+                    claim_hash_verified = (derived_iri == row["ledger_iri"])
+                except Exception:
+                    claim_hash_verified = False
+            else:
+                # Not anchored: recompute from fields
+                recomputed = compute_content_hash(row)
+                claim_hash_verified = (recomputed == row["content_hash"])
 
         chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
         rpc_url = os.getenv("REGEN_RPC_URL", "https://regen-rpc.polkachu.com/")
