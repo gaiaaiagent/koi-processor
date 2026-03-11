@@ -1300,6 +1300,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Commitment routers not mounted: {e}")
 
+            # Task router is always mounted (no capability gate — core feature)
+            try:
+                from api.routers.task_router import create_router as create_task_router
+                app.include_router(create_task_router(db_pool, _caps), prefix="/tasks")
+                logger.info("Task router mounted (/tasks)")
+            except Exception as e:
+                logger.warning(f"Task router not mounted: {e}")
+
             # Claims engine router (always on, no capability gate)
             try:
                 from api.routers.claims_router import create_router as create_claims_router
