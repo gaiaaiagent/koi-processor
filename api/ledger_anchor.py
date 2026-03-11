@@ -1,7 +1,7 @@
-"""Ledger anchoring — content hash computation + CLI-based broadcast to Regen testnet.
+"""Ledger anchoring — content hash computation + CLI-based broadcast to Regen Ledger (mainnet `regen-1`).
 
 Computes BLAKE2b-256 hash of canonical claim serialization, derives IRI via
-regen CLI, and broadcasts MsgAnchor to the regen-upgrade testnet.
+regen CLI, and broadcasts MsgAnchor to the Regen Ledger mainnet.
 """
 
 import base64
@@ -17,9 +17,9 @@ import time
 logger = logging.getLogger(__name__)
 
 # Config from environment (set in personal.env, no mnemonic)
-REGEN_CHAIN_ID = os.getenv("REGEN_CHAIN_ID", "regen-upgrade")
-REGEN_RPC_URL = os.getenv("REGEN_RPC_URL", "https://rpc-regen-upgrade.vitwit.com/")
-REGEN_REST_URL = os.getenv("REGEN_REST_URL", "https://api-regen-upgrade.vitwit.com/")
+REGEN_CHAIN_ID = os.getenv("REGEN_CHAIN_ID", "regen-1")
+REGEN_RPC_URL = os.getenv("REGEN_RPC_URL", "https://regen-rpc.polkachu.com/")
+REGEN_REST_URL = os.getenv("REGEN_REST_URL", "https://regen-api.polkachu.com/")
 REGEN_KEY_NAME = os.getenv("REGEN_KEY_NAME", "claims-service")
 
 
@@ -58,6 +58,46 @@ def compute_content_hash(row) -> str:
     canonical = _canonical_claim_json(row)
     h = hashlib.blake2b(canonical.encode(), digest_size=32)
     return h.hexdigest()
+
+
+def compute_attestation_hash(row) -> str:
+    """Compute BLAKE2b-256 hash of canonical attestation serialization.
+
+    Returns hex-encoded hash string. Same pattern as compute_content_hash().
+    """
+    obj = {
+        "attestation_rid": row["attestation_rid"],
+        "claim_rid": row["claim_rid"],
+        "reviewer_uri": row["reviewer_uri"],
+        "verdict": row["verdict"],
+        "rationale": row.get("rationale") or "",
+        "evidence_uris": sorted(row.get("evidence_uris") or []),
+    }
+    canonical = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    h = hashlib.blake2b(canonical.encode(), digest_size=32)
+    return h.hexdigest()
+
+
+# Cached signing address (deterministic for a given key name)
+_signing_address: str | None = None
+
+
+def get_signing_address() -> str:
+    """Get the regen address for the signing key. Cached after first call."""
+    global _signing_address
+    if _signing_address is not None:
+        return _signing_address
+
+    regen_bin = _check_regen_cli()
+    result = subprocess.run(
+        [regen_bin, "keys", "show", REGEN_KEY_NAME,
+         "--keyring-backend", "test", "-a"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to get signing address: {result.stderr.strip()}")
+    _signing_address = result.stdout.strip()
+    return _signing_address
 
 
 def _check_regen_cli() -> str:
@@ -168,7 +208,7 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
                 "claim_rid": claim_rid,
                 "content_hash": content_hash,
                 "ready_to_anchor": False,
-                "reason": f"Insufficient funds for '{REGEN_KEY_NAME}'. Fund from testnet faucet.",
+                "reason": f"Insufficient funds for '{REGEN_KEY_NAME}'. Fund account with REGEN.",
                 "ledger_iri": iri,
                 "ledger_timestamp": None,
             }

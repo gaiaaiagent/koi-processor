@@ -26,6 +26,7 @@ import asyncio
 import asyncpg
 import hashlib
 import httpx
+import unicodedata
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Literal, Optional, Tuple
 from enum import Enum
@@ -78,6 +79,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Serve static files (demo portal)
+from fastapi.staticfiles import StaticFiles
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+@app.get("/demo")
+async def demo_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/static/demo.html")
+
 # Load capabilities registry
 try:
     from api.capabilities import Capabilities
@@ -103,6 +115,55 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')  # kept for /chat LLM endpoint
 ENABLE_SEMANTIC_MATCHING = os.getenv('ENABLE_SEMANTIC_MATCHING', 'true').lower() == 'true'
 KOI_NET_ENABLED = os.getenv('KOI_NET_ENABLED', 'false').lower() in ('true', '1', 'yes')
 TERMINUSDB_ENABLED = os.getenv('TERMINUSDB_ENABLED', 'false').lower() in ('true', '1', 'yes')
+QUARTZ_BASE_URL = os.getenv('QUARTZ_BASE_URL', '').rstrip('/')
+
+# Quartz URL generation
+QUARTZ_TYPE_PATHS = {
+    "Person": "People",
+    "Organization": "Organizations",
+    "Project": "Projects",
+    "Location": "Locations",
+    "Concept": "Concepts",
+    "Meeting": "Meetings",
+    "Practice": "Practices",
+    "Pattern": "Patterns",
+    "CaseStudy": "CaseStudies",
+    "Bioregion": "Bioregions",
+    "Protocol": "Protocols",
+    "Playbook": "Playbooks",
+    "Question": "Questions",
+    "Claim": "Claims",
+    "Evidence": "Evidence",
+    "Commitment": "Commitments",
+    "CommitmentPool": "CommitmentPools",
+    "CommitmentAction": "CommitmentActions",
+    "Source": "Sources",
+    "WorkItem": "WorkItems",
+    "Milestone": "Milestones",
+    "Initiative": "Initiatives",
+    "Decision": "Decisions",
+    "Risk": "Risks",
+    "Metric": "Metrics",
+    "Outcome": "Outcomes",
+}
+
+def quartz_slug(name: str) -> str:
+    """Convert entity name to Quartz-compatible URL slug."""
+    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    s = s.strip()
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"[^\w-]", "", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+def quartz_url(entity_type: str, name: str) -> Optional[str]:
+    """Build Quartz URL. Returns None for unknown entity types or if base URL not set."""
+    if not QUARTZ_BASE_URL:
+        return None
+    path = QUARTZ_TYPE_PATHS.get(entity_type)
+    if path is None:
+        return None
+    return f"{QUARTZ_BASE_URL}/{path}/{quartz_slug(name)}"
 
 # DEPRECATED: These are now loaded from vault schemas via entity_schema.py
 # Kept as fallback comments for reference
@@ -160,8 +221,6 @@ class IngestRequest(BaseModel):
     relationships: List[ExtractedRelationship] = []
     source: str = "obsidian-vault"
     context: Optional[ResolutionContext] = None  # For contextual entity resolution
-    replace_existing: bool = False  # Atomic delete+insert for idempotent reprocessing
-    link_existing_only: bool = False  # Skip Tier 3 entity creation (resolve to existing only)
 
 
 class CanonicalEntity(BaseModel):
@@ -181,7 +240,6 @@ class IngestStats(BaseModel):
     resolved_entities: int
     relationships_processed: int
     failed_entities: int
-    skipped_entities: int = 0  # Entities skipped due to link_existing_only
     errors: Optional[List[Dict[str, str]]] = None
 
 
@@ -191,7 +249,6 @@ class IngestResponse(BaseModel):
     canonical_entities: List[CanonicalEntity]
     receipt_rid: str
     stats: IngestStats
-    skipped_entities: List[str] = []  # Entity names skipped due to link_existing_only
 
 
 class RegisterEntityRequest(BaseModel):
@@ -202,7 +259,9 @@ class RegisterEntityRequest(BaseModel):
     name: str
     properties: Dict[str, Any] = {}
     frontmatter: Optional[Dict[str, Any]] = None  # YAML frontmatter for relationship extraction
-    content_hash: str
+    content_hash: Optional[str] = None
+    publication_scope: Optional[str] = "local_graph"  # "local_graph" | "federated"
+    visibility_scope: Optional[str] = "public"  # "public" | "node_private"
 
 
 class RegisterEntityResponse(BaseModel):
@@ -213,6 +272,7 @@ class RegisterEntityResponse(BaseModel):
     vault_rid: str
     merged_with: Optional[str] = None
     collision_warning: Optional[str] = None
+    koi_rid: Optional[str] = None
 
 
 class VaultEntityMapping(BaseModel):
@@ -282,6 +342,10 @@ class ShortestPathResponse(BaseModel):
     steps: List[PathStep]
     nodes: List[GraphNode]
 
+
+# =============================================================================
+# Embedding Service (provider-agnostic)
+# =============================================================================
 
 async def generate_embedding(text: str) -> Optional[List[float]]:
     """Generate embedding using the configured provider."""
@@ -457,6 +521,13 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     # Get schema-driven config for multi-word token overlap
     schema = get_schema_for_type(entity_type)
     if not schema.require_token_overlap:
+        # Even with token overlap bypassed, guard against first-name inflation for
+        # 2-token full names (First Last): require the last tokens (family names)
+        # to have a minimum JW similarity so "Benjamin Life" ≠ "Benjamin Neal".
+        if len(tokens1) == 2 and len(tokens2) == 2:
+            last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
+            if last_jw < 0.75:
+                return False
         return True  # Schema says bypass multi-word token overlap check
 
     overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
@@ -871,7 +942,7 @@ async def resolve_entity(
             confidence=best_score
         ), False
 
-    # Tier 2b: Semantic match (OpenAI embeddings + pgvector)
+    # Tier 2b: Semantic match (embeddings + pgvector)
     if embedding_provider and ENABLE_SEMANTIC_MATCHING:
         embedding = await generate_embedding(entity.name)
         if embedding:
@@ -1147,7 +1218,7 @@ async def enqueue_outbox(
 
 @app.on_event("startup")
 async def startup():
-    """Initialize database connection pool and OpenAI client"""
+    """Initialize database connection pool and embedding provider"""
     global db_pool, openai_client, embedding_provider
     try:
         db_pool = await asyncpg.create_pool(
@@ -1220,6 +1291,15 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"Web router not mounted: {e}")
 
+            # Commitment pooling router (always on, no capability gate)
+            try:
+                from api.routers.commitment_router import create_router as create_commitment_router, create_pool_router
+                app.include_router(create_commitment_router(db_pool))
+                app.include_router(create_pool_router(db_pool))
+                logger.info("Commitment routers mounted (/commitments/, /pools/)")
+            except Exception as e:
+                logger.warning(f"Commitment routers not mounted: {e}")
+
             # Claims engine router (always on, no capability gate)
             try:
                 from api.routers.claims_router import create_router as create_claims_router
@@ -1236,6 +1316,21 @@ async def startup():
                 except Exception as e:
                     logger.warning(f"GitHub router not mounted: {e}")
 
+            if _caps.mediawiki_sensor:
+                try:
+                    from api.mediawiki_sensor import MediaWikiSensor
+                    mw_sensor = MediaWikiSensor(pool=db_pool, event_queue=getattr(app.state, 'event_queue', None))
+                    await mw_sensor.start()
+                    app.state.mediawiki_sensor = mw_sensor
+                except Exception as e:
+                    logger.warning(f"MediaWiki sensor not started: {e}")
+                try:
+                    from api.routers.mediawiki_router import create_router as create_mw_router
+                    app.include_router(create_mw_router(db_pool, getattr(app.state, 'mediawiki_sensor', None)))
+                    logger.info("MediaWiki router mounted")
+                except Exception as e:
+                    logger.warning(f"MediaWiki router not mounted: {e}")
+
             if _caps.coordinator_endpoints:
                 try:
                     from api.routers.network_router import create_router as create_network_router
@@ -1243,20 +1338,6 @@ async def startup():
                     logger.info("Network router mounted")
                 except Exception as e:
                     logger.warning(f"Network router not mounted: {e}")
-
-        if _caps.vault_sync:
-            try:
-                from api.routers.vault_sync_router import create_router as create_vault_sync_router
-                app.include_router(create_vault_sync_router(db_pool, _caps))
-                logger.info("Vault sync router mounted (/koi-net/vault-sync)")
-            except Exception as e:
-                logger.warning(f"Vault sync router not mounted: {e}")
-
-        # Task router is always mounted (no capability gate — core feature)
-        # fail-fast: startup event raises if import fails
-        from api.routers.task_router import create_router as create_task_router
-        app.include_router(create_task_router(db_pool, _caps), prefix="/tasks")
-        logger.info("Task router mounted (/tasks)")
 
         # Initialize KOI-net federation (if enabled)
         if KOI_NET_ENABLED:
@@ -1568,46 +1649,6 @@ async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
     except Exception:
         pass  # May fail if pg_trgm extension not available
 
-    # ==========================================================================
-    # Task Registry (Migration 056)
-    # ==========================================================================
-
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS task_registry (
-            id SERIAL PRIMARY KEY,
-            task_key TEXT UNIQUE NOT NULL,
-            uuid TEXT,
-            title TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'inbox'
-                CHECK (status IN ('inbox', 'open', 'in-progress', 'waiting', 'done', 'cancelled')),
-            priority TEXT DEFAULT 'medium',
-            due_date DATE,
-            start_date DATE,
-            wait_until DATE,
-            context TEXT,
-            effort TEXT,
-            owner_uri TEXT,
-            project_uri TEXT,
-            collaborator_uris TEXT[] DEFAULT '{}',
-            blocked_by TEXT[] DEFAULT '{}',
-            source_note TEXT,
-            source_type TEXT DEFAULT 'meeting',
-            vault_path TEXT,
-            tags TEXT[] DEFAULT '{}',
-            metadata JSONB DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW(),
-            completed_at TIMESTAMP,
-            started_at TIMESTAMP,
-            triaged_at TIMESTAMP
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON task_registry(status)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_due_date ON task_registry(due_date)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_owner ON task_registry(owner_uri)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_project ON task_registry(project_uri)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_source_note ON task_registry(source_note)")
-
     logger.info("Schema verified/created (including relationship tables)")
 
 
@@ -1645,6 +1686,32 @@ async def health_check():
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
         )
+
+
+@app.get("/graph-version")
+async def graph_version_endpoint():
+    """Return a deterministic hash of graph state for eval snapshot pinning.
+
+    Hash = SHA-256(entity_count:rel_count:max_entity_updated:max_rel_created)[:16]
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                (SELECT COUNT(*) FROM entity_registry WHERE NOT node_private) AS entity_count,
+                (SELECT COUNT(*) FROM entity_relationships) AS rel_count,
+                (SELECT COALESCE(MAX(updated_at), '1970-01-01'::timestamptz) FROM entity_registry) AS max_entity_updated,
+                (SELECT COALESCE(GREATEST(MAX(created_at), MAX(updated_at)), '1970-01-01'::timestamptz) FROM entity_relationships) AS max_rel_changed
+        """)
+        import hashlib as _hl
+        state = f"{row['entity_count']}:{row['rel_count']}:{row['max_entity_updated']}:{row['max_rel_changed']}"
+        version_hash = _hl.sha256(state.encode()).hexdigest()[:16]
+        return {
+            "graph_version": version_hash,
+            "entity_count": row['entity_count'],
+            "relationship_count": row['rel_count'],
+        }
 
 
 @app.get("/entity-types")
@@ -1722,20 +1789,11 @@ async def ingest_extraction(request: IngestRequest):
     canonical_entities: List[CanonicalEntity] = []
     new_count = 0
     resolved_count = 0
-    skipped_count = 0
-    skipped_names: List[str] = []
     failed_entities: List[dict] = []
     entity_uri_map: Dict[str, str] = {}  # normalized_name → canonical URI
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
-            # Atomic replace: delete existing links before inserting new ones
-            if request.replace_existing:
-                await conn.execute(
-                    "DELETE FROM document_entity_links WHERE document_rid = $1",
-                    request.document_rid
-                )
-
             for entity in request.entities:
                 try:
                     logger.info(f"Processing entity: {entity.name} ({entity.type})")
@@ -1756,14 +1814,6 @@ async def ingest_extraction(request: IngestRequest):
 
                     canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
                     logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
-
-                    # link_existing_only: skip Tier 3 (new entity creation)
-                    if is_new and request.link_existing_only:
-                        skipped_count += 1
-                        skipped_names.append(entity.name)
-                        logger.info(f"Skipped unresolved entity: {entity.name} ({entity.type}) — link_existing_only=True")
-                        continue
-
                     canonical_entities.append(canonical)
                     entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
 
@@ -1861,22 +1911,17 @@ async def ingest_extraction(request: IngestRequest):
         resolved_entities=resolved_count,
         relationships_processed=rel_count,
         failed_entities=len(failed_entities),
-        skipped_entities=skipped_count,
         errors=failed_entities if failed_entities else None
     )
     if failed_entities:
         logger.warning(f"Ingest completed with {len(failed_entities)} failures: "
                       f"{[f['name'] for f in failed_entities]}")
-    if skipped_names:
-        logger.info(f"Ingest skipped {skipped_count} unresolved entities (link_existing_only): "
-                   f"{skipped_names}")
 
     return IngestResponse(
         success=success,
         canonical_entities=canonical_entities,
         receipt_rid=receipt_rid,
-        stats=stats,
-        skipped_entities=skipped_names
+        stats=stats
     )
 
 
@@ -1895,7 +1940,7 @@ async def list_entities(
             entities = await conn.fetch("""
                 SELECT fuseki_uri, entity_text, entity_type, source, created_at
                 FROM entity_registry
-                WHERE entity_type = $1
+                WHERE entity_type = $1 AND NOT node_private
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
             """, entity_type, limit, offset)
@@ -1903,6 +1948,7 @@ async def list_entities(
             entities = await conn.fetch("""
                 SELECT fuseki_uri, entity_text, entity_type, source, created_at
                 FROM entity_registry
+                WHERE NOT node_private
                 ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
             """, limit, offset)
@@ -1947,7 +1993,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2 AND entity_type = $3
+                WHERE normalized_text ILIKE $2 AND entity_type = $3 AND NOT node_private
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -1960,7 +2006,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2
+                WHERE normalized_text ILIKE $2 AND NOT node_private
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -1983,13 +2029,16 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
         results = []
         for row in rows:
             uri = row["fuseki_uri"]
+            entity_type = row["entity_type"]
+            entity_name = row["entity_text"]
             results.append({
                 "fuseki_uri": uri,
-                "name": row["entity_text"],
-                "entity_type": row["entity_type"],
+                "name": entity_name,
+                "entity_type": entity_type,
                 "similarity": float(row["similarity"]),
                 "aliases": list(row["aliases"] or []),
                 "relationship_count": rel_counts.get(uri, 0),
+                "quartz_url": quartz_url(entity_type, entity_name),
             })
 
     return {"results": results, "count": len(results)}
@@ -2018,8 +2067,17 @@ async def resolve_entity_get(
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, context=None)
 
-    if canonical is None:
-        return {"candidates": [], "is_new": False}
+        if canonical is None:
+            return {"candidates": [], "is_new": False}
+
+        # Hide node_private entities from public resolution
+        if not is_new:
+            is_private = await conn.fetchval(
+                "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+                canonical.uri
+            )
+            if is_private:
+                return {"candidates": [], "is_new": False}
 
     return {
         "candidates": [{
@@ -2060,8 +2118,17 @@ async def resolve_entity_post(request: ResolveRequest):
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, request.context)
 
-    if canonical is None:
-        return {"candidates": [], "is_new": False}
+        if canonical is None:
+            return {"candidates": [], "is_new": False}
+
+        # Hide node_private entities from public resolution
+        if not is_new:
+            is_private = await conn.fetchval(
+                "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+                canonical.uri
+            )
+            if is_private:
+                return {"candidates": [], "is_new": False}
 
     return {
         "candidates": [{
@@ -2079,6 +2146,25 @@ async def resolve_entity_post(request: ResolveRequest):
 # Entity MentionedIn Endpoints (for bidirectional linking)
 # IMPORTANT: These must be defined BEFORE the generic /entity/{uri:path} route
 # =============================================================================
+
+class EvidenceItem(BaseModel):
+    subject_uri: str
+    subject_name: str
+    predicate: str
+    object_uri: str
+    object_name: str
+    confidence: Optional[float] = None
+    source: Optional[str] = None
+    source_section: Optional[str] = None
+    wiki_url: Optional[str] = None
+
+
+class EvidenceResponse(BaseModel):
+    entity_uri: str
+    entity_name: str
+    evidence: List[EvidenceItem]
+    total: int
+
 
 class MentionedInDocument(BaseModel):
     """A document that mentions an entity"""
@@ -2148,6 +2234,14 @@ async def get_entity_mentioned_in(
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
+        # Reject queries for node_private entities
+        is_private = await conn.fetchval(
+            "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+            entity_uri
+        )
+        if is_private:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
         # Query document_entity_links for documents mentioning this entity
         rows = await conn.fetch("""
             SELECT del.document_rid, del.mention_count, del.created_at
@@ -2168,11 +2262,8 @@ async def get_entity_mentioned_in(
             doc_rid = row['document_rid']
 
             # Extract vault path from RID
-            # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:, claude-session:
-            if doc_rid.startswith('claude-session:'):
-                session_id = doc_rid.replace('claude-session:', '')
-                vault_path = f"Claude Session: {session_id[:8]}..."
-            elif doc_rid.startswith('orn:obsidian.entity:Notes/'):
+            # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:
+            if doc_rid.startswith('orn:obsidian.entity:Notes/'):
                 vault_path = doc_rid.replace('orn:obsidian.entity:Notes/', '')
             elif doc_rid.startswith('vault:notes/'):
                 vault_path = doc_rid.replace('vault:notes/', '')
@@ -2228,7 +2319,18 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
     results = {}
 
     async with db_pool.acquire() as conn:
+        # Filter out node_private entities from the batch
+        private_uris = set()
+        if request.uris:
+            private_rows = await conn.fetch(
+                "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = ANY($1) AND node_private",
+                request.uris
+            )
+            private_uris = {r['fuseki_uri'] for r in private_rows}
+
         for entity_uri in request.uris:
+            if entity_uri in private_uris:
+                continue
             # Query for each entity
             rows = await conn.fetch("""
                 SELECT del.document_rid, del.mention_count, del.created_at
@@ -2284,6 +2386,114 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
 
 
 # =============================================================================
+# Evidence Provenance Endpoint
+# =============================================================================
+
+@app.get("/entity/{entity_uri:path}/evidence", response_model=EvidenceResponse)
+async def get_entity_evidence(entity_uri: str):
+    """Get evidence provenance for an entity's relationships.
+
+    Returns all relationships involving this entity with source provenance,
+    including MediaWiki page links and wiki URLs where available.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        # Look up entity name
+        entity = await conn.fetchrow(
+            "SELECT entity_text FROM entity_registry WHERE fuseki_uri = $1 AND NOT node_private",
+            entity_uri
+        )
+        if not entity:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        entity_name = entity["entity_text"]
+
+        # Get wiki base URL (if any wiki is registered)
+        wiki_base_url = None
+        try:
+            wiki_base_url = await conn.fetchval(
+                "SELECT base_url FROM mediawiki_wikis ORDER BY id LIMIT 1"
+            )
+        except asyncpg.UndefinedTableError:
+            pass  # migration 063 not applied
+
+        # Query relationships with provenance
+        try:
+            rows = await conn.fetch("""
+                SELECT
+                    er.subject_uri,
+                    subj.entity_text AS subject_name,
+                    er.predicate,
+                    er.object_uri,
+                    obj.entity_text AS object_name,
+                    er.confidence,
+                    er.source,
+                    mpl.source_section,
+                    mps.title AS wiki_page_title
+                FROM entity_relationships er
+                JOIN entity_registry subj ON subj.fuseki_uri = er.subject_uri
+                JOIN entity_registry obj ON obj.fuseki_uri = er.object_uri
+                LEFT JOIN mediawiki_page_state mps ON mps.source_rid = er.source_rid
+                LEFT JOIN mediawiki_page_links mpl ON mpl.source_page_id = mps.id
+                    AND mpl.target_title = obj.entity_text
+                    AND mpl.predicate = er.predicate
+                WHERE (er.subject_uri = $1 OR er.object_uri = $1)
+                ORDER BY er.confidence DESC NULLS LAST
+                LIMIT 100
+            """, entity_uri)
+        except asyncpg.UndefinedTableError:
+            # mediawiki tables don't exist — fall back without provenance
+            rows = await conn.fetch("""
+                SELECT
+                    er.subject_uri,
+                    subj.entity_text AS subject_name,
+                    er.predicate,
+                    er.object_uri,
+                    obj.entity_text AS object_name,
+                    er.confidence,
+                    er.source,
+                    NULL::text AS source_section,
+                    NULL::text AS wiki_page_title
+                FROM entity_relationships er
+                JOIN entity_registry subj ON subj.fuseki_uri = er.subject_uri
+                JOIN entity_registry obj ON obj.fuseki_uri = er.object_uri
+                WHERE (er.subject_uri = $1 OR er.object_uri = $1)
+                ORDER BY er.confidence DESC NULLS LAST
+                LIMIT 100
+            """, entity_uri)
+
+        evidence = []
+        for row in rows:
+            wiki_url = None
+            if wiki_base_url and row["wiki_page_title"]:
+                page_path = row["wiki_page_title"].replace(" ", "_")
+                wiki_url = f"{wiki_base_url.rstrip('/')}/wiki/{page_path}"
+                if row["source_section"]:
+                    wiki_url += f"#{row['source_section']}"
+
+            evidence.append(EvidenceItem(
+                subject_uri=row["subject_uri"],
+                subject_name=row["subject_name"],
+                predicate=row["predicate"],
+                object_uri=row["object_uri"],
+                object_name=row["object_name"],
+                confidence=row["confidence"],
+                source=row["source"],
+                source_section=row["source_section"],
+                wiki_url=wiki_url,
+            ))
+
+        return EvidenceResponse(
+            entity_uri=entity_uri,
+            entity_name=entity_name,
+            evidence=evidence,
+            total=len(evidence),
+        )
+
+
+# =============================================================================
 # Entity CRUD Endpoints
 # =============================================================================
 
@@ -2298,7 +2508,7 @@ async def get_entity(entity_uri: str):
             SELECT fuseki_uri, entity_text, entity_type, normalized_text,
                    source, first_seen_rid, metadata, created_at
             FROM entity_registry
-            WHERE fuseki_uri = $1
+            WHERE fuseki_uri = $1 AND NOT node_private
         """, entity_uri)
 
         if not entity:
@@ -2325,11 +2535,12 @@ async def get_stats():
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM entity_registry")
+        total = await conn.fetchval("SELECT COUNT(*) FROM entity_registry WHERE NOT node_private")
 
         by_type = await conn.fetch("""
             SELECT entity_type, COUNT(*) as count
             FROM entity_registry
+            WHERE NOT node_private
             GROUP BY entity_type
             ORDER BY count DESC
         """)
@@ -2337,6 +2548,7 @@ async def get_stats():
         recent = await conn.fetch("""
             SELECT entity_text, entity_type, created_at
             FROM entity_registry
+            WHERE NOT node_private
             ORDER BY created_at DESC
             LIMIT 10
         """)
@@ -2347,6 +2559,21 @@ async def get_stats():
             "recent_entities": [dict(r) for r in recent],
             "mode": KOI_MODE
         }
+
+
+async def _recompute_node_private(conn, canonical_uri: str):
+    """Set node_private=true only when ALL rid_mappings are node_private."""
+    row = await conn.fetchrow("""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE visibility_scope = 'node_private') AS private_count
+        FROM entity_rid_mappings
+        WHERE canonical_uri = $1
+    """, canonical_uri)
+    is_private = row['total'] > 0 and row['total'] == row['private_count']
+    await conn.execute(
+        "UPDATE entity_registry SET node_private = $1 WHERE fuseki_uri = $2",
+        is_private, canonical_uri
+    )
 
 
 @app.post("/register-entity", response_model=RegisterEntityResponse)
@@ -2409,8 +2636,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
             await conn.execute("""
                 INSERT INTO entity_rid_mappings (
                     vault_rid, vault_path, canonical_uri, entity_type,
-                    name, content_hash, sync_status, last_synced
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW())
+                    name, content_hash, sync_status, last_synced, visibility_scope
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW(), $7)
                 ON CONFLICT (vault_rid) DO UPDATE SET
                     vault_path = EXCLUDED.vault_path,
                     canonical_uri = EXCLUDED.canonical_uri,
@@ -2418,14 +2645,16 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     name = EXCLUDED.name,
                     content_hash = EXCLUDED.content_hash,
                     sync_status = 'linked',
-                    last_synced = NOW()
+                    last_synced = NOW(),
+                    visibility_scope = EXCLUDED.visibility_scope
             """,
                 request.vault_rid,
                 request.vault_path,
                 canonical.uri,
                 request.entity_type,
                 request.name,
-                request.content_hash
+                request.content_hash,
+                request.visibility_scope or "public"
             )
 
             # Update entity_registry with vault_rid if not set
@@ -2434,6 +2663,31 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 SET vault_rid = $1
                 WHERE fuseki_uri = $2 AND vault_rid IS NULL
             """, request.vault_rid, canonical.uri)
+
+            # Auto-assign koi_rid for federated publication scope
+            final_koi_rid = None
+            if request.publication_scope == "federated":
+                existing_koi_rid = await conn.fetchval(
+                    "SELECT koi_rid FROM entity_registry WHERE fuseki_uri = $1",
+                    canonical.uri
+                )
+                if not existing_koi_rid:
+                    import hashlib as _hashlib
+                    type_slug = request.entity_type.lower()
+                    h = _hashlib.sha256(canonical.uri.encode()).hexdigest()[:32]
+                    koi_rid = f"orn:koi-net.{type_slug}:{h}"
+                    await conn.execute(
+                        "UPDATE entity_registry SET koi_rid = $1 WHERE fuseki_uri = $2",
+                        koi_rid, canonical.uri
+                    )
+                    logger.info(f"Auto-assigned koi_rid for federated entity: {koi_rid}")
+                final_koi_rid = await conn.fetchval(
+                    "SELECT koi_rid FROM entity_registry WHERE fuseki_uri = $1",
+                    canonical.uri
+                )
+
+            # Recompute node_private flag based on all mappings for this entity
+            await _recompute_node_private(conn, canonical.uri)
 
             # Sync relationships from frontmatter if provided
             # Accept frontmatter OR properties (for older MCP clients)
@@ -2502,7 +2756,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 is_new=is_new,
                 vault_rid=request.vault_rid,
                 merged_with=canonical.merged_with,
-                collision_warning=collision_warning
+                collision_warning=collision_warning,
+                koi_rid=final_koi_rid if request.publication_scope == "federated" else None
             )
 
 
@@ -2519,7 +2774,7 @@ async def list_vault_entities(
 
     async with db_pool.acquire() as conn:
         # Build query with optional filters
-        conditions = []
+        conditions = ["COALESCE(visibility_scope, 'public') != 'node_private'"]
         params = []
         param_idx = 1
 
@@ -2551,12 +2806,13 @@ async def list_vault_entities(
 
         entities = await conn.fetch(query, *params)
 
-        # Get total count
+        # Get total count (exclude limit/offset params)
         count_query = f"SELECT COUNT(*) FROM entity_rid_mappings {where_clause}"
-        if params[:-2]:  # Exclude limit/offset for count
-            total = await conn.fetchval(count_query, *params[:-2])
+        count_params = params[:-2]  # Strip limit/offset
+        if count_params:
+            total = await conn.fetchval(count_query, *count_params)
         else:
-            total = await conn.fetchval("SELECT COUNT(*) FROM entity_rid_mappings")
+            total = await conn.fetchval(count_query)
 
         return {
             "entities": [
@@ -2590,6 +2846,7 @@ async def get_vault_entity(vault_rid: str):
                    name, sync_status, content_hash, last_synced, created_at
             FROM entity_rid_mappings
             WHERE vault_rid = $1
+              AND COALESCE(visibility_scope, 'public') != 'node_private'
         """, vault_rid)
 
         if not mapping:
@@ -2656,6 +2913,7 @@ async def resolve_canonical_to_vault(uris: List[str]):
                 SELECT vault_rid, vault_path, canonical_uri, entity_type, name
                 FROM entity_rid_mappings
                 WHERE canonical_uri = $1
+                  AND COALESCE(visibility_scope, 'public') != 'node_private'
                 LIMIT 1
             """, uri)
 
@@ -2721,6 +2979,7 @@ async def get_contextual_candidates_internal(
             FROM document_entity_links del
             JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
             WHERE er.entity_type = 'Project'
+              AND NOT er.node_private
               AND (LOWER(er.entity_text) LIKE $1
                    OR LOWER(er.normalized_text) LIKE $1)
         """, f"%{project_normalized}%")
@@ -2751,6 +3010,7 @@ async def get_contextual_candidates_internal(
                 FROM document_entity_links del
                 JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
                 WHERE er.entity_type = 'Person'
+                  AND NOT er.node_private
                   AND (LOWER(er.entity_text) LIKE $1
                        OR LOWER(er.normalized_text) LIKE $1)
             """, f"%{attendee_normalized}%")
@@ -2769,6 +3029,7 @@ async def get_contextual_candidates_internal(
                 FROM document_entity_links del
                 JOIN entity_registry er ON del.entity_uri = er.fuseki_uri
                 WHERE er.entity_type = 'Concept'
+                  AND NOT er.node_private
                   AND (LOWER(er.entity_text) LIKE $1
                        OR LOWER(er.normalized_text) LIKE $1)
             """, f"%{topic_normalized}%")
@@ -2791,6 +3052,7 @@ async def get_contextual_candidates_internal(
             FROM entity_registry er
             JOIN document_entity_links del ON er.fuseki_uri = del.entity_uri
             WHERE er.entity_type = ANY($1)
+              AND NOT er.node_private
               AND del.document_rid = ANY($2)
         """, entity_types, related_docs_list)
 
@@ -2816,6 +3078,7 @@ async def get_contextual_candidates_internal(
             FROM entity_registry er
             LEFT JOIN entity_rid_mappings erm ON er.fuseki_uri = erm.canonical_uri
             WHERE er.entity_type = 'Person'
+              AND NOT er.node_private
               AND erm.vault_path IS NOT NULL
               AND er.fuseki_uri NOT IN (
                   SELECT entity_uri FROM document_entity_links
@@ -3167,22 +3430,34 @@ async def get_relationships_endpoint(
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with db_pool.acquire() as conn:
+        # Reject queries for node_private entities
+        is_private = await conn.fetchval(
+            "SELECT node_private FROM entity_registry WHERE fuseki_uri = $1",
+            entity_uri
+        )
+        if is_private:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
         relationships = await get_entity_relationships(conn, entity_uri, predicate, direction)
 
-        # Enrich with entity names
+        # Enrich with entity names, filtering out node_private neighbors
         enriched = []
         for rel in relationships:
             # Get subject name
             subject_row = await conn.fetchrow("""
-                SELECT entity_text, entity_type FROM entity_registry
+                SELECT entity_text, entity_type, node_private FROM entity_registry
                 WHERE fuseki_uri = $1
             """, rel['subject_uri'])
 
             # Get object name
             object_row = await conn.fetchrow("""
-                SELECT entity_text, entity_type FROM entity_registry
+                SELECT entity_text, entity_type, node_private FROM entity_registry
                 WHERE fuseki_uri = $1
             """, rel['object_uri'])
+
+            # Skip relationships where either endpoint is node_private
+            if (subject_row and subject_row['node_private']) or (object_row and object_row['node_private']):
+                continue
 
             enriched.append({
                 **rel,
@@ -3599,140 +3874,6 @@ async def get_session_files(
             ],
             "count": len(rows),
             "filter": {"path_contains": path_contains}
-        }
-
-
-# =============================================================================
-# Session-Entity Queries
-# =============================================================================
-
-
-@app.get("/search-sessions-by-entity")
-async def search_sessions_by_entity(
-    entity_uri: Optional[str] = None,
-    entity_name: Optional[str] = None,
-    entity_type: Optional[str] = None,
-    limit: int = 10
-):
-    """
-    Find sessions that mention a specific entity.
-
-    Query by URI (exact) or by name (read-only resolution, Tiers 1-2 only).
-    Does NOT create new entities — uses strict matching to avoid false positives.
-
-    Examples:
-        GET /search-sessions-by-entity?entity_name=Darren%20Zal
-        GET /search-sessions-by-entity?entity_uri=orn:personal-koi.entity:person-darren-zal-...
-        GET /search-sessions-by-entity?entity_name=IndigenomicsAI&entity_type=Organization
-    """
-    if not db_pool:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    if not entity_uri and not entity_name:
-        raise HTTPException(status_code=400, detail="Provide entity_uri or entity_name")
-
-    async with db_pool.acquire() as conn:
-        resolved_uri = entity_uri
-
-        if not resolved_uri and entity_name:
-            # Read-only resolution: exact + fuzzy only (no Tier 3 creation)
-            normalized = normalize_entity_text(entity_name)
-
-            # Tier 1: Exact match
-            if entity_type:
-                match = await conn.fetchrow("""
-                    SELECT fuseki_uri, entity_text FROM entity_registry
-                    WHERE normalized_text = $1 AND entity_type = $2
-                    LIMIT 1
-                """, normalized, entity_type)
-            else:
-                match = await conn.fetchrow("""
-                    SELECT fuseki_uri, entity_text FROM entity_registry
-                    WHERE normalized_text = $1
-                    LIMIT 1
-                """, normalized)
-
-            if not match:
-                # Tier 1.1: Alias match (uses normalize_alias for wikilink/path stripping)
-                normalized_alias = normalize_alias(entity_name)
-                if entity_type:
-                    match = await conn.fetchrow("""
-                        SELECT fuseki_uri, entity_text FROM entity_registry
-                        WHERE entity_type = $1 AND $2 = ANY(aliases)
-                        LIMIT 1
-                    """, entity_type, normalized_alias)
-                else:
-                    match = await conn.fetchrow("""
-                        SELECT fuseki_uri, entity_text FROM entity_registry
-                        WHERE $1 = ANY(aliases)
-                        LIMIT 1
-                    """, normalized_alias)
-
-            if not match:
-                # Tier 2a: Fuzzy match (Jaro-Winkler, strict threshold)
-                if entity_type:
-                    candidates = await conn.fetch("""
-                        SELECT fuseki_uri, entity_text, normalized_text
-                        FROM entity_registry WHERE entity_type = $1
-                    """, entity_type)
-                else:
-                    candidates = await conn.fetch("""
-                        SELECT fuseki_uri, entity_text, normalized_text
-                        FROM entity_registry
-                    """)
-
-                best_match = None
-                best_score = 0.0
-                for cand in candidates:
-                    score = jaro_winkler_similarity(normalized, cand['normalized_text'])
-                    if score >= 0.92 and score > best_score:
-                        if passes_token_overlap_check(normalized, cand['normalized_text'], entity_type or 'Person'):
-                            best_score = score
-                            best_match = cand
-
-                if best_match:
-                    match = best_match
-
-            if not match:
-                return {
-                    "entity_found": False,
-                    "entity_name": entity_name,
-                    "sessions": [],
-                    "count": 0
-                }
-
-            resolved_uri = match['fuseki_uri']
-
-        # Query sessions linked to this entity
-        rows = await conn.fetch("""
-            SELECT DISTINCT s.session_id, s.summary, s.first_prompt,
-                   s.created_at, s.last_ingested_at,
-                   del.mention_count, del.context
-            FROM document_entity_links del
-            JOIN session_ingestion_log s
-              ON del.document_rid = 'claude-session:' || s.session_id
-            WHERE del.entity_uri = $1
-            ORDER BY s.last_ingested_at DESC
-            LIMIT $2
-        """, resolved_uri, limit)
-
-        return {
-            "entity_found": True,
-            "entity_uri": resolved_uri,
-            "entity_name": entity_name,
-            "sessions": [
-                {
-                    "session_id": r['session_id'],
-                    "summary": r['summary'],
-                    "first_prompt": r['first_prompt'][:200] if r['first_prompt'] else None,
-                    "created_at": r['created_at'].isoformat() if r['created_at'] else None,
-                    "last_ingested_at": r['last_ingested_at'].isoformat() if r['last_ingested_at'] else None,
-                    "mention_count": r['mention_count'] or 1,
-                    "context": r['context']
-                }
-                for r in rows
-            ],
-            "count": len(rows)
         }
 
 
@@ -4246,10 +4387,313 @@ async def graph_shortest_path(
 CHAT_LLM_MODEL = os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini')
 
 
+# ── B2 GraphRAG: graph-guided retrieval ──────────────────────────────
+
+async def _compute_graph_version_hash(conn) -> str:
+    """Compute deterministic graph state hash for cache invalidation."""
+    import hashlib as _hashlib
+    row = await conn.fetchrow("""
+        SELECT
+            (SELECT COUNT(*) FROM entity_registry) AS ec,
+            (SELECT COUNT(*) FROM entity_relationships) AS rc,
+            (SELECT MAX(updated_at) FROM entity_registry) AS meu,
+            (SELECT GREATEST(MAX(created_at), MAX(updated_at)) FROM entity_relationships) AS mrc
+    """)
+    state = f"{row['ec']}:{row['rc']}:{row['meu']}:{row['mrc']}"
+    return _hashlib.sha256(state.encode()).hexdigest()[:16]
+
+
+async def _ensure_graph_metrics(conn) -> bool:
+    """Ensure entity_graph_metrics is populated and fresh. Returns True if available."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT graph_version, COUNT(*) as cnt FROM entity_graph_metrics GROUP BY graph_version LIMIT 1"
+        )
+        if not row or row['cnt'] == 0:
+            return False
+        current_version = await _compute_graph_version_hash(conn)
+        return row['graph_version'] == current_version
+    except Exception:
+        return False
+
+
+async def _graph_guided_retrieval(
+    query: str,
+    query_embedding: list,
+    conn,
+    top_k: int = 10,
+) -> tuple:
+    """B2 GraphRAG: community-aware, centrality-weighted retrieval.
+
+    Returns (sources, relationships_ctx, doc_chunks, web_sources) matching
+    the B1 interface so the LLM prompt builder works unchanged.
+
+    Strategy:
+    1. Semantic search for seed entities (same as B1)
+    2. Look up community_l1 + betweenness for each seed from entity_graph_metrics
+    3. Expand: entities in same L1 community, sorted by betweenness DESC
+    4. Follow edges from seeds via entity_relationships (predicate-aware)
+    5. Rank: semantic_score * 0.4 + centrality * 0.3 + community_overlap * 0.3
+    """
+    sources = []
+    relationships_ctx = []
+    doc_chunks = []
+    web_sources = []
+
+    if not query_embedding:
+        return sources, relationships_ctx, doc_chunks, web_sources
+
+    embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+
+    # ── Step 1: Seed entities via semantic search (like B1, with fallback) ──
+    try:
+        seed_rows = await conn.fetch("""
+            SELECT id, fuseki_uri, entity_text, entity_type, metadata,
+                   1 - (embedding <=> $1::vector) AS similarity
+            FROM entity_registry
+            WHERE embedding IS NOT NULL AND NOT node_private
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+        """, embedding_str, top_k)
+    except (asyncpg.exceptions.UndefinedColumnError,
+            asyncpg.exceptions.UndefinedFunctionError,
+            asyncpg.exceptions.DataError) as e:
+        logger.warning("entity_registry.embedding vector search failed, falling back to text search: %s", e)
+        # Fallback: text search when vector column/extension is unavailable
+        words = [w for w in query.lower().split() if len(w) >= 3]
+        if words:
+            conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
+            match_score = " + ".join(
+                f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
+                for i in range(len(words))
+            )
+            params = [f"%{w}%" for w in words]
+            params.append(top_k)
+            seed_rows = await conn.fetch(f"""
+                SELECT id, fuseki_uri, entity_text, entity_type, metadata,
+                       ({match_score})::float / {len(words)} AS similarity
+                FROM entity_registry
+                WHERE ({conditions}) AND NOT node_private
+                ORDER BY ({match_score}) DESC, created_at DESC
+                LIMIT ${len(words)+1}
+            """, *params)
+        else:
+            seed_rows = []
+
+    if not seed_rows:
+        return sources, relationships_ctx, doc_chunks, web_sources
+
+    seed_ids = [r['id'] for r in seed_rows]
+    seed_uris = [r['fuseki_uri'] for r in seed_rows]
+    seed_scores = {r['id']: float(r['similarity']) for r in seed_rows}
+
+    # ── Step 2: Get community + centrality for seeds ──
+    metrics_available = await _ensure_graph_metrics(conn)
+    seed_communities = {}
+    seed_betweenness = {}
+
+    if metrics_available:
+        metric_rows = await conn.fetch("""
+            SELECT entity_id, community_l1, betweenness
+            FROM entity_graph_metrics
+            WHERE entity_id = ANY($1)
+        """, seed_ids)
+        for mr in metric_rows:
+            seed_communities[mr['entity_id']] = mr['community_l1']
+            seed_betweenness[mr['entity_id']] = mr['betweenness']
+
+    # Determine dominant communities from seeds
+    comm_counts = {}
+    for eid in seed_ids:
+        c = seed_communities.get(eid, -1)
+        if c >= 0:
+            comm_counts[c] = comm_counts.get(c, 0) + 1
+    dominant_communities = sorted(comm_counts, key=comm_counts.get, reverse=True)[:3]
+
+    # ── Step 3: Expand via community — get high-centrality entities in same communities ──
+    expanded_entities = {}  # id -> {uri, label, type, score, description}
+
+    if metrics_available and dominant_communities:
+        community_rows = await conn.fetch("""
+            SELECT
+                er.id, er.fuseki_uri, er.entity_text, er.entity_type, er.metadata,
+                egm.community_l1, egm.betweenness
+            FROM entity_graph_metrics egm
+            JOIN entity_registry er ON er.id = egm.entity_id
+            WHERE egm.community_l1 = ANY($1) AND NOT er.node_private
+            ORDER BY egm.betweenness DESC
+            LIMIT $2
+        """, dominant_communities, top_k * 2)
+
+        for cr in community_rows:
+            eid = cr['id']
+            if eid not in expanded_entities:
+                expanded_entities[eid] = {
+                    'id': eid,
+                    'uri': cr['fuseki_uri'],
+                    'label': cr['entity_text'],
+                    'type': cr['entity_type'],
+                    'metadata': cr['metadata'],
+                    'betweenness': float(cr['betweenness'] or 0),
+                    'community': cr['community_l1'],
+                    'semantic_score': seed_scores.get(eid, 0.0),
+                }
+
+    # Add seeds that might not be in expanded set
+    for row in seed_rows:
+        eid = row['id']
+        if eid not in expanded_entities:
+            meta = row['metadata'] or {}
+            if isinstance(meta, str):
+                meta = json_module_global.loads(meta)
+            expanded_entities[eid] = {
+                'id': eid,
+                'uri': row['fuseki_uri'],
+                'label': row['entity_text'],
+                'type': row['entity_type'],
+                'metadata': meta,
+                'betweenness': seed_betweenness.get(eid, 0.0),
+                'community': seed_communities.get(eid, -1),
+                'semantic_score': float(row['similarity']),
+            }
+
+    # ── Step 4: Composite ranking ──
+    # score = semantic * 0.4 + centrality * 0.3 + community_overlap * 0.3
+    max_bc = max((e['betweenness'] for e in expanded_entities.values()), default=1.0) or 1.0
+
+    for eid, ent in expanded_entities.items():
+        sem = ent['semantic_score']
+        bc_norm = ent['betweenness'] / max_bc
+        comm_overlap = 1.0 if ent['community'] in dominant_communities else 0.0
+        ent['composite_score'] = sem * 0.4 + bc_norm * 0.3 + comm_overlap * 0.3
+
+    # Sort by composite score, take top_k
+    ranked = sorted(expanded_entities.values(), key=lambda x: x['composite_score'], reverse=True)[:top_k]
+
+    # Build sources list
+    entity_uris = []
+    for ent in ranked:
+        meta = ent.get('metadata', {})
+        if isinstance(meta, str):
+            meta = json_module_global.loads(meta)
+        description = meta.get('description', '') if isinstance(meta, dict) else ''
+        sources.append({
+            "uri": ent['uri'],
+            "label": ent['label'],
+            "entity_type": ent['type'],
+            "score": round(ent['composite_score'], 4),
+            "description": description,
+            "retrieval_mode": "graphrag",
+            "community": ent.get('community', -1),
+            "betweenness": round(ent.get('betweenness', 0), 6),
+        })
+        entity_uris.append(ent['uri'])
+
+    # ── Step 5: Relationships — predicate-aware, community-guided ──
+    if entity_uris:
+        rel_rows = await conn.fetch("""
+            WITH RECURSIVE traverse AS (
+                SELECT r.subject_uri, r.object_uri, r.predicate, 1 AS depth
+                FROM entity_relationships r
+                WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
+                UNION
+                SELECT r2.subject_uri, r2.object_uri, r2.predicate, t.depth + 1
+                FROM traverse t
+                JOIN entity_relationships r2
+                    ON r2.subject_uri IN (t.subject_uri, t.object_uri)
+                    OR r2.object_uri IN (t.subject_uri, t.object_uri)
+                WHERE t.depth < 2
+            )
+            SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
+                t.subject_uri,
+                s.entity_text AS subject_label,
+                t.predicate,
+                t.object_uri,
+                o.entity_text AS object_label,
+                t.depth
+            FROM traverse t
+            LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
+            LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+            WHERE NOT COALESCE(s.node_private, false)
+              AND NOT COALESCE(o.node_private, false)
+            ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
+            LIMIT 50
+        """, entity_uris)
+        for rr in rel_rows:
+            subj = rr['subject_label'] or rr['subject_uri']
+            obj = rr['object_label'] or rr['object_uri']
+            relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+
+    # ── Step 6: Document chunks (same as B1) ──
+    try:
+        chunk_rows = await conn.fetch("""
+            SELECT
+                c.document_rid,
+                m.content->>'title' AS title,
+                LEFT(c.content->>'text', 500) AS chunk_text,
+                c.content->>'section_id' AS section_id,
+                c.content->>'section_title' AS section_title,
+                c.content->>'wiki_url' AS wiki_url,
+                1 - (c.embedding <=> $1::vector) AS similarity
+            FROM koi_memory_chunks c
+            JOIN koi_memories m ON m.rid = c.document_rid
+            WHERE c.embedding IS NOT NULL
+            ORDER BY c.embedding <=> $1::vector
+            LIMIT 8
+        """, embedding_str)
+        for cr in chunk_rows:
+            if float(cr['similarity']) > 0.3:
+                doc_chunks.append({
+                    "rid": cr['document_rid'],
+                    "title": cr['title'] or cr['document_rid'],
+                    "text": cr['chunk_text'] or "",
+                    "score": round(float(cr['similarity']), 4),
+                    "section_id": cr['section_id'],
+                    "section_title": cr['section_title'],
+                    "wiki_url": cr['wiki_url'],
+                })
+                sources.append({
+                    "uri": cr['document_rid'],
+                    "label": cr['title'] or cr['document_rid'],
+                    "entity_type": "Document",
+                    "score": round(float(cr['similarity']), 4),
+                    "description": (cr['chunk_text'] or "")[:200],
+                    "url": cr['wiki_url'],
+                })
+    except Exception:
+        pass
+
+    # ── Step 7: Web sources (same as B1) ──
+    if entity_uris:
+        try:
+            ws_rows = await conn.fetch("""
+                SELECT DISTINCT ON (ws.url) ws.url, ws.title, ws.description
+                FROM web_submissions ws
+                JOIN document_entity_links del ON del.document_rid = 'web:' || ws.rid::text
+                WHERE del.entity_uri = ANY($1) AND ws.status IN ('ingested', 'monitoring')
+                LIMIT 5
+            """, entity_uris)
+            for wr in ws_rows:
+                desc = wr['description'] or ""
+                web_sources.append({"url": wr['url'], "title": wr['title'] or wr['url'], "summary": desc})
+                sources.append({
+                    "uri": wr['url'],
+                    "label": wr['title'] or wr['url'],
+                    "entity_type": "WebSource",
+                    "score": 0.8,
+                    "description": desc[:200],
+                })
+        except Exception:
+            pass
+
+    return sources, relationships_ctx, doc_chunks, web_sources
+
+
 class ChatRequest(BaseModel):
     """Request for RAG chat."""
     query: str
     max_context_entities: int = Field(default=5, ge=1, le=20)
+    retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
 
 
 @app.post("/chat")
@@ -4286,27 +4730,45 @@ async def chat_endpoint(request: ChatRequest):
     # ------------------------------------------------------------------
     query_embedding = await generate_embedding(request.query)
 
-    sources: List[Dict[str, Any]] = []
+    # ── B2 GraphRAG dispatch ──
+    _use_graphrag = request.retrieval_mode == "graphrag"
+    _graphrag_done = False  # True when graphrag produced usable results
 
-    async with db_pool.acquire() as conn:
+    if _use_graphrag:
+        async with db_pool.acquire() as conn:
+            _gr_sources, _gr_rels, _gr_docs, _gr_web = await _graph_guided_retrieval(
+                request.query, query_embedding, conn, top_k=request.max_context_entities
+            )
+        # Only use graphrag results if it actually found sources;
+        # otherwise fall through to B1 so we don't serve empty context.
+        if _gr_sources:
+            sources = _gr_sources
+            relationships_ctx = _gr_rels
+            doc_chunks = _gr_docs
+            web_sources = _gr_web
+            _graphrag_done = True
+
+    # ── B1 hybrid retrieval (skipped when graphrag produced results) ──
+    if not _graphrag_done:
+        sources: List[Dict[str, Any]] = []
+
+    if not _graphrag_done:
+      async with db_pool.acquire() as conn:
         if query_embedding:
             embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
             try:
                 rows = await conn.fetch("""
-                    SELECT
-                        er.fuseki_uri,
-                        er.entity_text,
-                        er.entity_type,
-                        er.metadata,
-                        1 - (ee.embedding <=> $1::vector) AS similarity
-                    FROM entity_registry er
-                    JOIN entity_embeddings ee ON ee.entity_uri = er.fuseki_uri
-                    WHERE ee.embedding IS NOT NULL
-                    ORDER BY ee.embedding <=> $1::vector
+                    SELECT fuseki_uri, entity_text, entity_type, metadata,
+                           1 - (embedding <=> $1::vector) AS similarity
+                    FROM entity_registry
+                    WHERE embedding IS NOT NULL AND NOT node_private
+                    ORDER BY embedding <=> $1::vector
                     LIMIT $2
                 """, embedding_str, request.max_context_entities)
-            except asyncpg.exceptions.UndefinedTableError:
-                logger.warning("entity_embeddings table missing, falling back to text search")
+            except (asyncpg.exceptions.UndefinedColumnError,
+                    asyncpg.exceptions.UndefinedFunctionError,
+                    asyncpg.exceptions.DataError) as e:
+                logger.warning("entity_registry.embedding vector search failed, falling back to text search: %s", e)
                 # Extract meaningful words (3+ chars) from query for keyword matching
                 words = [w for w in request.query.lower().split() if len(w) >= 3]
                 if words:
@@ -4321,7 +4783,7 @@ async def chat_endpoint(request: ChatRequest):
                         SELECT fuseki_uri, entity_text, entity_type, metadata,
                                ({match_score})::float / {len(words)} AS similarity
                         FROM entity_registry
-                        WHERE {conditions}
+                        WHERE ({conditions}) AND NOT node_private
                         ORDER BY ({match_score}) DESC, created_at DESC
                         LIMIT ${len(words)+1}
                     """, *params)
@@ -4342,7 +4804,7 @@ async def chat_endpoint(request: ChatRequest):
                     SELECT fuseki_uri, entity_text, entity_type, metadata,
                            ({match_score})::float / {len(words)} AS similarity
                     FROM entity_registry
-                    WHERE {conditions}
+                    WHERE ({conditions}) AND NOT node_private
                     ORDER BY ({match_score}) DESC, created_at DESC
                     LIMIT ${len(words)+1}
                 """, *params)
@@ -4362,6 +4824,7 @@ async def chat_endpoint(request: ChatRequest):
                 "entity_type": row['entity_type'],
                 "score": round(float(row['similarity']), 4),
                 "description": description,
+                "quartz_url": quartz_url(row['entity_type'], row['entity_text']),
             })
             entity_uris.append(row['fuseki_uri'])
 
@@ -4397,6 +4860,8 @@ async def chat_endpoint(request: ChatRequest):
                 FROM traverse t
                 LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
                 LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
+                WHERE NOT COALESCE(s.node_private, false)
+                  AND NOT COALESCE(o.node_private, false)
                 ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
                 LIMIT 50
             """, entity_uris)
@@ -4412,16 +4877,19 @@ async def chat_endpoint(request: ChatRequest):
         if query_embedding:
             try:
                 chunk_rows = await conn.fetch("""
-                    SELECT DISTINCT ON (c.document_rid)
+                    SELECT
                         c.document_rid,
                         m.content->>'title' AS title,
                         LEFT(c.content->>'text', 500) AS chunk_text,
+                        c.content->>'section_id' AS section_id,
+                        c.content->>'section_title' AS section_title,
+                        c.content->>'wiki_url' AS wiki_url,
                         1 - (c.embedding <=> $1::vector) AS similarity
                     FROM koi_memory_chunks c
                     JOIN koi_memories m ON m.rid = c.document_rid
                     WHERE c.embedding IS NOT NULL
-                    ORDER BY c.document_rid, c.embedding <=> $1::vector
-                    LIMIT 5
+                    ORDER BY c.embedding <=> $1::vector
+                    LIMIT 8
                 """, embedding_str)
                 for cr in chunk_rows:
                     if float(cr['similarity']) > 0.3:
@@ -4430,6 +4898,9 @@ async def chat_endpoint(request: ChatRequest):
                             "title": cr['title'] or cr['document_rid'],
                             "text": cr['chunk_text'] or "",
                             "score": round(float(cr['similarity']), 4),
+                            "section_id": cr['section_id'],
+                            "section_title": cr['section_title'],
+                            "wiki_url": cr['wiki_url'],
                         })
                         sources.append({
                             "uri": cr['document_rid'],
@@ -4437,6 +4908,7 @@ async def chat_endpoint(request: ChatRequest):
                             "entity_type": "Document",
                             "score": round(float(cr['similarity']), 4),
                             "description": (cr['chunk_text'] or "")[:200],
+                            "url": cr['wiki_url'],
                         })
             except (asyncpg.exceptions.UndefinedTableError,
                     asyncpg.exceptions.UndefinedColumnError):
@@ -4445,6 +4917,7 @@ async def chat_endpoint(request: ChatRequest):
                 # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
                 # while generate_embedding() may output a different dimension (e.g. 1536).
                 logger.warning(f"koi_memory_chunks vector dimension mismatch (BGE vs provider): {e}")
+                pass  # skip chunk results, /chat still works with entity context
 
         # ------------------------------------------------------------------
         # 2c. Fetch web sources linked to matched entities (B1.3)
@@ -4495,7 +4968,10 @@ async def chat_endpoint(request: ChatRequest):
     rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
 
     doc_block = "\n".join(
-        f"- **{d['title']}**: {d['text'][:300]}"
+        f"- **{d['title']}**"
+        + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
+        + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
+        + f": {d['text'][:300]}"
         for d in doc_chunks
     ) if doc_chunks else ""
 
@@ -4510,6 +4986,7 @@ async def chat_endpoint(request: ChatRequest):
         "governance in bioregions. Answer the user's question using the entity, "
         "relationship, document, and web source context provided below. "
         "Cite specific entities and sources in your answer. "
+        "When referencing wiki sources, cite them as [Page > Section](url). "
         "If the context is insufficient, say so honestly. Be concise."
     )
 
@@ -4558,6 +5035,7 @@ async def chat_endpoint(request: ChatRequest):
         "answer": answer,
         "sources": sources,
         "intent": intent,
+        "retrieval_mode": request.retrieval_mode,
     }
 
 
