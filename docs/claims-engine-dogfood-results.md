@@ -35,7 +35,7 @@ All 3 original claims received identity-bound attestations and advanced through 
 
 **Status:** COMPLETE (2026-03-11)
 
-First claim successfully anchored on Regen Ledger testnet (`regen-upgrade`).
+First claim successfully anchored on Regen Ledger mainnet (`regen-1`).
 
 **Setup:**
 - `regen` CLI v7.2.0 installed to `~/bin/regen` on production

@@ -539,7 +539,8 @@
           <h3 class="text-xs font-semibold text-yellow-800 uppercase mb-2">Blockchain Anchor</h3>
           ${claim.content_hash ? `<div class="text-xs mb-1"><span class="text-yellow-700 font-medium">Content Hash:</span> <code class="text-yellow-900">${claim.content_hash.substring(0, 24)}...</code></div>` : ''}
           ${claim.ledger_iri ? `<div class="text-xs mb-1"><span class="text-yellow-700 font-medium">Ledger IRI:</span> <code class="text-yellow-900">${escHtml(claim.ledger_iri)}</code></div>` : ''}
-          ${claim.tx_hash ? `<div class="text-xs"><span class="text-yellow-700 font-medium">Tx Hash:</span> <a href="https://www.mintscan.io/regen/tx/${claim.tx_hash}" target="_blank" class="text-blue-600 hover:underline"><code>${claim.tx_hash.substring(0, 24)}...</code></a></div>` : ''}
+          ${claim.tx_hash ? `<div class="text-xs mb-1"><span class="text-yellow-700 font-medium">Tx Hash:</span> <a href="https://www.mintscan.io/regen/tx/${claim.tx_hash}" target="_blank" class="text-blue-600 hover:underline"><code>${claim.tx_hash.substring(0, 24)}...</code></a></div>` : ''}
+          ${claim.verification === 'ledger_anchored' ? `<button onclick="window.open(API_BASE + '/claims/' + encodeURIComponent('${escAttr(claim.claim_rid)}') + '/proof-pack?format=download')" class="mt-2 bg-yellow-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-yellow-700 transition">Download Verification Bundle</button>` : ''}
         </div>` : ''}
 
         <!-- Evidence -->
@@ -564,6 +565,7 @@
                 <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium ${verdictColor(a.verdict)}">${escHtml(a.verdict)}</span>
               </div>
               ${a.rationale ? `<div class="text-xs text-gray-500 mt-1">${escHtml(a.rationale)}</div>` : ''}
+              ${a.attest_tx_hash ? `<div class="text-xs text-yellow-600 mt-1">Anchored: <a href="https://www.mintscan.io/regen/tx/${a.attest_tx_hash}" target="_blank" class="hover:underline"><code>${a.attest_tx_hash.substring(0, 16)}...</code></a></div>` : ''}
               <div class="text-xs text-gray-400 mt-1">${formatDateTime(a.created_at)}</div>
             </div>
           `).join('') : '<p class="text-sm text-gray-400 mb-2">No attestations yet.</p>'}

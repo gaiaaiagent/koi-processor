@@ -79,7 +79,7 @@ CREATE TABLE claim_attestations (
 
   -- On-chain attestation (MsgAttest)
   content_hash TEXT,                       -- BLAKE2b-256 of canonical attestation
-  graph_iri TEXT,                          -- regen:.rdf IRI for ContentHash.Graph
+  ledger_iri TEXT,                          -- regen:.rdf IRI for ContentHash.Graph
   attest_tx_hash TEXT,
   attest_timestamp TIMESTAMPTZ,
   attestor_address TEXT,                   -- regen1... on-chain address
@@ -175,7 +175,7 @@ Verdict change → new canonical JSON → new RID → `INSERT ... ON CONFLICT(cl
   "rationale": "...",
   "evidence_uris": ["..."],
   "content_hash": null,
-  "graph_iri": null,
+  "ledger_iri": null,
   "attest_tx_hash": null,
   "created_at": "2026-03-10T...",
   "updated_at": "2026-03-10T..."

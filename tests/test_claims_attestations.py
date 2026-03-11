@@ -366,3 +366,120 @@ async def test_attestation_rid_stability(client, conn):
     assert rid1 == rid2  # Stable
     assert rid1 != rid3  # Different reviewer → different RID
     assert rid1.startswith("orn:koi-net.attestation:")
+
+
+@pytest.mark.anyio
+async def test_content_hash_populated_on_create(client, conn):
+    """Attestation content_hash should be populated immediately on create."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Hash Rev", "urn:test:rev-hash")
+    rid = await _setup_test_claim(conn, claimant_uri)
+
+    resp = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+        "rationale": "Hash test",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["content_hash"] is not None
+    assert len(data["content_hash"]) == 64  # BLAKE2b-256 hex
+
+
+@pytest.mark.anyio
+async def test_content_hash_updates_on_verdict_change(client, conn):
+    """Content_hash should change when verdict changes."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Hash Change Rev", "urn:test:rev-hash-change")
+    rid = await _setup_test_claim(conn, claimant_uri)
+
+    resp1 = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "pending",
+    })
+    hash1 = resp1.json()["content_hash"]
+
+    resp2 = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+    })
+    hash2 = resp2.json()["content_hash"]
+
+    assert hash1 != hash2  # Different verdict → different hash
+
+
+@pytest.mark.anyio
+async def test_anchor_attestation_rejects_pending_verdict(client, conn):
+    """Anchor should reject attestations with pending verdict."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Pending Rev", "urn:test:rev-pending-anchor")
+    rid = await _setup_test_claim(conn, claimant_uri, verification="ledger_anchored")
+
+    # Create pending attestation
+    create_resp = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "pending",
+    })
+    att_rid = create_resp.json()["attestation_rid"]
+
+    # Attempt to anchor
+    resp = await client.post(f"/claims/{rid}/attestations/{att_rid}/anchor")
+    assert resp.status_code == 409
+    assert "pending" in resp.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_anchor_attestation_rejects_non_anchored_parent(client, conn):
+    """Anchor should reject when parent claim is not ledger_anchored."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Non-Anch Rev", "urn:test:rev-non-anch")
+    rid = await _setup_test_claim(conn, claimant_uri, verification="verified")
+
+    create_resp = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+    })
+    att_rid = create_resp.json()["attestation_rid"]
+
+    resp = await client.post(f"/claims/{rid}/attestations/{att_rid}/anchor")
+    assert resp.status_code == 409
+    assert "ledger_anchored" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_reconcile_attestation_no_tx_hash(client, conn):
+    """Reconcile should return 409 when attestation has no tx_hash."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Recon Rev", "urn:test:rev-recon")
+    rid = await _setup_test_claim(conn, claimant_uri, verification="ledger_anchored")
+
+    create_resp = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+    })
+    att_rid = create_resp.json()["attestation_rid"]
+
+    resp = await client.post(f"/claims/{rid}/attestations/{att_rid}/reconcile")
+    assert resp.status_code == 409
+    assert "tx_hash" in resp.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_attestation_response_includes_anchor_fields(client, conn):
+    """AttestationResponse should include ledger_iri, attest_timestamp, attestor_address."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Fields Rev", "urn:test:rev-fields")
+    rid = await _setup_test_claim(conn, claimant_uri)
+
+    resp = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+    })
+    data = resp.json()
+    # All anchor fields should be present (but null for non-anchored attestation)
+    assert "ledger_iri" in data
+    assert "attest_timestamp" in data
+    assert "attestor_address" in data
+    assert data["ledger_iri"] is None
+    assert data["attest_timestamp"] is None
+    assert data["attestor_address"] is None

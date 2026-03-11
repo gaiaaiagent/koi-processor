@@ -1,7 +1,7 @@
 # Claims Engine — Current State & Roadmap
 
-**Status:** V1 Complete + V2 Attestations (Phase 1+2) + Steel Thread Phase B Deployed (Mar 11, 2026)
-**Environment:** Live on `regen-upgrade` testnet
+**Status:** V1 Complete + V2 Phase 2 (Attestation Anchoring + Proof-Pack Download) Deployed
+**Environment:** Live on Regen Ledger mainnet (`regen-1`)
 **Dogfooding:** 49+ claims across 3 organizations (CEC, Blue Forest, ZFP)
 **Steel Thread:** Phase A (22/22) + Phase B (25/25) proven on Octo with on-chain anchors
 **Next:** [V2 Attestation Layer Design](claims-engine-v2-attestations.md) — Phase 3 (on-chain attestation)
@@ -67,7 +67,7 @@ Claims at the `verified` state can be permanently anchored on the Regen Ledger b
    → Returns: content_hash + predicted IRI (no broadcast yet)
    ↓
 3. POST /claims/{rid}/anchor
-   → Broadcasts MsgAnchor transaction to regen-upgrade testnet
+   → Broadcasts MsgAnchor transaction to Regen Ledger mainnet
    → Polls for on-chain confirmation (up to 30s)
    → On success: transitions claim to "ledger_anchored" state
    → On timeout: returns HTTP 202 with tx_hash for later reconciliation
@@ -89,18 +89,18 @@ The blockchain transaction (`MsgAnchor`) contains:
 
 ### Technical Details
 
-- **Chain:** `regen-upgrade` testnet (not mainnet)
+- **Chain:** `regen-1` mainnet
 - **Signing:** Local `regen` CLI binary with `--keyring-backend test` (no Python signing library needed)
 - **Verification:** Any anchor can be independently verified via the REST API:
-  `GET https://api-regen-upgrade.vitwit.com/regen/data/v2/anchor-by-iri/{iri}`
+  `GET https://regen-api.polkachu.com/regen/data/v2/anchor-by-iri/{iri}`
 - **Ghost anchor protection (V2 Hardening):** If the broadcast succeeds but confirmation times out, the claim stays at `verified` (not falsely marked `ledger_anchored`). The `tx_hash` is preserved so `/reconcile` can finalize later.
 
 ### Environment Variables (in `personal.env`)
 
 ```
-REGEN_CHAIN_ID=regen-upgrade
-REGEN_RPC_URL=https://rpc-regen-upgrade.vitwit.com/
-REGEN_REST_URL=https://api-regen-upgrade.vitwit.com/
+REGEN_CHAIN_ID=regen-1
+REGEN_RPC_URL=https://regen-rpc.polkachu.com/
+REGEN_REST_URL=https://regen-api.polkachu.com/
 REGEN_KEY_NAME=claims-service
 ```
 
@@ -259,13 +259,15 @@ This returns a list of extracted claims with `ai_confidence` scores. Each extrac
 | GET | /claims/{rid}/history | Verification audit log |
 | POST | /claims/extract | AI extraction from document text |
 | POST | /claims/{rid}/prepare-anchor | Compute content hash + predict IRI |
-| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger testnet |
+| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger mainnet |
 | POST | /claims/{rid}/reconcile | Check on-chain status of timed-out broadcast |
 | GET | /claims/{rid}/proof-pack | Synthesized verification artifact (requires ledger_anchored) |
 | POST | /claims/evidence-from-artifacts | Create Evidence entity from published artifacts (Pattern/Protocol/CaseStudy/Practice) |
 | POST | /claims/{rid}/attestations | Create/update attestation (UPSERT) |
 | GET | /claims/{rid}/attestations | List attestations for a claim |
 | GET | /claims/{rid}/attestations/{att_rid} | Get single attestation |
+| POST | /claims/{rid}/attestations/{att_rid}/anchor | Anchor attestation on Regen Ledger mainnet |
+| POST | /claims/{rid}/attestations/{att_rid}/reconcile | Check on-chain status of attestation anchor |
 
 ### MCP Tools (personal-koi-mcp)
 
@@ -364,13 +366,14 @@ V2 introduces:
 - [x] Phase 1b: Router + graph integration (claims_router.py)
 - [x] Phase 2: Claim extraction pipeline (claim_extractor.py)
 - [x] Phase 3: MCP tools (personal-koi-mcp)
-- [x] Phase 4: Ledger anchoring — live testnet via regen CLI (ledger_anchor.py)
+- [x] Phase 4: Ledger anchoring — live on Regen Ledger mainnet via regen CLI (ledger_anchor.py)
 - [x] Phase 5: Testing (46 smoke tests + 16 pytest passing)
 - [x] Phase 6: V2 Hardening — ghost anchor fix, reconcile endpoint, 202 pending responses
 - [x] Phase 7: V2 Design Doc — attestation layer architecture
 - [x] Phase 8: V2 Attestations Phase 1+2 — migration 066, attestation CRUD, operator_uri, policy gates, graph edges, grandfathering
 - [x] Phase 9: Steel Thread Phase A — end-to-end proof (Evidence → claim → attestations → anchor → proof pack). 22/22 on Local, Octo, FR.
 - [x] Phase 10: Steel Thread Phase B — evidence-from-artifacts transformation (interview artifacts → Evidence → claim → anchor). Migration 067 (`derived_from`). 25/25 on Local + Octo.
+- [x] Phase 11: V2 Phase 2 — Mainnet sync, attestation anchoring, proof-pack download, hash verification. Migration 069 (`graph_iri` → `ledger_iri`).
 
 ## Key Files
 
@@ -381,7 +384,7 @@ V2 introduces:
 | `migrations/064_claims_engine.sql` | Core schema (claims + claim_state_log tables) |
 | `migrations/065_claims_tx_hash.sql` | tx_hash column for reconciliation |
 | `tests/test_claims_reconcile.py` | 16 pytest tests (in-process ASGI) |
-| `scripts/test_claims_api.py` | 20 HTTP smoke tests |
+| `scripts/test_claims_api.py` | 25 HTTP smoke tests |
 | `migrations/066_claims_v2_attestations.sql` | V2 attestation schema + operator_uri |
 | `migrations/067_evidence_from_artifacts.sql` | `derived_from` predicate for Phase B |
 | `tests/test_steel_thread_phase_a.sh` | 22-check end-to-end steel thread proof |

@@ -15,6 +15,8 @@ Implements the Claims Engine API:
   POST /claims/{rid}/attestations — create/update attestation (UPSERT)
   GET  /claims/{rid}/attestations — list attestations for a claim
   GET  /claims/{rid}/attestations/{att_rid} — get single attestation
+  POST /claims/{rid}/attestations/{att_rid}/anchor — anchor attestation on Regen Ledger
+  POST /claims/{rid}/attestations/{att_rid}/reconcile — check on-chain status of attestation anchor
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
@@ -137,8 +139,11 @@ class ProofPackResponse(BaseModel):
     history: List[Dict[str, Any]]
     anchor: Dict[str, Any]
     attestations: List[Dict[str, Any]]
+    claim_content_hash_verified: bool = False
+    chain_id: str = ""
+    verification_instructions: str = ""
     assembled_at: str
-    version: str = "1.0"
+    version: str = "2.0"
 
 
 class EvidenceFromArtifactsRequest(BaseModel):
@@ -175,8 +180,41 @@ class AttestationResponse(BaseModel):
     evidence_uris: Optional[List[str]]
     content_hash: Optional[str] = None
     attest_tx_hash: Optional[str] = None
+    ledger_iri: Optional[str] = None
+    attest_timestamp: Optional[str] = None
+    attestor_address: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class AttestationAnchorResponse(BaseModel):
+    attestation_rid: str
+    claim_rid: str
+    content_hash: str
+    attest_tx_hash: str
+    ledger_iri: str
+    attest_timestamp: Optional[str] = None
+    attestor_address: Optional[str] = None
+
+
+class AttestationAnchorPendingResponse(BaseModel):
+    attestation_rid: str
+    claim_rid: str
+    content_hash: str
+    attest_tx_hash: str
+    ledger_iri: str
+    status: str = "pending"
+    message: str = ""
+
+
+class AttestationReconcileResponse(BaseModel):
+    attestation_rid: str
+    claim_rid: str
+    status: str  # "anchored", "pending", "failed"
+    attest_tx_hash: Optional[str] = None
+    ledger_iri: Optional[str] = None
+    attest_timestamp: Optional[str] = None
+    message: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +284,26 @@ def _attestation_rid(claim_rid: str, reviewer_uri: str) -> str:
     canonical = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
     h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:16]
     return f"orn:koi-net.attestation:{h}"
+
+
+def _attestation_response(row, reviewer_name=None) -> AttestationResponse:
+    """Build AttestationResponse from a DB row."""
+    return AttestationResponse(
+        attestation_rid=row["attestation_rid"],
+        claim_rid=row["claim_rid"],
+        reviewer_uri=row["reviewer_uri"],
+        reviewer_name=reviewer_name or row.get("reviewer_name"),
+        verdict=row["verdict"],
+        rationale=row.get("rationale"),
+        evidence_uris=row.get("evidence_uris"),
+        content_hash=row.get("content_hash"),
+        attest_tx_hash=row.get("attest_tx_hash"),
+        ledger_iri=row.get("ledger_iri"),
+        attest_timestamp=row["attest_timestamp"].isoformat() if row.get("attest_timestamp") else None,
+        attestor_address=row.get("attestor_address"),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
 
 
 async def _check_attestation_policy(conn, claim_rid: str, target_level: str, claim_created_at) -> tuple:
@@ -993,7 +1051,7 @@ def create_router(pool, caps=None):
         202: {"model": AnchorPendingResponse, "description": "Tx broadcast but on-chain verification pending"},
     })
     async def anchor_claim(rid: str):
-        """Anchor a verified claim on the Regen Ledger testnet.
+        """Anchor a verified claim on the Regen Ledger mainnet.
 
         Precondition: claim must be at 'verified' state.
         Requires content_hash (call prepare-anchor first if missing).
@@ -1094,11 +1152,11 @@ def create_router(pool, caps=None):
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
                     VALUES ($1, 'verified', 'ledger_anchored', 'ledger_anchor_service',
-                            'Anchored on Regen Ledger testnet', $2::jsonb)
+                            'Anchored on Regen Ledger mainnet', $2::jsonb)
                 """, rid, json.dumps({
                     "tx_hash": result.get("tx_hash"),
                     "ledger_iri": result["ledger_iri"],
-                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-upgrade"),
+                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-1"),
                 }))
 
         logger.info(f"claim.anchored rid={rid} iri={result['ledger_iri']} tx={result.get('tx_hash')}")
@@ -1229,7 +1287,7 @@ def create_router(pool, caps=None):
                 """, rid, json.dumps({
                     "tx_hash": tx_hash,
                     "ledger_iri": ledger_iri,
-                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-upgrade"),
+                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-1"),
                     "reconciled": True,
                 }))
 
@@ -1248,11 +1306,15 @@ def create_router(pool, caps=None):
     # ------------------------------------------------------------------ #
 
     @router.get("/{rid}/proof-pack", response_model=ProofPackResponse)
-    async def get_proof_pack(rid: str):
+    async def get_proof_pack(
+        rid: str,
+        format: Optional[str] = Query(None, description="Set to 'download' for Content-Disposition attachment"),
+    ):
         """Assemble a proof pack for a claim.
 
         Synthesizes claim data, linked evidence, full audit history, anchor
-        fields, and attestations into a single archivable verification artifact.
+        fields, attestations with anchor details, and hash verification into
+        a single archivable verification artifact.
         The claim must be at ledger_anchored state.
         """
         async with pool.acquire() as conn:
@@ -1324,7 +1386,7 @@ def create_router(pool, caps=None):
                 if about_row:
                     about_uri = about_row["object_uri"]
 
-            # Fetch attestations
+            # Fetch attestations (with anchor details)
             attestations = []
             try:
                 att_rows = await conn.fetch("""
@@ -1334,18 +1396,29 @@ def create_router(pool, caps=None):
                     WHERE a.claim_rid = $1
                     ORDER BY a.created_at ASC
                 """, rid)
-                attestations = [
-                    {
+                from api.ledger_anchor import compute_attestation_hash
+                for a in att_rows:
+                    att_entry = {
                         "attestation_rid": a["attestation_rid"],
                         "reviewer_uri": a["reviewer_uri"],
                         "reviewer_name": a.get("reviewer_name"),
                         "verdict": a["verdict"],
                         "rationale": a.get("rationale"),
                         "evidence_uris": a.get("evidence_uris"),
+                        "content_hash": a.get("content_hash"),
+                        "attest_tx_hash": a.get("attest_tx_hash"),
+                        "ledger_iri": a.get("ledger_iri"),
+                        "attest_timestamp": a["attest_timestamp"].isoformat() if a.get("attest_timestamp") else None,
+                        "attestor_address": a.get("attestor_address"),
                         "created_at": a["created_at"].isoformat() if a.get("created_at") else None,
                     }
-                    for a in att_rows
-                ]
+                    # Verify attestation content hash
+                    if a.get("content_hash"):
+                        recomputed = compute_attestation_hash(a)
+                        att_entry["hash_verified"] = (recomputed == a["content_hash"])
+                    else:
+                        att_entry["hash_verified"] = None
+                    attestations.append(att_entry)
             except Exception:
                 pass  # Pre-migration DB — no attestations table
 
@@ -1353,7 +1426,23 @@ def create_router(pool, caps=None):
         if isinstance(meta, str):
             meta = json.loads(meta)
 
-        return ProofPackResponse(
+        # Verify claim content hash
+        claim_hash_verified = False
+        if row.get("content_hash"):
+            from api.ledger_anchor import compute_content_hash
+            recomputed = compute_content_hash(row)
+            claim_hash_verified = (recomputed == row["content_hash"])
+
+        chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
+        rpc_url = os.getenv("REGEN_RPC_URL", "https://regen-rpc.polkachu.com/")
+        verification_instructions = (
+            "1. Verify claim content_hash matches BLAKE2b-256 of canonical claim JSON\n"
+            f"2. Query tx on Regen Ledger: regen query tx <tx_hash> --node {rpc_url}\n"
+            "3. Confirm tx code=0 and IRI matches claim's ledger_iri\n"
+            "4. Repeat for each attestation anchor"
+        )
+
+        proof_pack = ProofPackResponse(
             claim_rid=rid,
             verification=row["verification"],
             claim={
@@ -1380,11 +1469,26 @@ def create_router(pool, caps=None):
                 "ledger_iri": row.get("ledger_iri"),
                 "tx_hash": row.get("tx_hash"),
                 "ledger_timestamp": row["ledger_timestamp"].isoformat() if row.get("ledger_timestamp") else None,
-                "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-upgrade"),
+                "chain_id": chain_id,
             },
             attestations=attestations,
+            claim_content_hash_verified=claim_hash_verified,
+            chain_id=chain_id,
+            verification_instructions=verification_instructions,
             assembled_at=datetime.now(timezone.utc).isoformat(),
         )
+
+        if format == "download":
+            from starlette.responses import JSONResponse
+            short_rid = rid.split(":")[-1][:12] if ":" in rid else rid[:12]
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            filename = f"proof-pack-{short_rid}-{date_str}.json"
+            return JSONResponse(
+                content=proof_pack.model_dump(),
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
+        return proof_pack
 
     # ------------------------------------------------------------------ #
     # Attestations (V2 Phase 1)                                           #
@@ -1440,23 +1544,36 @@ def create_router(pool, caps=None):
                     detail="Self-attestation not allowed: reviewer_uri cannot be the claimant",
                 )
 
+            # Compute content_hash before UPSERT
+            from api.ledger_anchor import compute_attestation_hash
+            att_hash_row = {
+                "attestation_rid": att_rid,
+                "claim_rid": rid,
+                "reviewer_uri": body.reviewer_uri,
+                "verdict": body.verdict,
+                "rationale": body.rationale,
+                "evidence_uris": body.evidence_uris,
+            }
+            content_hash = compute_attestation_hash(att_hash_row)
+
             async with conn.transaction():
-                # UPSERT attestation
+                # UPSERT attestation (includes content_hash)
                 row = await conn.fetchrow("""
                     INSERT INTO claim_attestations
                         (attestation_rid, claim_rid, reviewer_uri, verdict, rationale,
-                         evidence_uris, metadata, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
+                         evidence_uris, content_hash, metadata, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), NOW())
                     ON CONFLICT (claim_rid, reviewer_uri)
                     DO UPDATE SET verdict = EXCLUDED.verdict,
                                   rationale = EXCLUDED.rationale,
                                   evidence_uris = EXCLUDED.evidence_uris,
+                                  content_hash = EXCLUDED.content_hash,
                                   metadata = EXCLUDED.metadata,
                                   updated_at = NOW()
                     RETURNING *
                 """,
                     att_rid, rid, body.reviewer_uri, body.verdict,
-                    body.rationale, body.evidence_uris,
+                    body.rationale, body.evidence_uris, content_hash,
                     _json_dumps(body.metadata),
                 )
 
@@ -1487,19 +1604,7 @@ def create_router(pool, caps=None):
                 )
 
         logger.info(f"claim.attestation rid={rid} att={att_rid} reviewer={body.reviewer_uri} verdict={body.verdict}")
-        return AttestationResponse(
-            attestation_rid=row["attestation_rid"],
-            claim_rid=row["claim_rid"],
-            reviewer_uri=row["reviewer_uri"],
-            reviewer_name=reviewer["entity_text"] if reviewer else None,
-            verdict=row["verdict"],
-            rationale=row.get("rationale"),
-            evidence_uris=row.get("evidence_uris"),
-            content_hash=row.get("content_hash"),
-            attest_tx_hash=row.get("attest_tx_hash"),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
+        return _attestation_response(row, reviewer_name=reviewer["entity_text"] if reviewer else None)
 
     @router.get("/{rid}/attestations", response_model=List[AttestationResponse])
     async def list_attestations(
@@ -1532,22 +1637,7 @@ def create_router(pool, caps=None):
                     ORDER BY a.created_at DESC
                 """, rid)
 
-        return [
-            AttestationResponse(
-                attestation_rid=r["attestation_rid"],
-                claim_rid=r["claim_rid"],
-                reviewer_uri=r["reviewer_uri"],
-                reviewer_name=r.get("reviewer_name"),
-                verdict=r["verdict"],
-                rationale=r.get("rationale"),
-                evidence_uris=r.get("evidence_uris"),
-                content_hash=r.get("content_hash"),
-                attest_tx_hash=r.get("attest_tx_hash"),
-                created_at=r["created_at"],
-                updated_at=r["updated_at"],
-            )
-            for r in rows
-        ]
+        return [_attestation_response(r) for r in rows]
 
     @router.get("/{rid}/attestations/{att_rid}", response_model=AttestationResponse)
     async def get_attestation(rid: str, att_rid: str):
@@ -1562,18 +1652,223 @@ def create_router(pool, caps=None):
             if not row:
                 raise HTTPException(status_code=404, detail=f"Attestation not found: {att_rid}")
 
-        return AttestationResponse(
-            attestation_rid=row["attestation_rid"],
-            claim_rid=row["claim_rid"],
-            reviewer_uri=row["reviewer_uri"],
-            reviewer_name=row.get("reviewer_name"),
-            verdict=row["verdict"],
-            rationale=row.get("rationale"),
-            evidence_uris=row.get("evidence_uris"),
-            content_hash=row.get("content_hash"),
-            attest_tx_hash=row.get("attest_tx_hash"),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+        return _attestation_response(row)
+
+    # ------------------------------------------------------------------ #
+    # Attestation anchoring                                                #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/{rid}/attestations/{att_rid}/anchor", response_model=AttestationAnchorResponse)
+    async def anchor_attestation(rid: str, att_rid: str):
+        """Anchor an attestation on-chain via MsgAnchor.
+
+        Mirrors claim anchor semantics: parent claim must be ledger_anchored,
+        attestation verdict must be approved or rejected (not pending/needs_info).
+        Lazy content_hash backfill for pre-existing attestations.
+        """
+        from api.ledger_anchor import (
+            broadcast_anchor, compute_attestation_hash, derive_ledger_iri,
+            get_signing_address,
+        )
+
+        async with pool.acquire() as conn:
+            # Fetch attestation
+            att = await conn.fetchrow("""
+                SELECT * FROM claim_attestations
+                WHERE claim_rid = $1 AND attestation_rid = $2
+            """, rid, att_rid)
+            if not att:
+                raise HTTPException(status_code=404, detail=f"Attestation not found: {att_rid}")
+
+            # Guard: parent claim must be ledger_anchored
+            claim = await conn.fetchrow(
+                "SELECT verification FROM claims WHERE claim_rid = $1", rid
+            )
+            if not claim or claim["verification"] != "ledger_anchored":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Parent claim must be ledger_anchored (current: {claim['verification'] if claim else 'not found'})",
+                )
+
+            # Guard: verdict must be approved or rejected
+            if att["verdict"] not in ("approved", "rejected"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot anchor attestation with verdict '{att['verdict']}'. "
+                           f"Must be 'approved' or 'rejected'.",
+                )
+
+            # Guard: already anchored
+            if att.get("attest_tx_hash"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Attestation already anchored (tx_hash: {att['attest_tx_hash'][:16]}...)",
+                )
+
+            # Lazy content_hash backfill
+            content_hash = att.get("content_hash")
+            if not content_hash:
+                content_hash = compute_attestation_hash(att)
+                await conn.execute(
+                    "UPDATE claim_attestations SET content_hash = $2 WHERE attestation_rid = $1",
+                    att_rid, content_hash,
+                )
+
+        # Broadcast anchor (reuses claim anchor infrastructure)
+        try:
+            result = await broadcast_anchor(att_rid, content_hash)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Anchor broadcast failed: {e}")
+
+        ledger_iri = result.get("ledger_iri")
+        tx_hash = result.get("tx_hash")
+
+        # Resolve signing address
+        try:
+            attestor_address = get_signing_address()
+        except Exception:
+            attestor_address = None
+
+        if result.get("ready_to_anchor"):
+            # Full success — store anchor data
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claim_attestations
+                    SET attest_tx_hash = $2, ledger_iri = $3, attest_timestamp = NOW(),
+                        attestor_address = $4, updated_at = NOW()
+                    WHERE attestation_rid = $1
+                """, att_rid, tx_hash, ledger_iri, attestor_address)
+
+            logger.info(f"attestation.anchored att={att_rid} iri={ledger_iri} tx={tx_hash}")
+            return AttestationAnchorResponse(
+                attestation_rid=att_rid,
+                claim_rid=rid,
+                content_hash=content_hash,
+                attest_tx_hash=tx_hash,
+                ledger_iri=ledger_iri,
+                attest_timestamp=result.get("ledger_timestamp"),
+                attestor_address=attestor_address,
+            )
+
+        if tx_hash:
+            # Broadcast happened but confirmation timed out
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claim_attestations
+                    SET attest_tx_hash = $2, ledger_iri = $3, attestor_address = $4, updated_at = NOW()
+                    WHERE attestation_rid = $1
+                """, att_rid, tx_hash, ledger_iri, attestor_address)
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                status_code=202,
+                content=AttestationAnchorPendingResponse(
+                    attestation_rid=att_rid,
+                    claim_rid=rid,
+                    content_hash=content_hash,
+                    attest_tx_hash=tx_hash,
+                    ledger_iri=ledger_iri,
+                    status="pending",
+                    message=result.get("reason", "Tx broadcast but confirmation timed out. "
+                            f"Call POST /claims/{rid}/attestations/{att_rid}/reconcile to finalize."),
+                ).model_dump(),
+            )
+
+        # Pre-broadcast failure
+        raise HTTPException(
+            status_code=503,
+            detail=result.get("reason", "Attestation anchoring not available"),
+        )
+
+    @router.post("/{rid}/attestations/{att_rid}/reconcile", response_model=AttestationReconcileResponse)
+    async def reconcile_attestation(rid: str, att_rid: str):
+        """Check on-chain status of an attestation with a pending broadcast.
+
+        Mirrors claim reconcile semantics exactly.
+        """
+        from api.ledger_anchor import query_tx_status, verify_anchor_onchain
+
+        async with pool.acquire() as conn:
+            att = await conn.fetchrow("""
+                SELECT * FROM claim_attestations
+                WHERE claim_rid = $1 AND attestation_rid = $2
+            """, rid, att_rid)
+            if not att:
+                raise HTTPException(status_code=404, detail=f"Attestation not found: {att_rid}")
+
+            tx_hash = att.get("attest_tx_hash")
+            if not tx_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No attest_tx_hash on this attestation. Nothing to reconcile. "
+                           f"Use POST /claims/{rid}/attestations/{att_rid}/anchor to broadcast.",
+                )
+
+        # Query tx status on-chain
+        tx_status = query_tx_status(tx_hash)
+
+        if not tx_status["found"]:
+            return AttestationReconcileResponse(
+                attestation_rid=att_rid,
+                claim_rid=rid,
+                status="pending",
+                attest_tx_hash=tx_hash,
+                ledger_iri=att.get("ledger_iri"),
+                message="Transaction not yet indexed on-chain. Retry reconcile later.",
+            )
+
+        if tx_status["code"] != 0:
+            # Tx failed — clear tx_hash + ledger_iri, allow re-anchor
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claim_attestations
+                    SET attest_tx_hash = NULL, ledger_iri = NULL, updated_at = NOW()
+                    WHERE attestation_rid = $1
+                """, att_rid)
+            return AttestationReconcileResponse(
+                attestation_rid=att_rid,
+                claim_rid=rid,
+                status="failed",
+                attest_tx_hash=tx_hash,
+                message=f"Transaction failed on-chain (code={tx_status['code']}). "
+                        f"attest_tx_hash and ledger_iri cleared. You may re-anchor.",
+            )
+
+        # Tx confirmed (code=0) — soft IRI check
+        ledger_iri = att.get("ledger_iri")
+        if ledger_iri:
+            anchor_present = verify_anchor_onchain(ledger_iri)
+            if not anchor_present:
+                logger.warning(
+                    f"Attestation anchor IRI {ledger_iri} not queryable via REST "
+                    f"(tx {tx_hash} confirmed code=0). Proceeding with finalization."
+                )
+
+        # Finalize — store timestamp
+        from datetime import datetime as _dt
+        attest_ts = None
+        ts_raw = tx_status.get("timestamp")
+        if ts_raw:
+            try:
+                attest_ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                attest_ts = datetime.now(timezone.utc)
+
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE claim_attestations
+                SET attest_timestamp = $2, updated_at = NOW()
+                WHERE attestation_rid = $1
+            """, att_rid, attest_ts)
+
+        logger.info(f"attestation.reconciled att={att_rid} iri={ledger_iri} tx={tx_hash}")
+        return AttestationReconcileResponse(
+            attestation_rid=att_rid,
+            claim_rid=rid,
+            status="anchored",
+            attest_tx_hash=tx_hash,
+            ledger_iri=ledger_iri,
+            attest_timestamp=str(ts_raw) if ts_raw else None,
+            message="Attestation anchor confirmed on-chain.",
         )
 
     return router
