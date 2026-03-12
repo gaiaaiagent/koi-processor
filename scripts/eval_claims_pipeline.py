@@ -284,8 +284,11 @@ def compute_aggregates(all_runs):
 
 # ── Comparison ────────────────────────────────────────────────────────
 
-def compare_baselines(current, baseline_path):
-    """Compare current run against a saved baseline."""
+def compare_baselines(current, baseline_path, latency_multiplier=None):
+    """Compare current run against a saved baseline.
+
+    Returns True if a regression was detected (latency exceeded threshold).
+    """
     with open(baseline_path) as f:
         baseline = json.load(f)
 
@@ -332,7 +335,23 @@ def compare_baselines(current, baseline_path):
 
     chain_match = baseline.get("chain_id") == current.get("chain_id")
     print(f"\n  Chain ID match: {'YES' if chain_match else 'NO (different environments)'}")
+
+    # Latency regression check
+    latency_regression = False
+    if latency_multiplier is not None:
+        b_latency = b_agg.get("total_latency_s", 0)
+        c_latency = c_agg.get("total_latency_s", 0)
+        threshold = b_latency * latency_multiplier
+        if b_latency > 0 and c_latency > threshold:
+            print(f"\n  LATENCY REGRESSION: {c_latency:.3f}s > {threshold:.3f}s "
+                  f"(baseline {b_latency:.3f}s × {latency_multiplier})")
+            latency_regression = True
+        elif b_latency > 0:
+            print(f"\n  Latency within threshold: {c_latency:.3f}s <= {threshold:.3f}s "
+                  f"(baseline {b_latency:.3f}s × {latency_multiplier})")
+
     print("=" * 60)
+    return latency_regression
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -345,6 +364,8 @@ def main():
     parser.add_argument("--skip-anchor", action="store_true", help="Skip on-chain anchor step")
     parser.add_argument("--save", default="docs/eval/claims-baseline.json", help="Save results path")
     parser.add_argument("--compare", help="Compare against saved baseline")
+    parser.add_argument("--fail-on-latency-regression", type=float, metavar="MULTIPLIER",
+                        help="Exit 1 if total latency exceeds baseline × MULTIPLIER (requires --compare)")
     args = parser.parse_args()
     BASE_URL = args.base_url
 
@@ -450,12 +471,19 @@ def main():
     print(f"\nResults saved to {save_path}")
 
     # Compare
+    latency_regression = False
     if args.compare:
-        compare_baselines(result, args.compare)
+        latency_regression = compare_baselines(
+            result, args.compare,
+            latency_multiplier=args.fail_on_latency_regression,
+        )
 
     # Exit code
     if aggregates["success_rate"] < 100:
         print("\nWARNING: Not all steps passed")
+        sys.exit(1)
+    if latency_regression:
+        print("\nFAIL: Latency regression detected")
         sys.exit(1)
     print("\nAll pipeline steps passed!")
 

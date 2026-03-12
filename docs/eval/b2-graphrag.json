@@ -1,66 +1,66 @@
 {
   "eval_version": "b5-v1",
-  "timestamp": "2026-03-04T05:28:05.134564+00:00",
-  "api_url": "http://127.0.0.1:8351",
+  "timestamp": "2026-03-04T10:16:06.010671+00:00",
+  "api_url": "http://127.0.0.1:18351",
   "retrieval_mode": "graphrag",
-  "graph_version": "e633013c71723d0f",
+  "graph_version": "c8aedf6eab430baa",
   "query_count": 28,
   "aggregates": {
     "total_queries": 28,
-    "successful_queries": 27,
-    "error_queries": 1,
-    "resolution_rate": 100.0,
-    "avg_source_count": 13,
-    "median_source_count": 15,
-    "latency_p50_s": 3.38,
-    "latency_p95_s": 12.967,
-    "latency_avg_s": 5.244,
+    "successful_queries": 28,
+    "error_queries": 0,
+    "resolution_rate": 96.4,
+    "avg_source_count": 12.54,
+    "median_source_count": 14.5,
+    "latency_p50_s": 2.96,
+    "latency_p95_s": 6.716,
+    "latency_avg_s": 3.334,
     "by_category": {
       "entity_resolution": {
         "total": 5,
         "resolution_rate": 100.0,
         "avg_source_count": 12.6,
-        "avg_latency_s": 4.058
+        "avg_latency_s": 3.769
       },
       "relationship_traversal": {
         "total": 5,
         "resolution_rate": 100.0,
         "avg_source_count": 12,
-        "avg_latency_s": 4.995
+        "avg_latency_s": 4.294
       },
       "roadmap": {
         "total": 5,
         "resolution_rate": 100.0,
         "avg_source_count": 13.4,
-        "avg_latency_s": 2.629
+        "avg_latency_s": 2.417
       },
       "web_content": {
         "total": 3,
         "resolution_rate": 100.0,
         "avg_source_count": 13.67,
-        "avg_latency_s": 5.569
+        "avg_latency_s": 3.009
       },
       "commitment_pooling": {
         "total": 2,
         "resolution_rate": 100.0,
         "avg_source_count": 12.5,
-        "avg_latency_s": 7.953
+        "avg_latency_s": 4.193
       },
       "cross_domain": {
         "total": 3,
         "resolution_rate": 100.0,
         "avg_source_count": 13.67,
-        "avg_latency_s": 4.98
+        "avg_latency_s": 3.207
       },
       "regen_secondary": {
-        "total": 4,
-        "resolution_rate": 100.0,
-        "avg_source_count": 13.5,
-        "avg_latency_s": 8.907
+        "total": 5,
+        "resolution_rate": 80.0,
+        "avg_source_count": 10.8,
+        "avg_latency_s": 2.782
       }
     },
-    "relevance_avg": 2.81,
-    "relevance_pct_4plus": 33.3
+    "relevance_avg": 2.71,
+    "relevance_pct_4plus": 35.7
   },
   "results": [
     {
@@ -68,7 +68,7 @@
       "category": "entity_resolution",
       "expected_hint": "Organization focused on bioregional regeneration in Cascadia",
       "status": "ok",
-      "latency_s": 3.274,
+      "latency_s": 3.616,
       "source_count": 13,
       "sources": [
         {
@@ -137,7 +137,7 @@
           "score": 0.8
         }
       ],
-      "answer": "Regenerate Cascadia is an organization focused on ecological stewardship and regenerative practices within the Cascadia bioregion. It is involved in initiatives such as the commitment pooling integration (C0/C1/C2 track) and the pilot commitment pool (C2) to foster community governance and collaborative efforts in environmental restoration.\n\nFor more information, you can explore their initiatives and projects on their website or related resources. If you have specific questions about their programs or how they operate, feel free to ask!",
+      "answer": "Regenerate Cascadia is an organization focused on ecological stewardship and regenerative practices within the Cascadia bioregion. It is involved in various initiatives, such as the commitment pooling integration (C0/C1/C2 track) and the pilot commitment pool (C2) aimed at fostering community governance and collaborative efforts for environmental sustainability. This organization plays a crucial role in promoting practices that support the health of ecosystems, including those in the Salish Sea, which is a significant area within the Pacific Northwest megalopolis. \n\nFor more information about their activities and initiatives, you can visit their website or related resources.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -158,8 +158,8 @@
         "confidence": 0.8
       },
       "relevance": {
-        "score": 4,
-        "reason": "The answer is relevant and mostly accurate, providing a good overview of the organization's focus and initiatives."
+        "score": 5,
+        "reason": "The answer provides a clear and accurate description of Regenerate Cascadia, detailing its focus on ecological stewardship and specific initiatives, making it highly relevant and well-grounded."
       }
     },
     {
@@ -167,7 +167,7 @@
       "category": "entity_resolution",
       "expected_hint": "Herring monitoring or ecology in the Salish Sea bioregion",
       "status": "ok",
-      "latency_s": 4.889,
+      "latency_s": 4.957,
       "source_count": 15,
       "sources": [
         {
@@ -246,7 +246,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The Salish Sea herring is a significant ecological and cultural component of the Salish Sea bioregion, which spans parts of British Columbia and Washington state. Herring are a crucial species in the marine ecosystem, serving as a key food source for various marine animals, including salmon, seabirds, and marine mammals.\n\nThe Salish Sea Herring Case is a relevant case study that highlights the importance of herring populations and their management within the region. This case underscores the challenges faced by herring due to environmental pressures, including pollution and overfishing, which are linked to the broader pollution-based economy affecting the Salish Sea.\n\nOrganizations like the SeaDoc Society and projects such as the Salish Sea Marine Survival Project are involved in research and conservation efforts aimed at protecting herring populations and their habitats. Additionally, the Coast Salish peoples have a deep cultural connection to herring, emphasizing the need for sustainable practices and respect for traditional ecological knowledge.\n\nFor more detailed information, you can refer to sources like the [Salish Sea - Wikipedia](https://en.wikipedia.org/wiki/Salish_Sea) and the [SalishSea.io](https://salishsea.io/) website.",
+      "answer": "The Salish Sea herring is a significant ecological and cultural component of the Salish Sea bioregion. Herring are a key species in the marine food web, serving as a crucial food source for various marine animals, including birds, fish, and marine mammals. The health of herring populations is indicative of the overall health of the marine ecosystem.\n\nThe Salish Sea Herring Case is a relevant case study that addresses the challenges facing herring populations, including overfishing and environmental degradation. Efforts to protect and restore herring populations are part of broader initiatives like the Salish Sea Marine Survival Project, which focuses on improving the survival rates of salmon and other marine species in the region.\n\nOrganizations such as the SeaDoc Society and the WWF are involved in research and conservation efforts related to herring and the broader marine ecosystem of the Salish Sea. The Coast Salish peoples also have a deep cultural connection to herring, emphasizing sustainable practices and the importance of these fish in their traditional diets and economies.\n\nFor more detailed information, you can explore resources like the [Salish Sea - Wikipedia](https://en.wikipedia.org/wiki/Salish_Sea) or the [SalishSea.io](https://salishsea.io/) website.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -270,7 +270,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer is relevant and mostly accurate, covering ecological and cultural aspects of herring in the Salish Sea, but it could provide more specific details on monitoring efforts."
+        "reason": "The answer is relevant and mostly accurate, covering the ecological importance of herring and mentioning conservation efforts, but it is slightly incomplete as it cuts off before fully addressing the cultural significance."
       }
     },
     {
@@ -278,7 +278,7 @@
       "category": "entity_resolution",
       "expected_hint": "Knowledge Organization Infrastructure protocol by BlockScience",
       "status": "ok",
-      "latency_s": 6.965,
+      "latency_s": 5.83,
       "source_count": 15,
       "sources": [
         {
@@ -357,7 +357,7 @@
           "score": 0.4829
         }
       ],
-      "answer": "The KOI-net protocol is a foundational framework designed for federated communication among nodes, particularly in the context of ecological stewardship and community governance. It utilizes ECDSA-signed envelopes to ensure secure event transmission between nodes, facilitating reliable data sharing and coordination across bioregions.\n\nKey components of the KOI-net protocol include:\n- **ECDSA-signed commitment events**: This feature enhances the protocol's capability to securely manage commitments across nodes (C2 \u2014 Extend KOI-net protocol to carry ECDSA-signed commitment events).\n- **Federation infrastructure**: The protocol supports a federated architecture where multiple nodes can operate collaboratively, as demonstrated by the successful deployment of four nodes that are now federating (All 4 KOI nodes deployed and federating).\n- **Integration with other initiatives**: The protocol is aligned with various work items and initiatives, such as the A2A agent coordination protocol, which aims to enhance bioregional AI swarm coordination (A2A agent coordination protocol (co-op.us Waves A\u2013E)).\n\nFor more technical details, you can refer to the **koi-net-protocol-openapi.json**, which outlines the API specifications for the KOI-net protocol, including event broadcasting capabilities.",
+      "answer": "The KOI-net protocol is a framework designed for federated communication among nodes, utilizing ECDSA (Elliptic Curve Digital Signature Algorithm) for signing commitment events. It has undergone several developments, including the adoption of ECDSA-signed envelopes for federation and the integration of various components for enhanced functionality.\n\nKey milestones include:\n- The deployment of the Front Range KOI node and the successful exchange of the first signed event between nodes.\n- The establishment of a commitment pooling integration track (C0/C1/C2) that aims to make capital allocation loops provable end-to-end in at least one bioregion.\n- The implementation of an A2A (agent-to-agent) coordination protocol, which supports bioregional AI swarm coordination.\n\nFor more technical details, you can refer to the **koi-net-protocol-openapi.json** document, which outlines the API specifications for broadcasting events and other functionalities of the KOI-net protocol.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -381,7 +381,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer is relevant and mostly accurate, covering key aspects of the KOI protocol, but it lacks some details on its broader implications and specific applications."
+        "reason": "The answer provides relevant information about the KOI protocol, including its purpose, key milestones, and technical details, but could benefit from more context on its broader implications."
       }
     },
     {
@@ -389,7 +389,7 @@
       "category": "entity_resolution",
       "expected_hint": "Person involved in bioregional knowledge commoning",
       "status": "ok",
-      "latency_s": 1.78,
+      "latency_s": 1.481,
       "source_count": 10,
       "sources": [
         {
@@ -443,7 +443,7 @@
           "score": 0.3548
         }
       ],
-      "answer": "Benjamin Life is affiliated with the Bioregional Knowledge Commons. However, there is no additional context or specific information provided about his role or contributions within this framework. If you have a more specific question about Benjamin Life or his involvement, please provide further details.",
+      "answer": "Benjamin Life is a person affiliated with the Bioregional Knowledge Commons. If you need specific information about his contributions or roles within this context, please provide more details or clarify your question.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -462,7 +462,7 @@
       },
       "relevance": {
         "score": 3,
-        "reason": "The answer mentions Benjamin Life's affiliation with the Bioregional Knowledge Commons but lacks specific details about his role or contributions."
+        "reason": "The answer is partially relevant as it identifies Benjamin Life's affiliation but lacks specific information about his contributions."
       }
     },
     {
@@ -470,7 +470,7 @@
       "category": "entity_resolution",
       "expected_hint": "Colorado Front Range bioregion or related geographic area",
       "status": "ok",
-      "latency_s": 3.38,
+      "latency_s": 2.96,
       "source_count": 10,
       "sources": [
         {
@@ -524,7 +524,7 @@
           "score": 0.4333
         }
       ],
-      "answer": "The Front Range bioregion is currently represented by the \"Front Range KOI node deployed\" as a work item. This node is part of the broader initiatives and outcomes related to bioregional governance and ecological stewardship. It plays a role in the overall framework that includes commitment pooling, bioregional financing, and AI swarm coordination, all aimed at enhancing community governance and regenerative practices.\n\nIf you need more specific information about the Front Range bioregion or its initiatives, please clarify your question.",
+      "answer": "The Front Range bioregion is currently represented by the \"Front Range KOI node deployed (localhost:8355)\" as a work item. This node is part of broader initiatives and outcomes related to bioregional governance and ecological stewardship, including the operational status of the \"Bioregional AI swarm coordination\" and the integration of \"commitment pooling\" which is provable end-to-end in at least one bioregion.\n\nIf you need more specific information or context about the Front Range bioregion, please clarify your question!",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -542,8 +542,8 @@
         "confidence": 0.6
       },
       "relevance": {
-        "score": 3,
-        "reason": "The answer provides some relevant information about the Front Range bioregion but lacks specific details about its geographic characteristics and context."
+        "score": 2,
+        "reason": "The answer mentions the Front Range bioregion but lacks key geographic and ecological information specific to Colorado."
       }
     },
     {
@@ -551,7 +551,7 @@
       "category": "relationship_traversal",
       "expected_hint": "Should list organizations located_in or affiliated_with Salish Sea",
       "status": "ok",
-      "latency_s": 5.81,
+      "latency_s": 6.716,
       "source_count": 15,
       "sources": [
         {
@@ -630,7 +630,7 @@
           "score": 0.8
         }
       ],
-      "answer": "Several organizations are involved in the Salish Sea, focusing on ecological stewardship, conservation, and community governance. Notable entities include:\n\n1. **British Columbia Geographical Names Office** - Engages in the naming and preservation of geographical features in British Columbia.\n2. **Chemainus First Nation** - A First Nations community involved in local governance and ecological practices.\n3. **Geographical Names Board of Canada** - Works on the official naming of geographical features across Canada.\n4. **Transboundary Georgia Basin\u2013Puget Sound Environmental Indicators Working Group** - Focuses on environmental indicators and health of the ecosystem across the border.\n5. **United States Board on Geographic Names** - Responsible for the naming of geographical features in the United States.\n6. **Washington State Board on Geographic Names** - Similar to the U.S. Board, but specific to Washington State.\n7. **WWF (World Wildlife Fund)** - Engages in global conservation efforts, including initiatives in the Salish Sea.\n8. **Long Live The Kings** - Works on restoring wild salmon and supporting sustainable fishing in the Pacific Northwest.\n9. **WRIA 1 Salmon Recovery Program** - Focuses on recovering salmon populations in the Nooksack Basin.\n\nThese organizations collaborate on various projects and initiatives to promote ecological health and community involvement in the Salish Sea.",
+      "answer": "Several organizations are involved in the Salish Sea, focusing on ecological stewardship, community governance, and environmental restoration. Notable organizations include:\n\n1. **British Columbia Geographical Names Office** - Engages in the naming and mapping of geographical features.\n2. **Chemainus First Nation** - Represents the interests of the local Indigenous community.\n3. **Geographical Names Board of Canada** - Oversees the naming of geographical features in Canada.\n4. **Transboundary Georgia Basin\u2013Puget Sound Environmental Indicators Working Group** - Focuses on environmental indicators across the border.\n5. **United States Board on Geographic Names** - Responsible for naming geographical features in the U.S.\n6. **Washington State Board on Geographic Names** - Similar to the U.S. Board, but focused on Washington state.\n7. **WWF (World Wildlife Fund)** - Works on conservation efforts in the region.\n8. **Long Live The Kings** - Focuses on restoring wild salmon and sustainable fishing in the Pacific Northwest.\n9. **WRIA 1 Salmon Recovery Program** - Aims to recover salmon populations in the Nooksack Basin.\n\nThese organizations collaborate on various projects and initiatives to promote ecological health and community engagement in the Salish Sea. For more information, you can explore their respective websites or resources like [SalishSea.io](https://salishsea.io/) and [WRIA 1 Salmon Recovery Program](https://salmonwria1.org/).",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -653,8 +653,8 @@
         "confidence": 0.8
       },
       "relevance": {
-        "score": 3,
-        "reason": "The answer lists some relevant organizations but lacks a comprehensive overview and misses key local entities specifically focused on the Salish Sea."
+        "score": 4,
+        "reason": "The answer lists several relevant organizations working in the Salish Sea, but it could provide more specific details about their roles and contributions."
       }
     },
     {
@@ -662,7 +662,7 @@
       "category": "relationship_traversal",
       "expected_hint": "People or orgs connected to herring monitoring practices",
       "status": "ok",
-      "latency_s": 2.622,
+      "latency_s": 2.417,
       "source_count": 4,
       "sources": [
         {
@@ -686,7 +686,7 @@
           "score": 0.1
         }
       ],
-      "answer": "The Herring Conservation and Restoration Society is likely involved in herring monitoring, as it is an organization focused on the conservation and restoration of herring populations. Additionally, herring monitoring itself is a practice that may involve various stakeholders, including researchers, local communities, and environmental organizations. Specific individuals or groups involved in the monitoring efforts may not be detailed in the provided context. For more precise information, you may need to refer to specific reports or documents related to the Herring Count Data 2024 or the Salish Sea Herring Case.",
+      "answer": "The Herring Conservation and Restoration Society is likely involved in herring monitoring, as it is an organization focused on the conservation of herring populations. Additionally, herring monitoring as a practice typically involves various stakeholders, including researchers, local communities, and environmental organizations, who collaborate to gather data and assess herring populations, as evidenced by the Herring Count Data 2024. For specific individuals or groups, more detailed context would be needed.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -699,7 +699,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer identifies a relevant organization and acknowledges the involvement of various stakeholders, but lacks specific names or detailed examples."
+        "reason": "The answer is relevant and provides a good overview of organizations and stakeholders involved in herring monitoring, though it could benefit from more specific examples."
       }
     },
     {
@@ -707,7 +707,7 @@
       "category": "relationship_traversal",
       "expected_hint": "Projects linked to Regenerate Cascadia via has_project or related predicates",
       "status": "ok",
-      "latency_s": 2.314,
+      "latency_s": 2.385,
       "source_count": 15,
       "sources": [
         {
@@ -786,7 +786,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The specific context provided does not detail the projects of Regenerate Cascadia beyond mentioning the \"C2 \u2014 Pilot commitment pool\" as a work item. For more comprehensive information about the various projects under Regenerate Cascadia, I recommend visiting their official website or additional resources related to their initiatives. If you need further assistance or specific details about their projects, please let me know!",
+      "answer": "The context provided does not specify the specific projects that Regenerate Cascadia is involved in beyond the mention of \"C2 \u2014 Pilot commitment pool with Regenerate Cascadia.\" For detailed information about their projects, you may want to visit their official website or related resources. Unfortunately, I cannot provide a comprehensive list of their projects based on the current context.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -809,8 +809,8 @@
         "confidence": 0.8
       },
       "relevance": {
-        "score": 3,
-        "reason": "The answer mentions one specific project but lacks comprehensive details about other projects, making it partially relevant."
+        "score": 2,
+        "reason": "The answer mentions a project but lacks key details about other specific projects associated with Regenerate Cascadia."
       }
     },
     {
@@ -818,7 +818,7 @@
       "category": "relationship_traversal",
       "expected_hint": "Practices linked to Salish Sea via practiced_in or located_in",
       "status": "ok",
-      "latency_s": 6.454,
+      "latency_s": 4.921,
       "source_count": 15,
       "sources": [
         {
@@ -897,7 +897,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The Salish Sea bioregion employs various ecological stewardship and regenerative practices, often rooted in the traditions and knowledge of the Coast Salish peoples. Key practices include:\n\n1. **Salmon Restoration**: Organizations like Long Live the Kings focus on restoring wild salmon populations, which are crucial for the ecosystem and cultural heritage. Their efforts include habitat restoration and sustainable fishing practices.\n\n2. **Pollution Mitigation**: Addressing the pollution-based economy in the Salish Sea is vital. Projects like the Salish Sea Marine Survival Project aim to monitor and improve marine health, addressing pollutants that affect marine life.\n\n3. **Community Governance**: Initiatives such as the Coast Salish Gathering promote community-led governance and decision-making, ensuring that local voices are heard in environmental management.\n\n4. **Cultural Practices**: The Coast Salish peoples engage in traditional ecological knowledge practices, which include sustainable harvesting and land management techniques that have been passed down through generations.\n\n5. **Collaborative Projects**: The Salish Sea Hub and other organizations foster collaboration among various stakeholders, including indigenous groups, to promote shared stewardship of the bioregion's resources.\n\nThese practices reflect a holistic approach to ecological stewardship, integrating scientific research, indigenous knowledge, and community involvement. For more detailed information, you can explore resources from organizations like Long Live the Kings and the Salish Sea Hub.",
+      "answer": "The Salish Sea bioregion employs various ecological stewardship and regenerative practices aimed at preserving its unique marine and terrestrial ecosystems. Key practices include:\n\n1. **Salmon Restoration**: Organizations like Long Live the Kings focus on restoring wild salmon populations, which are crucial for the ecosystem and local communities. Their efforts include habitat restoration and sustainable fishing practices.\n\n2. **Community Governance**: Initiatives such as the Coast Salish Gathering emphasize the importance of indigenous governance and the rights of Coast Salish peoples, integrating traditional ecological knowledge with modern stewardship practices.\n\n3. **Pollution Mitigation**: Projects like the Salish Sea Marine Survival Project work to address pollution and its impacts on marine life, promoting cleaner waterways and sustainable economic practices.\n\n4. **Collaborative Research and Monitoring**: The Salish Sea Hub and other organizations engage in collaborative research to monitor environmental indicators and support informed decision-making for conservation efforts.\n\n5. **Education and Advocacy**: Programs like Salish Sea Dreaming aim to educate the community about the importance of ecological stewardship and the interconnectedness of the region's ecosystems.\n\nThese practices reflect a commitment to regenerative approaches that not only protect the environment but also enhance community resilience and cultural heritage. For more detailed information, you can refer to sources like [Long Live The Kings](https://lltk.org/) and [SalishSea.io](https://salishsea.io/).",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -921,7 +921,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer is relevant and mostly accurate, covering key ecological practices in the Salish Sea bioregion, but it is slightly incomplete."
+        "reason": "The answer provides relevant practices linked to the Salish Sea bioregion, covering key areas such as salmon restoration, community governance, pollution mitigation, and collaborative research."
       }
     },
     {
@@ -929,7 +929,7 @@
       "category": "relationship_traversal",
       "expected_hint": "Concepts connected via broader/narrower/related_to predicates",
       "status": "ok",
-      "latency_s": 7.775,
+      "latency_s": 5.032,
       "source_count": 11,
       "sources": [
         {
@@ -988,7 +988,7 @@
           "score": 0.3579
         }
       ],
-      "answer": "Knowledge commoning involves several key concepts that relate to the collaborative and community-driven management of knowledge resources. In the context of the Bioregional Knowledge Commons and its initiatives, the following concepts are particularly relevant:\n\n1. **Ecological Stewardship**: This involves the responsible management of natural resources and ecosystems, ensuring sustainability and regeneration. The initiatives like the **Bioregional AI swarm coordination operational** outcome emphasize the integration of ecological sensing agents and data to support stewardship.\n\n2. **Regenerative Practices**: These practices focus on restoring and enhancing ecosystems and communities. The **Knowledge to flow funding pilot integration** initiative aims to facilitate funding for regenerative projects, indicating a commitment to supporting practices that regenerate ecological and community health.\n\n3. **Community Governance**: Effective governance structures are essential for managing shared resources. The **Part B security and governance addendum** initiative highlights the need for enforceable consent and policy within community frameworks, ensuring that governance is participatory and accountable.\n\n4. **Commitment Pooling**: This concept involves pooling resources and commitments from various stakeholders to support collective goals. The **Commitment pooling integration \u2014 C0/C1/C2 track** is an example of how this concept is operationalized within the bioregion to enhance collaboration.\n\n5. **Federated Chat Policy Boundaries**: The **Implement federated chat policy boundaries** work item indicates the importance of communication frameworks that respect individual node sovereignty while enabling collective decision-making.\n\nThese concepts collectively contribute to the framework of knowledge commoning by fostering collaboration, sustainability, and shared governance within bioregions.",
+      "answer": "Knowledge commoning involves several interconnected concepts that facilitate the sharing, governance, and stewardship of knowledge within a community or bioregion. Key concepts related to knowledge commoning in the context provided include:\n\n1. **Bioregional Knowledge Commons**: This organization focuses on the collective management and sharing of knowledge within specific bioregions, promoting ecological stewardship and regenerative practices.\n\n2. **Commitment Pooling Integration**: This concept relates to the lifecycle of commitments within a community, ensuring that resources and responsibilities are shared equitably among participants.\n\n3. **Federated Chat Policy Boundaries**: Implementing policies for communication within the knowledge commons helps maintain clarity and security in discussions and decision-making processes.\n\n4. **Ecological Sensing Agents**: These agents gather data and insights about the environment, contributing to a shared understanding of ecological conditions, which is vital for informed decision-making in knowledge commoning.\n\n5. **Capital Allocation Loop**: This outcome ensures that resources are allocated transparently and effectively, based on shared knowledge and evidence, which is crucial for sustaining community initiatives.\n\n6. **A2A Agent Coordination Protocol**: This protocol facilitates collaboration among agents in the knowledge commons, enhancing the efficiency of knowledge sharing and decision-making.\n\n7. **Security and Governance Controls**: Establishing security measures and governance frameworks ensures that knowledge is shared responsibly and that community members can trust the processes in place.\n\nThese concepts collectively support the principles of knowledge commoning by fostering collaboration, transparency, and ecological awareness within communities.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1008,7 +1008,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer is relevant and covers key concepts related to knowledge commoning, but it is incomplete as it cuts off mid-sentence."
+        "reason": "The answer is relevant and mostly accurate, covering key concepts related to knowledge commoning, but could benefit from more examples or elaboration on the connections between the concepts."
       }
     },
     {
@@ -1016,7 +1016,7 @@
       "category": "roadmap",
       "expected_hint": "Should mention P0/critical priority roadmap items",
       "status": "ok",
-      "latency_s": 2.401,
+      "latency_s": 1.828,
       "source_count": 15,
       "sources": [
         {
@@ -1095,7 +1095,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The context provided does not include specific information about the \"BKC roadmap\" or its critical path. Therefore, I cannot provide a concise answer regarding what is on the critical path for the BKC roadmap. If you can provide more details or clarify what BKC refers to, I would be happy to assist further.",
+      "answer": "The context provided does not include specific information about the \"BKC roadmap\" or its critical path. Therefore, I cannot provide an answer regarding this topic. If you have more details or a specific focus related to the BKC roadmap, please share, and I will do my best to assist you.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1118,8 +1118,8 @@
         "confidence": 0.8
       },
       "relevance": {
-        "score": 2,
-        "reason": "The answer mentions the topic but fails to provide any specific information about the critical path or priority items."
+        "score": 1,
+        "reason": "The answer does not address the query about the BKC roadmap or its critical path."
       }
     },
     {
@@ -1127,7 +1127,7 @@
       "category": "roadmap",
       "expected_hint": "Completed work items or milestones from the roadmap",
       "status": "ok",
-      "latency_s": 2.611,
+      "latency_s": 2.343,
       "source_count": 15,
       "sources": [
         {
@@ -1206,7 +1206,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The provided context does not specify any particular milestones that have been completed. It mentions various entities and relationships related to salmon populations, the Salish Sea, and WRIA 1, but does not detail specific milestones or achievements. For information on milestones related to salmon recovery or ecological stewardship, you may want to check the [WRIA 1 Salmon Recovery Program](https://salmonwria1.org/) or other related organizations like Long Live The Kings or SeaDoc Society.",
+      "answer": "The provided context does not specify any particular milestones that have been completed. It mentions various entities and relationships related to salmon populations, the Salish Sea, and ecological stewardship, but does not detail specific milestones or achievements. For more information on milestones related to salmon recovery or ecological projects in the WRIA 1 area, you may want to refer to the WRIA 1 Salmon Recovery Program website or other related sources.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1229,8 +1229,8 @@
         "confidence": 0.8
       },
       "relevance": {
-        "score": 3,
-        "reason": "The answer acknowledges the lack of specific milestones but provides some useful context and suggests relevant sources for further information."
+        "score": 2,
+        "reason": "The answer mentions the topic but fails to provide specific information about completed milestones."
       }
     },
     {
@@ -1238,7 +1238,7 @@
       "category": "roadmap",
       "expected_hint": "High priority items from the roadmap",
       "status": "ok",
-      "latency_s": 1.627,
+      "latency_s": 1.768,
       "source_count": 10,
       "sources": [
         {
@@ -1292,7 +1292,7 @@
           "score": 0.3
         }
       ],
-      "answer": "The context provided does not explicitly mention any P0 items. If you have specific criteria or a different set of items in mind related to P0, please provide more details or clarify your request.",
+      "answer": "The context provided does not specify any items labeled as \"P0.\" Therefore, I cannot provide a list of P0 items. If you have more specific criteria or additional context, please share, and I can assist further.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1311,7 +1311,7 @@
       },
       "relevance": {
         "score": 2,
-        "reason": "The answer acknowledges the topic but fails to provide any relevant information about P0 items."
+        "reason": "The answer acknowledges the lack of information but fails to provide any relevant details about P0 items."
       }
     },
     {
@@ -1319,7 +1319,7 @@
       "category": "roadmap",
       "expected_hint": "Planned or in-progress roadmap items",
       "status": "ok",
-      "latency_s": 2.018,
+      "latency_s": 2.118,
       "source_count": 15,
       "sources": [
         {
@@ -1398,7 +1398,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The context provided does not include any information about a \"BKC project.\" Therefore, I cannot provide details on the next steps for that project. If you have more specific information or context regarding the BKC project, please share it, and I would be happy to assist further.",
+      "answer": "The context provided does not include any information about a \"BKC project.\" Therefore, I cannot provide the next steps for this project. If you have more specific details or another name for the project, please share, and I'll do my best to assist you.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1422,7 +1422,7 @@
       },
       "relevance": {
         "score": 1,
-        "reason": "The answer does not address the query about the BKC project and lacks any relevant information."
+        "reason": "The answer is completely irrelevant as it does not address the query about the BKC project."
       }
     },
     {
@@ -1430,7 +1430,7 @@
       "category": "roadmap",
       "expected_hint": "Items that depend_on or are blocked by B1 chat",
       "status": "ok",
-      "latency_s": 4.488,
+      "latency_s": 4.027,
       "source_count": 12,
       "sources": [
         {
@@ -1494,7 +1494,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The chat retrieval system's performance and reliability depend on several work items and initiatives outlined in the context. Specifically, the following work items are crucial:\n\n1. **B1 \u2014 Chat retrieval hardening**: This work item focuses on strengthening the chat retrieval system to ensure it functions effectively under various conditions.\n2. **Implement federated chat policy boundaries**: This involves establishing clear boundaries for how chat data is accessed and shared across different nodes, which is essential for maintaining system integrity and security.\n3. **Chat fanout scoring and all-node responses**: This work item assesses how well the chat system distributes queries and responses across multiple nodes, which impacts the overall efficiency and reliability of the chat retrieval process.\n\nAdditionally, the **KG chat roadmap decisions are evaluation-driven** outcome indicates that ongoing assessments will influence the development and optimization of the chat retrieval system. \n\nThese components collectively ensure that the chat retrieval system remains reliable and efficient across its operational nodes.",
+      "answer": "The chat retrieval system's effectiveness depends on several work items and initiatives outlined in the context. Specifically, it relies on:\n\n1. **B1 \u2014 Chat retrieval hardening (WorkItem)**: This work item focuses on strengthening the chat retrieval capabilities.\n2. **Implement federated chat policy boundaries (WorkItem)**: Establishing clear policy boundaries is essential for the retrieval system to function effectively across different nodes.\n3. **KG chat roadmap decisions are evaluation-driven (Outcome)**: The decisions made regarding the knowledge graph (KG) chat roadmap are based on evaluations, which influence the chat retrieval system's performance.\n\nThese elements collectively ensure that the chat retrieval system operates reliably and efficiently across the network of nodes.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1515,7 +1515,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer is relevant and mostly accurate, covering key work items that depend on the chat retrieval system, but it could provide more detail on how these items specifically impact the system."
+        "reason": "The answer is relevant and mostly accurate, covering key work items that depend on the chat retrieval system, but could provide more detail on how these elements interact."
       }
     },
     {
@@ -1523,7 +1523,7 @@
       "category": "web_content",
       "expected_hint": "Ingested web sources related to governance",
       "status": "ok",
-      "latency_s": 1.993,
+      "latency_s": 1.732,
       "source_count": 10,
       "sources": [
         {
@@ -1577,7 +1577,7 @@
           "score": 0.346
         }
       ],
-      "answer": "The provided context does not include specific web sources that have been ingested about bioregional governance. It primarily outlines entities, relationships, and initiatives related to bioregional activities and outcomes. If you need information on specific web sources, please provide additional context or details.",
+      "answer": "The provided context does not include specific web sources that have been ingested about bioregional governance. Therefore, I cannot provide that information. If you have access to additional documents or sources, please share them for further assistance.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1596,7 +1596,7 @@
       },
       "relevance": {
         "score": 2,
-        "reason": "The answer mentions the topic but does not provide any specific web sources related to bioregional governance."
+        "reason": "The answer acknowledges the topic but fails to provide any specific information or examples of ingested web sources."
       }
     },
     {
@@ -1604,7 +1604,7 @@
       "category": "web_content",
       "expected_hint": "Recent web submissions with titles and summaries",
       "status": "ok",
-      "latency_s": 12.967,
+      "latency_s": 5.947,
       "source_count": 16,
       "sources": [
         {
@@ -1688,7 +1688,7 @@
           "score": 0.8
         }
       ],
-      "answer": "Here are the summaries of the latest web sources related to the Salish Sea and ecological stewardship:\n\n1. **Salish Sea - Wikipedia**: This page provides an overview of the Salish Sea, detailing its geographical significance, ecological characteristics, and the various organizations involved in its stewardship. It emphasizes the importance of the Salish Sea as a critical habitat for diverse marine life, including salmon populations, and discusses the environmental challenges it faces.\n\n2. **Long Live The Kings - Restoring wild salmon in the Pacific Northwest**: This organization focuses on the restoration of wild salmon and steelhead populations in the Pacific Northwest. Their mission includes supporting sustainable fishing practices and engaging in various initiatives to enhance salmon habitats and populations, which are crucial for the ecological health of the Salish Sea.\n\n3. **SalishSea.io**: This website serves as a platform for sharing information and resources related to the Salish Sea. It likely includes data on environmental monitoring, community initiatives, and collaborative efforts aimed at preserving the ecological integrity of the region.\n\n4. **Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association**: This source promotes responsible recreation practices in the Nooksack Valley, emphasizing the importance of protecting salmon habitats while engaging in outdoor activities. It likely provides guidelines and resources for the community to ensure sustainable interactions with the environment.\n\nThese sources collectively highlight the ecological significance of the Salish Sea, the challenges it faces, and the efforts by various organizations and communities to promote stewardship and sustainability.",
+      "answer": "Here are the summaries of the latest web sources related to the Salish Sea and ecological stewardship:\n\n1. **Salish Sea - Wikipedia**: This page provides an overview of the Salish Sea, detailing its geographical features, ecological significance, and the various organizations involved in its stewardship. It highlights the area's biodiversity, including marine mammals and salmon populations, and discusses the environmental challenges it faces, such as pollution and habitat degradation.\n\n2. **Long Live The Kings - Restoring wild salmon in the Pacific Northwest**: This organization focuses on the restoration of wild salmon and steelhead populations in the Pacific Northwest. Their mission includes supporting sustainable fishing practices and enhancing the health of aquatic ecosystems, which are crucial for the survival of salmon species.\n\n3. **SalishSea.io**: This website serves as a hub for information and resources related to the Salish Sea, including data on environmental monitoring, community engagement, and stewardship initiatives. It aims to connect individuals and organizations working towards the conservation and restoration of the Salish Sea ecosystem.\n\n4. **Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association**: This initiative promotes responsible outdoor recreation practices to protect salmon habitats and ensure the sustainability of local ecosystems. It provides guidelines for recreational activities in the Nooksack Valley, emphasizing the importance of minimizing human impact on natural resources.\n\nThese sources collectively emphasize the importance of ecological stewardship, community involvement, and sustainable practices in preserving the health of the Salish Sea and its ecosystems.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1713,7 +1713,7 @@
       },
       "relevance": {
         "score": 4,
-        "reason": "The answer provides relevant summaries of web sources related to the Salish Sea and ecological stewardship, but it is incomplete as it cuts off before listing all sources."
+        "reason": "The answer provides relevant summaries of web sources related to the Salish Sea, but it does not fully cover the expected topic of recent web submissions with titles and summaries."
       }
     },
     {
@@ -1721,7 +1721,7 @@
       "category": "web_content",
       "expected_hint": "The public Quartz site and its purpose",
       "status": "ok",
-      "latency_s": 1.747,
+      "latency_s": 1.348,
       "source_count": 15,
       "sources": [
         {
@@ -1800,7 +1800,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The context provided does not include any information about the \"Salish Sea Knowledge Garden.\" Therefore, I cannot provide an answer regarding its definition or details. If you have more specific information or another source, I would be happy to help!",
+      "answer": "The context provided does not include specific information about the \"Salish Sea Knowledge Garden.\" Therefore, I cannot provide an answer regarding its details or significance. If you have more information or another question, feel free to ask!",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1832,7 +1832,7 @@
       "category": "commitment_pooling",
       "expected_hint": "Explanation of commitment lifecycle: proposed \u2192 verified \u2192 active \u2192 redeemed",
       "status": "ok",
-      "latency_s": 13.3,
+      "latency_s": 6.785,
       "source_count": 10,
       "sources": [
         {
@@ -1886,7 +1886,7 @@
           "score": 0.4527
         }
       ],
-      "answer": "Commitment pooling is a structured process designed to facilitate collaborative resource management and funding within bioregions. It operates through several key components and initiatives:\n\n1. **Ontology and Framework**: Commitment pooling is built upon a foundational ontology that defines various commitment entity types and predicates. This ontology is crucial for establishing a shared understanding and framework for commitments across different stakeholders (C0: Commitment pooling \u2014 ontology, migrations, API router).\n\n2. **Integration Across Bioregions**: The initiative includes federated commitment pooling, which allows for coordination and integration of commitments across multiple bioregions (C2: Federated commitment pooling across bioregions). This ensures that commitments are not isolated but can interact and support broader ecological and community goals.\n\n3. **End-to-End Provenance**: The process is designed to be provable end-to-end, meaning that the commitments made can be tracked and verified throughout their lifecycle. This includes the activation of commitment pools and the creation of commitment pledges, which are essential for demonstrating accountability and transparency (Commitment pooling is provable end-to-end in at least one bioregion).\n\n4. **Capital Allocation**: Commitment pooling also facilitates a capital allocation loop, where resources can be allocated based on commitments made by various stakeholders. This loop is designed to be provable end-to-end, ensuring that funds are used effectively and in alignment with the commitments (Capital allocation loop is provable end-to-end).\n\n5. **Governance and Coordination**: The governance structure is designed to be node-sovereign, pilot-chartered, and commons-governed, which helps in ensuring that all stakeholders have a voice in the decision-making process (V2 triad governance). This governance model supports the integration of various initiatives and ensures that commitments align with community values and ecological stewardship.\n\nIn summary, commitment pooling works by creating a structured framework for making, tracking, and fulfilling commitments across bioregions, supported by a robust governance model and a focus on transparency and accountability.",
+      "answer": "Commitment pooling is a structured approach to integrating and managing commitments across multiple bioregions, facilitating ecological stewardship and community governance. It involves several key components and processes:\n\n1. **Ontology and Framework**: Commitment pooling is built on a foundational ontology that defines commitment entity types and predicates. This is crucial for standardizing how commitments are represented and managed across different systems (C0: Commitment pooling \u2014 ontology, migrations, API router).\n\n2. **Integration Tracks**: The commitment pooling process is organized into integration tracks (C0/C1/C2), which guide the implementation and scaling of commitment pooling across bioregions. This includes both native implementations and federated approaches (Commitment pooling integration \u2014 C0/C1/C2 track).\n\n3. **End-to-End Provability**: Commitment pooling aims to ensure that the entire process\u2014from the creation of commitment pledges to their activation\u2014is provable end-to-end. This means that all actions and commitments can be tracked and verified within at least one bioregion (Commitment pooling is provable end-to-end in at least one bioregion).\n\n4. **Governance and Coordination**: The governance structure involves a triad of node-sovereign, pilot-chartered, and commons-governed frameworks, which helps in managing the commitments and ensuring accountability (V2 triad governance).\n\n5. **Funding and Resource Allocation**: The process integrates with funding mechanisms, such as the Knowledge to flow funding pilot integration, which supports the allocation of resources based on commitments made within the community (Knowledge to flow funding pilot integration).\n\n6. **Technology and Tools**: Commitment pooling utilizes various technological tools, including APIs for managing commitments and external pipelines for tracking allocations, ensuring transparency and reliability (C0 \u2014 Commitment registry API).\n\nIn summary, commitment pooling operates as a collaborative framework that combines standardized definitions, integration tracks, governance structures, and technological tools to manage ecological commitments effectively across bioregions.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -1905,7 +1905,7 @@
       },
       "relevance": {
         "score": 2,
-        "reason": "The answer mentions commitment pooling but does not adequately explain the commitment lifecycle stages of proposed, verified, active, and redeemed."
+        "reason": "The answer mentions commitment pooling but does not address the specific lifecycle stages of proposed, verified, active, and redeemed."
       }
     },
     {
@@ -1913,7 +1913,7 @@
       "category": "commitment_pooling",
       "expected_hint": "CAVs as first-class KOI entities for mutual aid",
       "status": "ok",
-      "latency_s": 2.606,
+      "latency_s": 1.601,
       "source_count": 15,
       "sources": [
         {
@@ -1992,7 +1992,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The provided context does not include information about community asset vouchers. Therefore, I cannot provide a specific answer regarding that topic. If you have further details or another question, feel free to ask!",
+      "answer": "The provided context does not contain any information about community asset vouchers. Therefore, I cannot provide a specific answer regarding that topic. If you have any other questions or need information related to the entities and relationships mentioned, feel free to ask!",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2024,7 +2024,7 @@
       "category": "cross_domain",
       "expected_hint": "C-series roadmap items and their relationship to commitment work",
       "status": "ok",
-      "latency_s": 2.869,
+      "latency_s": 3.477,
       "source_count": 12,
       "sources": [
         {
@@ -2088,7 +2088,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The context provided does not explicitly detail how the \"Deep Geothermal Roadmap\" connects to \"commitment pooling integration \u2014 C0/C1/C2 track.\" However, both projects may relate to ecological stewardship and regenerative practices within bioregions, particularly in Canada.\n\nThe \"Deep Geothermal Roadmap\" likely outlines strategies for utilizing geothermal energy, which can be a sustainable energy source, while \"commitment pooling\" refers to integrating various commitments towards achieving specific environmental or governance outcomes. Both initiatives could potentially intersect in promoting sustainable energy practices and collaborative governance frameworks in bioregions like the Salish Sea. \n\nFor a more precise connection, additional information on the specific goals and frameworks of both projects would be needed.",
+      "answer": "The context provided does not explicitly detail how the \"Deep Geothermal Roadmap\" connects to \"commitment pooling integration.\" However, both projects may relate to broader themes of ecological stewardship and sustainable practices within bioregions, particularly in Canada. \n\nThe \"Deep Geothermal Roadmap\" likely focuses on developing geothermal energy as a sustainable resource, while \"commitment pooling integration\" suggests a collaborative approach to resource management and governance, possibly involving multiple stakeholders in a bioregion. \n\nFor a more precise connection, further information about the specific goals and strategies of the \"Deep Geothermal Roadmap\" would be necessary.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2109,7 +2109,7 @@
       },
       "relevance": {
         "score": 3,
-        "reason": "The answer provides some relevant context about the projects but lacks specific details on how the roadmap directly connects to commitment pooling."
+        "reason": "The answer provides some context about the topics but lacks specific details on how the roadmap directly connects to commitment pooling."
       }
     },
     {
@@ -2117,7 +2117,7 @@
       "category": "cross_domain",
       "expected_hint": "Projects, practices, or organizations connected to herring ecology",
       "status": "ok",
-      "latency_s": 6.489,
+      "latency_s": 2.175,
       "source_count": 15,
       "sources": [
         {
@@ -2196,7 +2196,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The provided context does not include specific information about projects related to herring. If you have any additional context or sources that mention herring or related projects, please share them, and I can assist you further.",
+      "answer": "The provided context does not include any specific projects or information related to herring. If you have additional context or specific inquiries about herring-related projects, please share, and I would be happy to assist further.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2219,8 +2219,8 @@
         "confidence": 0.8
       },
       "relevance": {
-        "score": 2,
-        "reason": "The answer acknowledges the topic but fails to provide any specific information about herring-related projects."
+        "score": 1,
+        "reason": "The answer does not provide any relevant information about herring-related projects."
       }
     },
     {
@@ -2228,7 +2228,7 @@
       "category": "cross_domain",
       "expected_hint": "Federation, KOI-net, holon topology connecting bioregional nodes",
       "status": "ok",
-      "latency_s": 5.581,
+      "latency_s": 3.969,
       "source_count": 14,
       "sources": [
         {
@@ -2284,7 +2284,7 @@
         {
           "label": "examples/coordinator.py",
           "type": "Document",
-          "score": 0.3022
+          "score": 0.3021
         },
         {
           "label": "Cascade Institute",
@@ -2302,7 +2302,7 @@
           "score": 0.8
         }
       ],
-      "answer": "Bioregions connect to each other in the knowledge commons through shared ecological practices, governance frameworks, and collaborative projects that address environmental challenges. For example, the Salish Sea, located in both Canada and the United States, involves various organizations like the British Columbia Geographical Names Office and the Chemainus First Nation, which work together on issues such as pollution and habitat restoration. \n\nAdditionally, initiatives like the Cascade Institute analyze complex systems and propose interventions that can be applied across different bioregions, such as the Enhanced Geothermal Systems concept, which has potential applications in various regions, including the Canadian Arctic. These connections foster a collaborative approach to ecological stewardship and regenerative practices, allowing bioregions to learn from each other's successes and challenges. \n\nThus, the knowledge commons serves as a platform for sharing information, strategies, and resources that enhance the resilience and sustainability of interconnected bioregions.",
+      "answer": "Bioregions connect to each other in the knowledge commons through shared ecological systems, collaborative governance, and mutual stewardship practices. For example, the Salish Sea, which spans parts of Canada and the United States, involves various organizations like the British Columbia Geographical Names Office and the Chemainus First Nation, highlighting collaborative efforts in environmental management and cultural stewardship.\n\nAdditionally, concepts like Enhanced Geothermal Systems and projects such as \"Geothermal power is the key to cheaper energy in the Canadian Arctic\" illustrate how energy solutions in one bioregion can inform and support sustainability efforts in another, such as the Arctic regions of Canada. \n\nThe Cascade Institute serves as a research hub that analyzes complex global systems, fostering connections between bioregions by identifying high-leverage interventions that can be applied across different ecological and governance contexts. Thus, the knowledge commons facilitates the sharing of insights and practices that enhance ecological stewardship and community resilience across interconnected bioregions.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2325,26 +2325,34 @@
       },
       "relevance": {
         "score": 3,
-        "reason": "The answer provides some relevant information about bioregions connecting through collaboration and shared practices, but it lacks specific details on federation, KOI-net, and holon topology."
+        "reason": "The answer provides some relevant information about connections between bioregions but lacks specific details on federation, KOI-net, and holon topology."
       }
     },
     {
       "query": "Gregory Landua",
       "category": "regen_secondary",
       "expected_hint": "Person, co-founder or key figure at Regen Network",
-      "status": "error",
-      "error": "Server disconnected without sending a response.",
-      "latency_s": 1.131,
+      "status": "ok",
+      "latency_s": 2.416,
       "source_count": 0,
       "sources": [],
-      "answer": ""
+      "answer": "It seems there are no specific entities or relationships provided in the context regarding Gregory Landua. However, Gregory Landua is known for his work in ecological stewardship and regenerative practices. He is a co-founder of the company \"Regenerative Leadership Institute\" and has been involved in various initiatives focused on sustainability and community governance. If you have a specific aspect of his work or contributions you would like to know more about, please provide additional details!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [],
+        "confidence": 0.0
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer provides some relevant information about Gregory Landua but does not specifically mention his role at Regen Network, which is the key focus of the query."
+      }
     },
     {
       "query": "What is Regen Network?",
       "category": "regen_secondary",
       "expected_hint": "Organization focused on ecological regeneration and ecocredits",
       "status": "ok",
-      "latency_s": 2.979,
+      "latency_s": 1.632,
       "source_count": 15,
       "sources": [
         {
@@ -2423,7 +2431,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The context provided does not include any information about \"Regen Network.\" Therefore, I cannot provide an answer regarding it. If you have more specific details or another question, feel free to ask!",
+      "answer": "The context provided does not include any information about \"Regen Network.\" Therefore, I cannot provide an answer to your question. If you have more specific details or another question, feel free to ask!",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2455,7 +2463,7 @@
       "category": "regen_secondary",
       "expected_hint": "NCT token or credit class in Regen ecosystem",
       "status": "ok",
-      "latency_s": 11.679,
+      "latency_s": 3.369,
       "source_count": 11,
       "sources": [
         {
@@ -2514,7 +2522,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The term \"Nature Carbon Tonne\" does not appear directly in the provided context. However, it may relate to broader concepts of ecological stewardship and carbon management within bioregions like British Columbia, particularly in projects aimed at addressing climate change, such as the \"Nature, Climate, Jobs Solution\" project.\n\nThis project, along with organizations like BC Spaces For Nature, focuses on integrating nature-based solutions to enhance carbon sequestration and promote biodiversity. These efforts are crucial in regions like the Salish Sea, which is impacted by pollution and climate change.\n\nFor more specific information about carbon management or related initiatives in British Columbia, you may need to consult additional resources or documents that specifically address carbon accounting or nature-based climate solutions.",
+      "answer": "The term \"Nature Carbon Tonne\" does not appear to be directly referenced in the provided context. However, it may relate to broader concepts of ecological stewardship and carbon management within bioregions like British Columbia, particularly in projects such as the \"Nature, Climate, Jobs Solution\" which aims to address climate change through nature-based solutions.\n\nFor more detailed information on carbon management and ecological practices in British Columbia, you may want to explore the initiatives of organizations like BC Spaces For Nature or the Executive Council of British Columbia, which are involved in environmental stewardship and policy-making. \n\nIf you have a more specific question or context regarding \"Nature Carbon Tonne,\" please provide additional details.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2542,7 +2550,7 @@
       "category": "regen_secondary",
       "expected_hint": "Monitoring practices for ecosystem health",
       "status": "ok",
-      "latency_s": 11.554,
+      "latency_s": 4.117,
       "source_count": 15,
       "sources": [
         {
@@ -2621,7 +2629,7 @@
           "score": 0.8
         }
       ],
-      "answer": "Ecological monitoring refers to the systematic observation and assessment of ecological conditions and changes in specific environments over time. This process involves collecting data on various ecological indicators, such as species populations, habitat conditions, and environmental factors, to evaluate the health and sustainability of ecosystems.\n\nIn the context of the Salish Sea and its salmon populations, ecological monitoring can help track the status of species like Chinook Salmon and Southern Resident Killer Whales, as well as the impacts of pollution and habitat changes. Organizations like the Cascade Institute and initiatives such as the WRIA 1 Salmon Recovery Program are involved in such monitoring efforts to inform conservation strategies and promote ecological stewardship in the region. \n\nFor more detailed information, you can refer to resources like the [WRIA 1 Salmon Recovery Program](https://salmonwria1.org/) or the [Cascade Institute](https://cascadeinstitute.org/).",
+      "answer": "Ecological monitoring refers to the systematic observation and assessment of ecosystems to track changes in environmental conditions, biodiversity, and ecological processes over time. This practice is essential for understanding the health of ecosystems, assessing the impacts of human activities, and informing conservation and management strategies.\n\nIn the context of the Salish Sea and its associated salmon populations, ecological monitoring can involve tracking the health of salmon runs, such as Chinook salmon, and understanding the factors affecting their populations, including habitat quality and pollution levels. Organizations like the Cascade Institute and initiatives like the WRIA 1 Salmon Recovery Program focus on such monitoring to support ecological stewardship and recovery efforts in the region. For example, the WRIA 1 program aims to restore self-sustaining salmonid runs in the Nooksack Basin, highlighting the importance of monitoring to achieve these goals. \n\nFor more detailed information, you can refer to the [WRIA 1 Salmon Recovery Program](https://salmonwria1.org/) and the [Cascade Institute](https://cascadeinstitute.org/).",
       "intent": {
         "intent": "knowledge_query",
         "entities": [
@@ -2645,7 +2653,7 @@
       },
       "relevance": {
         "score": 5,
-        "reason": "The answer provides a comprehensive overview of ecological monitoring, its importance for ecosystem health, and specific examples related to the Salish Sea, making it highly relevant and well-grounded."
+        "reason": "The answer provides a comprehensive overview of ecological monitoring, its significance for ecosystem health, and specific examples related to the Salish Sea and salmon populations."
       }
     },
     {
@@ -2653,7 +2661,7 @@
       "category": "regen_secondary",
       "expected_hint": "Regen Network ecocredit issuance and trading",
       "status": "ok",
-      "latency_s": 9.416,
+      "latency_s": 2.377,
       "source_count": 13,
       "sources": [
         {
@@ -2722,7 +2730,7 @@
           "score": 0.8
         }
       ],
-      "answer": "The provided context does not contain specific information about how ecocredits work. Ecocredits generally refer to a system where credits are earned for engaging in environmentally beneficial practices, such as reducing carbon emissions or restoring ecosystems. These credits can then be traded or sold to incentivize sustainable practices. For detailed information, you may want to consult dedicated resources or organizations focused on ecological credits or carbon markets.",
+      "answer": "The provided context does not include specific information about ecocredits. Ecocredits generally refer to a system where credits are earned for engaging in environmentally beneficial practices, such as reducing carbon emissions or restoring ecosystems. These credits can then be traded or sold to incentivize sustainable practices. For detailed information on ecocredits, I recommend checking dedicated environmental finance resources or organizations focused on ecological stewardship.",
       "intent": {
         "intent": "knowledge_query",
         "entities": [

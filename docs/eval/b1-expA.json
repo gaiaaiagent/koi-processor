@@ -1,0 +1,3001 @@
+{
+  "eval_version": "b5-v1",
+  "timestamp": "2026-03-04T10:53:29.516137+00:00",
+  "api_url": "http://127.0.0.1:18351",
+  "retrieval_mode": "hybrid",
+  "graph_version": "c8aedf6eab430baa",
+  "query_count": 28,
+  "aggregates": {
+    "total_queries": 28,
+    "successful_queries": 28,
+    "error_queries": 0,
+    "resolution_rate": 100.0,
+    "avg_source_count": 13.96,
+    "median_source_count": 14.5,
+    "latency_p50_s": 3.185,
+    "latency_p95_s": 6.943,
+    "latency_avg_s": 3.424,
+    "by_category": {
+      "entity_resolution": {
+        "total": 5,
+        "resolution_rate": 100.0,
+        "avg_source_count": 14.4,
+        "avg_latency_s": 3.541
+      },
+      "relationship_traversal": {
+        "total": 5,
+        "resolution_rate": 100.0,
+        "avg_source_count": 13.4,
+        "avg_latency_s": 4.914
+      },
+      "roadmap": {
+        "total": 5,
+        "resolution_rate": 100.0,
+        "avg_source_count": 13.8,
+        "avg_latency_s": 2.782
+      },
+      "web_content": {
+        "total": 3,
+        "resolution_rate": 100.0,
+        "avg_source_count": 14.67,
+        "avg_latency_s": 4.28
+      },
+      "commitment_pooling": {
+        "total": 2,
+        "resolution_rate": 100.0,
+        "avg_source_count": 14,
+        "avg_latency_s": 2.023
+      },
+      "cross_domain": {
+        "total": 3,
+        "resolution_rate": 100.0,
+        "avg_source_count": 14.33,
+        "avg_latency_s": 3.348
+      },
+      "regen_secondary": {
+        "total": 5,
+        "resolution_rate": 100.0,
+        "avg_source_count": 13.6,
+        "avg_latency_s": 2.554
+      }
+    },
+    "relevance_avg": 2.68,
+    "relevance_pct_4plus": 32.1
+  },
+  "results": [
+    {
+      "query": "Regenerate Cascadia",
+      "category": "entity_resolution",
+      "expected_hint": "Organization focused on bioregional regeneration in Cascadia",
+      "status": "ok",
+      "latency_s": 5.055,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "Regenerate Cascadia",
+          "type": "Organization",
+          "score": 1.0
+        },
+        {
+          "label": "Regenerate Cascadia",
+          "type": "Project",
+          "score": 1.0
+        },
+        {
+          "label": "Cascadia",
+          "type": "Bioregion",
+          "score": 0.6409
+        },
+        {
+          "label": "Cascadia",
+          "type": "Location",
+          "score": 0.6408
+        },
+        {
+          "label": "Cascadia QF Round",
+          "type": "Playbook",
+          "score": 0.5514
+        },
+        {
+          "label": "Cascadia Trusted Observer",
+          "type": "Concept",
+          "score": 0.503
+        },
+        {
+          "label": "Cascadia Trusted Observer",
+          "type": "Person",
+          "score": 0.503
+        },
+        {
+          "label": "British Columbia",
+          "type": "Location",
+          "score": 0.4389
+        },
+        {
+          "label": "British Columbia",
+          "type": "Bioregion",
+          "score": 0.4388
+        },
+        {
+          "label": "Cowichan Valley",
+          "type": "Bioregion",
+          "score": 0.4366
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Regenerate Cascadia is both an organization and a project focused on ecological stewardship and regenerative practices within the Cascadia bioregion. This initiative aims to promote sustainable practices and community governance that align with the ecological and cultural values of the region, which includes areas in British Columbia and Washington state.\n\nFor more detailed information about their activities and objectives, you may refer to their official website or related resources that discuss their impact on the Cascadia bioregion. Unfortunately, specific details about their programs or initiatives are not provided in the current context.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Regenerate Cascadia",
+          "Regenerate Cascadia",
+          "Cascadia",
+          "Cascadia",
+          "Cascadia QF Round",
+          "Cascadia Trusted Observer",
+          "Cascadia Trusted Observer",
+          "British Columbia",
+          "British Columbia",
+          "Cowichan Valley",
+          "Salish Sea - Wikipedia",
+          "SalishSea.io",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program"
+        ],
+        "confidence": 1.0
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer is relevant and mostly accurate, providing a good overview of Regenerate Cascadia's focus on ecological stewardship and regenerative practices, though it lacks specific details about their programs."
+      }
+    },
+    {
+      "query": "Salish Sea herring",
+      "category": "entity_resolution",
+      "expected_hint": "Herring monitoring or ecology in the Salish Sea bioregion",
+      "status": "ok",
+      "latency_s": 5.805,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Salish Sea Herring Case",
+          "type": "CaseStudy",
+          "score": 0.8364
+        },
+        {
+          "label": "Salish Sea",
+          "type": "Location",
+          "score": 0.8188
+        },
+        {
+          "label": "Salish Sea",
+          "type": "Bioregion",
+          "score": 0.8188
+        },
+        {
+          "label": "Salish Sea Hub",
+          "type": "Organization",
+          "score": 0.7417
+        },
+        {
+          "label": "Salish Sea Dreaming",
+          "type": "Project",
+          "score": 0.6934
+        },
+        {
+          "label": "Salish Sea Marine Survival Project",
+          "type": "Project",
+          "score": 0.6783
+        },
+        {
+          "label": "Salmon populations",
+          "type": "Concept",
+          "score": 0.6361
+        },
+        {
+          "label": "Chinook Salmon",
+          "type": "Concept",
+          "score": 0.6259
+        },
+        {
+          "label": "Herring Monitoring",
+          "type": "Practice",
+          "score": 0.6254
+        },
+        {
+          "label": "salmon recovery",
+          "type": "Practice",
+          "score": 0.6221
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The Salish Sea herring, particularly in the context of the Salish Sea Herring Case, is a significant topic related to the ecological health of the region. Herring are a crucial species in the marine ecosystem, serving as a key food source for various fish, birds, and marine mammals, including salmon populations like Chinook salmon.\n\nMonitoring herring populations is an essential practice for understanding and managing the health of the Salish Sea ecosystem. Organizations such as the Salish Sea Hub and projects like the Salish Sea Marine Survival Project are involved in efforts to study and restore these populations, recognizing their importance in the broader context of salmon recovery and marine biodiversity.\n\nFor more detailed information, you can refer to resources like the [Salish Sea - Wikipedia](https://en.wikipedia.org/wiki/Salish_Sea) or the [WRIA 1 Salmon Recovery Program](https://salmonwria1.org/), which focus on salmon recovery efforts in the Nooksack Basin and the surrounding areas.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Salish Sea Herring Case",
+          "Salish Sea",
+          "Salish Sea",
+          "Salish Sea Hub",
+          "Salish Sea Dreaming",
+          "Salish Sea Marine Survival Project",
+          "Salmon populations",
+          "Chinook Salmon",
+          "Herring Monitoring",
+          "salmon recovery",
+          "Salish Sea - Wikipedia",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "SalishSea.io",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Home - W\u0331S\u00c1NE\u0106 Leadership Council"
+        ],
+        "confidence": 0.8364
+      },
+      "relevance": {
+        "score": 5,
+        "reason": "The answer is highly relevant, accurately discusses the ecological role of herring in the Salish Sea, and mentions key organizations involved in monitoring and recovery efforts."
+      }
+    },
+    {
+      "query": "KOI protocol",
+      "category": "entity_resolution",
+      "expected_hint": "Knowledge Organization Infrastructure protocol by BlockScience",
+      "status": "ok",
+      "latency_s": 1.569,
+      "source_count": 17,
+      "sources": [
+        {
+          "label": "Toucan Protocol",
+          "type": "Organization",
+          "score": 0.5754
+        },
+        {
+          "label": "A2A protocol",
+          "type": "Concept",
+          "score": 0.5168
+        },
+        {
+          "label": "Astral Protocol",
+          "type": "Organization",
+          "score": 0.4743
+        },
+        {
+          "label": "BKC CoIP",
+          "type": "Project",
+          "score": 0.4541
+        },
+        {
+          "label": "PKOLS",
+          "type": "Location",
+          "score": 0.4295
+        },
+        {
+          "label": "Nooksack Salmon Enhancement Association",
+          "type": "Organization",
+          "score": 0.3788
+        },
+        {
+          "label": "WRIA 1 Salmon Recovery Program",
+          "type": "Organization",
+          "score": 0.3669
+        },
+        {
+          "label": "Chinook Salmon",
+          "type": "Concept",
+          "score": 0.3623
+        },
+        {
+          "label": "WRIA 1 Salmonid Recovery Plan",
+          "type": "Protocol",
+          "score": 0.3616
+        },
+        {
+          "label": "Herring Monitoring",
+          "type": "Practice",
+          "score": 0.3601
+        },
+        {
+          "label": "examples/coordinator.py",
+          "type": "Document",
+          "score": 0.4415
+        },
+        {
+          "label": "examples/partial.py",
+          "type": "Document",
+          "score": 0.3674
+        },
+        {
+          "label": "koi-net.config.json",
+          "type": "Document",
+          "score": 0.431
+        },
+        {
+          "label": "koi-net-protocol-openapi.json",
+          "type": "Document",
+          "score": 0.4217
+        },
+        {
+          "label": "pyproject.toml",
+          "type": "Document",
+          "score": 0.4829
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about the KOI protocol. Therefore, I cannot provide details on it. If you have any other questions or need information on related topics, feel free to ask!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Toucan Protocol",
+          "A2A protocol",
+          "Astral Protocol",
+          "BKC CoIP",
+          "PKOLS",
+          "Nooksack Salmon Enhancement Association",
+          "WRIA 1 Salmon Recovery Program",
+          "Chinook Salmon",
+          "WRIA 1 Salmonid Recovery Plan",
+          "Herring Monitoring",
+          "examples/coordinator.py",
+          "examples/partial.py",
+          "koi-net.config.json",
+          "koi-net-protocol-openapi.json",
+          "pyproject.toml",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer does not address the query about the KOI protocol at all."
+      }
+    },
+    {
+      "query": "Benjamin Life",
+      "category": "entity_resolution",
+      "expected_hint": "Person involved in bioregional knowledge commoning",
+      "status": "ok",
+      "latency_s": 2.09,
+      "source_count": 12,
+      "sources": [
+        {
+          "label": "Benjamin Neal",
+          "type": "Person",
+          "score": 0.5974
+        },
+        {
+          "label": "Bill Baue",
+          "type": "Person",
+          "score": 0.336
+        },
+        {
+          "label": "Briony Penn",
+          "type": "Person",
+          "score": 0.3338
+        },
+        {
+          "label": "Christopher Collins",
+          "type": "Person",
+          "score": 0.3277
+        },
+        {
+          "label": "Long Live the Kings",
+          "type": "Organization",
+          "score": 0.3224
+        },
+        {
+          "label": "Michael Lawrence",
+          "type": "Person",
+          "score": 0.3199
+        },
+        {
+          "label": "BFI",
+          "type": "Organization",
+          "score": 0.316
+        },
+        {
+          "label": "BWL",
+          "type": "Organization",
+          "score": 0.3152
+        },
+        {
+          "label": "Todd Youngblood",
+          "type": "Person",
+          "score": 0.3085
+        },
+        {
+          "label": "John Caldwell",
+          "type": "Person",
+          "score": 0.3079
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about \"Benjamin Life.\" It appears that Benjamin Life is affiliated with the Bioregional Knowledge Commons, but further details about his role or contributions are not available. If you have more specific questions or need information about another entity, please let me know!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Benjamin Neal",
+          "Bill Baue",
+          "Briony Penn",
+          "Christopher Collins",
+          "Long Live the Kings",
+          "Michael Lawrence",
+          "BFI",
+          "BWL",
+          "Todd Youngblood",
+          "John Caldwell",
+          "Cascade Institute",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 2,
+        "reason": "The answer mentions Benjamin Life and his affiliation but lacks key details about his role or contributions."
+      }
+    },
+    {
+      "query": "Front Range bioregion",
+      "category": "entity_resolution",
+      "expected_hint": "Colorado Front Range bioregion or related geographic area",
+      "status": "ok",
+      "latency_s": 3.185,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Bioregioning",
+          "type": "Concept",
+          "score": 0.5103
+        },
+        {
+          "label": "Colorado River District",
+          "type": "Organization",
+          "score": 0.4915
+        },
+        {
+          "label": "How Scale Bioregional Monitoring",
+          "type": "Question",
+          "score": 0.4453
+        },
+        {
+          "label": "Colorado River Basin Watershed Data Aggregator",
+          "type": "Project",
+          "score": 0.4368
+        },
+        {
+          "label": "Pacific Northwest",
+          "type": "Bioregion",
+          "score": 0.4044
+        },
+        {
+          "label": "Bioregional Knowledge Commons",
+          "type": "Organization",
+          "score": 0.4017
+        },
+        {
+          "label": "Capital Regional District",
+          "type": "Organization",
+          "score": 0.4013
+        },
+        {
+          "label": "bioregional AI swarms",
+          "type": "Concept",
+          "score": 0.3885
+        },
+        {
+          "label": "Puget lowland forests",
+          "type": "Concept",
+          "score": 0.3823
+        },
+        {
+          "label": "British Columbia",
+          "type": "Location",
+          "score": 0.3769
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about the Front Range bioregion. However, the Front Range is generally known as a region in Colorado that includes the eastern slope of the Rocky Mountains and is characterized by diverse ecosystems, urban areas, and significant water resources, including the Colorado River. For more detailed information, you may want to explore resources related to the Colorado River District or the broader ecological and governance frameworks that apply to bioregions in Colorado. If you have specific aspects of the Front Range bioregion you are interested in, please let me know!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Bioregioning",
+          "Colorado River District",
+          "How Scale Bioregional Monitoring",
+          "Colorado River Basin Watershed Data Aggregator",
+          "Pacific Northwest",
+          "Bioregional Knowledge Commons",
+          "Capital Regional District",
+          "bioregional AI swarms",
+          "Puget lowland forests",
+          "British Columbia",
+          "Salish Sea - Wikipedia",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "Puget Sound Partnership"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer provides some relevant information about the Front Range bioregion but lacks specific details and depth."
+      }
+    },
+    {
+      "query": "What organizations work in the Salish Sea?",
+      "category": "relationship_traversal",
+      "expected_hint": "Should list organizations located_in or affiliated_with Salish Sea",
+      "status": "ok",
+      "latency_s": 6.943,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Salish Sea",
+          "type": "Location",
+          "score": 0.6863
+        },
+        {
+          "label": "Salish Sea",
+          "type": "Bioregion",
+          "score": 0.6863
+        },
+        {
+          "label": "Salish Sea Marine Survival Project",
+          "type": "Project",
+          "score": 0.678
+        },
+        {
+          "label": "Salish Sea Hub",
+          "type": "Organization",
+          "score": 0.6753
+        },
+        {
+          "label": "Straits Salish Territories",
+          "type": "Location",
+          "score": 0.6209
+        },
+        {
+          "label": "Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea",
+          "type": "Organization",
+          "score": 0.6127
+        },
+        {
+          "label": "Coast Salish peoples",
+          "type": "Concept",
+          "score": 0.6097
+        },
+        {
+          "label": "Salish Sea Dreaming",
+          "type": "Project",
+          "score": 0.6019
+        },
+        {
+          "label": "Coast Salish Gathering",
+          "type": "Project",
+          "score": 0.5966
+        },
+        {
+          "label": "Salish Sea Herring Case",
+          "type": "CaseStudy",
+          "score": 0.5929
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Several organizations are actively involved in the Salish Sea, focusing on ecological stewardship, community governance, and cultural heritage. Key organizations include:\n\n1. **Salish Sea Hub** - An organization dedicated to collaborative efforts in the Salish Sea region.\n2. **Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea** - Focuses on historical ecology and the cultural significance of the region.\n3. **British Columbia Geographical Names Office** - Involved in the naming and mapping of geographical features in the region.\n4. **Chemainus First Nation** - Represents Indigenous interests and stewardship in the Salish Sea.\n5. **Geographical Names Board of Canada** - Engages in the official naming of places within the Salish Sea.\n6. **Transboundary Georgia Basin\u2013Puget Sound Environmental Indicators Working Group** - Works on environmental indicators and transboundary issues affecting the Salish Sea.\n7. **United States Board on Geographic Names** - Similar to its Canadian counterpart, it manages geographical naming in the U.S. portion of the Salish Sea.\n8. **Washington State Board on Geographic Names** - Focuses on naming and mapping in Washington state.\n9. **WWF (World Wildlife Fund)** - Engages in conservation efforts in the Salish Sea, particularly related to marine ecosystems.\n\nThese organizations collaborate on various projects and initiatives to address environmental challenges and promote sustainable practices in the Salish Sea.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Salish Sea",
+          "Salish Sea",
+          "Salish Sea Marine Survival Project",
+          "Salish Sea Hub",
+          "Straits Salish Territories",
+          "Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea",
+          "Coast Salish peoples",
+          "Salish Sea Dreaming",
+          "Coast Salish Gathering",
+          "Salish Sea Herring Case",
+          "Salish Sea - Wikipedia",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "SalishSea.io",
+          "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "Coast Salish Gathering 2017"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer lists several relevant organizations working in the Salish Sea, covering various aspects of ecological and cultural stewardship, though it could include more specific details about each organization's role."
+      }
+    },
+    {
+      "query": "Who is involved in herring monitoring?",
+      "category": "relationship_traversal",
+      "expected_hint": "People or orgs connected to herring monitoring practices",
+      "status": "ok",
+      "latency_s": 4.675,
+      "source_count": 12,
+      "sources": [
+        {
+          "label": "Herring Monitoring",
+          "type": "Practice",
+          "score": 0.8531
+        },
+        {
+          "label": "Herring Conservation and Restoration Society",
+          "type": "Organization",
+          "score": 0.6585
+        },
+        {
+          "label": "Herring Count Data 2024",
+          "type": "Evidence",
+          "score": 0.5915
+        },
+        {
+          "label": "Salish Sea Herring Case",
+          "type": "CaseStudy",
+          "score": 0.5478
+        },
+        {
+          "label": "Lenfest Forage Fish Task Force",
+          "type": "Organization",
+          "score": 0.5084
+        },
+        {
+          "label": "WRIA 1 Salmon Recovery Program",
+          "type": "Organization",
+          "score": 0.5029
+        },
+        {
+          "label": "Salmon recovery Hub",
+          "type": "Project",
+          "score": 0.5005
+        },
+        {
+          "label": "How Scale Bioregional Monitoring",
+          "type": "Question",
+          "score": 0.4954
+        },
+        {
+          "label": "World Fisheries Trust",
+          "type": "Organization",
+          "score": 0.4859
+        },
+        {
+          "label": "salmon recovery",
+          "type": "Practice",
+          "score": 0.4797
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Herring monitoring involves several organizations and practices focused on the conservation and restoration of herring populations. Key entities involved include:\n\n1. **Herring Conservation and Restoration Society** - An organization dedicated to the conservation and restoration of herring populations.\n2. **Lenfest Forage Fish Task Force** - Another organization that likely contributes to monitoring efforts related to forage fish, including herring.\n3. **Herring Monitoring (Practice)** - The specific practice of monitoring herring populations, which may involve various methodologies and collaborative efforts among organizations.\n\nFor detailed data and evidence, the **Herring Count Data 2024** could provide insights into the current status of herring populations as part of these monitoring efforts. \n\nThese organizations and practices work together to ensure the sustainability of herring populations, which are crucial for the broader marine ecosystem, particularly for species like salmon and Southern Resident Killer Whales.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Herring Monitoring",
+          "Herring Conservation and Restoration Society",
+          "Herring Count Data 2024",
+          "Salish Sea Herring Case",
+          "Lenfest Forage Fish Task Force",
+          "WRIA 1 Salmon Recovery Program",
+          "Salmon recovery Hub",
+          "How Scale Bioregional Monitoring",
+          "World Fisheries Trust",
+          "salmon recovery",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Puget Sound Partnership"
+        ],
+        "confidence": 0.8531
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer provides relevant organizations involved in herring monitoring and mentions the importance of these efforts, but could benefit from more specific details about the roles of each organization."
+      }
+    },
+    {
+      "query": "What projects does Regenerate Cascadia have?",
+      "category": "relationship_traversal",
+      "expected_hint": "Projects linked to Regenerate Cascadia via has_project or related predicates",
+      "status": "ok",
+      "latency_s": 3.473,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "Regenerate Cascadia",
+          "type": "Project",
+          "score": 0.7533
+        },
+        {
+          "label": "Regenerate Cascadia",
+          "type": "Organization",
+          "score": 0.7533
+        },
+        {
+          "label": "Cascadia",
+          "type": "Bioregion",
+          "score": 0.5141
+        },
+        {
+          "label": "Cascadia",
+          "type": "Location",
+          "score": 0.514
+        },
+        {
+          "label": "restoration projects",
+          "type": "Concept",
+          "score": 0.4688
+        },
+        {
+          "label": "habitat restoration and protection projects",
+          "type": "Project",
+          "score": 0.4671
+        },
+        {
+          "label": "Cascadia QF Round",
+          "type": "Playbook",
+          "score": 0.4514
+        },
+        {
+          "label": "Design School for Regenerating Earth",
+          "type": "Organization",
+          "score": 0.4462
+        },
+        {
+          "label": "Cascadia Trusted Observer",
+          "type": "Concept",
+          "score": 0.4439
+        },
+        {
+          "label": "Cascadia Trusted Observer",
+          "type": "Person",
+          "score": 0.4438
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not specify the exact projects that Regenerate Cascadia is currently involved in. However, it is associated with broader concepts such as restoration projects and habitat restoration and protection projects. For specific details about their projects, you may want to visit their official website or related resources like the [SalishSea.io](https://salishsea.io/) or the [WRIA 1 Salmon Recovery Program](https://salmonwria1.org/), which focus on ecological restoration efforts in the region.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Regenerate Cascadia",
+          "Regenerate Cascadia",
+          "Cascadia",
+          "Cascadia",
+          "restoration projects",
+          "habitat restoration and protection projects",
+          "Cascadia QF Round",
+          "Design School for Regenerating Earth",
+          "Cascadia Trusted Observer",
+          "Cascadia Trusted Observer",
+          "SalishSea.io",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer mentions related concepts but lacks specific details about the actual projects of Regenerate Cascadia."
+      }
+    },
+    {
+      "query": "What practices are used in the Salish Sea bioregion?",
+      "category": "relationship_traversal",
+      "expected_hint": "Practices linked to Salish Sea via practiced_in or located_in",
+      "status": "ok",
+      "latency_s": 5.803,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Salish Sea",
+          "type": "Location",
+          "score": 0.6855
+        },
+        {
+          "label": "Salish Sea",
+          "type": "Bioregion",
+          "score": 0.6855
+        },
+        {
+          "label": "Salish Sea Hub",
+          "type": "Organization",
+          "score": 0.6398
+        },
+        {
+          "label": "Salish Sea Marine Survival Project",
+          "type": "Project",
+          "score": 0.6374
+        },
+        {
+          "label": "Coast Salish peoples",
+          "type": "Concept",
+          "score": 0.6067
+        },
+        {
+          "label": "Coast Salish Gathering",
+          "type": "Project",
+          "score": 0.6058
+        },
+        {
+          "label": "Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea",
+          "type": "Organization",
+          "score": 0.602
+        },
+        {
+          "label": "Salish Sea Dreaming",
+          "type": "Project",
+          "score": 0.5969
+        },
+        {
+          "label": "Straits Salish Territories",
+          "type": "Location",
+          "score": 0.5848
+        },
+        {
+          "label": "Interior Salish",
+          "type": "Concept",
+          "score": 0.5608
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "In the Salish Sea bioregion, various practices focused on ecological stewardship and community governance are prominent. These include:\n\n1. **Restoration Projects**: Initiatives like the **Salish Sea Marine Survival Project** aim to restore wild salmon populations, which are crucial for the ecosystem and local communities. Organizations such as **Long Live The Kings** work towards sustainable fishing practices in the Pacific Northwest.\n\n2. **Cultural Practices**: The **Coast Salish peoples** emphasize **Seven Generation Decision Making**, a principle that encourages considering the long-term impacts of decisions on future generations. This approach integrates traditional ecological knowledge with modern conservation efforts.\n\n3. **Community Engagement**: Events like the **Coast Salish Gathering** foster community dialogue and collaboration among Indigenous peoples and local stakeholders to address environmental issues and promote cultural heritage.\n\n4. **Historical Ecology**: The **Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea** focuses on understanding historical ecosystems to inform current practices and conservation strategies.\n\n5. **Monitoring and Observations**: Organizations involved in **Marine Mammal Observations** contribute to the understanding of marine life and the impacts of human activities on species like cetaceans and California sea lions.\n\nThese practices collectively aim to enhance ecological health, preserve cultural heritage, and promote sustainable governance in the Salish Sea bioregion.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Salish Sea",
+          "Salish Sea",
+          "Salish Sea Hub",
+          "Salish Sea Marine Survival Project",
+          "Coast Salish peoples",
+          "Coast Salish Gathering",
+          "Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea",
+          "Salish Sea Dreaming",
+          "Straits Salish Territories",
+          "Interior Salish",
+          "Salish Sea - Wikipedia",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "SalishSea.io",
+          "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "Coast Salish Gathering 2017"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer provides relevant practices linked to the Salish Sea bioregion, covering ecological stewardship, cultural practices, and community engagement, but it is slightly incomplete."
+      }
+    },
+    {
+      "query": "What concepts relate to knowledge commoning?",
+      "category": "relationship_traversal",
+      "expected_hint": "Concepts connected via broader/narrower/related_to predicates",
+      "status": "ok",
+      "latency_s": 3.677,
+      "source_count": 12,
+      "sources": [
+        {
+          "label": "Knowledge Commoning",
+          "type": "Concept",
+          "score": 0.7867
+        },
+        {
+          "label": "Federated Knowledge Commons",
+          "type": "Concept",
+          "score": 0.6263
+        },
+        {
+          "label": "Bioregional Knowledge Commons",
+          "type": "Organization",
+          "score": 0.583
+        },
+        {
+          "label": "Indigenous Commons",
+          "type": "Organization",
+          "score": 0.494
+        },
+        {
+          "label": "Knowledge 4 Change",
+          "type": "Organization",
+          "score": 0.491
+        },
+        {
+          "label": "Commons Governance",
+          "type": "Concept",
+          "score": 0.441
+        },
+        {
+          "label": "The Common Wealth",
+          "type": "Organization",
+          "score": 0.42
+        },
+        {
+          "label": "Epistemic Justice",
+          "type": "Concept",
+          "score": 0.3718
+        },
+        {
+          "label": "Ontological Pluriversality",
+          "type": "Concept",
+          "score": 0.3636
+        },
+        {
+          "label": "Commons Resource Monitoring",
+          "type": "Pattern",
+          "score": 0.3619
+        },
+        {
+          "label": "examples/coordinator.py",
+          "type": "Document",
+          "score": 0.3579
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Knowledge commoning is related to several concepts, including:\n\n1. **Cosmolocal Production** - This concept emphasizes the local adaptation of global knowledge and resources, fostering community-driven approaches.\n2. **Plurality** - This refers to the recognition and inclusion of diverse perspectives and practices in knowledge creation and sharing.\n\nThese relationships highlight the collaborative and inclusive nature of knowledge commoning, which is essential for ecological stewardship and community governance.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Knowledge Commoning",
+          "Federated Knowledge Commons",
+          "Bioregional Knowledge Commons",
+          "Indigenous Commons",
+          "Knowledge 4 Change",
+          "Commons Governance",
+          "The Common Wealth",
+          "Epistemic Justice",
+          "Ontological Pluriversality",
+          "Commons Resource Monitoring",
+          "examples/coordinator.py",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer is relevant and mostly accurate, covering key concepts related to knowledge commoning, but could benefit from additional examples or details."
+      }
+    },
+    {
+      "query": "What's on the critical path for the BKC roadmap?",
+      "category": "roadmap",
+      "expected_hint": "Should mention P0/critical priority roadmap items",
+      "status": "ok",
+      "latency_s": 3.623,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "BKC CoIP",
+          "type": "Project",
+          "score": 0.5029
+        },
+        {
+          "label": "Deep Geothermal Roadmap",
+          "type": "Project",
+          "score": 0.373
+        },
+        {
+          "label": "BKC A2A Agent Card",
+          "type": "Project",
+          "score": 0.3418
+        },
+        {
+          "label": "Boulder Summit 2026",
+          "type": "Meeting",
+          "score": 0.3368
+        },
+        {
+          "label": "Bowker Creek Watershed",
+          "type": "Location",
+          "score": 0.3335
+        },
+        {
+          "label": "Results-based management",
+          "type": "Concept",
+          "score": 0.3295
+        },
+        {
+          "label": "SRKW Range",
+          "type": "Location",
+          "score": 0.3155
+        },
+        {
+          "label": "BioFi Project",
+          "type": "Organization",
+          "score": 0.3138
+        },
+        {
+          "label": "Action Agenda",
+          "type": "Concept",
+          "score": 0.3114
+        },
+        {
+          "label": "Canyon Creek Barrier correction",
+          "type": "CaseStudy",
+          "score": 0.3111
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not contain specific details about the critical path for the BKC CoIP or the Deep Geothermal Roadmap. To obtain information about the critical path for the BKC roadmap, you may need to refer to project documentation or updates from the organizations involved, such as the BKC CoIP project team or related stakeholders. You could also explore resources like the Cascade Institute or the SalishSea.io website for insights into ongoing projects and their critical paths.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "BKC CoIP",
+          "Deep Geothermal Roadmap",
+          "BKC A2A Agent Card",
+          "Boulder Summit 2026",
+          "Bowker Creek Watershed",
+          "Results-based management",
+          "SRKW Range",
+          "BioFi Project",
+          "Action Agenda",
+          "Canyon Creek Barrier correction",
+          "Cascade Institute",
+          "SalishSea.io",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "Puget Sound Partnership"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 2,
+        "reason": "The answer mentions the topic but lacks specific information about the critical priority roadmap items."
+      }
+    },
+    {
+      "query": "What milestones are done?",
+      "category": "roadmap",
+      "expected_hint": "Completed work items or milestones from the roadmap",
+      "status": "ok",
+      "latency_s": 3.43,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "levee removals/setbacks",
+          "type": "Practice",
+          "score": 0.3512
+        },
+        {
+          "label": "MEASURING RECOVERY",
+          "type": "Concept",
+          "score": 0.3214
+        },
+        {
+          "label": "Implementation Strategies",
+          "type": "Concept",
+          "score": 0.3088
+        },
+        {
+          "label": "r3.0",
+          "type": "Organization",
+          "score": 0.2953
+        },
+        {
+          "label": "Results-based management",
+          "type": "Concept",
+          "score": 0.2888
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "Organization",
+          "score": 0.2882
+        },
+        {
+          "label": "restoration projects",
+          "type": "Concept",
+          "score": 0.2855
+        },
+        {
+          "label": "Seven Generation Decision Making",
+          "type": "Practice",
+          "score": 0.2834
+        },
+        {
+          "label": "Marine Mammal Observations",
+          "type": "Concept",
+          "score": 0.2751
+        },
+        {
+          "label": "Deep Geothermal Roadmap",
+          "type": "Project",
+          "score": 0.2738
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not specify particular milestones that have been completed regarding the various practices, concepts, or projects listed. However, it does mention the South Fork Nooksack River Salmon Habitat Restoration Project, which has received funding and is part of ongoing restoration efforts. For specific milestones related to levee removals, restoration projects, or other initiatives, more detailed information from specific project reports or updates would be needed. \n\nFor further insights, you might explore resources like the WRIA 1 Salmon Recovery Program or the NOAA Fisheries article on the South Fork Nooksack River project.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "levee removals/setbacks",
+          "MEASURING RECOVERY",
+          "Implementation Strategies",
+          "r3.0",
+          "Results-based management",
+          "Cascade Institute",
+          "restoration projects",
+          "Seven Generation Decision Making",
+          "Marine Mammal Observations",
+          "Deep Geothermal Roadmap",
+          "Cascade Institute",
+          "SalishSea.io",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Coast Salish Gathering 2017",
+          "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer provides some relevant context about a specific project but lacks detailed information on completed milestones."
+      }
+    },
+    {
+      "query": "Show P0 items",
+      "category": "roadmap",
+      "expected_hint": "High priority items from the roadmap",
+      "status": "ok",
+      "latency_s": 1.3,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "J Pod",
+          "type": "Concept",
+          "score": 0.4316
+        },
+        {
+          "label": "PKOLS",
+          "type": "Location",
+          "score": 0.3774
+        },
+        {
+          "label": "Superpod",
+          "type": "Concept",
+          "score": 0.3524
+        },
+        {
+          "label": "Pack out everything you bring in",
+          "type": "Practice",
+          "score": 0.3522
+        },
+        {
+          "label": "podcast",
+          "type": "Project",
+          "score": 0.3293
+        },
+        {
+          "label": "PICS",
+          "type": "Organization",
+          "score": 0.325
+        },
+        {
+          "label": "SSMSP",
+          "type": "Project",
+          "score": 0.3178
+        },
+        {
+          "label": "Question",
+          "type": "Question",
+          "score": 0.3091
+        },
+        {
+          "label": "Eve",
+          "type": "Person",
+          "score": 0.3032
+        },
+        {
+          "label": "r3.0",
+          "type": "Organization",
+          "score": 0.299
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SeaDoc Society",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about \"P0 items.\" Therefore, I cannot provide a relevant answer regarding P0 items. Please clarify or provide additional context.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "J Pod",
+          "PKOLS",
+          "Superpod",
+          "Pack out everything you bring in",
+          "podcast",
+          "PICS",
+          "SSMSP",
+          "Question",
+          "Eve",
+          "r3.0",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association",
+          "SeaDoc Society"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 2,
+        "reason": "The answer acknowledges the topic but fails to provide any relevant information about P0 items."
+      }
+    },
+    {
+      "query": "What are the next steps for the BKC project?",
+      "category": "roadmap",
+      "expected_hint": "Planned or in-progress roadmap items",
+      "status": "ok",
+      "latency_s": 3.813,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "BKC CoIP",
+          "type": "Project",
+          "score": 0.5163
+        },
+        {
+          "label": "BioFi Project",
+          "type": "Organization",
+          "score": 0.3789
+        },
+        {
+          "label": "BKC A2A Agent Card",
+          "type": "Project",
+          "score": 0.3717
+        },
+        {
+          "label": "Vancouver Foundation project \"From Recognition to Action: Co-Creating Municipal Accountability Tools for Indigenous Health and Reconciliation\"",
+          "type": "Project",
+          "score": 0.3529
+        },
+        {
+          "label": "ReFi BCN",
+          "type": "Organization",
+          "score": 0.3384
+        },
+        {
+          "label": "Boulder Summit 2026",
+          "type": "Meeting",
+          "score": 0.3374
+        },
+        {
+          "label": "Deep Geothermal Roadmap",
+          "type": "Project",
+          "score": 0.3355
+        },
+        {
+          "label": "POLIS Water Project",
+          "type": "Organization",
+          "score": 0.3292
+        },
+        {
+          "label": "Bowker Creek Watershed",
+          "type": "Location",
+          "score": 0.3247
+        },
+        {
+          "label": "Canyon Creek Barrier correction",
+          "type": "CaseStudy",
+          "score": 0.3243
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not specify the next steps for the BKC CoIP project. To obtain detailed information about the upcoming actions or phases of the BKC project, I recommend checking the project's official communications or reaching out to affiliated individuals such as Andrea Farias, Bill Baue, or Darren Zal, who are involved with the project. You can also visit the [Cascade Institute](https://cascadeinstitute.org/) or the [Salish Sea Hub](https://www.salishseahub.ca/) for updates related to the project.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "BKC CoIP",
+          "BioFi Project",
+          "BKC A2A Agent Card",
+          "Vancouver Foundation project \"From Recognition to Action: Co-Creating Municipal Accountability Tools for Indigenous Health and Reconciliation\"",
+          "ReFi BCN",
+          "Boulder Summit 2026",
+          "Deep Geothermal Roadmap",
+          "POLIS Water Project",
+          "Bowker Creek Watershed",
+          "Canyon Creek Barrier correction",
+          "Cascade Institute",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer acknowledges the lack of specific information about the next steps but provides useful suggestions for where to find more details."
+      }
+    },
+    {
+      "query": "What depends on the chat retrieval system?",
+      "category": "roadmap",
+      "expected_hint": "Items that depend_on or are blocked by B1 chat",
+      "status": "ok",
+      "latency_s": 1.742,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "MEASURING RECOVERY",
+          "type": "Concept",
+          "score": 0.3143
+        },
+        {
+          "label": "Question",
+          "type": "Question",
+          "score": 0.3043
+        },
+        {
+          "label": "Commons Resource Monitoring",
+          "type": "Pattern",
+          "score": 0.2966
+        },
+        {
+          "label": "Pattern Mining",
+          "type": "Concept",
+          "score": 0.2931
+        },
+        {
+          "label": "A2A protocol",
+          "type": "Concept",
+          "score": 0.2869
+        },
+        {
+          "label": "Community Monitoring More Effective",
+          "type": "Claim",
+          "score": 0.2861
+        },
+        {
+          "label": "Toucan Protocol",
+          "type": "Organization",
+          "score": 0.2694
+        },
+        {
+          "label": "Co-decision Making",
+          "type": "Practice",
+          "score": 0.2635
+        },
+        {
+          "label": "Ecosystem monitoring",
+          "type": "Practice",
+          "score": 0.2564
+        },
+        {
+          "label": "r3.0",
+          "type": "Organization",
+          "score": 0.249
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SeaDoc Society",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about a chat retrieval system or its dependencies. Therefore, I cannot answer your question regarding what depends on the chat retrieval system. If you have more specific details or context, please provide them for a more accurate response.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "MEASURING RECOVERY",
+          "Question",
+          "Commons Resource Monitoring",
+          "Pattern Mining",
+          "A2A protocol",
+          "Community Monitoring More Effective",
+          "Toucan Protocol",
+          "Co-decision Making",
+          "Ecosystem monitoring",
+          "r3.0",
+          "Coast Salish Gathering 2017",
+          "Puget Sound Partnership",
+          "SeaDoc Society"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer does not address the query and lacks any relevant information."
+      }
+    },
+    {
+      "query": "What web sources have been ingested about bioregional governance?",
+      "category": "web_content",
+      "expected_hint": "Ingested web sources related to governance",
+      "status": "ok",
+      "latency_s": 2.157,
+      "source_count": 12,
+      "sources": [
+        {
+          "label": "Bioregional Knowledge Commons",
+          "type": "Organization",
+          "score": 0.6511
+        },
+        {
+          "label": "Bioregioning",
+          "type": "Concept",
+          "score": 0.5748
+        },
+        {
+          "label": "How Scale Bioregional Monitoring",
+          "type": "Question",
+          "score": 0.5614
+        },
+        {
+          "label": "Commons Governance",
+          "type": "Concept",
+          "score": 0.5172
+        },
+        {
+          "label": "bioregional AI swarms",
+          "type": "Concept",
+          "score": 0.5123
+        },
+        {
+          "label": "Indigenous Commons",
+          "type": "Organization",
+          "score": 0.4244
+        },
+        {
+          "label": "Ecosystem monitoring",
+          "type": "Practice",
+          "score": 0.4106
+        },
+        {
+          "label": "Bioregional AI Swarms Build Day",
+          "type": "Meeting",
+          "score": 0.4095
+        },
+        {
+          "label": "Indigenomics Institute",
+          "type": "Organization",
+          "score": 0.4085
+        },
+        {
+          "label": "Ecojustice",
+          "type": "Organization",
+          "score": 0.408
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not specify any particular web sources that have been ingested specifically about bioregional governance. The relevant entities and relationships focus more on ecological stewardship, ecosystem monitoring, and specific organizations related to bioregional practices. If you need information on bioregional governance, I recommend checking the websites of the Bioregional Knowledge Commons and the Indigenous Commons, as they may provide insights into governance practices in bioregions.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Bioregional Knowledge Commons",
+          "Bioregioning",
+          "How Scale Bioregional Monitoring",
+          "Commons Governance",
+          "bioregional AI swarms",
+          "Indigenous Commons",
+          "Ecosystem monitoring",
+          "Bioregional AI Swarms Build Day",
+          "Indigenomics Institute",
+          "Ecojustice",
+          "Puget Sound Partnership",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer acknowledges the lack of specific sources but provides some useful direction for further research."
+      }
+    },
+    {
+      "query": "Summarize the latest web sources",
+      "category": "web_content",
+      "expected_hint": "Recent web submissions with titles and summaries",
+      "status": "ok",
+      "latency_s": 7.938,
+      "source_count": 17,
+      "sources": [
+        {
+          "label": "research dive",
+          "type": "Project",
+          "score": 0.413
+        },
+        {
+          "label": "Commons Resource Monitoring",
+          "type": "Pattern",
+          "score": 0.4019
+        },
+        {
+          "label": "newsletter",
+          "type": "Project",
+          "score": 0.3605
+        },
+        {
+          "label": "scientific data",
+          "type": "Evidence",
+          "score": 0.3482
+        },
+        {
+          "label": "Bert Webber",
+          "type": "Person",
+          "score": 0.3427
+        },
+        {
+          "label": "Colorado River Basin Watershed Data Aggregator",
+          "type": "Project",
+          "score": 0.3342
+        },
+        {
+          "label": "The New York Times",
+          "type": "Organization",
+          "score": 0.333
+        },
+        {
+          "label": "Xwsepsum (Kosapsum) peoples",
+          "type": "Concept",
+          "score": 0.3289
+        },
+        {
+          "label": "r3.0",
+          "type": "Organization",
+          "score": 0.3159
+        },
+        {
+          "label": "SeaDoc Society",
+          "type": "Organization",
+          "score": 0.3069
+        },
+        {
+          "label": "koi-net.config.json",
+          "type": "Document",
+          "score": 0.3317
+        },
+        {
+          "label": "koi-net-protocol-openapi.json",
+          "type": "Document",
+          "score": 0.305
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SeaDoc Society",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Here are summaries of the latest relevant web sources related to the Salish Sea:\n\n1. **Cascade Institute**: This Canadian research center focuses on analyzing complex global systems to anticipate future crises and identify high-leverage interventions. Their work aims to shift humanity's course towards more sustainable practices, which could be relevant for ecological stewardship in bioregions like the Salish Sea.\n\n2. **Salish Sea - Wikipedia**: The Wikipedia page provides comprehensive information about the Salish Sea, including its geographical features, ecological significance, and cultural importance to the Coast Salish peoples. It discusses the various waterways, marine life, and environmental challenges facing the region.\n\n3. **WRIA 1 (Nooksack Basin) Salmon Recovery Program**: This program is dedicated to recovering salmon populations in the Nooksack Basin. It emphasizes the importance of restoring healthy rivers and marine shorelines to achieve self-sustaining salmonid runs, which is crucial for the ecological balance in the Salish Sea.\n\n4. **Home | Salish Sea Hub**: This platform serves as a collaborative resource for stakeholders in the Salish Sea region, promoting information sharing and community engagement around ecological stewardship and conservation efforts.\n\n5. **SeaDoc Society**: The SeaDoc Society is committed to ensuring the health of marine wildlife and their ecosystems in the Salish Sea through science and education. They focus on finding science-based solutions to environmental issues affecting the region.\n\nThese sources collectively highlight the ecological, cultural, and conservation aspects of the Salish Sea, emphasizing the importance of collaborative efforts in addressing environmental challenges.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "research dive",
+          "Commons Resource Monitoring",
+          "newsletter",
+          "scientific data",
+          "Bert Webber",
+          "Colorado River Basin Watershed Data Aggregator",
+          "The New York Times",
+          "Xwsepsum (Kosapsum) peoples",
+          "r3.0",
+          "SeaDoc Society",
+          "koi-net.config.json",
+          "koi-net-protocol-openapi.json",
+          "Cascade Institute",
+          "Salish Sea - Wikipedia",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Home | Salish Sea Hub",
+          "SeaDoc Society"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer provides relevant summaries of web sources related to the Salish Sea, but it could include more recent submissions and additional titles."
+      }
+    },
+    {
+      "query": "What is the Salish Sea Knowledge Garden?",
+      "category": "web_content",
+      "expected_hint": "The public Quartz site and its purpose",
+      "status": "ok",
+      "latency_s": 2.744,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Salish Sea",
+          "type": "Location",
+          "score": 0.6418
+        },
+        {
+          "label": "Salish Sea",
+          "type": "Bioregion",
+          "score": 0.6418
+        },
+        {
+          "label": "Salish Sea Hub",
+          "type": "Organization",
+          "score": 0.6235
+        },
+        {
+          "label": "Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea",
+          "type": "Organization",
+          "score": 0.5958
+        },
+        {
+          "label": "Salish Sea Dreaming",
+          "type": "Project",
+          "score": 0.5929
+        },
+        {
+          "label": "Salish Sea Marine Survival Project",
+          "type": "Project",
+          "score": 0.5912
+        },
+        {
+          "label": "Coast Salish Gathering",
+          "type": "Project",
+          "score": 0.5904
+        },
+        {
+          "label": "Coast Salish peoples",
+          "type": "Concept",
+          "score": 0.5432
+        },
+        {
+          "label": "Interior Salish",
+          "type": "Concept",
+          "score": 0.5304
+        },
+        {
+          "label": "Straits Salish Territories",
+          "type": "Location",
+          "score": 0.5204
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about the \"Salish Sea Knowledge Garden.\" Therefore, I cannot provide an answer regarding its details or significance. If you have more information or context about this entity, I would be happy to help!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Salish Sea",
+          "Salish Sea",
+          "Salish Sea Hub",
+          "Kwi\u00e1ht Center for the Historical Ecology of the Salish Sea",
+          "Salish Sea Dreaming",
+          "Salish Sea Marine Survival Project",
+          "Coast Salish Gathering",
+          "Coast Salish peoples",
+          "Interior Salish",
+          "Straits Salish Territories",
+          "Salish Sea - Wikipedia",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "SalishSea.io",
+          "Home - W\u0331S\u00c1NE\u0106 Leadership Council",
+          "Coast Salish Gathering 2017"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer does not address the query about the Salish Sea Knowledge Garden and lacks relevant information."
+      }
+    },
+    {
+      "query": "How does commitment pooling work?",
+      "category": "commitment_pooling",
+      "expected_hint": "Explanation of commitment lifecycle: proposed \u2192 verified \u2192 active \u2192 redeemed",
+      "status": "ok",
+      "latency_s": 1.992,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Puget Sound Partnership",
+          "type": "Organization",
+          "score": 0.332
+        },
+        {
+          "label": "Quadratic Funding",
+          "type": "Protocol",
+          "score": 0.3157
+        },
+        {
+          "label": "Co-decision Making",
+          "type": "Practice",
+          "score": 0.3128
+        },
+        {
+          "label": "Federated Knowledge Commons",
+          "type": "Concept",
+          "score": 0.3022
+        },
+        {
+          "label": "Co-management",
+          "type": "Practice",
+          "score": 0.2916
+        },
+        {
+          "label": "Shoreline Management Program (SMP)",
+          "type": "Concept",
+          "score": 0.29
+        },
+        {
+          "label": "AI for Good Sponsorship",
+          "type": "Concept",
+          "score": 0.2891
+        },
+        {
+          "label": "Integrate salmon recovery with floodplain management",
+          "type": "Practice",
+          "score": 0.2838
+        },
+        {
+          "label": "Polycrisis Core Model",
+          "type": "Project",
+          "score": 0.2826
+        },
+        {
+          "label": "Community Monitoring More Effective",
+          "type": "Claim",
+          "score": 0.2772
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about \"commitment pooling.\" Therefore, I cannot provide an answer based on the available entities, relationships, or web sources. If you have more specific information or a different question, feel free to ask!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Puget Sound Partnership",
+          "Quadratic Funding",
+          "Co-decision Making",
+          "Federated Knowledge Commons",
+          "Co-management",
+          "Shoreline Management Program (SMP)",
+          "AI for Good Sponsorship",
+          "Integrate salmon recovery with floodplain management",
+          "Polycrisis Core Model",
+          "Community Monitoring More Effective",
+          "Cascade Institute",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Coast Salish Gathering 2017",
+          "Puget Sound Partnership"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer does not address the query about commitment pooling at all."
+      }
+    },
+    {
+      "query": "What are community asset vouchers?",
+      "category": "commitment_pooling",
+      "expected_hint": "CAVs as first-class KOI entities for mutual aid",
+      "status": "ok",
+      "latency_s": 2.054,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "community organizations",
+          "type": "Organization",
+          "score": 0.4175
+        },
+        {
+          "label": "Port Community Energy Transformations",
+          "type": "Project",
+          "score": 0.3794
+        },
+        {
+          "label": "Victoria Native Friendship Centre",
+          "type": "Organization",
+          "score": 0.3311
+        },
+        {
+          "label": "Compost Centre Victoria",
+          "type": "Organization",
+          "score": 0.3267
+        },
+        {
+          "label": "BKC A2A Agent Card",
+          "type": "Project",
+          "score": 0.3266
+        },
+        {
+          "label": "Vancouver Foundation",
+          "type": "Organization",
+          "score": 0.3253
+        },
+        {
+          "label": "Wellspring Commons",
+          "type": "Organization",
+          "score": 0.323
+        },
+        {
+          "label": "Victoria Foundation",
+          "type": "Organization",
+          "score": 0.3187
+        },
+        {
+          "label": "Vancouver Foundation project \"From Recognition to Action: Co-Creating Municipal Accountability Tools for Indigenous Health and Reconciliation\"",
+          "type": "Project",
+          "score": 0.3182
+        },
+        {
+          "label": "co-op.us",
+          "type": "Organization",
+          "score": 0.3134
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The provided context does not contain specific information about \"community asset vouchers.\" Therefore, I cannot provide a detailed answer on that topic. If you have more information or a different question, feel free to ask!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "community organizations",
+          "Port Community Energy Transformations",
+          "Victoria Native Friendship Centre",
+          "Compost Centre Victoria",
+          "BKC A2A Agent Card",
+          "Vancouver Foundation",
+          "Wellspring Commons",
+          "Victoria Foundation",
+          "Vancouver Foundation project \"From Recognition to Action: Co-Creating Municipal Accountability Tools for Indigenous Health and Reconciliation\"",
+          "co-op.us",
+          "Cascade Institute",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer does not address the query about community asset vouchers at all."
+      }
+    },
+    {
+      "query": "How does the roadmap connect to commitment pooling?",
+      "category": "cross_domain",
+      "expected_hint": "C-series roadmap items and their relationship to commitment work",
+      "status": "ok",
+      "latency_s": 2.688,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Deep Geothermal Roadmap",
+          "type": "Project",
+          "score": 0.4002
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "Organization",
+          "score": 0.3381
+        },
+        {
+          "label": "Quadratic Funding",
+          "type": "Protocol",
+          "score": 0.3204
+        },
+        {
+          "label": "Action Agenda",
+          "type": "Concept",
+          "score": 0.31
+        },
+        {
+          "label": "Co-decision Making",
+          "type": "Practice",
+          "score": 0.3075
+        },
+        {
+          "label": "Astral Protocol",
+          "type": "Organization",
+          "score": 0.3029
+        },
+        {
+          "label": "Implementation Strategies",
+          "type": "Concept",
+          "score": 0.3018
+        },
+        {
+          "label": "Shoreline Management Program (SMP)",
+          "type": "Concept",
+          "score": 0.3006
+        },
+        {
+          "label": "2022-2026 Action Agenda",
+          "type": "Project",
+          "score": 0.3001
+        },
+        {
+          "label": "Results-based management",
+          "type": "Concept",
+          "score": 0.2973
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not specifically mention \"commitment pooling,\" so I cannot directly answer how the Deep Geothermal Roadmap connects to it. However, the Deep Geothermal Roadmap is a project that may involve implementation strategies related to sustainable energy practices, which could potentially intersect with concepts of co-decision making and community governance.\n\nIf you have more specific information or context about \"commitment pooling,\" I would be able to provide a more targeted response.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Deep Geothermal Roadmap",
+          "Puget Sound Partnership",
+          "Quadratic Funding",
+          "Action Agenda",
+          "Co-decision Making",
+          "Astral Protocol",
+          "Implementation Strategies",
+          "Shoreline Management Program (SMP)",
+          "2022-2026 Action Agenda",
+          "Results-based management",
+          "Cascade Institute",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Coast Salish Gathering 2017",
+          "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "Puget Sound Partnership"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 2,
+        "reason": "The answer mentions the topic but fails to address the specific connection between the roadmap and commitment pooling."
+      }
+    },
+    {
+      "query": "What projects relate to herring?",
+      "category": "cross_domain",
+      "expected_hint": "Projects, practices, or organizations connected to herring ecology",
+      "status": "ok",
+      "latency_s": 2.721,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Herring Monitoring",
+          "type": "Practice",
+          "score": 0.6673
+        },
+        {
+          "label": "Herring Conservation and Restoration Society",
+          "type": "Organization",
+          "score": 0.6243
+        },
+        {
+          "label": "Salish Sea Herring Case",
+          "type": "CaseStudy",
+          "score": 0.5762
+        },
+        {
+          "label": "Herring Count Data 2024",
+          "type": "Evidence",
+          "score": 0.5511
+        },
+        {
+          "label": "Salmon recovery Hub",
+          "type": "Project",
+          "score": 0.4919
+        },
+        {
+          "label": "WRIA 1 Salmon Recovery Program",
+          "type": "Organization",
+          "score": 0.4721
+        },
+        {
+          "label": "salmon recovery",
+          "type": "Practice",
+          "score": 0.4615
+        },
+        {
+          "label": "habitat restoration and protection projects",
+          "type": "Project",
+          "score": 0.4609
+        },
+        {
+          "label": "Salmon populations",
+          "type": "Concept",
+          "score": 0.4542
+        },
+        {
+          "label": "South Fork Nooksack River Salmon Habitat Restoration Project",
+          "type": "Project",
+          "score": 0.4505
+        },
+        {
+          "label": "Salish Sea - Wikipedia",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific projects directly related to herring. However, it does mention the **Herring Monitoring (Practice)** and the **Herring Conservation and Restoration Society (Organization)**, which may be involved in herring-related initiatives. Additionally, the **Salish Sea Herring Case (CaseStudy)** could provide insights into herring conservation efforts in the region. For more detailed information on specific projects related to herring, further context or sources would be needed.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Herring Monitoring",
+          "Herring Conservation and Restoration Society",
+          "Salish Sea Herring Case",
+          "Herring Count Data 2024",
+          "Salmon recovery Hub",
+          "WRIA 1 Salmon Recovery Program",
+          "salmon recovery",
+          "habitat restoration and protection projects",
+          "Salmon populations",
+          "South Fork Nooksack River Salmon Habitat Restoration Project",
+          "Salish Sea - Wikipedia",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Washington Tribes Restore Salmon Habitat on South Fork Nooksack River | NOAA Fisheries",
+          "Recreate Responsibly \u2014 Nooksack Salmon Enhancement Association"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 3,
+        "reason": "The answer mentions relevant practices and organizations but lacks specific details about projects."
+      }
+    },
+    {
+      "query": "How do bioregions connect to each other in the knowledge commons?",
+      "category": "cross_domain",
+      "expected_hint": "Federation, KOI-net, holon topology connecting bioregional nodes",
+      "status": "ok",
+      "latency_s": 4.635,
+      "source_count": 13,
+      "sources": [
+        {
+          "label": "Bioregional Knowledge Commons",
+          "type": "Organization",
+          "score": 0.779
+        },
+        {
+          "label": "Federated Knowledge Commons",
+          "type": "Concept",
+          "score": 0.6093
+        },
+        {
+          "label": "Bioregioning",
+          "type": "Concept",
+          "score": 0.5712
+        },
+        {
+          "label": "Knowledge Commoning",
+          "type": "Concept",
+          "score": 0.534
+        },
+        {
+          "label": "How Scale Bioregional Monitoring",
+          "type": "Question",
+          "score": 0.4942
+        },
+        {
+          "label": "bioregional AI swarms",
+          "type": "Concept",
+          "score": 0.4727
+        },
+        {
+          "label": "Indigenous Commons",
+          "type": "Organization",
+          "score": 0.4559
+        },
+        {
+          "label": "Ecosystem Modeling",
+          "type": "Concept",
+          "score": 0.4119
+        },
+        {
+          "label": "Ocean Networks Canada",
+          "type": "Organization",
+          "score": 0.391
+        },
+        {
+          "label": "Commons Governance",
+          "type": "Concept",
+          "score": 0.388
+        },
+        {
+          "label": "examples/coordinator.py",
+          "type": "Document",
+          "score": 0.3022
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Bioregions connect to each other in the knowledge commons through concepts such as **Knowledge Commoning**, which emphasizes the collaborative sharing and management of knowledge across different ecological and cultural contexts. This is facilitated by the **Federated Knowledge Commons** concept, which allows for the integration of diverse knowledge systems and practices.\n\nFor instance, the **Salish Sea** encompasses the **Puget Sound**, and knowledge generated in one bioregion can inform practices in another, fostering a network of ecological stewardship. Organizations like the **Bioregional Knowledge Commons** and **Indigenous Commons** play crucial roles in this interconnectedness by promoting shared governance and regenerative practices that respect local ecosystems while also addressing broader ecological challenges.\n\nAdditionally, initiatives like **bioregional AI swarms** can enhance monitoring and data sharing across bioregions, supporting collaborative efforts in ecosystem modeling and management. This interconnected approach helps to create a resilient framework for ecological governance and stewardship across different bioregions.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Bioregional Knowledge Commons",
+          "Federated Knowledge Commons",
+          "Bioregioning",
+          "Knowledge Commoning",
+          "How Scale Bioregional Monitoring",
+          "bioregional AI swarms",
+          "Indigenous Commons",
+          "Ecosystem Modeling",
+          "Ocean Networks Canada",
+          "Commons Governance",
+          "examples/coordinator.py",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 4,
+        "reason": "The answer is relevant and mostly accurate, covering key concepts like Knowledge Commoning and Federated Knowledge Commons, but it lacks specific mention of KOI-net and holon topology."
+      }
+    },
+    {
+      "query": "Gregory Landua",
+      "category": "regen_secondary",
+      "expected_hint": "Person, co-founder or key figure at Regen Network",
+      "status": "ok",
+      "latency_s": 1.684,
+      "source_count": 12,
+      "sources": [
+        {
+          "label": "Andrea Farias",
+          "type": "Person",
+          "score": 0.399
+        },
+        {
+          "label": "Luiz Fernando",
+          "type": "Person",
+          "score": 0.3795
+        },
+        {
+          "label": "Conor Turland",
+          "type": "Person",
+          "score": 0.3764
+        },
+        {
+          "label": "Daniel Pauly",
+          "type": "Person",
+          "score": 0.3731
+        },
+        {
+          "label": "Lucian",
+          "type": "Person",
+          "score": 0.3653
+        },
+        {
+          "label": "Victoria Landscape Group",
+          "type": "Project",
+          "score": 0.3519
+        },
+        {
+          "label": "Ian Graham",
+          "type": "Person",
+          "score": 0.3502
+        },
+        {
+          "label": "Leighton Gall",
+          "type": "Person",
+          "score": 0.3499
+        },
+        {
+          "label": "acquisition of land",
+          "type": "Practice",
+          "score": 0.3476
+        },
+        {
+          "label": "Garry Oak Meadows",
+          "type": "Concept",
+          "score": 0.3409
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include any information about Gregory Landua. Therefore, I cannot provide any details or insights regarding him. If you have specific questions or need information about a different topic, feel free to ask!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Andrea Farias",
+          "Luiz Fernando",
+          "Conor Turland",
+          "Daniel Pauly",
+          "Lucian",
+          "Victoria Landscape Group",
+          "Ian Graham",
+          "Leighton Gall",
+          "acquisition of land",
+          "Garry Oak Meadows",
+          "Cascade Institute",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer completely fails to address the query about Gregory Landua."
+      }
+    },
+    {
+      "query": "What is Regen Network?",
+      "category": "regen_secondary",
+      "expected_hint": "Organization focused on ecological regeneration and ecocredits",
+      "status": "ok",
+      "latency_s": 1.73,
+      "source_count": 12,
+      "sources": [
+        {
+          "label": "Orca Network",
+          "type": "Organization",
+          "score": 0.462
+        },
+        {
+          "label": "Regen Foundation",
+          "type": "Organization",
+          "score": 0.4585
+        },
+        {
+          "label": "Bioregioning",
+          "type": "Concept",
+          "score": 0.4209
+        },
+        {
+          "label": "Design School for Regenerating Earth",
+          "type": "Organization",
+          "score": 0.4125
+        },
+        {
+          "label": "Bioregional Knowledge Commons",
+          "type": "Organization",
+          "score": 0.3869
+        },
+        {
+          "label": "bioregional AI swarms",
+          "type": "Concept",
+          "score": 0.3817
+        },
+        {
+          "label": "Ghost Net",
+          "type": "Concept",
+          "score": 0.3788
+        },
+        {
+          "label": "r3.0",
+          "type": "Organization",
+          "score": 0.3427
+        },
+        {
+          "label": "Regenerate Cascadia",
+          "type": "Organization",
+          "score": 0.3401
+        },
+        {
+          "label": "Regenerate Cascadia",
+          "type": "Project",
+          "score": 0.3401
+        },
+        {
+          "label": "SalishSea.io",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "SeaDoc Society",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not include specific information about the Regen Network. Therefore, I cannot provide an answer regarding what Regen Network is. If you have other sources or details, please share them for further assistance.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Orca Network",
+          "Regen Foundation",
+          "Bioregioning",
+          "Design School for Regenerating Earth",
+          "Bioregional Knowledge Commons",
+          "bioregional AI swarms",
+          "Ghost Net",
+          "r3.0",
+          "Regenerate Cascadia",
+          "Regenerate Cascadia",
+          "SalishSea.io",
+          "SeaDoc Society"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 1,
+        "reason": "The answer does not address the query about Regen Network at all."
+      }
+    },
+    {
+      "query": "Nature Carbon Tonne",
+      "category": "regen_secondary",
+      "expected_hint": "NCT token or credit class in Regen ecosystem",
+      "status": "ok",
+      "latency_s": 3.056,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Climate threat",
+          "type": "Concept",
+          "score": 0.3395
+        },
+        {
+          "label": "Cosmolocal production",
+          "type": "Concept",
+          "score": 0.3116
+        },
+        {
+          "label": "WCC",
+          "type": "Organization",
+          "score": 0.3078
+        },
+        {
+          "label": "BC Spaces For Nature",
+          "type": "Organization",
+          "score": 0.304
+        },
+        {
+          "label": "Ecosystem monitoring",
+          "type": "Practice",
+          "score": 0.3015
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "Organization",
+          "score": 0.3001
+        },
+        {
+          "label": "Port Community Energy Transformations",
+          "type": "Project",
+          "score": 0.2944
+        },
+        {
+          "label": "Nature, Climate, Jobs Solution",
+          "type": "Project",
+          "score": 0.2904
+        },
+        {
+          "label": "UNESCO",
+          "type": "Organization",
+          "score": 0.2902
+        },
+        {
+          "label": "Ecosystem Modeling",
+          "type": "Concept",
+          "score": 0.2899
+        },
+        {
+          "label": "Cascade Institute",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The term \"Nature Carbon Tonne\" does not appear explicitly in the provided context. However, it likely relates to concepts of carbon sequestration and ecosystem services, particularly in the context of the Puget Sound and Salish Sea regions, where ecosystem monitoring and recovery efforts, such as those by organizations like the Cascade Institute and BC Spaces For Nature, are crucial for addressing climate threats and enhancing carbon storage in natural systems.\n\nIf you are looking for specific information on carbon accounting or related projects, please clarify, and I can assist further!",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Climate threat",
+          "Cosmolocal production",
+          "WCC",
+          "BC Spaces For Nature",
+          "Ecosystem monitoring",
+          "Cascade Institute",
+          "Port Community Energy Transformations",
+          "Nature, Climate, Jobs Solution",
+          "UNESCO",
+          "Ecosystem Modeling",
+          "Cascade Institute",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Puget Sound Partnership",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 2,
+        "reason": "The answer mentions related concepts but does not address the specific topic of the NCT token or credit class in the Regen ecosystem."
+      }
+    },
+    {
+      "query": "What is ecological monitoring?",
+      "category": "regen_secondary",
+      "expected_hint": "Monitoring practices for ecosystem health",
+      "status": "ok",
+      "latency_s": 3.621,
+      "source_count": 14,
+      "sources": [
+        {
+          "label": "Ecosystem monitoring",
+          "type": "Practice",
+          "score": 0.7821
+        },
+        {
+          "label": "How Scale Bioregional Monitoring",
+          "type": "Question",
+          "score": 0.5903
+        },
+        {
+          "label": "Community Monitoring More Effective",
+          "type": "Claim",
+          "score": 0.5616
+        },
+        {
+          "label": "Department of Ecology",
+          "type": "Organization",
+          "score": 0.5137
+        },
+        {
+          "label": "Ecosystem Modeling",
+          "type": "Concept",
+          "score": 0.4877
+        },
+        {
+          "label": "Herring Monitoring",
+          "type": "Practice",
+          "score": 0.4783
+        },
+        {
+          "label": "Commons Resource Monitoring",
+          "type": "Pattern",
+          "score": 0.4719
+        },
+        {
+          "label": "Ecojustice",
+          "type": "Organization",
+          "score": 0.4167
+        },
+        {
+          "label": "Restore and reconnect isolated habitats",
+          "type": "Practice",
+          "score": 0.3795
+        },
+        {
+          "label": "Co-management",
+          "type": "Practice",
+          "score": 0.3771
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "Ecological monitoring refers to the systematic observation and assessment of ecosystems to track their health, changes, and the impacts of various factors such as pollution, climate change, and human activities. It often involves practices like ecosystem monitoring, community monitoring, and specific monitoring efforts such as Herring Monitoring. These practices aim to gather data that can inform management decisions and support ecological stewardship.\n\nIn the context of the Salish Sea, ecological monitoring is crucial for understanding the health of this bioregion, which is impacted by a pollution-based economy and involves various organizations and communities, including the Coast Salish peoples and the Department of Ecology. Effective monitoring can help in restoring and reconnecting isolated habitats and support co-management practices that involve local communities in decision-making processes.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Ecosystem monitoring",
+          "How Scale Bioregional Monitoring",
+          "Community Monitoring More Effective",
+          "Department of Ecology",
+          "Ecosystem Modeling",
+          "Herring Monitoring",
+          "Commons Resource Monitoring",
+          "Ecojustice",
+          "Restore and reconnect isolated habitats",
+          "Co-management",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Coast Salish Gathering 2017",
+          "Puget Sound Partnership"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 5,
+        "reason": "The answer provides a comprehensive overview of ecological monitoring, its practices, and its significance in the context of the Salish Sea, making it highly relevant and accurate."
+      }
+    },
+    {
+      "query": "How do ecocredits work?",
+      "category": "regen_secondary",
+      "expected_hint": "Regen Network ecocredit issuance and trading",
+      "status": "ok",
+      "latency_s": 2.68,
+      "source_count": 15,
+      "sources": [
+        {
+          "label": "Ecosystem monitoring",
+          "type": "Practice",
+          "score": 0.4758
+        },
+        {
+          "label": "Ecojustice",
+          "type": "Organization",
+          "score": 0.4684
+        },
+        {
+          "label": "Ecosystem Modeling",
+          "type": "Concept",
+          "score": 0.4629
+        },
+        {
+          "label": "Department of Ecology",
+          "type": "Organization",
+          "score": 0.4195
+        },
+        {
+          "label": "How Scale Bioregional Monitoring",
+          "type": "Question",
+          "score": 0.3893
+        },
+        {
+          "label": "Bioregional Knowledge Commons",
+          "type": "Organization",
+          "score": 0.3869
+        },
+        {
+          "label": "Pollution Based Economy",
+          "type": "Concept",
+          "score": 0.3817
+        },
+        {
+          "label": "UNESCO",
+          "type": "Organization",
+          "score": 0.3753
+        },
+        {
+          "label": "Commons Resource Monitoring",
+          "type": "Pattern",
+          "score": 0.3752
+        },
+        {
+          "label": "Bioregioning",
+          "type": "Concept",
+          "score": 0.3673
+        },
+        {
+          "label": "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Coast Salish Gathering 2017",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Puget Sound Partnership",
+          "type": "WebSource",
+          "score": 0.8
+        },
+        {
+          "label": "Home | Salish Sea Hub",
+          "type": "WebSource",
+          "score": 0.8
+        }
+      ],
+      "answer": "The context provided does not contain specific information about ecocredits or how they work. Ecocredits generally refer to a system where credits are earned for engaging in environmentally beneficial practices, such as conservation or restoration efforts. These credits can then be traded or sold to offset environmental impacts elsewhere. For detailed information on ecocredits, you may need to consult additional resources or specific organizations focused on ecological finance or sustainability practices.",
+      "intent": {
+        "intent": "knowledge_query",
+        "entities": [
+          "Ecosystem monitoring",
+          "Ecojustice",
+          "Ecosystem Modeling",
+          "Department of Ecology",
+          "How Scale Bioregional Monitoring",
+          "Bioregional Knowledge Commons",
+          "Pollution Based Economy",
+          "UNESCO",
+          "Commons Resource Monitoring",
+          "Bioregioning",
+          "Long Live The Kings - Restoring wild salmon in the Pacific Northwest",
+          "WRIA 1 (Nooksack Basin) Salmon Recovery Program - WRIA1 Salmon Recovery Program",
+          "Coast Salish Gathering 2017",
+          "Puget Sound Partnership",
+          "Home | Salish Sea Hub"
+        ],
+        "confidence": 0.8
+      },
+      "relevance": {
+        "score": 2,
+        "reason": "The answer mentions ecocredits but lacks specific information about the Regen Network's issuance and trading processes."
+      }
+    }
+  ]
+}
