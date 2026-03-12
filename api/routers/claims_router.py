@@ -67,6 +67,7 @@ class ClaimResponse(BaseModel):
     source_document: Optional[str]
     ai_confidence: Optional[float]
     content_hash: Optional[str]
+    data_iri: Optional[str] = None
     ledger_iri: Optional[str]
     tx_hash: Optional[str] = None
     supersedes_rid: Optional[str]
@@ -318,11 +319,19 @@ def _canonical_json(claimant_uri: str, statement: str, claim_type: str,
     return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
 
 
-def _claim_rid(claimant_uri: str, statement: str, claim_type: str,
-               about_uri: str | None, metadata: dict) -> str:
-    """Content-addressable RID: hash of all content fields including about_uri."""
+def _legacy_claim_rid(claimant_uri: str, statement: str, claim_type: str,
+                      about_uri: str | None, metadata: dict) -> str:
+    """Legacy RID (SHA256, 16-char) for cross-cutover idempotency checks."""
     canonical = _canonical_json(claimant_uri, statement, claim_type, about_uri, metadata)
     h = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    return f"orn:koi-net.claim:{h}"
+
+
+def _claim_rid(claimant_uri: str, statement: str, claim_type: str,
+               about_uri: str | None, metadata: dict) -> str:
+    """Content-addressable RID: BLAKE2b hash of all content fields including about_uri."""
+    canonical = _canonical_json(claimant_uri, statement, claim_type, about_uri, metadata)
+    h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:32]
     return f"orn:koi-net.claim:{h}"
 
 
@@ -338,7 +347,7 @@ def _attestation_rid(claim_rid: str, reviewer_uri: str) -> str:
     """
     obj = {"claim_rid": claim_rid, "reviewer_uri": reviewer_uri}
     canonical = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
-    h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:16]
+    h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:32]
     return f"orn:koi-net.attestation:{h}"
 
 
@@ -426,6 +435,7 @@ def _row_to_claim(row, evidence=None, attestation_count=0, attestation_summary=N
         source_document=row.get("source_document"),
         ai_confidence=float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
         content_hash=row.get("content_hash"),
+        data_iri=row.get("data_iri"),
         ledger_iri=row.get("ledger_iri"),
         tx_hash=row.get("tx_hash"),
         supersedes_rid=row.get("supersedes_rid"),
@@ -523,12 +533,24 @@ def create_router(pool, caps=None):
                                    body.about_uri, body.metadata)
 
             # 3. Idempotency check (before transaction — read-only)
+            #    Also check the legacy SHA256-16 RID to prevent duplicates across
+            #    the hash cutover boundary (pre-existing dogfood claims).
             existing = await conn.fetchrow(
                 "SELECT * FROM claims WHERE claim_rid = $1", claim_rid
             )
             if existing:
                 logger.info(f"claim.idempotent_hit rid={claim_rid}")
                 return await _fetch_enriched_claim(conn, claim_rid)
+
+            legacy_rid = _legacy_claim_rid(body.claimant_uri, body.statement, body.claim_type,
+                                           body.about_uri, body.metadata)
+            if legacy_rid != claim_rid:
+                existing_legacy = await conn.fetchrow(
+                    "SELECT * FROM claims WHERE claim_rid = $1", legacy_rid
+                )
+                if existing_legacy:
+                    logger.info(f"claim.idempotent_hit_legacy rid={legacy_rid}")
+                    return await _fetch_enriched_claim(conn, legacy_rid)
 
             # All writes in a single transaction — no partial state on failure.
             # Catch UniqueViolationError for concurrent-request idempotency:
@@ -1486,27 +1508,28 @@ def create_router(pool, caps=None):
             # Compute and store content hash
             content_hash = compute_content_hash(row)
 
+            # Derive data_iri (non-fatal if regen binary not available)
+            data_iri = None
+            reason = None
+            try:
+                data_iri = derive_ledger_iri(content_hash)
+            except RuntimeError as e:
+                reason = str(e)
+            except Exception as e:
+                reason = f"IRI derivation failed: {e}"
+
             await conn.execute("""
-                UPDATE claims SET content_hash = $2, updated_at = NOW()
+                UPDATE claims SET content_hash = $2, data_iri = COALESCE($3, data_iri),
+                       updated_at = NOW()
                 WHERE claim_rid = $1
-            """, rid, content_hash)
+            """, rid, content_hash, data_iri)
 
-        # Derive predicted IRI via CLI (non-fatal if regen binary not available)
-        predicted_iri = None
-        reason = None
-        try:
-            predicted_iri = derive_ledger_iri(content_hash)
-        except RuntimeError as e:
-            reason = str(e)
-        except Exception as e:
-            reason = f"IRI derivation failed: {e}"
-
-        logger.info(f"claim.prepare_anchor rid={rid} hash={content_hash[:16]}... iri={predicted_iri}")
+        logger.info(f"claim.prepare_anchor rid={rid} hash={content_hash[:16]}... iri={data_iri}")
         return AnchorPrepareResponse(
             claim_rid=rid,
             content_hash=content_hash,
-            predicted_ledger_iri=predicted_iri,
-            ready_to_anchor=predicted_iri is not None,
+            predicted_ledger_iri=data_iri,
+            ready_to_anchor=data_iri is not None,
             reason=reason,
         )
 
@@ -1528,7 +1551,7 @@ def create_router(pool, caps=None):
         AnchorPendingResponse (202) if tx broadcast succeeded but on-chain
         verification is not yet available.
         """
-        from api.ledger_anchor import broadcast_anchor, compute_content_hash, verify_anchor_onchain
+        from api.ledger_anchor import broadcast_anchor, compute_content_hash, derive_ledger_iri, verify_anchor_onchain
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1550,10 +1573,22 @@ def create_router(pool, caps=None):
             content_hash = row.get("content_hash")
             if not content_hash:
                 content_hash = compute_content_hash(row)
+
+            # Ensure data_iri is populated (lazy backfill for pre-070 claims)
+            data_iri = row.get("data_iri")
+            if not data_iri:
+                try:
+                    data_iri = derive_ledger_iri(content_hash)
+                except Exception:
+                    data_iri = None
+
+            if not row.get("content_hash") or not row.get("data_iri"):
                 await conn.execute("""
-                    UPDATE claims SET content_hash = $2, updated_at = NOW()
+                    UPDATE claims SET content_hash = $2,
+                           data_iri = COALESCE($3, data_iri),
+                           updated_at = NOW()
                     WHERE claim_rid = $1
-                """, rid, content_hash)
+                """, rid, content_hash, data_iri)
 
         # Broadcast anchor via CLI (blocking — may take up to 30s for confirmation)
         result = await broadcast_anchor(rid, content_hash)
@@ -1648,7 +1683,7 @@ def create_router(pool, caps=None):
         For claims that have a tx_hash but haven't transitioned to ledger_anchored
         (e.g., broadcast timed out). Queries the tx on-chain and finalizes state.
         """
-        from api.ledger_anchor import query_tx_status, verify_anchor_onchain
+        from api.ledger_anchor import derive_ledger_iri, query_tx_status, verify_anchor_onchain
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1743,11 +1778,15 @@ def create_router(pool, caps=None):
                         detail=f"Claim state changed during reconcile (now: {row['verification']})",
                     )
 
+                # Backfill data_iri from ledger_iri if NULL
+                data_iri = row.get("data_iri") or ledger_iri
+
                 await conn.execute("""
                     UPDATE claims
-                    SET ledger_timestamp = $2, verification = 'ledger_anchored', updated_at = NOW()
+                    SET ledger_timestamp = $2, verification = 'ledger_anchored',
+                        data_iri = COALESCE(data_iri, $3), updated_at = NOW()
                     WHERE claim_rid = $1
-                """, rid, ledger_ts)
+                """, rid, ledger_ts, data_iri)
 
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
@@ -1948,6 +1987,7 @@ def create_router(pool, caps=None):
                 "ai_confidence": float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
                 "supersedes_rid": row.get("supersedes_rid"),
                 "metadata": meta or {},
+                "data_iri": row.get("data_iri"),
                 "operator_uri": row.get("operator_uri"),
                 "created_by": row.get("created_by"),
                 "created_at": row["created_at"].isoformat(),
@@ -1957,6 +1997,7 @@ def create_router(pool, caps=None):
             history=history,
             anchor={
                 "content_hash": row.get("content_hash"),
+                "data_iri": row.get("data_iri"),
                 "ledger_iri": row.get("ledger_iri"),
                 "tx_hash": row.get("tx_hash"),
                 "ledger_timestamp": row["ledger_timestamp"].isoformat() if row.get("ledger_timestamp") else None,
@@ -2012,7 +2053,7 @@ def create_router(pool, caps=None):
 
             # Verify reviewer exists and is an allowed type (Person or Organization)
             reviewer = await conn.fetchrow(
-                "SELECT fuseki_uri, entity_text, entity_type FROM entity_registry WHERE fuseki_uri = $1",
+                "SELECT fuseki_uri, entity_text, entity_type, wallet_address FROM entity_registry WHERE fuseki_uri = $1",
                 body.reviewer_uri,
             )
             if not reviewer:
@@ -2034,6 +2075,9 @@ def create_router(pool, caps=None):
                     status_code=409,
                     detail="Self-attestation not allowed: reviewer_uri cannot be the claimant",
                 )
+
+            # Resolve reviewer wallet for attestor_address
+            reviewer_wallet = reviewer.get("wallet_address") if reviewer else None
 
             # Compute content_hash before UPSERT
             from api.ledger_anchor import compute_attestation_hash
@@ -2061,23 +2105,25 @@ def create_router(pool, caps=None):
                                f"Anchored attestations are immutable. To revise, create a new claim version.",
                     )
 
-                # UPSERT attestation (includes content_hash)
+                # UPSERT attestation (includes content_hash + attestor_address from reviewer wallet)
                 row = await conn.fetchrow("""
                     INSERT INTO claim_attestations
                         (attestation_rid, claim_rid, reviewer_uri, verdict, rationale,
-                         evidence_uris, content_hash, metadata, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), NOW())
+                         evidence_uris, content_hash, attestor_address, metadata, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW(), NOW())
                     ON CONFLICT (claim_rid, reviewer_uri)
                     DO UPDATE SET verdict = EXCLUDED.verdict,
                                   rationale = EXCLUDED.rationale,
                                   evidence_uris = EXCLUDED.evidence_uris,
                                   content_hash = EXCLUDED.content_hash,
+                                  attestor_address = COALESCE(claim_attestations.attestor_address, EXCLUDED.attestor_address),
                                   metadata = EXCLUDED.metadata,
                                   updated_at = NOW()
                     RETURNING *
                 """,
                     att_rid, rid, body.reviewer_uri, body.verdict,
                     body.rationale, body.evidence_uris, content_hash,
+                    reviewer_wallet,
                     _json_dumps(body.metadata),
                 )
 
@@ -2233,11 +2279,23 @@ def create_router(pool, caps=None):
         ledger_iri = result.get("ledger_iri")
         tx_hash = result.get("tx_hash")
 
-        # Resolve signing address
-        try:
-            attestor_address = get_signing_address()
-        except Exception:
-            attestor_address = None
+        # 3-tier attestor_address resolution:
+        # 1. Existing attestor_address on the attestation (set at creation from reviewer wallet)
+        # 2. Current wallet_address from entity_registry (may have been registered after creation)
+        # 3. Service account fallback
+        attestor_address = att.get("attestor_address")
+        if not attestor_address:
+            async with pool.acquire() as conn:
+                reviewer_wallet = await conn.fetchval(
+                    "SELECT wallet_address FROM entity_registry WHERE fuseki_uri = $1",
+                    att["reviewer_uri"],
+                )
+            attestor_address = reviewer_wallet
+        if not attestor_address:
+            try:
+                attestor_address = get_signing_address()
+            except Exception:
+                attestor_address = None
 
         if result.get("ready_to_anchor"):
             # Full success — store anchor data

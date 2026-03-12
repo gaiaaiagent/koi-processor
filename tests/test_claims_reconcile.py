@@ -425,3 +425,38 @@ async def test_reconcile_response_model():
     d = m.model_dump()
     assert d["status"] == "anchored"
     assert d["ledger_timestamp"] == "2026-03-09"
+
+
+# ---------------------------------------------------------------------------
+# Issue #12 — data_iri backfill during reconcile
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_reconcile_backfills_data_iri(client, conn):
+    """Reconcile should populate data_iri from ledger_iri when data_iri is NULL."""
+    rid = await _setup_test_claim(
+        conn, verification="verified",
+        tx_hash="RECONCILE_DATA_IRI_TEST_HASH",
+        ledger_iri="regen:13toVgf5aZqSVSeJQv562xkXKmjBcNLLLLdata",
+    )
+
+    # Verify data_iri is NULL initially
+    row = await conn.fetchrow("SELECT data_iri FROM claims WHERE claim_rid = $1", rid)
+    assert row["data_iri"] is None
+
+    with patch("api.ledger_anchor.query_tx_status") as mock_tx:
+        mock_tx.return_value = {
+            "found": True,
+            "code": 0,
+            "timestamp": "2026-03-12T12:00:00Z",
+        }
+        with patch("api.ledger_anchor.verify_anchor_onchain", return_value=True):
+            resp = await client.post(f"/claims/{rid}/reconcile")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "anchored"
+
+    # Verify data_iri was backfilled from ledger_iri
+    row = await conn.fetchrow("SELECT data_iri FROM claims WHERE claim_rid = $1", rid)
+    assert row["data_iri"] == "regen:13toVgf5aZqSVSeJQv562xkXKmjBcNLLLLdata"

@@ -1412,6 +1412,7 @@ async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
             ledger_id TEXT,
             metadata_iri TEXT,
             admin_address TEXT,
+            wallet_address TEXT,
             aliases TEXT[],
             jurisdiction TEXT,
             class_id TEXT,
@@ -2038,7 +2039,7 @@ async def list_entities(
     async with db_pool.acquire() as conn:
         if entity_type:
             entities = await conn.fetch("""
-                SELECT fuseki_uri, entity_text, entity_type, source, created_at
+                SELECT fuseki_uri, entity_text, entity_type, source, wallet_address, created_at
                 FROM entity_registry
                 WHERE entity_type = $1 AND NOT node_private
                 ORDER BY created_at DESC
@@ -2046,7 +2047,7 @@ async def list_entities(
             """, entity_type, limit, offset)
         else:
             entities = await conn.fetch("""
-                SELECT fuseki_uri, entity_text, entity_type, source, created_at
+                SELECT fuseki_uri, entity_text, entity_type, source, wallet_address, created_at
                 FROM entity_registry
                 WHERE NOT node_private
                 ORDER BY created_at DESC
@@ -2088,7 +2089,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
         # Text search: ILIKE on normalized_text
         if entity_type:
             rows = await conn.fetch("""
-                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases,
+                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases, wallet_address,
                        CASE WHEN normalized_text = $1 THEN 1.0
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
@@ -2101,7 +2102,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
             """, normalized_query, f"%{normalized_query}%", entity_type, limit)
         else:
             rows = await conn.fetch("""
-                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases,
+                SELECT fuseki_uri, entity_text, entity_type, source, created_at, aliases, wallet_address,
                        CASE WHEN normalized_text = $1 THEN 1.0
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
@@ -2131,7 +2132,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
             uri = row["fuseki_uri"]
             entity_type = row["entity_type"]
             entity_name = row["entity_text"]
-            results.append({
+            result_entry = {
                 "fuseki_uri": uri,
                 "name": entity_name,
                 "entity_type": entity_type,
@@ -2139,7 +2140,10 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                 "aliases": list(row["aliases"] or []),
                 "relationship_count": rel_counts.get(uri, 0),
                 "quartz_url": quartz_url(entity_type, entity_name),
-            })
+            }
+            if row.get("wallet_address"):
+                result_entry["wallet_address"] = row["wallet_address"]
+            results.append(result_entry)
 
     return {"results": results, "count": len(results)}
 
@@ -2606,7 +2610,7 @@ async def get_entity(entity_uri: str):
     async with db_pool.acquire() as conn:
         entity = await conn.fetchrow("""
             SELECT fuseki_uri, entity_text, entity_type, normalized_text,
-                   source, first_seen_rid, metadata, created_at
+                   source, first_seen_rid, metadata, wallet_address, created_at
             FROM entity_registry
             WHERE fuseki_uri = $1 AND NOT node_private
         """, entity_uri)
@@ -2626,6 +2630,61 @@ async def get_entity(entity_uri: str):
             "entity": dict(entity),
             "documents": [dict(d) for d in docs]
         }
+
+
+class WalletUpdateRequest(BaseModel):
+    wallet_address: str = Field(..., description="Bech32 regen address (regen1...) or EVM hex (0x...)")
+
+
+def _validate_wallet_address(address: str) -> bool:
+    """Validate a wallet address (bech32 regen or EVM hex)."""
+    # EVM hex address
+    if re.match(r'^0x[0-9a-fA-F]{40}$', address):
+        return True
+    # Bech32 regen address
+    try:
+        import bech32
+        hrp, data = bech32.bech32_decode(address)
+        if hrp == "regen" and data is not None:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+@app.patch("/entities/{entity_uri:path}/wallet")
+async def update_entity_wallet(entity_uri: str, body: WalletUpdateRequest):
+    """Set or update the wallet address for an entity."""
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    if not _validate_wallet_address(body.wallet_address):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid wallet address: {body.wallet_address}. "
+                   f"Must be bech32 regen address (regen1...) or EVM hex (0x...)",
+        )
+
+    async with db_pool.acquire() as conn:
+        entity = await conn.fetchrow(
+            "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+            entity_uri,
+        )
+        if not entity:
+            raise HTTPException(status_code=404, detail=f"Entity not found: {entity_uri}")
+
+        try:
+            await conn.execute(
+                "UPDATE entity_registry SET wallet_address = $2, updated_at = NOW() WHERE fuseki_uri = $1",
+                entity_uri, body.wallet_address,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Wallet address already registered to another entity: {body.wallet_address}",
+            )
+
+    return {"entity_uri": entity_uri, "wallet_address": body.wallet_address}
 
 
 @app.get("/stats")
