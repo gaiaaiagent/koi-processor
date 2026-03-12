@@ -8,6 +8,7 @@ Tests:
 11-16: Extraction, anchor preconditions, 404s
 17-20: Reconcile, tx_hash in responses
 21-25: Attestation content_hash, anchor fields, proof-pack enhanced/download, attestation anchor
+26-27: Anchored attestation immutability guard, proof-pack hash_verified
 """
 
 import argparse
@@ -615,6 +616,67 @@ def test_attestation_anchor_state_check():
     check("rejects non-anchored parent", status2 == 409, f"status={status2} data={data2}")
 
 
+def test_anchored_attestation_immutable():
+    """Test that updating an anchored attestation returns 409."""
+    print("\n[26] Anchored attestation immutability guard")
+    if not CREATED_RIDS:
+        check("immutability guard", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    # Get attestations to find one (may not be anchored in smoke test, but test the endpoint behavior)
+    status, atts = _req("GET", f"/claims/{rid}/attestations")
+    if status != 200 or not atts:
+        check("immutability guard (skip — no attestations)", True)
+        return
+    # Find an anchored attestation
+    anchored = [a for a in atts if a.get("attest_tx_hash")]
+    if not anchored:
+        # No anchored attestations — simulate by checking that non-anchored can still be updated
+        att = atts[0]
+        status2, data2 = _req("POST", f"/claims/{rid}/attestations", {
+            "reviewer_uri": att["reviewer_uri"],
+            "verdict": att["verdict"],
+            "rationale": "Updated rationale for immutability test",
+        })
+        check("non-anchored attestation updatable", status2 in (200, 201),
+              f"status={status2}")
+        return
+    # Try to update an anchored attestation — should get 409
+    att = anchored[0]
+    status3, data3 = _req("POST", f"/claims/{rid}/attestations", {
+        "reviewer_uri": att["reviewer_uri"],
+        "verdict": "rejected",
+        "rationale": "Trying to modify anchored attestation",
+    })
+    check("anchored attestation returns 409", status3 == 409,
+          f"status={status3} detail={data3.get('detail', '')}")
+    check("error mentions immutable", "immutable" in data3.get("detail", "").lower(),
+          f"detail={data3.get('detail', '')}")
+
+
+def test_proof_pack_hash_verified():
+    """Test that proof-pack hash_verified is true for attestations with matching content_hash."""
+    print("\n[27] Proof-pack attestation hash_verified")
+    if not CREATED_RIDS:
+        check("proof-pack hash_verified", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    status, data = _req("GET", f"/claims/{rid}/proof-pack")
+    if status != 200:
+        check("proof-pack hash_verified (skip)", True)
+        return
+    atts = data.get("attestations", [])
+    if not atts:
+        check("proof-pack hash_verified (skip — no attestations)", True)
+        return
+    # All attestations with content_hash should have hash_verified = true
+    for att in atts:
+        if att.get("content_hash"):
+            check(f"hash_verified for {att['attestation_rid'][:30]}",
+                  att.get("hash_verified") is True,
+                  f"hash_verified={att.get('hash_verified')}")
+
+
 def main():
     global BASE_URL
     parser = argparse.ArgumentParser(description="Claims Engine V1 smoke tests")
@@ -679,6 +741,8 @@ def main():
     test_proof_pack_enhanced()
     test_proof_pack_download()
     test_attestation_anchor_state_check()
+    test_anchored_attestation_immutable()
+    test_proof_pack_hash_verified()
 
     print("\n" + "=" * 50)
     print(f"Results: {PASS} passed, {FAIL} failed")

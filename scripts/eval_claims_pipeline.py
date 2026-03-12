@@ -384,7 +384,7 @@ def main():
     print(f"  Claimant: {claimant_uri}")
 
     reviewer_uris = []
-    for name in ["Eval Reviewer Alpha", "Eval Reviewer Beta"]:
+    for name in ["Eval Reviewer Alpha", "Eval Pipeline Verifier"]:
         uri = _resolve_or_create_entity(name, "Person")
         if uri and uri not in reviewer_uris:
             reviewer_uris.append(uri)

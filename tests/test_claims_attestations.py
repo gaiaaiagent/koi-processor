@@ -465,6 +465,65 @@ async def test_reconcile_attestation_no_tx_hash(client, conn):
 
 
 @pytest.mark.anyio
+async def test_anchored_attestation_immutable(client, conn):
+    """Updating an anchored attestation should return 409."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Immut Rev", "urn:test:rev-immut")
+    rid = await _setup_test_claim(conn, claimant_uri)
+
+    # Create attestation
+    resp1 = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+        "rationale": "Initial review",
+    })
+    assert resp1.status_code == 201
+
+    # Simulate anchoring by setting attest_tx_hash directly
+    await conn.execute("""
+        UPDATE claim_attestations
+        SET attest_tx_hash = 'ABCDEF1234567890ABCDEF1234567890',
+            ledger_iri = 'regen:13toVgf5aZqSVSeJQv562xkXKmjBcN'
+        WHERE claim_rid = $1 AND reviewer_uri = $2
+    """, rid, reviewer_uri)
+
+    # Attempt to update — should be rejected
+    resp2 = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "rejected",
+        "rationale": "Trying to change anchored attestation",
+    })
+    assert resp2.status_code == 409
+    assert "immutable" in resp2.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_unanchored_attestation_updatable(client, conn):
+    """Unanchored attestation can still be updated via UPSERT."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Update Rev", "urn:test:rev-update")
+    rid = await _setup_test_claim(conn, claimant_uri)
+
+    resp1 = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "pending",
+        "rationale": "Initial",
+    })
+    assert resp1.status_code == 201
+    assert resp1.json()["verdict"] == "pending"
+
+    # Update without anchoring — should succeed
+    resp2 = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+        "rationale": "Now confirmed",
+    })
+    assert resp2.status_code == 201
+    assert resp2.json()["verdict"] == "approved"
+    assert resp2.json()["rationale"] == "Now confirmed"
+
+
+@pytest.mark.anyio
 async def test_attestation_response_includes_anchor_fields(client, conn):
     """AttestationResponse should include ledger_iri, attest_timestamp, attestor_address."""
     claimant_uri = await _setup_test_claimant(conn)

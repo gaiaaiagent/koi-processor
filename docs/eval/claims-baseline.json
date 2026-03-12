@@ -1,0 +1,242 @@
+{
+  "eval_version": "claims-v1",
+  "timestamp": "2026-03-12T01:31:45.276004+00:00",
+  "api_url": "http://localhost:8351",
+  "chain_id": "unknown",
+  "is_testnet": false,
+  "run_count": 3,
+  "skip_anchor": true,
+  "aggregates": {
+    "total_steps": 8,
+    "success_rate": 100.0,
+    "total_latency_s": 1.479,
+    "anchor_latency_s": 0,
+    "by_step": {
+      "create_claim": {
+        "avg_latency_s": 0.0042,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "attestation_1": {
+        "avg_latency_s": 0.0035,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "verify_peer_reviewed": {
+        "avg_latency_s": 0.0034,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "attestation_2": {
+        "avg_latency_s": 0.0026,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "verify_verified": {
+        "avg_latency_s": 0.0038,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "prepare_anchor": {
+        "avg_latency_s": 0.4755,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "anchor": {
+        "avg_latency_s": 0,
+        "success_rate": 100.0,
+        "count": 3
+      },
+      "proof_pack": {
+        "avg_latency_s": 0,
+        "success_rate": 100.0,
+        "count": 3
+      }
+    }
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "steps": [
+        {
+          "step": "create_claim",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0038,
+          "error": null
+        },
+        {
+          "step": "attestation_1",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0034,
+          "error": null
+        },
+        {
+          "step": "verify_peer_reviewed",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.0024,
+          "error": null
+        },
+        {
+          "step": "attestation_2",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.002,
+          "error": null
+        },
+        {
+          "step": "verify_verified",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.0062,
+          "error": null
+        },
+        {
+          "step": "prepare_anchor",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.7082,
+          "error": null
+        },
+        {
+          "step": "anchor",
+          "success": true,
+          "status": 0,
+          "latency_s": 0,
+          "error": null
+        },
+        {
+          "step": "proof_pack",
+          "success": true,
+          "status": 0,
+          "latency_s": 0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run_id": 2,
+      "steps": [
+        {
+          "step": "create_claim",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.004,
+          "error": null
+        },
+        {
+          "step": "attestation_1",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0035,
+          "error": null
+        },
+        {
+          "step": "verify_peer_reviewed",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.0037,
+          "error": null
+        },
+        {
+          "step": "attestation_2",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0024,
+          "error": null
+        },
+        {
+          "step": "verify_verified",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.0025,
+          "error": null
+        },
+        {
+          "step": "prepare_anchor",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.3632,
+          "error": null
+        },
+        {
+          "step": "anchor",
+          "success": true,
+          "status": 0,
+          "latency_s": 0,
+          "error": null
+        },
+        {
+          "step": "proof_pack",
+          "success": true,
+          "status": 0,
+          "latency_s": 0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run_id": 3,
+      "steps": [
+        {
+          "step": "create_claim",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0047,
+          "error": null
+        },
+        {
+          "step": "attestation_1",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0035,
+          "error": null
+        },
+        {
+          "step": "verify_peer_reviewed",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.0041,
+          "error": null
+        },
+        {
+          "step": "attestation_2",
+          "success": true,
+          "status": 201,
+          "latency_s": 0.0034,
+          "error": null
+        },
+        {
+          "step": "verify_verified",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.0027,
+          "error": null
+        },
+        {
+          "step": "prepare_anchor",
+          "success": true,
+          "status": 200,
+          "latency_s": 0.355,
+          "error": null
+        },
+        {
+          "step": "anchor",
+          "success": true,
+          "status": 0,
+          "latency_s": 0,
+          "error": null
+        },
+        {
+          "step": "proof_pack",
+          "success": true,
+          "status": 0,
+          "latency_s": 0,
+          "error": null
+        }
+      ]
+    }
+  ]
+}
