@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # create-invite.sh — Admin generates an invite token for a new peer
 #
-# Usage: ./create-invite.sh [--dry-run] [--ttl <hours>] [--vault-sync-folder <folder>] [--relay-ssh <user@host>] <peer-name> <peer-number>
-# Example: ./create-invite.sh --vault-sync-folder Shared shawn-personal 3
+# Usage: ./create-invite.sh [--dry-run] [--ttl <hours>] [--vault-sync-folder <folder>] [--relay-ssh <user@host>] <peer-name> [peer-number]
+# Example: ./create-invite.sh --vault-sync-folder Shared shawn-personal
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,12 +19,13 @@ RELAY_SSH="${RELAY_SSH:-poly@37.27.48.12}"
 usage() {
     cat <<USAGE
 Usage:
-  $0 [--dry-run] [--ttl <hours>] [--vault-sync-folder <folder>] [--relay-ssh <user@host>] <peer-name> <peer-number>
+  $0 [--dry-run] [--ttl <hours>] [--vault-sync-folder <folder>] [--relay-ssh <user@host>] <peer-name> [peer-number]
 
 Examples:
+  $0 shawn-personal
   $0 shawn-personal 3
-  $0 --ttl 48 --vault-sync-folder Shared shawn-personal 3
-  $0 --dry-run shawn-personal 3
+  $0 --ttl 48 --vault-sync-folder Shared shawn-personal
+  $0 --dry-run shawn-personal
 USAGE
 }
 
@@ -59,26 +60,70 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ $# -lt 2 ]]; then
+if [[ $# -lt 1 || $# -gt 2 ]]; then
     usage
     exit 1
 fi
 
 PEER_NAME="$1"
-PEER_NUMBER="$2"
+PEER_NUMBER="${2:-}"
 
 # ============================================
 # VALIDATE
 # ============================================
 
 validate_peer_name "$PEER_NAME"
-validate_peer_number "$PEER_NUMBER"
 validate_ssh_target "$RELAY_SSH"
+
+peer_registry_init
+
+if [[ -z "$PEER_NUMBER" ]]; then
+    log_info "No peer number provided; auto-selecting next available number..."
+    PEER_NUMBER=$(python3 -c "
+import json
+from pathlib import Path
+
+registry_path = Path('$PEER_REGISTRY')
+live_status = {'active', 'invited', 'approving'}
+used = set()
+
+if registry_path.exists():
+    try:
+        registry = json.loads(registry_path.read_text())
+    except Exception:
+        registry = []
+else:
+    registry = []
+
+for p in registry:
+    if p.get('status') not in live_status:
+        continue
+    n = p.get('peer_number')
+    try:
+        used.add(int(n))
+    except (TypeError, ValueError):
+        pass
+
+for candidate in range(3, 255):
+    if candidate not in used:
+        print(candidate)
+        break
+" 2>/dev/null || true)
+
+    if [[ -z "$PEER_NUMBER" ]]; then
+        log_fatal "No available peer numbers in range 3-254"
+    fi
+    log_info "Auto-selected peer number: $PEER_NUMBER (10.100.0.$PEER_NUMBER)"
+else
+    validate_peer_number "$PEER_NUMBER"
+    log_info "Using explicit peer number: $PEER_NUMBER (10.100.0.$PEER_NUMBER)"
+fi
+
+validate_peer_number "$PEER_NUMBER"
 
 PEER_IP="10.100.0.${PEER_NUMBER}"
 
 # Check peer_name not already in a live state
-peer_registry_init
 EXISTING=$(python3 -c "
 import json, sys
 reg = json.load(open('$PEER_REGISTRY'))
@@ -166,9 +211,12 @@ ADMIN_WG_IP="${ADMIN_WG_IP:-10.100.0.2}"
 ADMIN_BASE_URL="http://${ADMIN_WG_IP}:8351"
 
 if ! $DRY_RUN; then
-    # Verify admin API is reachable (on localhost — we are the admin)
-    curl -sf "http://127.0.0.1:8351/koi-net/health" >/dev/null 2>&1 || \
-        log_fatal "Cannot reach local KOI-net API at http://127.0.0.1:8351/koi-net/health"
+    # Best-effort check: token generation itself does not require local API uptime.
+    # Onboarding will still require admin API to be up at handshake time.
+    if ! curl -sf "http://127.0.0.1:8351/koi-net/health" >/dev/null 2>&1; then
+        log_warn "Local KOI-net API is not reachable at http://127.0.0.1:8351/koi-net/health"
+        log_warn "Proceeding with invite creation anyway. Ensure admin API is running before peer handshake."
+    fi
 fi
 
 # ============================================
