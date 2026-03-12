@@ -140,6 +140,8 @@ def create_router(pool, caps=None):
     """Return an APIRouter for commitment pooling endpoints."""
     router = APIRouter(prefix="/commitments", tags=["commitments"])
 
+    from api.federation_events import emit_domain_event
+
     # ------------------------------------------------------------------ #
     # Commitment CRUD                                                       #
     # ------------------------------------------------------------------ #
@@ -199,6 +201,19 @@ def create_router(pool, caps=None):
                 logger.warning(f"Failed to create pledges_commitment relationship: {e}")
 
         logger.info(f"commitment.create rid={rid} pledger={body.pledger_uri}")
+        await emit_domain_event("commitment", "NEW", rid, {
+            "commitment_rid": rid, "pledger_uri": body.pledger_uri,
+            "title": body.title, "description": body.description,
+            "offer_type": body.offer_type, "quantity": float(body.quantity) if body.quantity else None,
+            "unit": body.unit,
+            "validity_start": body.validity_start.isoformat() if body.validity_start else None,
+            "validity_end": body.validity_end.isoformat() if body.validity_end else None,
+            "state": "PROPOSED", "metadata": body.metadata or {},
+            "created_by": body.created_by,
+            "state_transition": {"from_state": None, "to_state": "PROPOSED",
+                                 "actor": body.created_by, "reason": "created",
+                                 "created_at": datetime.now(timezone.utc).isoformat()},
+        })
         return _row_to_commitment(row)
 
     @router.get("/", response_model=List[CommitmentResponse])
@@ -287,6 +302,12 @@ def create_router(pool, caps=None):
             """, rid, current_state, new_state, body.actor, body.reason)
 
         logger.info(f"commitment.state_transition rid={rid} {current_state}→{new_state} actor={body.actor}")
+        await emit_domain_event("commitment", "UPDATE", rid, {
+            "commitment_rid": rid, "state": new_state,
+            "state_transition": {"from_state": current_state, "to_state": new_state,
+                                 "actor": body.actor, "reason": body.reason,
+                                 "created_at": datetime.now(timezone.utc).isoformat()},
+        })
         return _row_to_commitment(updated)
 
     @router.post("/{rid}/link-evidence", response_model=CommitmentResponse)
@@ -337,6 +358,13 @@ def create_router(pool, caps=None):
                 logger.warning(f"Failed to create proves_commitment relationship: {e}")
 
         logger.info(f"commitment.link_evidence rid={rid} evidence={body.evidence_uri}")
+        await emit_domain_event("commitment", "UPDATE", rid, {
+            "commitment_rid": rid, "state": "EVIDENCE_LINKED",
+            "evidence_uri": body.evidence_uri,
+            "state_transition": {"from_state": row["state"], "to_state": "EVIDENCE_LINKED",
+                                 "actor": body.actor, "reason": "evidence linked",
+                                 "created_at": datetime.now(timezone.utc).isoformat()},
+        })
         return _row_to_commitment(updated)
 
     return router
@@ -349,6 +377,8 @@ def create_router(pool, caps=None):
 def create_pool_router(pool, caps=None):
     """Return an APIRouter for CommitmentPool endpoints."""
     router = APIRouter(prefix="/pools", tags=["commitment-pools"])
+
+    from api.federation_events import emit_domain_event
 
     @router.post("/create", response_model=PoolResponse, status_code=201)
     async def create_pool(body: PoolCreateRequest):
@@ -386,6 +416,15 @@ def create_pool_router(pool, caps=None):
                     logger.warning(f"Failed to create governs_pool relationship: {e}")
 
         logger.info(f"pool.create rid={rid} name={body.name}")
+        await emit_domain_event("commitment_pool", "NEW", rid, {
+            "pool_rid": rid, "name": body.name, "description": body.description,
+            "steward_uri": body.steward_uri, "bioregion_uri": body.bioregion_uri,
+            "activation_threshold_pct": float(body.activation_threshold_pct) if body.activation_threshold_pct else None,
+            "activation_threshold_count": body.activation_threshold_count,
+            "demurrage_rate_monthly": float(body.demurrage_rate_monthly) if body.demurrage_rate_monthly else None,
+            "state": "forming", "metadata": body.metadata or {},
+            "created_by": body.created_by,
+        })
         return _row_to_pool(row)
 
     @router.get("/{rid}", response_model=PoolResponse)
