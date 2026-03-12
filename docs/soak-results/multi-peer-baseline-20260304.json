@@ -1,0 +1,64 @@
+{
+  "baseline_captured_at": "2026-03-04T10:30:00Z",
+  "runtime_shas": {
+    "regen_prod": "93672a8c",
+    "server_stable": "a0470bb7"
+  },
+  "migration": "060_multi_peer_sync.sql",
+  "local": {
+    "node": "darren-personal",
+    "peer_count": 1,
+    "peers": ["nuc-personal"],
+    "files_tracked": 1,
+    "tombstones": 1,
+    "pending_events": 0,
+    "reconcile_drift": 0,
+    "rejected": {
+      "path_traversal": 0,
+      "oversize": 0,
+      "missing_fields": 0,
+      "invalid_type": 0,
+      "integrity_mismatch": 0,
+      "stale_event": 0,
+      "unauthorized_source": 0
+    },
+    "metrics": {
+      "scans_completed": 4066,
+      "events_queued": 38,
+      "events_applied": 9,
+      "events_skipped_dedup": 0,
+      "conflicts_created": 2,
+      "watcher_enabled": true
+    }
+  },
+  "nuc": {
+    "node": "nuc-personal",
+    "peer_count": 1,
+    "peers": ["darren-personal"],
+    "files_tracked": 1,
+    "tombstones": 28,
+    "pending_events": 0,
+    "reconcile_drift": 0,
+    "rejected": {
+      "path_traversal": 0,
+      "oversize": 0,
+      "missing_fields": 0,
+      "invalid_type": 0,
+      "integrity_mismatch": 0,
+      "stale_event": 1,
+      "unauthorized_source": 0
+    },
+    "metrics": {
+      "scans_completed": 8619,
+      "events_queued": 9,
+      "events_applied": 35,
+      "events_skipped_dedup": 0,
+      "conflicts_created": 2,
+      "watcher_enabled": true
+    }
+  },
+  "regression_test": {
+    "create_sync_local_to_nuc": "pass",
+    "delete_sync_local_to_nuc": "pass"
+  }
+}
