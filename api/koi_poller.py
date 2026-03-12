@@ -257,7 +257,7 @@ class KOIPoller:
                     self._backoff,
                     self._next_poll_retry_at,
                     "POLL",
-                    f"Poll failed for {source_node}: {e}",
+                    f"Poll failed for {source_node}: {type(e).__name__}: {e!r}",
                 )
 
     async def _push_webhook_peers(self):
