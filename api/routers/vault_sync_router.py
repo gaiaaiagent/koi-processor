@@ -1,138 +1,188 @@
-"""Vault sync management endpoints (trigger, status, pause, resume).
+"""Vault sync management endpoints.
 
-Wraps the VaultSyncManager from api/vault_sync.py to provide REST control
-over bidirectional markdown sync between KOI-net peers.
-Only included when caps.vault_sync is True.
+Provides REST control over bidirectional markdown sync between KOI-net peers.
+Mounted at /koi-net/vault-sync when caps.vault_sync is True.
 
-Note: mounted at /koi-net/vault-sync to group with other KOI-net endpoints.
+Endpoints:
+    GET  /status     — Dashboard info (metrics, config, rejected events)
+    POST /trigger    — Force immediate sync cycle
+    POST /configure  — Configure vault sync for a peer
+    POST /reconcile  — Detect or repair drift between DB and filesystem
+    POST /pause      — Pause the sync polling loop
+    POST /resume     — Resume the sync polling loop
 """
 
-from typing import Any, Dict, Optional
+import logging
+import os
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
+from api.auth import enforce_local_admin
 
-# -- Response models ---------------------------------------------------------
+logger = logging.getLogger(__name__)
 
-class VaultSyncStatusResponse(BaseModel):
-    """Current vault sync manager status and metrics."""
-    running: bool = False
-    paused: bool = False
-    scan_interval_s: int = 60
-    files_scanned: int = 0
-    events_queued: int = 0
-    events_applied: int = 0
-    conflicts_created: int = 0
-    scans_completed: int = 0
-    watcher_enabled: bool = False
-    last_error: Optional[str] = None
-
-
-class VaultSyncTriggerResponse(BaseModel):
-    """Result of manually triggering a vault sync."""
-    status: str  # "triggered", "already_running", "paused", "error"
-    message: str = ""
-    events_queued: int = 0
-
-
-# -- Router factory ----------------------------------------------------------
-
-# Reference to the VaultSyncManager instance, set by the startup profile.
+# Reference to the VaultSyncManager instance, set by setup_koi_net().
 _vault_sync_manager = None
 
 
 def set_vault_sync_manager(manager):
-    """Called by the startup profile to inject the VaultSyncManager instance."""
+    """Called by setup_koi_net() to inject the VaultSyncManager instance."""
     global _vault_sync_manager
     _vault_sync_manager = manager
+
+
+def _bool_env_raw(name: str, default: bool = False) -> bool:
+    """Check env var as bool (standalone, no side effects)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _unavailable(msg: str = "Vault sync is not enabled") -> JSONResponse:
+    return JSONResponse(status_code=400, content={"error": msg})
 
 
 def create_router(pool, caps):
     """Return an APIRouter for vault sync endpoints.
 
-    Only included when caps.vault_sync is True.  Mounted at
+    Only included when caps.vault_sync is True. Mounted at
     /koi-net/vault-sync by the app wiring layer.
-
-    Parameters
-    ----------
-    pool : asyncpg.Pool
-        Database connection pool.
-    caps : Capabilities
-        Runtime capabilities (vault_sync flag).
     """
     router = APIRouter(prefix="/koi-net/vault-sync", tags=["vault-sync"])
 
-    @router.get("/status", response_model=VaultSyncStatusResponse)
-    async def vault_sync_status():
-        """Return vault sync manager status and metrics.
+    @router.get("/status")
+    async def vault_sync_status(request: Request):
+        """Get vault sync dashboard info."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
 
-        Includes scan counts, event counts, conflict counts, and whether
-        the file watcher is active.
-        """
         if _vault_sync_manager is None:
-            return VaultSyncStatusResponse(running=False)
+            return JSONResponse(content={"enabled": False, "reason": "VAULT_SYNC_ENABLED not set"})
 
-        metrics = _vault_sync_manager.metrics
-        return VaultSyncStatusResponse(
-            running=True,
-            paused=getattr(_vault_sync_manager, "_paused", False),
-            scan_interval_s=getattr(
-                _vault_sync_manager, "scan_interval", 60
-            ),
-            files_scanned=metrics.files_scanned,
-            events_queued=metrics.events_queued,
-            events_applied=metrics.events_applied,
-            conflicts_created=metrics.conflicts_created,
-            scans_completed=metrics.scans_completed,
-            watcher_enabled=metrics.watcher_enabled,
-        )
+        status = await _vault_sync_manager.get_status()
+        return JSONResponse(content=status)
 
-    @router.post("/trigger", response_model=VaultSyncTriggerResponse)
-    async def vault_sync_trigger():
-        """Manually trigger an immediate vault sync scan.
+    @router.post("/trigger")
+    async def vault_sync_trigger(request: Request):
+        """Force an immediate sync cycle."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
 
-        Calls VaultSyncManager.trigger_sync() to run a scan outside the
-        normal polling interval.
-        """
         if _vault_sync_manager is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Vault sync manager not initialized",
-            )
+            return _unavailable()
 
         result = await _vault_sync_manager.trigger_sync()
-        return VaultSyncTriggerResponse(
-            status=result.get("status", "triggered"),
-            message=result.get("message", ""),
-            events_queued=result.get("events_queued", 0),
-        )
+        return JSONResponse(content=result)
+
+    @router.post("/configure")
+    async def vault_sync_configure(request: Request):
+        """Configure vault sync for a peer."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
+
+        if _vault_sync_manager is None:
+            return _unavailable("Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)")
+
+        body = await request.json()
+        peer = body.get("peer")
+        shared_folder = body.get("shared_folder", "Shared")
+        enabled = body.get("enabled", True)
+
+        if not peer:
+            return JSONResponse(status_code=400, content={"error": "peer is required"})
+
+        result = await _vault_sync_manager.configure(peer, shared_folder, enabled)
+        if "error" in result:
+            return JSONResponse(status_code=404, content=result)
+        return JSONResponse(content=result)
+
+    @router.delete("/peers/{peer_name}")
+    async def vault_sync_remove_peer(request: Request, peer_name: str):
+        """Disable/remove a vault sync peer."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
+
+        if _vault_sync_manager is None:
+            return _unavailable("Vault sync is not enabled (set VAULT_SYNC_ENABLED=true)")
+
+        result = await _vault_sync_manager.unconfigure(peer_name)
+        if "error" in result:
+            return JSONResponse(status_code=404, content=result)
+        return JSONResponse(content=result)
+
+    @router.post("/reconcile")
+    async def vault_sync_reconcile(request: Request):
+        """Run reconciliation: detect or repair drift between DB and filesystem."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
+
+        if _vault_sync_manager is None:
+            return _unavailable()
+
+        body = await request.json()
+        mode = body.get("mode", "detect")
+
+        if mode == "repair":
+            if not _bool_env_raw("VAULT_SYNC_REPAIR_ENABLED", False):
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "repair mode disabled"},
+                )
+
+        if mode not in ("detect", "repair"):
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"invalid mode: {mode}. Use 'detect' or 'repair'."},
+            )
+
+        try:
+            from api.vault_sync import VaultUnavailableError
+            result = await _vault_sync_manager.reconcile(
+                mode=mode,
+                confirm=body.get("confirm", False),
+                paths=body.get("paths"),
+                max_actions=body.get("max_actions", 50),
+                peer_rid=body.get("peer"),
+            )
+        except Exception as e:
+            if type(e).__name__ == "VaultUnavailableError":
+                return JSONResponse(status_code=503, content={"error": str(e)})
+            raise
+
+        return JSONResponse(content=result)
 
     @router.post("/pause")
-    async def vault_sync_pause():
-        """Pause the vault sync polling loop.
+    async def vault_sync_pause(request: Request):
+        """Pause the vault sync polling loop."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
 
-        The manager stays initialized but stops scanning until resumed.
-        """
         if _vault_sync_manager is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Vault sync manager not initialized",
-            )
+            return _unavailable()
 
         _vault_sync_manager._paused = True
-        return {"status": "paused"}
+        return JSONResponse(content={"status": "paused"})
 
     @router.post("/resume")
-    async def vault_sync_resume():
+    async def vault_sync_resume(request: Request):
         """Resume the vault sync polling loop after a pause."""
+        err = enforce_local_admin(request)
+        if err:
+            return err
+
         if _vault_sync_manager is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Vault sync manager not initialized",
-            )
+            return _unavailable()
 
         _vault_sync_manager._paused = False
-        return {"status": "resumed"}
+        return JSONResponse(content={"status": "resumed"})
 
     return router

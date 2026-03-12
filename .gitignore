@@ -105,3 +105,6 @@ data/mediawiki_parsed/
 # Claude Code auto-generated context files (keep root CLAUDE.md only)
 **/CLAUDE.md
 !/CLAUDE.md
+
+# Soak test runtime data
+docs/soak-results/
