@@ -92,7 +92,10 @@ async def _apply_entity(conn, rid: str, event_type: str, payload: Dict[str, Any]
         conf = rel.get("confidence", 1.0)
         src = rel.get("source", "federation")
         if subj and pred and obj:
+            # Use a savepoint so FK violations don't abort the outer transaction
+            # (asyncpg puts the PG transaction in error state on any failed SQL)
             try:
+                await conn.execute("SAVEPOINT rel_insert")
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, confidence, source)
                     VALUES ($1, $2, $3, $4, $5)
@@ -101,7 +104,9 @@ async def _apply_entity(conn, rid: str, event_type: str, payload: Dict[str, Any]
                         source = EXCLUDED.source,
                         updated_at = NOW()
                 """, subj, pred, obj, conf, src)
+                await conn.execute("RELEASE SAVEPOINT rel_insert")
             except Exception as e:
+                await conn.execute("ROLLBACK TO SAVEPOINT rel_insert")
                 # FK violations are expected if related entities haven't arrived yet
                 logger.debug(f"domain.entity.rel_skip pred={pred} err={e}")
 
@@ -362,15 +367,27 @@ async def _append_state_log(
 
     if table == "commitment_state_log":
         # commitment_state_log uses commitment_state enum for from_state/to_state
-        await conn.execute(f"""
-            INSERT INTO {table} ({rid_col}, from_state, to_state, actor, reason, metadata)
-            VALUES ($1, $2::commitment_state, $3::commitment_state, $4, $5, $6::jsonb)
-        """, rid_val, from_state, to_state, actor, reason, meta_json)
+        if ts:
+            await conn.execute(f"""
+                INSERT INTO {table} ({rid_col}, from_state, to_state, actor, reason, metadata, created_at)
+                VALUES ($1, $2::commitment_state, $3::commitment_state, $4, $5, $6::jsonb, $7)
+            """, rid_val, from_state, to_state, actor, reason, meta_json, ts)
+        else:
+            await conn.execute(f"""
+                INSERT INTO {table} ({rid_col}, from_state, to_state, actor, reason, metadata)
+                VALUES ($1, $2::commitment_state, $3::commitment_state, $4, $5, $6::jsonb)
+            """, rid_val, from_state, to_state, actor, reason, meta_json)
     else:
-        await conn.execute(f"""
-            INSERT INTO {table} ({rid_col}, from_state, to_state, actor, reason, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-        """, rid_val, from_state, to_state, actor, reason, meta_json)
+        if ts:
+            await conn.execute(f"""
+                INSERT INTO {table} ({rid_col}, from_state, to_state, actor, reason, metadata, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+            """, rid_val, from_state, to_state, actor, reason, meta_json, ts)
+        else:
+            await conn.execute(f"""
+                INSERT INTO {table} ({rid_col}, from_state, to_state, actor, reason, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            """, rid_val, from_state, to_state, actor, reason, meta_json)
 
 
 def _parse_ts(val) -> Optional[datetime]:
