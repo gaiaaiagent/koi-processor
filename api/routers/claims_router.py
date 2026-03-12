@@ -17,6 +17,7 @@ Implements the Claims Engine API:
   GET  /claims/{rid}/attestations/{att_rid} — get single attestation
   POST /claims/{rid}/attestations/{att_rid}/anchor — anchor attestation on Regen Ledger
   POST /claims/{rid}/attestations/{att_rid}/reconcile — check on-chain status of attestation anchor
+  POST /claims/claim-from-settlement — settlement→evidence→claim with threshold auto-advance
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
@@ -184,6 +185,29 @@ class EvidenceFromSettlementResponse(BaseModel):
     settlement_summary: Dict[str, Any]
 
 
+class ClaimFromSettlementRequest(BaseModel):
+    """Create a claim backed by settlement evidence, with threshold-based auto-advance."""
+    settlement: EvidenceFromSettlementRequest = Field(..., description="Settlement data (forwarded to evidence-from-settlement)")
+    claimant_uri: str = Field(..., description="entity_registry.fuseki_uri of the claimant")
+    about_uri: Optional[str] = Field(None, description="Entity URI the claim is about (Location, Org, Project, etc.)")
+    statement: str = Field(..., min_length=10, max_length=5000, description="Plain-language impact assertion")
+    claim_type: str = Field("financial", description="ecological | social | financial | governance")
+    operator_uri: Optional[str] = Field(None, description="entity_registry.fuseki_uri of the operator")
+    reviewer_uri: Optional[str] = Field(None, description="Reviewer for system attestation (required for auto-advance)")
+    manual_override: bool = Field(False, description="Force self_reported regardless of threshold band")
+
+
+class ClaimFromSettlementResponse(BaseModel):
+    evidence_uri: str
+    claim_rid: str
+    verification: str
+    threshold_band: str  # "auto" | "semi" | "manual"
+    auto_advanced: bool
+    auto_advance_reason: Optional[str] = None
+    receipt_id: Optional[str] = None
+    settlement_summary: Dict[str, Any]
+
+
 class AttestationCreateRequest(BaseModel):
     reviewer_uri: str
     verdict: str = "pending"  # pending|approved|rejected|needs_info
@@ -257,6 +281,15 @@ _ABOUT_ALLOWED_TYPES = {
     "practice", "pattern", "casestudy", "concept", "project",
     "bioregion", "location", "organization", "person",
 }
+
+# ---------------------------------------------------------------------------
+# TBFF threshold policy bands (settlement evidence path only)
+# ---------------------------------------------------------------------------
+# Below AUTO_ADVANCE_CEILING:     auto-advance to verified (2 system attestations)
+# AUTO_ADVANCE_CEILING..MANUAL:   auto-advance to peer_reviewed (1 attestation; 1 more needed)
+# Above MANUAL_FLOOR:             stays self_reported (full attestation chain)
+TBFF_AUTO_ADVANCE_CEILING_USD = 500.0
+TBFF_MANUAL_FLOOR_USD = 5000.0
 
 _TRANSITION_PRECONDITIONS = {
     "ledger_anchored": lambda row: (
@@ -642,6 +675,146 @@ def create_router(pool, caps=None):
                 count, summary = att_map.get(r["claim_rid"], [0, {}])
                 results.append(_row_to_claim(r, attestation_count=count, attestation_summary=summary or None))
             return results
+
+    # ------------------------------------------------------------------ #
+    # Claim from settlement with threshold policy (3A)                     #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/claim-from-settlement", response_model=ClaimFromSettlementResponse, status_code=201)
+    async def claim_from_settlement(body: ClaimFromSettlementRequest):
+        """Create Evidence from settlement, then create a claim with threshold-based auto-advance.
+
+        Threshold bands (total_redistributed_usd):
+          < $500    → "auto"  — auto-advance to verified (2 system attestations)
+          $500–$5k  → "semi"  — auto-advance to peer_reviewed (1 system attestation)
+          > $5k     → "manual" — stays self_reported (full attestation chain required)
+
+        manual_override=true forces self_reported regardless of amount.
+        """
+        # 1. Determine threshold band
+        amount = body.settlement.total_redistributed_usd
+        if body.manual_override:
+            band = "manual"
+        elif amount < TBFF_AUTO_ADVANCE_CEILING_USD:
+            band = "auto"
+        elif amount < TBFF_MANUAL_FLOOR_USD:
+            band = "semi"
+        else:
+            band = "manual"
+
+        # 2. Create Evidence via existing endpoint logic
+        ev_response = await evidence_from_settlement(body.settlement)
+
+        # 3. Create claim
+        claim_body = ClaimCreateRequest(
+            claimant_uri=body.claimant_uri,
+            statement=body.statement,
+            claim_type=body.claim_type,
+            about_uri=body.about_uri,
+            operator_uri=body.operator_uri,
+            metadata={
+                "settlement_id": body.settlement.settlement_id,
+                "total_redistributed_usd": amount,
+                "threshold_band": band,
+                "tbff_policy_version": "0.1",
+            },
+        )
+        claim_response = await create_claim(claim_body)
+
+        # 4. Link evidence to claim
+        link_body = EvidenceLinkRequest(
+            evidence_uri=ev_response.evidence_uri,
+            actor="tbff-threshold-policy",
+        )
+        await link_evidence(claim_response.claim_rid, link_body)
+
+        # 5. Auto-advance based on band (requires reviewer_uri for attestation)
+        auto_advanced = False
+        auto_advance_reason = None
+        final_verification = "self_reported"
+
+        if band in ("auto", "semi") and body.reviewer_uri:
+            async with pool.acquire() as conn:
+                # Verify reviewer exists and is not the claimant
+                reviewer = await conn.fetchrow(
+                    "SELECT fuseki_uri, entity_type FROM entity_registry WHERE fuseki_uri = $1",
+                    body.reviewer_uri,
+                )
+                if not reviewer:
+                    auto_advance_reason = f"Reviewer not found: {body.reviewer_uri}"
+                elif reviewer["entity_type"].lower() not in ("person", "organization"):
+                    auto_advance_reason = f"Reviewer type '{reviewer['entity_type']}' not valid for attestation"
+                elif body.reviewer_uri == body.claimant_uri:
+                    auto_advance_reason = "Reviewer cannot be the claimant (self-attestation)"
+                else:
+                    try:
+                        # Create first system attestation
+                        att1_body = AttestationCreateRequest(
+                            reviewer_uri=body.reviewer_uri,
+                            verdict="approved",
+                            rationale=f"TBFF threshold policy auto-approve: ${amount:,.2f} in '{band}' band",
+                            evidence_uris=[ev_response.evidence_uri],
+                            metadata={"policy": "tbff-threshold-v0.1", "band": band, "auto": True},
+                        )
+                        await create_attestation(claim_response.claim_rid, att1_body)
+
+                        # Advance to peer_reviewed
+                        verify_body = VerifyRequest(
+                            new_level="peer_reviewed",
+                            actor="tbff-threshold-policy",
+                            reason=f"Auto-advance: ${amount:,.2f} below ${TBFF_MANUAL_FLOOR_USD:,.0f} threshold",
+                        )
+                        await verify_claim(claim_response.claim_rid, verify_body)
+                        final_verification = "peer_reviewed"
+                        auto_advanced = True
+
+                        if band == "auto":
+                            # For auto band, need 2 attestations for verified.
+                            # Use operator_uri as second reviewer if available and different.
+                            second_reviewer = body.operator_uri
+                            if second_reviewer and second_reviewer != body.reviewer_uri and second_reviewer != body.claimant_uri:
+                                att2_body = AttestationCreateRequest(
+                                    reviewer_uri=second_reviewer,
+                                    verdict="approved",
+                                    rationale=f"TBFF threshold policy auto-approve: ${amount:,.2f} in 'auto' band (< ${TBFF_AUTO_ADVANCE_CEILING_USD:,.0f})",
+                                    evidence_uris=[ev_response.evidence_uri],
+                                    metadata={"policy": "tbff-threshold-v0.1", "band": "auto", "auto": True},
+                                )
+                                await create_attestation(claim_response.claim_rid, att2_body)
+
+                                verify2_body = VerifyRequest(
+                                    new_level="verified",
+                                    actor="tbff-threshold-policy",
+                                    reason=f"Auto-advance: ${amount:,.2f} below ${TBFF_AUTO_ADVANCE_CEILING_USD:,.0f} auto threshold",
+                                )
+                                await verify_claim(claim_response.claim_rid, verify2_body)
+                                final_verification = "verified"
+                            else:
+                                auto_advance_reason = (
+                                    "Auto band needs 2 distinct reviewers for verified; "
+                                    "advanced to peer_reviewed only (provide operator_uri as second reviewer)"
+                                )
+                    except HTTPException as e:
+                        auto_advance_reason = f"Auto-advance failed: {e.detail}"
+                        # Claim still exists at self_reported — not fatal
+        elif band in ("auto", "semi") and not body.reviewer_uri:
+            auto_advance_reason = "reviewer_uri required for auto-advance"
+
+        logger.info(
+            f"claim.from_settlement rid={claim_response.claim_rid} band={band} "
+            f"verification={final_verification} auto={auto_advanced} amount=${amount:,.2f}"
+        )
+
+        return ClaimFromSettlementResponse(
+            evidence_uri=ev_response.evidence_uri,
+            claim_rid=claim_response.claim_rid,
+            verification=final_verification,
+            threshold_band=band,
+            auto_advanced=auto_advanced,
+            auto_advance_reason=auto_advance_reason,
+            receipt_id=ev_response.receipt_id,
+            settlement_summary=ev_response.settlement_summary,
+        )
 
     # ------------------------------------------------------------------ #
     # Get claim by RID (with evidence)                                     #

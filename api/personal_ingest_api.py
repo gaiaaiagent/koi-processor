@@ -39,6 +39,9 @@ import logging
 import uuid
 from metaphone import doublemetaphone
 
+# Import CAT receipt chain
+from api.cat_receipts import create_receipt, generate_receipt_id, get_receipt_chain
+
 # Import vault relationship parser
 from api.vault_parser import (
     sync_vault_relationships,
@@ -221,6 +224,7 @@ class IngestRequest(BaseModel):
     relationships: List[ExtractedRelationship] = []
     source: str = "obsidian-vault"
     context: Optional[ResolutionContext] = None  # For contextual entity resolution
+    parent_receipt_id: Optional[str] = None  # Chain to a parent CAT receipt
 
 
 class CanonicalEntity(BaseModel):
@@ -247,7 +251,9 @@ class IngestResponse(BaseModel):
     """Response from ingest endpoint"""
     success: bool
     canonical_entities: List[CanonicalEntity]
-    receipt_rid: str
+    receipt_id: str
+    receipt_rid: Optional[str] = None  # Deprecated alias — use receipt_id
+    receipt_persisted: bool = True  # False if receipt DB write failed (receipt_id still valid format but not in DB)
     stats: IngestStats
 
 
@@ -1901,10 +1907,8 @@ async def ingest_extraction(request: IngestRequest):
                     except asyncpg.exceptions.CheckViolationError as e:
                         logger.warning(f"Skipping relationship (check violation): {e}")
 
-    # Generate receipt RID
-    receipt_rid = f"orn:personal-koi.receipt:{uuid.uuid4().hex[:16]}"
-
     success = len(failed_entities) == 0
+    canonical_uris = [ce.uri for ce in canonical_entities]
     stats = IngestStats(
         entities_processed=len(request.entities),
         new_entities=new_count,
@@ -1917,12 +1921,85 @@ async def ingest_extraction(request: IngestRequest):
         logger.warning(f"Ingest completed with {len(failed_entities)} failures: "
                       f"{[f['name'] for f in failed_entities]}")
 
+    # Create real CAT receipt for provenance tracking
+    doc_hash = hashlib.sha256(request.document_rid.encode()).hexdigest()[:16]
+    output_rid = f"orn:personal-koi.ingest:{doc_hash}"
+    content_hash = hashlib.sha256(
+        request.model_dump_json().encode()
+    ).hexdigest()
+
+    receipt_persisted = False
+    # Deterministic fallback receipt_id (same SHA-256 format as real receipts)
+    receipt_id = generate_receipt_id("entity_ingest", request.document_rid, output_rid)
+    try:
+        async with db_pool.acquire() as receipt_conn:
+            receipt = await create_receipt(
+                receipt_conn,
+                transformation_type="entity_ingest",
+                input_rid=request.document_rid,
+                output_rid=output_rid,
+                processor_name="personal_ingest_api",
+                source_sensor=request.source,
+                parent_receipt_id=request.parent_receipt_id,
+                metadata={
+                    "entities_processed": len(request.entities),
+                    "new_entities": new_count,
+                    "resolved_entities": resolved_count,
+                    "relationships_processed": rel_count,
+                    "canonical_entity_uris": canonical_uris,
+                },
+                content_hash=content_hash,
+            )
+            receipt_id = receipt.receipt_id
+            receipt_persisted = True
+    except Exception as e:
+        logger.error(f"Failed to create ingest CAT receipt: {e}")
+
     return IngestResponse(
         success=success,
         canonical_entities=canonical_entities,
-        receipt_rid=receipt_rid,
+        receipt_id=receipt_id,
+        receipt_rid=receipt_id,  # Backwards compatibility
+        receipt_persisted=receipt_persisted,
         stats=stats
     )
+
+
+@app.get("/receipts/{receipt_id}/chain")
+async def get_receipt_chain_endpoint(receipt_id: str):
+    """Walk the parent chain from a receipt back to the root.
+
+    Returns receipts in reverse chronological order (most recent first).
+    Useful for verifying provenance of ingest operations, TBFF settlements,
+    and Hub Cultivator decision logging.
+    """
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        chain = await get_receipt_chain(conn, receipt_id)
+        if not chain:
+            raise HTTPException(status_code=404, detail=f"Receipt {receipt_id} not found")
+
+        return {
+            "receipt_id": receipt_id,
+            "chain_length": len(chain),
+            "chain": [
+                {
+                    "receipt_id": r.receipt_id,
+                    "transformation_type": r.transformation_type,
+                    "input_rid": r.input_rid,
+                    "output_rid": r.output_rid,
+                    "parent_receipt_id": r.parent_receipt_id,
+                    "processor_name": r.processor_name,
+                    "source_sensor": r.source_sensor,
+                    "metadata": r.metadata,
+                    "content_hash": r.content_hash,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in chain
+            ],
+        }
 
 
 @app.get("/entities")

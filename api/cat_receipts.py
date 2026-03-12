@@ -6,6 +6,8 @@ Records every transformation in the web curation pipeline:
 - entity_resolution: Entities resolved against knowledge graph
 - sensor_registration: URL added to web sensor monitoring
 - user_submission: User-submitted information (no web source)
+- entity_ingest: Entities ingested via /ingest endpoint
+- tbff_settlement: TBFF settlement event transformed to Evidence
 
 Receipt IDs are SHA-256 hashes of (transformation_type + input_rid + output_rid + timestamp).
 Parent receipt IDs form a chain showing the full provenance path.
@@ -42,7 +44,10 @@ def generate_receipt_id(
     output_rid: str,
     timestamp: Optional[str] = None,
 ) -> str:
-    """Generate a deterministic receipt ID from transformation parameters."""
+    """Generate a SHA-256 receipt ID from transformation parameters.
+
+    Deterministic only if a fixed timestamp is supplied; otherwise uses current UTC time.
+    """
     ts = timestamp or datetime.now(timezone.utc).isoformat()
     payload = f"{transformation_type}:{input_rid}:{output_rid}:{ts}"
     return hashlib.sha256(payload.encode()).hexdigest()
