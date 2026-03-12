@@ -136,12 +136,20 @@ class EventQueue:
 
             for row in rows:
                 # If rid_types filter specified, check entity type from RID
+                # Domain events (_koi_domain marker) bypass the filter — they
+                # carry their own routing and should always be delivered.
                 if rid_types:
-                    # RID format: orn:koi-net.{type}:{slug}+{hash}
-                    rid = row["rid"]
-                    rid_type = extract_rid_type(rid)
-                    if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
-                        continue
+                    contents_raw = row["contents"]
+                    is_domain_event = False
+                    if contents_raw:
+                        c = json.loads(contents_raw) if isinstance(contents_raw, str) else contents_raw
+                        is_domain_event = isinstance(c, dict) and "_koi_domain" in c
+                    if not is_domain_event:
+                        # RID format: orn:koi-net.{type}:{slug}+{hash}
+                        rid = row["rid"]
+                        rid_type = extract_rid_type(rid)
+                        if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
+                            continue
 
                 event = {
                     "event_id": row["event_id"],
@@ -205,10 +213,16 @@ class EventQueue:
             events = []
             for row in rows:
                 if rid_types:
-                    rid = row["rid"]
-                    rid_type = extract_rid_type(rid)
-                    if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
-                        continue
+                    contents_raw = row["contents"]
+                    is_domain_event = False
+                    if contents_raw:
+                        c = json.loads(contents_raw) if isinstance(contents_raw, str) else contents_raw
+                        is_domain_event = isinstance(c, dict) and "_koi_domain" in c
+                    if not is_domain_event:
+                        rid = row["rid"]
+                        rid_type = extract_rid_type(rid)
+                        if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
+                            continue
 
                 events.append({
                     "event_id": row["event_id"],

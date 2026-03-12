@@ -698,6 +698,15 @@ class KOIPoller:
                 )
                 return
 
+        # Domain events — full database replication via federation
+        domain = contents.get("_koi_domain") if isinstance(contents, dict) else None
+        if domain:
+            from api.domain_event_handlers import apply_domain_event
+            domain_payload = contents.get("payload", {})
+            async with self.pool.acquire() as conn:
+                await apply_domain_event(conn, domain, rid, event_type, domain_payload, source_node)
+            return
+
         if event_type == "FORGET":
             # Mark cross-reference as removed
             async with self.pool.acquire() as conn:

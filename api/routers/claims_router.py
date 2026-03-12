@@ -17,6 +17,8 @@ Implements the Claims Engine API:
   GET  /claims/{rid}/attestations/{att_rid} — get single attestation
   POST /claims/{rid}/attestations/{att_rid}/anchor — anchor attestation on Regen Ledger
   POST /claims/{rid}/attestations/{att_rid}/reconcile — check on-chain status of attestation anchor
+  POST /claims/claim-from-settlement — settlement→evidence→claim with threshold auto-advance
+  GET  /claims/settlements — list TBFF settlement receipts with linked claim status
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
@@ -162,6 +164,51 @@ class EvidenceFromArtifactsResponse(BaseModel):
     source_artifacts: List[Dict[str, Any]]
 
 
+class EvidenceFromSettlementRequest(BaseModel):
+    settlement_id: str = Field(..., description="Unique settlement identifier (e.g. tx hash or internal ID)")
+    tx_hash: Optional[str] = Field(None, description="On-chain transaction hash (Base Sepolia/mainnet)")
+    chain_id: Optional[int] = Field(None, description="EVM chain ID (e.g. 84532 for Base Sepolia)")
+    block_number: Optional[int] = Field(None, description="Block number of the settlement transaction")
+    iterations: int = Field(..., ge=1, le=50, description="Number of TBFF iterations to convergence")
+    converged: bool = Field(True, description="Whether the settlement converged")
+    total_redistributed_usd: float = Field(..., ge=0, description="Total USD redistributed in this settlement")
+    node_balances: List[Dict[str, Any]] = Field(..., min_length=1, description="Final balance snapshot: [{participant_name, participant_uri?, initial_balance, final_balance, threshold}]")
+    bioregion: Optional[str] = Field(None, description="Bioregion name for path prefix")
+    description: str = Field(..., min_length=10, max_length=5000, description="Human-readable description of the settlement")
+    parent_receipt_id: Optional[str] = Field(None, description="Parent CAT receipt ID for provenance chaining")
+
+
+class EvidenceFromSettlementResponse(BaseModel):
+    evidence_uri: str
+    receipt_id: Optional[str] = None
+    receipt_persisted: bool = True
+    is_new: bool
+    settlement_summary: Dict[str, Any]
+
+
+class ClaimFromSettlementRequest(BaseModel):
+    """Create a claim backed by settlement evidence, with threshold-based auto-advance."""
+    settlement: EvidenceFromSettlementRequest = Field(..., description="Settlement data (forwarded to evidence-from-settlement)")
+    claimant_uri: str = Field(..., description="entity_registry.fuseki_uri of the claimant")
+    about_uri: Optional[str] = Field(None, description="Entity URI the claim is about (Location, Org, Project, etc.)")
+    statement: str = Field(..., min_length=10, max_length=5000, description="Plain-language impact assertion")
+    claim_type: str = Field("financial", description="ecological | social | financial | governance")
+    operator_uri: Optional[str] = Field(None, description="entity_registry.fuseki_uri of the operator")
+    reviewer_uri: Optional[str] = Field(None, description="Reviewer for system attestation (required for auto-advance)")
+    manual_override: bool = Field(False, description="Force self_reported regardless of threshold band")
+
+
+class ClaimFromSettlementResponse(BaseModel):
+    evidence_uri: str
+    claim_rid: str
+    verification: str
+    threshold_band: str  # "auto" | "semi" | "manual"
+    auto_advanced: bool
+    auto_advance_reason: Optional[str] = None
+    receipt_id: Optional[str] = None
+    settlement_summary: Dict[str, Any]
+
+
 class AttestationCreateRequest(BaseModel):
     reviewer_uri: str
     verdict: str = "pending"  # pending|approved|rejected|needs_info
@@ -235,6 +282,15 @@ _ABOUT_ALLOWED_TYPES = {
     "practice", "pattern", "casestudy", "concept", "project",
     "bioregion", "location", "organization", "person",
 }
+
+# ---------------------------------------------------------------------------
+# TBFF threshold policy bands (settlement evidence path only)
+# ---------------------------------------------------------------------------
+# Below AUTO_ADVANCE_CEILING:     auto-advance to verified (2 system attestations)
+# AUTO_ADVANCE_CEILING..MANUAL:   auto-advance to peer_reviewed (1 attestation; 1 more needed)
+# Above MANUAL_FLOOR:             stays self_reported (full attestation chain)
+TBFF_AUTO_ADVANCE_CEILING_USD = 500.0
+TBFF_MANUAL_FLOOR_USD = 5000.0
 
 _TRANSITION_PRECONDITIONS = {
     "ledger_anchored": lambda row: (
@@ -392,6 +448,8 @@ def create_router(pool, caps=None):
     """Return an APIRouter for claims engine endpoints."""
     router = APIRouter(prefix="/claims", tags=["claims"])
 
+    from api.federation_events import emit_domain_event
+
     # Lazy import to avoid circular deps at module level
     _entity_helpers = {}
 
@@ -543,6 +601,17 @@ def create_router(pool, caps=None):
                 return await _fetch_enriched_claim(conn, claim_rid)
 
             logger.info(f"claim.create rid={claim_rid} claimant={body.claimant_uri} type={body.claim_type}")
+            await emit_domain_event("claim", "NEW", claim_rid, {
+                "claim_rid": claim_rid, "entity_uri": entity_uri,
+                "claimant_uri": body.claimant_uri, "statement": body.statement,
+                "claim_type": body.claim_type, "verification": "self_reported",
+                "source_document": body.source_document, "ai_confidence": body.ai_confidence,
+                "supersedes_rid": body.supersedes_rid, "metadata": body.metadata or {},
+                "created_by": body.created_by, "operator_uri": body.operator_uri,
+                "state_transition": {"from_state": None, "to_state": "self_reported",
+                                     "actor": body.created_by, "reason": "created",
+                                     "created_at": datetime.now(timezone.utc).isoformat()},
+            })
             return await _fetch_enriched_claim(conn, claim_rid)
 
     # ------------------------------------------------------------------ #
@@ -620,6 +689,215 @@ def create_router(pool, caps=None):
                 count, summary = att_map.get(r["claim_rid"], [0, {}])
                 results.append(_row_to_claim(r, attestation_count=count, attestation_summary=summary or None))
             return results
+
+    # ------------------------------------------------------------------ #
+    # Claim from settlement with threshold policy (3A)                     #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/claim-from-settlement", response_model=ClaimFromSettlementResponse, status_code=201)
+    async def claim_from_settlement(body: ClaimFromSettlementRequest):
+        """Create Evidence from settlement, then create a claim with threshold-based auto-advance.
+
+        Threshold bands (total_redistributed_usd):
+          < $500    → "auto"  — auto-advance to verified (2 system attestations)
+          $500–$5k  → "semi"  — auto-advance to peer_reviewed (1 system attestation)
+          > $5k     → "manual" — stays self_reported (full attestation chain required)
+
+        manual_override=true forces self_reported regardless of amount.
+        """
+        # 1. Determine threshold band
+        amount = body.settlement.total_redistributed_usd
+        if body.manual_override:
+            band = "manual"
+        elif amount < TBFF_AUTO_ADVANCE_CEILING_USD:
+            band = "auto"
+        elif amount < TBFF_MANUAL_FLOOR_USD:
+            band = "semi"
+        else:
+            band = "manual"
+
+        # 2. Create Evidence via existing endpoint logic
+        ev_response = await evidence_from_settlement(body.settlement)
+
+        # 3. Create claim
+        claim_body = ClaimCreateRequest(
+            claimant_uri=body.claimant_uri,
+            statement=body.statement,
+            claim_type=body.claim_type,
+            about_uri=body.about_uri,
+            operator_uri=body.operator_uri,
+            metadata={
+                "settlement_id": body.settlement.settlement_id,
+                "total_redistributed_usd": amount,
+                "threshold_band": band,
+                "tbff_policy_version": "0.1",
+            },
+        )
+        claim_response = await create_claim(claim_body)
+
+        # 4. Link evidence to claim
+        link_body = EvidenceLinkRequest(
+            evidence_uri=ev_response.evidence_uri,
+            actor="tbff-threshold-policy",
+        )
+        await link_evidence(claim_response.claim_rid, link_body)
+
+        # 5. Auto-advance based on band (requires reviewer_uri for attestation)
+        auto_advanced = False
+        auto_advance_reason = None
+        final_verification = "self_reported"
+
+        if band in ("auto", "semi") and body.reviewer_uri:
+            async with pool.acquire() as conn:
+                # Verify reviewer exists and is not the claimant
+                reviewer = await conn.fetchrow(
+                    "SELECT fuseki_uri, entity_type FROM entity_registry WHERE fuseki_uri = $1",
+                    body.reviewer_uri,
+                )
+                if not reviewer:
+                    auto_advance_reason = f"Reviewer not found: {body.reviewer_uri}"
+                elif reviewer["entity_type"].lower() not in ("person", "organization"):
+                    auto_advance_reason = f"Reviewer type '{reviewer['entity_type']}' not valid for attestation"
+                elif body.reviewer_uri == body.claimant_uri:
+                    auto_advance_reason = "Reviewer cannot be the claimant (self-attestation)"
+                else:
+                    try:
+                        # Create first system attestation
+                        att1_body = AttestationCreateRequest(
+                            reviewer_uri=body.reviewer_uri,
+                            verdict="approved",
+                            rationale=f"TBFF threshold policy auto-approve: ${amount:,.2f} in '{band}' band",
+                            evidence_uris=[ev_response.evidence_uri],
+                            metadata={"policy": "tbff-threshold-v0.1", "band": band, "auto": True},
+                        )
+                        await create_attestation(claim_response.claim_rid, att1_body)
+
+                        # Advance to peer_reviewed
+                        verify_body = VerifyRequest(
+                            new_level="peer_reviewed",
+                            actor="tbff-threshold-policy",
+                            reason=f"Auto-advance: ${amount:,.2f} below ${TBFF_MANUAL_FLOOR_USD:,.0f} threshold",
+                        )
+                        await verify_claim(claim_response.claim_rid, verify_body)
+                        final_verification = "peer_reviewed"
+                        auto_advanced = True
+
+                        if band == "auto":
+                            # For auto band, need 2 attestations for verified.
+                            # Use operator_uri as second reviewer if available and different.
+                            second_reviewer = body.operator_uri
+                            if second_reviewer and second_reviewer != body.reviewer_uri and second_reviewer != body.claimant_uri:
+                                att2_body = AttestationCreateRequest(
+                                    reviewer_uri=second_reviewer,
+                                    verdict="approved",
+                                    rationale=f"TBFF threshold policy auto-approve: ${amount:,.2f} in 'auto' band (< ${TBFF_AUTO_ADVANCE_CEILING_USD:,.0f})",
+                                    evidence_uris=[ev_response.evidence_uri],
+                                    metadata={"policy": "tbff-threshold-v0.1", "band": "auto", "auto": True},
+                                )
+                                await create_attestation(claim_response.claim_rid, att2_body)
+
+                                verify2_body = VerifyRequest(
+                                    new_level="verified",
+                                    actor="tbff-threshold-policy",
+                                    reason=f"Auto-advance: ${amount:,.2f} below ${TBFF_AUTO_ADVANCE_CEILING_USD:,.0f} auto threshold",
+                                )
+                                await verify_claim(claim_response.claim_rid, verify2_body)
+                                final_verification = "verified"
+                            else:
+                                auto_advance_reason = (
+                                    "Auto band needs 2 distinct reviewers for verified; "
+                                    "advanced to peer_reviewed only (provide operator_uri as second reviewer)"
+                                )
+                    except HTTPException as e:
+                        auto_advance_reason = f"Auto-advance failed: {e.detail}"
+                        # Claim still exists at self_reported — not fatal
+        elif band in ("auto", "semi") and not body.reviewer_uri:
+            auto_advance_reason = "reviewer_uri required for auto-advance"
+
+        logger.info(
+            f"claim.from_settlement rid={claim_response.claim_rid} band={band} "
+            f"verification={final_verification} auto={auto_advanced} amount=${amount:,.2f}"
+        )
+
+        return ClaimFromSettlementResponse(
+            evidence_uri=ev_response.evidence_uri,
+            claim_rid=claim_response.claim_rid,
+            verification=final_verification,
+            threshold_band=band,
+            auto_advanced=auto_advanced,
+            auto_advance_reason=auto_advance_reason,
+            receipt_id=ev_response.receipt_id,
+            settlement_summary=ev_response.settlement_summary,
+        )
+
+    # ------------------------------------------------------------------ #
+    # List settlements (read model for flow-funding visualization)         #
+    # ------------------------------------------------------------------ #
+
+    @router.get("/settlements")
+    async def list_settlements(
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ):
+        """List TBFF settlement receipts with linked claim verification status.
+
+        Joins koi_transformation_receipts (transformation_type='tbff_settlement')
+        to claims via evidences_claim edges. Returns structured settlement data
+        including node_balances (when available in receipt metadata JSONB).
+        """
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (r.receipt_id)
+                    r.receipt_id,
+                    r.output_rid AS evidence_uri,
+                    r.metadata,
+                    r.created_at,
+                    c.claim_rid,
+                    c.verification,
+                    c.statement
+                FROM koi_transformation_receipts r
+                LEFT JOIN entity_relationships ev_link
+                    ON ev_link.subject_uri = r.output_rid
+                    AND ev_link.predicate = 'evidences_claim'
+                LEFT JOIN claims c
+                    ON c.entity_uri = ev_link.object_uri
+                WHERE r.transformation_type = 'tbff_settlement'
+                ORDER BY r.receipt_id, c.created_at DESC
+            """)
+            # Apply pagination after dedup
+            rows = rows[offset:offset + limit]
+
+            settlements = []
+            for row in rows:
+                raw_meta = row["metadata"] or {}
+                meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                amount = meta.get("total_redistributed_usd", 0)
+                # Derive threshold band from amount
+                if amount < 500:
+                    threshold_band = "auto"
+                elif amount <= 5000:
+                    threshold_band = "semi"
+                else:
+                    threshold_band = "manual"
+
+                settlements.append({
+                    "receipt_id": row["receipt_id"],
+                    "evidence_uri": row["evidence_uri"],
+                    "settlement_id": meta.get("settlement_id"),
+                    "tx_hash": meta.get("tx_hash"),
+                    "iterations": meta.get("iterations"),
+                    "converged": meta.get("converged"),
+                    "total_redistributed_usd": amount,
+                    "participant_count": meta.get("participant_count"),
+                    "node_balances": meta.get("node_balances"),  # None for pre-fix receipts
+                    "threshold_band": threshold_band,
+                    "claim_rid": row["claim_rid"],
+                    "claim_state": row["verification"],
+                    "claim_statement": row["statement"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                })
+
+            return {"settlements": settlements, "total": len(settlements)}
 
     # ------------------------------------------------------------------ #
     # Get claim by RID (with evidence)                                     #
@@ -718,6 +996,12 @@ def create_router(pool, caps=None):
                 """, rid, current, new_level, body.actor, body.reason)
 
             logger.info(f"claim.verify rid={rid} {current}→{new_level} actor={body.actor}")
+            await emit_domain_event("claim", "UPDATE", rid, {
+                "claim_rid": rid, "verification": new_level,
+                "state_transition": {"from_state": current, "to_state": new_level,
+                                     "actor": body.actor, "reason": body.reason,
+                                     "created_at": datetime.now(timezone.utc).isoformat()},
+            })
             return await _fetch_enriched_claim(conn, rid)
 
     # ------------------------------------------------------------------ #
@@ -769,6 +1053,13 @@ def create_router(pool, caps=None):
                 """, rid)
 
             logger.info(f"claim.link_evidence rid={rid} evidence={body.evidence_uri}")
+            await emit_domain_event("claim", "UPDATE", rid, {
+                "claim_rid": rid,
+                "state_transition": {"from_state": row["verification"], "to_state": row["verification"],
+                                     "actor": body.actor, "reason": "evidence linked",
+                                     "created_at": datetime.now(timezone.utc).isoformat(),
+                                     "metadata": {"evidence_uri": body.evidence_uri}},
+            })
             return await _fetch_enriched_claim(conn, rid)
 
     # ------------------------------------------------------------------ #
@@ -1016,6 +1307,161 @@ def create_router(pool, caps=None):
         )
 
     # ------------------------------------------------------------------ #
+    # Evidence from TBFF settlement (Capital Plane Phase 2)                #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/evidence-from-settlement", response_model=EvidenceFromSettlementResponse, status_code=201)
+    async def evidence_from_settlement(body: EvidenceFromSettlementRequest):
+        """Create an Evidence entity from a TBFF settlement event.
+
+        Transforms on-chain settlement data (balances, iterations, convergence)
+        into a citable Evidence entity with a CAT receipt chain. Follows the
+        same vault-note registration pattern as evidence_from_artifacts.
+        """
+        from api.personal_ingest_api import register_vault_entity, RegisterEntityRequest
+        from api.cat_receipts import create_receipt, generate_receipt_id
+
+        # 1. Build Evidence entity name and vault paths
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        evidence_name = f"TBFF Settlement — {body.bioregion or 'Unknown'} — {date_str}"
+
+        safe_bio = (body.bioregion or "unknown").strip().replace(" ", "-")[:30]
+        safe_id = body.settlement_id[:16]
+        vault_rid = f"orn:openclaw.entity:Evidence/tbff-settlement-{safe_id}"
+        vault_path = f"Evidence/{evidence_name}.md"
+
+        # 2. Build settlement summary
+        settlement_summary = {
+            "settlement_id": body.settlement_id,
+            "tx_hash": body.tx_hash,
+            "chain_id": body.chain_id,
+            "block_number": body.block_number,
+            "iterations": body.iterations,
+            "converged": body.converged,
+            "total_redistributed_usd": body.total_redistributed_usd,
+            "participant_count": len(body.node_balances),
+            "date": date_str,
+        }
+
+        # 3. Generate markdown content for vault note
+        balance_lines = []
+        for nb in body.node_balances:
+            name = nb.get("participant_name", "Unknown")
+            initial = nb.get("initial_balance", 0)
+            final = nb.get("final_balance", 0)
+            threshold = nb.get("threshold", 0)
+            balance_lines.append(
+                f"| {name} | ${initial:,.2f} | ${final:,.2f} | ${threshold:,.2f} |"
+            )
+
+        balance_table = (
+            "| Participant | Initial | Final | Threshold |\n"
+            "|---|---|---|---|\n"
+            + "\n".join(balance_lines)
+        )
+
+        markdown_content = (
+            f'---\n'
+            f'"@type": Evidence\n'
+            f'name: "{evidence_name}"\n'
+            f'description: "{body.description.strip()}"\n'
+            f'settlement_id: "{body.settlement_id}"\n'
+            + (f'tx_hash: "{body.tx_hash}"\n' if body.tx_hash else "")
+            + (f'chain_id: {body.chain_id}\n' if body.chain_id else "")
+            + f'---\n\n'
+            f'# {evidence_name}\n\n'
+            f'{body.description.strip()}\n\n'
+            f'## Settlement Details\n\n'
+            f'- **Iterations:** {body.iterations}\n'
+            f'- **Converged:** {body.converged}\n'
+            f'- **Total redistributed:** ${body.total_redistributed_usd:,.2f}\n'
+            + (f'- **TX hash:** `{body.tx_hash}`\n' if body.tx_hash else "")
+            + (f'- **Chain:** {body.chain_id}\n' if body.chain_id else "")
+            + (f'- **Block:** {body.block_number}\n' if body.block_number else "")
+            + f'\n## Final Balances\n\n'
+            f'{balance_table}\n'
+        )
+
+        content_hash = hashlib.sha256(markdown_content.encode()).hexdigest()
+
+        # 4. Register via /register-entity path
+        reg_request = RegisterEntityRequest(
+            vault_rid=vault_rid,
+            vault_path=vault_path,
+            entity_type="Evidence",
+            name=evidence_name,
+            content_hash=content_hash,
+            visibility_scope="public",
+            publication_scope="local_graph",
+            frontmatter={
+                "@type": "Evidence",
+                "name": evidence_name,
+                "description": body.description.strip(),
+                "settlement_id": body.settlement_id,
+                "tx_hash": body.tx_hash,
+                "chain_id": body.chain_id,
+            },
+        )
+
+        reg_response = await register_vault_entity(reg_request)
+        evidence_uri = reg_response.canonical_uri
+        is_new = reg_response.is_new
+
+        # 5. Create `documents` edges to participant Person entities (if in graph)
+        async with pool.acquire() as conn:
+            for nb in body.node_balances:
+                participant_uri = nb.get("participant_uri")
+                if participant_uri:
+                    await conn.execute("""
+                        INSERT INTO entity_relationships
+                            (subject_uri, predicate, object_uri, confidence, source)
+                        VALUES ($1, 'documents', $2, 1.0, 'evidence-from-settlement')
+                        ON CONFLICT DO NOTHING
+                    """, evidence_uri, participant_uri)
+
+        # 6. Create CAT receipt for provenance tracking
+        receipt_id = generate_receipt_id("tbff_settlement", f"tbff:{body.settlement_id}", evidence_uri)
+        try:
+            async with pool.acquire() as conn:
+                receipt = await create_receipt(
+                    conn,
+                    transformation_type="tbff_settlement",
+                    input_rid=f"tbff:{body.settlement_id}",
+                    output_rid=evidence_uri,
+                    processor_name="claims_router.evidence_from_settlement",
+                    source_sensor="tbff",
+                    metadata={
+                        "settlement_id": body.settlement_id,
+                        "tx_hash": body.tx_hash,
+                        "iterations": body.iterations,
+                        "converged": body.converged,
+                        "total_redistributed_usd": body.total_redistributed_usd,
+                        "participant_count": len(body.node_balances),
+                        "node_balances": [dict(nb) for nb in body.node_balances],
+                    },
+                    parent_receipt_id=body.parent_receipt_id,
+                    content_hash=content_hash,
+                )
+                receipt_id = receipt.receipt_id
+                receipt_persisted = True
+        except Exception as e:
+            logger.error(f"Failed to create TBFF settlement receipt: {e}")
+            receipt_persisted = False
+
+        logger.info(
+            f"Evidence from settlement: uri={evidence_uri} is_new={is_new} "
+            f"settlement={body.settlement_id} redistributed=${body.total_redistributed_usd}"
+        )
+
+        return EvidenceFromSettlementResponse(
+            evidence_uri=evidence_uri,
+            receipt_id=receipt_id,
+            receipt_persisted=receipt_persisted,
+            is_new=is_new,
+            settlement_summary=settlement_summary,
+        )
+
+    # ------------------------------------------------------------------ #
     # Prepare anchor (Phase 4)                                             #
     # ------------------------------------------------------------------ #
 
@@ -1168,15 +1614,16 @@ def create_router(pool, caps=None):
                     WHERE claim_rid = $1
                 """, rid, result["ledger_iri"], ledger_ts, content_hash, result.get("tx_hash"))
 
+                chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
                     VALUES ($1, 'verified', 'ledger_anchored', 'ledger_anchor_service',
-                            'Anchored on Regen Ledger mainnet', $2::jsonb)
+                            $3, $2::jsonb)
                 """, rid, json.dumps({
                     "tx_hash": result.get("tx_hash"),
                     "ledger_iri": result["ledger_iri"],
-                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-1"),
-                }))
+                    "chain_id": chain_id,
+                }), f"Anchored on Regen Ledger ({chain_id})")
 
         logger.info(f"claim.anchored rid={rid} iri={result['ledger_iri']} tx={result.get('tx_hash')}")
         return AnchorResponse(
@@ -1658,6 +2105,12 @@ def create_router(pool, caps=None):
                 )
 
         logger.info(f"claim.attestation rid={rid} att={att_rid} reviewer={body.reviewer_uri} verdict={body.verdict}")
+        await emit_domain_event("attestation", "NEW", att_rid, {
+            "attestation_rid": att_rid, "claim_rid": rid,
+            "reviewer_uri": body.reviewer_uri, "verdict": body.verdict,
+            "rationale": body.rationale, "evidence_uris": body.evidence_uris or [],
+            "content_hash": content_hash, "metadata": body.metadata or {},
+        })
         return _attestation_response(row, reviewer_name=reviewer["entity_text"] if reviewer else None)
 
     @router.get("/{rid}/attestations", response_model=List[AttestationResponse])
@@ -1924,5 +2377,19 @@ def create_router(pool, caps=None):
             attest_timestamp=str(ts_raw) if ts_raw else None,
             message="Attestation anchor confirmed on-chain.",
         )
+
+    # ------------------------------------------------------------------ #
+    # Chain Info (expose current chain config)                             #
+    # ------------------------------------------------------------------ #
+
+    @router.get("/chain-info")
+    async def chain_info():
+        """Return current chain configuration for portal and eval harness."""
+        chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
+        return {
+            "chain_id": chain_id,
+            "rpc_url": os.getenv("REGEN_RPC_URL", ""),
+            "is_testnet": chain_id != "regen-1",
+        }
 
     return router

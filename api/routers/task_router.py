@@ -116,6 +116,8 @@ def create_router(pool, caps) -> APIRouter:
     """
     router = APIRouter(tags=["tasks"])
 
+    from api.federation_events import emit_domain_event
+
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------
@@ -287,6 +289,16 @@ def create_router(pool, caps) -> APIRouter:
             )
 
         action = "created" if row["was_inserted"] else "updated"
+        await emit_domain_event("task", "NEW" if action == "created" else "UPDATE", req.taskKey, {
+            "task_key": req.taskKey, "uuid": req.uuid, "title": req.title,
+            "status": req.status, "priority": req.priority,
+            "due_date": req.dueDate, "start_date": req.startDate,
+            "wait_until": req.waitUntil, "context": req.context, "effort": req.effort,
+            "owner_uri": owner_uri, "project_uri": project_uri,
+            "collaborator_uris": collab_uris, "blocked_by": req.blockedBy or [],
+            "source_note": req.sourceNote, "source_type": req.sourceType,
+            "vault_path": req.vaultPath, "tags": req.tags or [],
+        })
         return TaskIngestResponse(task_key=row["task_key"], action=action, id=row["id"])
 
     # -----------------------------------------------------------------------
@@ -482,6 +494,10 @@ def create_router(pool, caps) -> APIRouter:
                 *vals
             )
 
+        await emit_domain_event("task", "UPDATE", task_key, {
+            "task_key": task_key, "title": existing["title"],
+            "status": new_status, "priority": updates.get("priority", existing["priority"]),
+        })
         return {"task_key": task_key, "action": "updated"}
 
     # -----------------------------------------------------------------------
