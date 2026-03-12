@@ -180,6 +180,57 @@ bash scripts/federation/soak-check.sh
 
 Captures status + reconcile drift from both peers, appends timestamped JSONL to `/tmp/vault-sync-soak.jsonl`. See `docs/runbooks/vault-sync-soak.md` for full soak runbook.
 
+## Domain Event Bridge (Federation Sync)
+
+Beyond document sharing and vault sync, the federation layer supports **domain event replication** — full database sync of entities, tasks, claims, attestations, commitments, and pools between peers.
+
+### How it works
+
+Mutation endpoints (`/register-entity`, `/tasks/ingest`, `/claims`, etc.) emit FUN events with a `_koi_domain` marker in the event contents. The receiving node's poller dispatches these to `api/domain_event_handlers.py`, which applies UPSERT semantics to the local database.
+
+### Supported domain types
+
+| Domain | Source table | Conflict key | Event source |
+|--------|-------------|--------------|--------------|
+| `entity` | `entity_registry` | `fuseki_uri` | `/register-entity`, `/ingest` |
+| `task` | `task_registry` | `task_key` | `/tasks/ingest`, `PATCH /tasks/{key}` |
+| `claim` | `claims` | `claim_rid` | `/claims` mutations |
+| `attestation` | `claim_attestations` | `(claim_rid, reviewer_uri)` | `/claims/{rid}/attestations` |
+| `commitment` | `commitments` | `commitment_rid` | `/commitments/create`, state changes |
+| `commitment_pool` | `commitment_pools` | `pool_rid` | `/pools/create` |
+
+### Key files
+
+- `api/federation_events.py` — Producer: `FederationEvents.emit()` queues domain events
+- `api/domain_event_handlers.py` — Consumer: UPSERT handlers for each domain type
+- `api/event_queue.py` — `_koi_domain` events bypass `rid_types` filter (always delivered)
+- `tests/test_federation_bridge.py` — 24 automated tests
+
+### Event format
+
+```json
+{
+  "_koi_domain": "entity",
+  "rid": "orn:personal-koi.entity:person-jane-doe-abc123",
+  "payload": {
+    "fuseki_uri": "orn:personal-koi.entity:person-jane-doe-abc123",
+    "entity_text": "Jane Doe",
+    "entity_type": "Person",
+    "normalized_text": "jane doe"
+  }
+}
+```
+
+### Verification
+
+```bash
+# Check domain events in queue
+psql -d personal_koi -c "SELECT rid, event_type, contents->>'_koi_domain' AS domain FROM koi_net_events ORDER BY queued_at DESC LIMIT 10"
+
+# Run bridge test suite
+pytest tests/test_federation_bridge.py -v
+```
+
 ## Dry Run
 
 Use `--dry-run` on bootstrap/approval/removal scripts before mutating:

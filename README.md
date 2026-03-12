@@ -161,6 +161,20 @@ VAULT_SYNC_REPAIR_ENABLED=false  # enable after soak
 
 All vault-sync endpoints require localhost + admin token.
 
+## Domain Event Federation
+
+Full database replication between KOI-net peers via protocol-native FUN events. Mutation endpoints emit domain events; receiving nodes apply them with UPSERT semantics for near-realtime (~60s) delta sync.
+
+Supported domains: `entity`, `task`, `claim`, `attestation`, `commitment`, `commitment_pool`.
+
+Key files:
+- `api/federation_events.py` — Producer singleton (`FederationEvents.emit()`)
+- `api/domain_event_handlers.py` — Consumer UPSERT handlers (entity, task, claim, attestation, commitment, pool)
+- `api/event_queue.py` — Event queue with `_koi_domain` bypass for `rid_types` filter
+- `tests/test_federation_bridge.py` — 24 automated tests
+
+Docs: [`scripts/federation/README.md`](scripts/federation/README.md) (Domain Event Bridge section)
+
 ## Claims Engine
 
 Lightweight, ledger-anchored impact claim system with Regen Ledger testnet integration.
