@@ -1,4 +1,4 @@
-"""Commitment pooling endpoints: pledge lifecycle, pool management, evidence linking.
+"""Commitment pooling endpoints: pledge lifecycle, pool management, evidence linking, routing.
 
 Implements the C0 commitment registry API:
   POST /commitments/create       — propose a new commitment pledge
@@ -6,6 +6,7 @@ Implements the C0 commitment registry API:
   PATCH /commitments/{rid}/state — transition state (steward action)
   POST /commitments/{rid}/link-evidence — attach Evidence entity
   GET  /commitments/             — list commitments (filterable)
+  POST /commitments/routing-suggestions — score draft against pools
   POST /pools/create             — create a new commitment pool
   GET  /pools/{rid}              — fetch pool by RID
   POST /pools/{rid}/pledge       — add an existing commitment to a pool
@@ -101,6 +102,40 @@ class PoolResponse(BaseModel):
 class PledgeToPoolRequest(BaseModel):
     commitment_rid: str
     actor: Optional[str] = None
+
+
+class RoutingSuggestionRequest(BaseModel):
+    """Draft commitment payload for routing scoring. Same shape as CommitmentCreateRequest."""
+    pledger_uri: Optional[str] = None
+    title: Optional[str] = None
+    offer_type: Optional[str] = None
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    validity_start: Optional[datetime] = None
+    validity_end: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ScoreBreakdown(BaseModel):
+    same_bioregion: int = 0
+    offer_need_overlap: int = 0
+    timeframe_overlap: int = 0
+    capacity_fit: int = 0
+    governance_compat: int = 0
+
+
+class PoolSuggestion(BaseModel):
+    pool_rid: str
+    pool_name: str
+    total_score: int
+    score_breakdown: ScoreBreakdown
+    hard_excludes: List[str]
+    recommended: bool
+    explanation: str
+
+
+class RoutingSuggestionResponse(BaseModel):
+    suggestions: List[PoolSuggestion]
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +289,16 @@ def create_router(pool, caps=None):
             """, *params)
 
         return [_row_to_commitment(r) for r in rows]
+
+    @router.post("/routing-suggestions", response_model=RoutingSuggestionResponse)
+    async def routing_suggestions(body: RoutingSuggestionRequest):
+        """Score a draft commitment against all available pools.
+
+        Accepts an unpersisted draft (same shape as CommitmentCreateRequest).
+        Returns pools ranked by routing score with breakdown and explanations.
+        """
+        suggestions = await _score_pools(pool, body)
+        return RoutingSuggestionResponse(suggestions=suggestions)
 
     @router.get("/{rid}", response_model=CommitmentResponse)
     async def get_commitment(rid: str):
@@ -613,3 +658,194 @@ def _row_to_pool(row) -> PoolResponse:
 def _json_dumps(obj) -> str:
     import json
     return json.dumps(obj)
+
+
+# ---------------------------------------------------------------------------
+# Routing scorer v0
+# ---------------------------------------------------------------------------
+
+async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolSuggestion]:
+    """Score all forming/active pools against a draft commitment.
+
+    Factors (v0):
+      same_bioregion      +30  exact bioregion_uri match
+      umbrella_bioregion   +15  parent via `broader` predicate (reduces same_bioregion to 0)
+      offer_need_overlap   +25  routing_tags ∩ pool need_tags / max(len)
+      timeframe_overlap    +15  date range intersection / commitment range
+      capacity_fit         +20  value fits remaining capacity
+      governance_compat    +10  same governance_membrane (inactive v0 — returns 0)
+
+    Hard excludes: no remaining capacity, outside timeframe entirely.
+    """
+    import json as _json
+    from datetime import date
+
+    meta = draft.metadata or {}
+    draft_bioregion = meta.get("bioregion_uri", "")
+    draft_tags = set(meta.get("routing_tags", []))
+    draft_value = meta.get("estimated_value_usd", 0) or 0
+    draft_start = draft.validity_start
+    draft_end = draft.validity_end
+    draft_governance = meta.get("governance_membrane", "")
+
+    async with db_pool.acquire() as conn:
+        # Fetch all forming/active pools
+        pool_rows = await conn.fetch(
+            "SELECT * FROM commitment_pools WHERE state IN ('forming', 'active')"
+        )
+
+        # Pre-fetch broader relationships for bioregion matching
+        broader_parents = {}
+        if draft_bioregion:
+            parents = await conn.fetch("""
+                SELECT object_uri FROM entity_relationships
+                WHERE subject_uri = $1 AND predicate = 'broader'
+            """, draft_bioregion)
+            broader_parents = {r["object_uri"] for r in parents}
+
+            # Also check if pool bioregions are children of draft bioregion
+            # (draft is in Salish Sea, pool is in Cascadia which is broader)
+            children = await conn.fetch("""
+                SELECT subject_uri FROM entity_relationships
+                WHERE object_uri = $1 AND predicate = 'broader'
+            """, draft_bioregion)
+            broader_parents.update(r["subject_uri"] for r in children)
+
+    suggestions = []
+    for pr in pool_rows:
+        pool_meta_raw = pr["metadata"]
+        if isinstance(pool_meta_raw, str):
+            pool_meta = _json.loads(pool_meta_raw)
+        else:
+            pool_meta = pool_meta_raw or {}
+
+        pool_bioregion = pr["bioregion_uri"] or ""
+        pool_need_tags = set(pool_meta.get("need_tags", []))
+        pool_capacity = pool_meta.get("capacity_usd", 0) or 0
+        pool_remaining = pool_meta.get("remaining_capacity_usd", pool_capacity) or pool_capacity
+        pool_threshold = pool_meta.get("activation_threshold_usd", 0) or 0
+        pool_governance = pool_meta.get("governance_membrane", "")
+        pool_start_str = pool_meta.get("validity_start")
+        pool_end_str = pool_meta.get("validity_end")
+
+        hard_excludes = []
+        breakdown = ScoreBreakdown()
+
+        # --- Same bioregion (+30) or umbrella (+15) ---
+        if draft_bioregion and pool_bioregion:
+            if draft_bioregion == pool_bioregion:
+                breakdown.same_bioregion = 30
+            elif pool_bioregion in broader_parents or draft_bioregion in broader_parents:
+                breakdown.same_bioregion = 15
+            # Also check if pool's bioregion is a parent of draft's bioregion
+            # by checking broader edges between pool_bioregion and draft_bioregion
+            elif not breakdown.same_bioregion:
+                async with db_pool.acquire() as conn:
+                    link = await conn.fetchval("""
+                        SELECT 1 FROM entity_relationships
+                        WHERE (subject_uri = $1 AND object_uri = $2 AND predicate = 'broader')
+                           OR (subject_uri = $2 AND object_uri = $1 AND predicate = 'broader')
+                        LIMIT 1
+                    """, draft_bioregion, pool_bioregion)
+                    if link:
+                        breakdown.same_bioregion = 15
+
+        # --- Offer/need taxonomy overlap (+25) ---
+        if draft_tags and pool_need_tags:
+            overlap = len(draft_tags & pool_need_tags)
+            max_len = max(len(draft_tags), len(pool_need_tags))
+            if max_len > 0:
+                breakdown.offer_need_overlap = round(25 * overlap / max_len)
+
+        # --- Timeframe overlap (+15) ---
+        if draft_start and draft_end:
+            # Parse pool dates if present
+            p_start = None
+            p_end = None
+            if pool_start_str:
+                try:
+                    p_start = datetime.fromisoformat(pool_start_str)
+                except (ValueError, TypeError):
+                    pass
+            if pool_end_str:
+                try:
+                    p_end = datetime.fromisoformat(pool_end_str)
+                except (ValueError, TypeError):
+                    pass
+
+            if p_start and p_end:
+                # Both have date ranges — compute overlap
+                overlap_start = max(draft_start, p_start)
+                overlap_end = min(draft_end, p_end)
+                if overlap_end > overlap_start:
+                    overlap_days = (overlap_end - overlap_start).days
+                    total_days = (draft_end - draft_start).days or 1
+                    breakdown.timeframe_overlap = round(15 * overlap_days / total_days)
+                else:
+                    hard_excludes.append("outside_timeframe")
+            else:
+                # Pool has no date constraints — full overlap assumed
+                breakdown.timeframe_overlap = 15
+
+        # --- Capacity fit (+20) ---
+        if draft_value > 0 and pool_remaining > 0:
+            if draft_value > pool_remaining:
+                hard_excludes.append("exceeds_capacity")
+            else:
+                # Score higher when commitment moves pool closer to threshold
+                if pool_threshold > 0:
+                    # How much does this pledge contribute toward threshold?
+                    contribution = min(draft_value / pool_threshold, 1.0)
+                    breakdown.capacity_fit = round(20 * min(contribution + 0.5, 1.0))
+                else:
+                    # No threshold — just check it fits
+                    fit_ratio = 1.0 - (draft_value / pool_remaining)
+                    breakdown.capacity_fit = round(20 * max(fit_ratio, 0.3))
+        elif draft_value > 0 and pool_remaining <= 0:
+            hard_excludes.append("no_capacity")
+
+        # --- Governance compatibility (+10, inactive v0) ---
+        # Returns 0 until governance_membrane is populated on both sides
+        breakdown.governance_compat = 0
+
+        # --- Total and recommendation ---
+        total_score = (
+            breakdown.same_bioregion
+            + breakdown.offer_need_overlap
+            + breakdown.timeframe_overlap
+            + breakdown.capacity_fit
+            + breakdown.governance_compat
+        )
+
+        # Build explanation
+        parts = []
+        if breakdown.same_bioregion == 30:
+            parts.append("same bioregion")
+        elif breakdown.same_bioregion == 15:
+            parts.append("umbrella bioregion match")
+        if breakdown.offer_need_overlap > 0:
+            overlap_count = len(draft_tags & pool_need_tags) if draft_tags and pool_need_tags else 0
+            parts.append(f"{overlap_count} tag overlap")
+        if breakdown.timeframe_overlap > 0:
+            parts.append("overlapping timeframe")
+        if breakdown.capacity_fit > 0:
+            parts.append("within capacity")
+        if hard_excludes:
+            parts.append(f"excludes: {', '.join(hard_excludes)}")
+
+        explanation = "; ".join(parts) if parts else "no scoring factors matched"
+
+        suggestions.append(PoolSuggestion(
+            pool_rid=pr["pool_rid"],
+            pool_name=pr["name"],
+            total_score=total_score,
+            score_breakdown=breakdown,
+            hard_excludes=hard_excludes,
+            recommended=total_score >= 60 and not hard_excludes,
+            explanation=explanation,
+        ))
+
+    # Sort by total_score desc, then pool_rid asc for deterministic tie-break
+    suggestions.sort(key=lambda s: (-s.total_score, s.pool_rid))
+    # Filter out hard-excluded from recommendations but still return them
+    return suggestions
