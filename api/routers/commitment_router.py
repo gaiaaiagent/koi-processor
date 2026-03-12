@@ -425,6 +425,36 @@ def create_pool_router(pool, caps=None):
 
     from api.federation_events import emit_domain_event
 
+    @router.get("/", response_model=List[PoolResponse])
+    async def list_pools(
+        state: Optional[str] = None,
+        bioregion_uri: Optional[str] = None,
+        limit: int = Query(default=50, le=200),
+        offset: int = Query(default=0, ge=0),
+    ):
+        """List commitment pools with optional filters."""
+        conditions: list[str] = []
+        params: list = []
+        i = 1
+        if state:
+            conditions.append(f"state = ${i}")
+            params.append(state)
+            i += 1
+        if bioregion_uri:
+            conditions.append(f"bioregion_uri = ${i}")
+            params.append(bioregion_uri)
+            i += 1
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend([limit, offset])
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(f"""
+                SELECT * FROM commitment_pools
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ${i} OFFSET ${i+1}
+            """, *params)
+        return [_row_to_pool(r) for r in rows]
+
     @router.post("/create", response_model=PoolResponse, status_code=201)
     async def create_pool(body: PoolCreateRequest):
         """Create a new commitment pool."""
