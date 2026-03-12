@@ -448,7 +448,10 @@ def create_router(pool, caps=None):
     """Return an APIRouter for claims engine endpoints."""
     router = APIRouter(prefix="/claims", tags=["claims"])
 
-    from api.federation_events import emit_domain_event
+    try:
+        from api.federation_events import emit_domain_event
+    except ImportError:
+        async def emit_domain_event(*a, **kw): pass  # no-op when federation bridge not deployed
 
     # Lazy import to avoid circular deps at module level
     _entity_helpers = {}

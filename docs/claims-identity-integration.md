@@ -44,15 +44,15 @@ The Claims Engine uses a **4-role model**: Claimant, Subject (about_uri), Operat
 
 1. **Regen Ledger org identity** — What's the current state of on-chain organization identity? Is there an org registry module, or just addresses? Can an organization be represented on-chain beyond a multisig?
 
-2. **`MsgAttest` vs `MsgAnchor`** — `MsgAttest` with `ContentHash.Graph` would semantically mean "this data is accurate" vs "this data exists." Is `MsgAttest` ready for production use on `regen-1`? Any gotchas (gas, indexing, query support)?
+2. **`MsgAttest` vs `MsgAnchor`** — ~~Is `MsgAttest` ready for production use?~~ **ANSWERED (pre-meeting, Mar 12):** Yes — Marie confirmed MsgAttest has been used for several years on mainnet. Production-ready, no caveats.
 
-3. **`cosmos.authz` delegation** — For per-reviewer signing: service account grants `MsgAttest` permission to reviewer addresses. Has this pattern been used on Regen Ledger? `authz` lets grantee execute via `MsgExec` on behalf of granter — does this give us per-reviewer identity binding, or is the on-chain signer still the granter's context?
+3. **`cosmos.authz` delegation** — ~~Does MsgExec reflect grantee identity on-chain?~~ **ANSWERED (pre-meeting, Mar 12):** Yes — Marie confirmed the grantee's identity is reflected on-chain. [Mintscan proof tx](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347). This confirms Option B is viable.
 
 4. **DID / identity standards** — Has any DID system been considered for Regen? Or is the practical path: Regen address + entity registry URI mapping?
 
 5. **Key management UX** — For non-crypto-native reviewers (e.g., project developers), what's the lightest-weight path to a signing key? Browser wallet (Keplr)? Custodial service? Something else?
 
-6. **Compatibility** — Any upcoming Regen Ledger changes (Cosmos SDK upgrade, module additions, ICS integration) that would affect the data module or identity?
+6. **Compatibility** — ~~Any upcoming changes affecting the data module?~~ **ANSWERED (pre-meeting, Mar 12):** No upcoming ledger changes affecting the data module. Safe to build on current APIs.
 
 ---
 
@@ -63,10 +63,11 @@ Keep single signer. Map `attestor_address` → entity registry URI in our DB. On
 - **Pro**: Zero UX change, deployable today
 - **Con**: Weakest identity binding — relies entirely on trust in the service operator
 
-### Option B — `cosmos.authz` delegation
-Reviewer gets own Regen address. Service account grants them `MsgAttest` permission via `MsgGrant`.
-- **Pro**: Leverages existing Cosmos infrastructure
-- **Con**: Need to verify with Marie — `authz` uses `MsgExec` wrapper, so the on-chain execution context may still be the granter. If so, this doesn't provide the per-reviewer identity binding we want.
+### Option B — `cosmos.authz` delegation (CONFIRMED VIABLE)
+Reviewer gets own Regen address. Service account grants them `MsgAttest` permission via `MsgGrant`. When we submit via `MsgExec`, the grantee's identity is reflected on-chain.
+- **Pro**: Leverages existing Cosmos infrastructure, grantee identity confirmed on-chain ([Mintscan proof](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347))
+- **Con**: Reviewer still needs a Regen address and gas — key management UX TBD
+- **Status**: Marie confirmed viability pre-meeting Mar 12. Remaining question: lightest key management path for non-crypto-native reviewers.
 
 ### Option C — Per-reviewer direct signing
 Each reviewer has their own key (Keplr, CLI, or custodial). They sign `MsgAttest` directly with their own address.
@@ -117,17 +118,32 @@ WebCrypto or OAuth-backed signing for off-chain attestation records. Service acc
 
 ---
 
-## 6. Post-Call Outcomes (To Be Filled After March 12)
+## 6. Post-Call Outcomes
 
 **Owner**: Darren
 
-After the Thursday all-hands with Marie, update this section with:
-- Which design option(s) Marie recommends or flags issues with
-- Current state of Regen Ledger identity / org modules
-- `MsgAttest` production readiness status
-- `cosmos.authz` behavior confirmation (granter vs grantee context)
-- Any SDK upgrade timeline that affects planning
-- Agreed next steps and ownership
+### Pre-meeting answers (Marie, Mar 12 overnight)
+
+Marie answered 3 of 6 questions before the meeting via Dave:
+
+| Question | Answer |
+|----------|--------|
+| MsgAttest production-ready? | Yes — used for several years on mainnet |
+| cosmos.authz grantee identity? | Yes — grantee reflected on-chain ([Mintscan proof](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347)) |
+| Upcoming ledger changes? | None affecting the data module |
+
+**Impact:** Option B (authz delegation) confirmed viable. Discussion shifts from "is this possible?" to "how do we implement it?"
+
+### Still open for meeting discussion
+
+- Key management UX for non-crypto-native reviewers
+- authz grant flow implementation details
+- DID / identity standards direction
+- Org identity on-chain (beyond multisig)
+
+### Meeting outcomes (fill after call)
+
+- *TBD*
 
 ---
 
