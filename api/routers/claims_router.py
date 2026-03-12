@@ -18,6 +18,7 @@ Implements the Claims Engine API:
   POST /claims/{rid}/attestations/{att_rid}/anchor — anchor attestation on Regen Ledger
   POST /claims/{rid}/attestations/{att_rid}/reconcile — check on-chain status of attestation anchor
   POST /claims/claim-from-settlement — settlement→evidence→claim with threshold auto-advance
+  GET  /claims/settlements — list TBFF settlement receipts with linked claim status
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
@@ -447,6 +448,8 @@ def create_router(pool, caps=None):
     """Return an APIRouter for claims engine endpoints."""
     router = APIRouter(prefix="/claims", tags=["claims"])
 
+    from api.federation_events import emit_domain_event
+
     # Lazy import to avoid circular deps at module level
     _entity_helpers = {}
 
@@ -598,6 +601,17 @@ def create_router(pool, caps=None):
                 return await _fetch_enriched_claim(conn, claim_rid)
 
             logger.info(f"claim.create rid={claim_rid} claimant={body.claimant_uri} type={body.claim_type}")
+            await emit_domain_event("claim", "NEW", claim_rid, {
+                "claim_rid": claim_rid, "entity_uri": entity_uri,
+                "claimant_uri": body.claimant_uri, "statement": body.statement,
+                "claim_type": body.claim_type, "verification": "self_reported",
+                "source_document": body.source_document, "ai_confidence": body.ai_confidence,
+                "supersedes_rid": body.supersedes_rid, "metadata": body.metadata or {},
+                "created_by": body.created_by, "operator_uri": body.operator_uri,
+                "state_transition": {"from_state": None, "to_state": "self_reported",
+                                     "actor": body.created_by, "reason": "created",
+                                     "created_at": datetime.now(timezone.utc).isoformat()},
+            })
             return await _fetch_enriched_claim(conn, claim_rid)
 
     # ------------------------------------------------------------------ #
@@ -817,6 +831,75 @@ def create_router(pool, caps=None):
         )
 
     # ------------------------------------------------------------------ #
+    # List settlements (read model for flow-funding visualization)         #
+    # ------------------------------------------------------------------ #
+
+    @router.get("/settlements")
+    async def list_settlements(
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ):
+        """List TBFF settlement receipts with linked claim verification status.
+
+        Joins koi_transformation_receipts (transformation_type='tbff_settlement')
+        to claims via evidences_claim edges. Returns structured settlement data
+        including node_balances (when available in receipt metadata JSONB).
+        """
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (r.receipt_id)
+                    r.receipt_id,
+                    r.output_rid AS evidence_uri,
+                    r.metadata,
+                    r.created_at,
+                    c.claim_rid,
+                    c.verification,
+                    c.statement
+                FROM koi_transformation_receipts r
+                LEFT JOIN entity_relationships ev_link
+                    ON ev_link.subject_uri = r.output_rid
+                    AND ev_link.predicate = 'evidences_claim'
+                LEFT JOIN claims c
+                    ON c.entity_uri = ev_link.object_uri
+                WHERE r.transformation_type = 'tbff_settlement'
+                ORDER BY r.receipt_id, c.created_at DESC
+            """)
+            # Apply pagination after dedup
+            rows = rows[offset:offset + limit]
+
+            settlements = []
+            for row in rows:
+                raw_meta = row["metadata"] or {}
+                meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                amount = meta.get("total_redistributed_usd", 0)
+                # Derive threshold band from amount
+                if amount < 500:
+                    threshold_band = "auto"
+                elif amount <= 5000:
+                    threshold_band = "semi"
+                else:
+                    threshold_band = "manual"
+
+                settlements.append({
+                    "receipt_id": row["receipt_id"],
+                    "evidence_uri": row["evidence_uri"],
+                    "settlement_id": meta.get("settlement_id"),
+                    "tx_hash": meta.get("tx_hash"),
+                    "iterations": meta.get("iterations"),
+                    "converged": meta.get("converged"),
+                    "total_redistributed_usd": amount,
+                    "participant_count": meta.get("participant_count"),
+                    "node_balances": meta.get("node_balances"),  # None for pre-fix receipts
+                    "threshold_band": threshold_band,
+                    "claim_rid": row["claim_rid"],
+                    "claim_state": row["verification"],
+                    "claim_statement": row["statement"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                })
+
+            return {"settlements": settlements, "total": len(settlements)}
+
+    # ------------------------------------------------------------------ #
     # Get claim by RID (with evidence)                                     #
     # ------------------------------------------------------------------ #
 
@@ -913,6 +996,12 @@ def create_router(pool, caps=None):
                 """, rid, current, new_level, body.actor, body.reason)
 
             logger.info(f"claim.verify rid={rid} {current}→{new_level} actor={body.actor}")
+            await emit_domain_event("claim", "UPDATE", rid, {
+                "claim_rid": rid, "verification": new_level,
+                "state_transition": {"from_state": current, "to_state": new_level,
+                                     "actor": body.actor, "reason": body.reason,
+                                     "created_at": datetime.now(timezone.utc).isoformat()},
+            })
             return await _fetch_enriched_claim(conn, rid)
 
     # ------------------------------------------------------------------ #
@@ -964,6 +1053,13 @@ def create_router(pool, caps=None):
                 """, rid)
 
             logger.info(f"claim.link_evidence rid={rid} evidence={body.evidence_uri}")
+            await emit_domain_event("claim", "UPDATE", rid, {
+                "claim_rid": rid,
+                "state_transition": {"from_state": row["verification"], "to_state": row["verification"],
+                                     "actor": body.actor, "reason": "evidence linked",
+                                     "created_at": datetime.now(timezone.utc).isoformat(),
+                                     "metadata": {"evidence_uri": body.evidence_uri}},
+            })
             return await _fetch_enriched_claim(conn, rid)
 
     # ------------------------------------------------------------------ #
@@ -1341,6 +1437,7 @@ def create_router(pool, caps=None):
                         "converged": body.converged,
                         "total_redistributed_usd": body.total_redistributed_usd,
                         "participant_count": len(body.node_balances),
+                        "node_balances": [dict(nb) for nb in body.node_balances],
                     },
                     parent_receipt_id=body.parent_receipt_id,
                     content_hash=content_hash,
@@ -2008,6 +2105,12 @@ def create_router(pool, caps=None):
                 )
 
         logger.info(f"claim.attestation rid={rid} att={att_rid} reviewer={body.reviewer_uri} verdict={body.verdict}")
+        await emit_domain_event("attestation", "NEW", att_rid, {
+            "attestation_rid": att_rid, "claim_rid": rid,
+            "reviewer_uri": body.reviewer_uri, "verdict": body.verdict,
+            "rationale": body.rationale, "evidence_uris": body.evidence_uris or [],
+            "content_hash": content_hash, "metadata": body.metadata or {},
+        })
         return _attestation_response(row, reviewer_name=reviewer["entity_text"] if reviewer else None)
 
     @router.get("/{rid}/attestations", response_model=List[AttestationResponse])
