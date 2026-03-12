@@ -14,4 +14,25 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #10430 | 11:31 AM | 🟣 | Committed Phase A graph traversal endpoints with comprehensive documentation | ~586 |
+
+### Feb 28, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #11796 | 3:11 PM | 🟣 | All 12 regression tests passing with pagination fix verified | ~393 |
+| #11795 | " | 🔴 | Recreated test_task_registry.py with pagination fix to prevent flaky test failures | ~507 |
+| #11786 | 3:06 PM | 🔵 | test_task_registry.py source file deleted but cached bytecode remains | ~328 |
+
+### Mar 4, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #13776 | 11:35 PM | ✅ | Fixed Test Gate Commands for Reproducible Execution | ~452 |
+
+### Mar 11, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #15887 | 10:37 PM | ✅ | Cherry-picked federation tests and bugfix to koi-processor repository | ~270 |
+| #15618 | 5:35 PM | ✅ | Claims engine dogfooding setup pushed to regen-prod branch | ~396 |
 </claude-mem-context>

@@ -13,6 +13,26 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #11398 | 9:50 PM | ⚖️ | Session-to-Knowledge-Graph Integration Architecture Decision | ~672 |
+| #11246 | 5:29 PM | 🟣 | WS2 API Contract Complete: TBFF Integration Documentation for Knowledge→Flow Loop | ~603 |
 | #10979 | 1:57 AM | ✅ | ADR Updated with Accelerated Rollout Evidence and Deployment Outcomes | ~558 |
 | #10978 | " | ✅ | ADR-001 Appendix B - Accelerated Rollout Evidence Documentation | ~327 |
+
+### Mar 9, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #14485 | 6:14 PM | 🔵 | Claims Engine V1 complete implementation documentation | ~776 |
+
+### Mar 10, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #15271 | 11:38 PM | ✅ | Updated dogfood results to mark Regen CLI installation complete | ~271 |
+
+### Mar 11, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #15618 | 5:35 PM | ✅ | Claims engine dogfooding setup pushed to regen-prod branch | ~396 |
 </claude-mem-context>
