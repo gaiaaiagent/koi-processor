@@ -1,5 +1,11 @@
 # Project Context for Claude
 
+> **DEPLOY WARNING**: This checkout (`koi-processor`, branch `regen-prod`) is NOT the deploy
+> source for the personal-koi server or NUC federation. The deploy source is the **koi-server
+> worktree** (`~/projects/RegenAI/koi-server`, branch `server/stable`). `deploy.sh` in the
+> Dobby repo rsyncs from koi-server, not here. Cherry-pick commits from koi-server into this
+> repo to keep history aligned, but do not expect edits here to reach production.
+
 **Project**: Regen Network Knowledge Graph Quality Improvement
 **Status**: ✅ COMPLETE - Production Deployed (2025-12-25)
 **Your Role**: AI coding assistant helping with knowledge graph quality
