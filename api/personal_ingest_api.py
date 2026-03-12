@@ -1314,6 +1314,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Claims router not mounted: {e}")
 
+            # SeaTrees Bloom export router (always on, no capability gate)
+            try:
+                from api.routers.seatrees_router import create_router as create_seatrees_router
+                app.include_router(create_seatrees_router(db_pool))
+                logger.info("SeaTrees router mounted (/seatrees/)")
+            except Exception as e:
+                logger.warning(f"SeaTrees router not mounted: {e}")
+
             if _caps.github_sensor:
                 try:
                     from api.routers.github_router import create_router as create_github_router
@@ -1350,6 +1358,10 @@ async def startup():
             try:
                 from api.koi_net_router import setup_koi_net
                 await setup_koi_net(db_pool)
+                # Wire event_queue for domain event emission from mutation endpoints
+                from api.koi_net_router import _event_queue
+                from api.federation_events import set_event_queue
+                set_event_queue(_event_queue)
                 logger.info("KOI-net federation initialized")
             except Exception as e:
                 logger.warning(f"KOI-net federation failed to initialize: {e}")
@@ -1830,6 +1842,17 @@ async def ingest_extraction(request: IngestRequest):
                     else:
                         resolved_count += 1
                         logger.info(f"Resolved to existing: {canonical.uri}")
+
+                    # Emit federation event for entity replication
+                    from api.federation_events import emit_domain_event
+                    await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
+                        "fuseki_uri": canonical.uri,
+                        "entity_text": canonical.name,
+                        "entity_type": entity.type,
+                        "normalized_text": canonical.name.lower().strip(),
+                        "aliases": [],
+                        "metadata": {},
+                    })
 
                     # Link entity to document
                     await conn.execute("""
@@ -2827,7 +2850,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 except Exception as e:
                     logger.warning(f"Failed to resolve pending relationships: {e}")
 
-            return RegisterEntityResponse(
+            result = RegisterEntityResponse(
                 success=True,
                 canonical_uri=canonical.uri,
                 is_new=is_new,
@@ -2836,6 +2859,19 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 collision_warning=collision_warning,
                 koi_rid=final_koi_rid if request.publication_scope == "federated" else None
             )
+
+            # Emit federation event for entity replication
+            from api.federation_events import emit_domain_event
+            await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
+                "fuseki_uri": canonical.uri,
+                "entity_text": request.name,
+                "entity_type": request.entity_type,
+                "normalized_text": canonical.name.lower().strip() if canonical.name else request.name.lower().strip(),
+                "aliases": [],
+                "metadata": {},
+            })
+
+            return result
 
 
 @app.get("/vault-entities")
