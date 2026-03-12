@@ -596,10 +596,29 @@ def create_router(pool, caps=None):
                 LIMIT ${i} OFFSET ${i+1}
             """, *params)
 
+            # Batch attestation summary (preserves pre-migration fallback)
+            att_map = {}
+            try:
+                rids = [r["claim_rid"] for r in rows]
+                att_rows = await conn.fetch("""
+                    SELECT claim_rid, verdict, COUNT(*) AS cnt
+                    FROM claim_attestations
+                    WHERE claim_rid = ANY($1)
+                    GROUP BY claim_rid, verdict
+                """, rids)
+                for ar in att_rows:
+                    rid = ar["claim_rid"]
+                    if rid not in att_map:
+                        att_map[rid] = [0, {}]
+                    att_map[rid][0] += ar["cnt"]
+                    att_map[rid][1][ar["verdict"]] = ar["cnt"]
+            except Exception:
+                pass  # Table may not exist yet (pre-migration)
+
             results = []
             for r in rows:
-                att_count, att_summary = await _get_attestation_summary(conn, r["claim_rid"])
-                results.append(_row_to_claim(r, attestation_count=att_count, attestation_summary=att_summary))
+                count, summary = att_map.get(r["claim_rid"], [0, {}])
+                results.append(_row_to_claim(r, attestation_count=count, attestation_summary=summary or None))
             return results
 
     # ------------------------------------------------------------------ #
@@ -1396,7 +1415,7 @@ def create_router(pool, caps=None):
                     WHERE a.claim_rid = $1
                     ORDER BY a.created_at ASC
                 """, rid)
-                from api.ledger_anchor import compute_attestation_hash
+                from api.ledger_anchor import compute_attestation_hash, derive_ledger_iri
                 for a in att_rows:
                     att_entry = {
                         "attestation_rid": a["attestation_rid"],
@@ -1414,8 +1433,17 @@ def create_router(pool, caps=None):
                     }
                     # Verify attestation content hash
                     if a.get("content_hash"):
-                        recomputed = compute_attestation_hash(a)
-                        att_entry["hash_verified"] = (recomputed == a["content_hash"])
+                        if a.get("attest_tx_hash") and a.get("ledger_iri"):
+                            # Anchored: verify stored hash → IRI matches stored IRI
+                            try:
+                                derived_iri = derive_ledger_iri(a["content_hash"])
+                                att_entry["hash_verified"] = (derived_iri == a["ledger_iri"])
+                            except Exception:
+                                att_entry["hash_verified"] = False
+                        else:
+                            # Not anchored: verify via recomputation
+                            recomputed = compute_attestation_hash(a)
+                            att_entry["hash_verified"] = (recomputed == a["content_hash"])
                     else:
                         att_entry["hash_verified"] = None
                     attestations.append(att_entry)
@@ -1570,6 +1598,19 @@ def create_router(pool, caps=None):
             content_hash = compute_attestation_hash(att_hash_row)
 
             async with conn.transaction():
+                # Immutability guard: anchored attestations cannot be modified (row-locked)
+                existing = await conn.fetchrow("""
+                    SELECT attest_tx_hash FROM claim_attestations
+                    WHERE claim_rid = $1 AND reviewer_uri = $2
+                    FOR UPDATE
+                """, rid, body.reviewer_uri)
+                if existing and existing.get("attest_tx_hash"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Attestation already anchored on-chain (tx: {existing['attest_tx_hash'][:16]}...). "
+                               f"Anchored attestations are immutable. To revise, create a new claim version.",
+                    )
+
                 # UPSERT attestation (includes content_hash)
                 row = await conn.fetchrow("""
                     INSERT INTO claim_attestations

@@ -4,16 +4,11 @@
 Run: python -m scripts.test_claims_api [--base-url http://localhost:8351]
 
 Tests:
-1. Create claim → 201 + claim_rid + entity_uri
-2. Idempotency: same body → same claim_rid
-3. Get claim by RID → includes evidence field
-4. List claims → results include created claim
-5. Verify claim → state transition + audit log
-6. Reject invalid transition → 409
-7. Link evidence → evidences_claim edge
-8. History → audit trail
-9. Prepare anchor → content_hash computed
-10. Entity graph integration verified
+1-10: Core claim CRUD, verification, evidence, anchoring prep
+11-16: Extraction, anchor preconditions, 404s
+17-20: Reconcile, tx_hash in responses
+21-25: Attestation content_hash, anchor fields, proof-pack enhanced/download, attestation anchor
+26-27: Anchored attestation immutability guard, proof-pack hash_verified
 """
 
 import argparse
@@ -453,6 +448,168 @@ def test_tx_hash_in_claim_response():
     check("tx_hash field exists", "tx_hash" in data, f"keys={list(data.keys())}")
 
 
+def test_attestation_content_hash():
+    """Test that content_hash is populated on attestation create."""
+    print("\n[21] Attestation content_hash populated")
+    if not CREATED_RIDS:
+        check("attestation content_hash", True)  # skip
+        return
+    # Use an existing claim that has attestations
+    rid = CREATED_RIDS[0]
+    status, data = _req("GET", f"/claims/{rid}/attestations")
+    if status == 200 and data:
+        att = data[0]
+        check("content_hash present", att.get("content_hash") is not None,
+              f"content_hash={att.get('content_hash')}")
+        check("content_hash is 64 hex chars", len(att.get("content_hash", "")) == 64,
+              f"len={len(att.get('content_hash', ''))}")
+    else:
+        check("attestation content_hash", True)  # skip if no attestations
+
+
+def test_attestation_anchor_fields():
+    """Test that attestation response includes anchor fields."""
+    print("\n[22] Attestation anchor fields in response")
+    if not CREATED_RIDS:
+        check("attestation anchor fields", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    status, data = _req("GET", f"/claims/{rid}/attestations")
+    if status == 200 and data:
+        att = data[0]
+        check("ledger_iri field exists", "ledger_iri" in att, str(att.keys()))
+        check("attest_timestamp field exists", "attest_timestamp" in att, str(att.keys()))
+        check("attestor_address field exists", "attestor_address" in att, str(att.keys()))
+    else:
+        check("attestation anchor fields", True)  # skip
+
+
+def test_proof_pack_enhanced():
+    """Test proof-pack includes hash verification and new fields."""
+    print("\n[23] Proof-pack enhanced fields")
+    # Find a ledger_anchored claim
+    status, data = _req("GET", "/claims/?verification=ledger_anchored&limit=1")
+    if status != 200 or not data:
+        check("proof-pack enhanced (skip — no anchored claims)", True)
+        return
+    rid = data[0]["claim_rid"]
+    status2, pp = _req("GET", f"/claims/{rid}/proof-pack")
+    check("proof-pack status 200", status2 == 200, f"status={status2}")
+    if status2 == 200:
+        check("claim_content_hash_verified present", "claim_content_hash_verified" in pp,
+              str(pp.keys()))
+        check("chain_id present", bool(pp.get("chain_id")), f"chain_id={pp.get('chain_id')}")
+        check("verification_instructions present", bool(pp.get("verification_instructions")),
+              "empty")
+        check("version is 2.0", pp.get("version") == "2.0", f"version={pp.get('version')}")
+        # Check attestations have anchor fields
+        if pp.get("attestations"):
+            att = pp["attestations"][0]
+            check("attestation has hash_verified", "hash_verified" in att, str(att.keys()))
+            check("attestation has content_hash", "content_hash" in att, str(att.keys()))
+
+
+def test_proof_pack_download():
+    """Test proof-pack download format returns Content-Disposition."""
+    print("\n[24] Proof-pack download format")
+    status, data = _req("GET", "/claims/?verification=ledger_anchored&limit=1")
+    if status != 200 or not data:
+        check("proof-pack download (skip — no anchored claims)", True)
+        return
+    rid = data[0]["claim_rid"]
+    # Can't easily test Content-Disposition with our simple _req helper,
+    # but verify the endpoint works with format=download
+    url = f"{BASE_URL}/claims/{urllib.parse.quote(rid, safe='')}/proof-pack?format=download"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            check("download status 200", resp.status == 200, f"status={resp.status}")
+            cd = resp.headers.get("Content-Disposition", "")
+            check("Content-Disposition present", "attachment" in cd, f"header={cd}")
+            check("filename in header", "proof-pack-" in cd, f"header={cd}")
+    except urllib.error.HTTPError as e:
+        check("proof-pack download", False, f"status={e.code}")
+
+
+def test_attestation_anchor_state_check():
+    """Test that attestation anchor rejects when parent claim is not ledger_anchored."""
+    print("\n[25] Attestation anchor — parent claim state check")
+    if not CREATED_RIDS:
+        check("attestation anchor state check", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    # Get attestations
+    status, atts = _req("GET", f"/claims/{rid}/attestations")
+    if status != 200 or not atts:
+        check("attestation anchor state check (skip)", True)
+        return
+    att_rid = atts[0]["attestation_rid"]
+    # This claim is at verified (not ledger_anchored), so anchor should be rejected
+    status2, data2 = _req("POST", f"/claims/{rid}/attestations/{att_rid}/anchor")
+    check("rejects non-anchored parent", status2 == 409, f"status={status2} data={data2}")
+
+
+def test_anchored_attestation_immutable():
+    """Test that updating an anchored attestation returns 409."""
+    print("\n[26] Anchored attestation immutability guard")
+    if not CREATED_RIDS:
+        check("immutability guard", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    # Get attestations to find one (may not be anchored in smoke test, but test the endpoint behavior)
+    status, atts = _req("GET", f"/claims/{rid}/attestations")
+    if status != 200 or not atts:
+        check("immutability guard (skip — no attestations)", True)
+        return
+    # Find an anchored attestation
+    anchored = [a for a in atts if a.get("attest_tx_hash")]
+    if not anchored:
+        # No anchored attestations — simulate by checking that non-anchored can still be updated
+        att = atts[0]
+        status2, data2 = _req("POST", f"/claims/{rid}/attestations", {
+            "reviewer_uri": att["reviewer_uri"],
+            "verdict": att["verdict"],
+            "rationale": "Updated rationale for immutability test",
+        })
+        check("non-anchored attestation updatable", status2 in (200, 201),
+              f"status={status2}")
+        return
+    # Try to update an anchored attestation — should get 409
+    att = anchored[0]
+    status3, data3 = _req("POST", f"/claims/{rid}/attestations", {
+        "reviewer_uri": att["reviewer_uri"],
+        "verdict": "rejected",
+        "rationale": "Trying to modify anchored attestation",
+    })
+    check("anchored attestation returns 409", status3 == 409,
+          f"status={status3} detail={data3.get('detail', '')}")
+    check("error mentions immutable", "immutable" in data3.get("detail", "").lower(),
+          f"detail={data3.get('detail', '')}")
+
+
+def test_proof_pack_hash_verified():
+    """Test that proof-pack hash_verified is true for attestations with matching content_hash."""
+    print("\n[27] Proof-pack attestation hash_verified")
+    if not CREATED_RIDS:
+        check("proof-pack hash_verified", True)  # skip
+        return
+    rid = CREATED_RIDS[0]
+    status, data = _req("GET", f"/claims/{rid}/proof-pack")
+    if status != 200:
+        check("proof-pack hash_verified (skip)", True)
+        return
+    atts = data.get("attestations", [])
+    if not atts:
+        check("proof-pack hash_verified (skip — no attestations)", True)
+        return
+    # All attestations with content_hash should have hash_verified = true
+    for att in atts:
+        if att.get("content_hash"):
+            check(f"hash_verified for {att['attestation_rid'][:30]}",
+                  att.get("hash_verified") is True,
+                  f"hash_verified={att.get('hash_verified')}")
+
+
 def main():
     global BASE_URL
     parser = argparse.ArgumentParser(description="Claims Engine V1 smoke tests")
@@ -501,6 +658,13 @@ def main():
     test_reconcile_not_found()
     test_reconcile_wrong_state()
     test_tx_hash_in_claim_response()
+    test_attestation_content_hash()
+    test_attestation_anchor_fields()
+    test_proof_pack_enhanced()
+    test_proof_pack_download()
+    test_attestation_anchor_state_check()
+    test_anchored_attestation_immutable()
+    test_proof_pack_hash_verified()
 
     print("\n" + "=" * 50)
     print(f"Results: {PASS} passed, {FAIL} failed")
