@@ -162,6 +162,28 @@ class EvidenceFromArtifactsResponse(BaseModel):
     source_artifacts: List[Dict[str, Any]]
 
 
+class EvidenceFromSettlementRequest(BaseModel):
+    settlement_id: str = Field(..., description="Unique settlement identifier (e.g. tx hash or internal ID)")
+    tx_hash: Optional[str] = Field(None, description="On-chain transaction hash (Base Sepolia/mainnet)")
+    chain_id: Optional[int] = Field(None, description="EVM chain ID (e.g. 84532 for Base Sepolia)")
+    block_number: Optional[int] = Field(None, description="Block number of the settlement transaction")
+    iterations: int = Field(..., ge=1, le=50, description="Number of TBFF iterations to convergence")
+    converged: bool = Field(True, description="Whether the settlement converged")
+    total_redistributed_usd: float = Field(..., ge=0, description="Total USD redistributed in this settlement")
+    node_balances: List[Dict[str, Any]] = Field(..., min_length=1, description="Final balance snapshot: [{participant_name, participant_uri?, initial_balance, final_balance, threshold}]")
+    bioregion: Optional[str] = Field(None, description="Bioregion name for path prefix")
+    description: str = Field(..., min_length=10, max_length=5000, description="Human-readable description of the settlement")
+    parent_receipt_id: Optional[str] = Field(None, description="Parent CAT receipt ID for provenance chaining")
+
+
+class EvidenceFromSettlementResponse(BaseModel):
+    evidence_uri: str
+    receipt_id: Optional[str] = None
+    receipt_persisted: bool = True
+    is_new: bool
+    settlement_summary: Dict[str, Any]
+
+
 class AttestationCreateRequest(BaseModel):
     reviewer_uri: str
     verdict: str = "pending"  # pending|approved|rejected|needs_info
@@ -997,6 +1019,160 @@ def create_router(pool, caps=None):
         )
 
     # ------------------------------------------------------------------ #
+    # Evidence from TBFF settlement (Capital Plane Phase 2)                #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/evidence-from-settlement", response_model=EvidenceFromSettlementResponse, status_code=201)
+    async def evidence_from_settlement(body: EvidenceFromSettlementRequest):
+        """Create an Evidence entity from a TBFF settlement event.
+
+        Transforms on-chain settlement data (balances, iterations, convergence)
+        into a citable Evidence entity with a CAT receipt chain. Follows the
+        same vault-note registration pattern as evidence_from_artifacts.
+        """
+        from api.personal_ingest_api import register_vault_entity, RegisterEntityRequest
+        from api.cat_receipts import create_receipt, generate_receipt_id
+
+        # 1. Build Evidence entity name and vault paths
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        evidence_name = f"TBFF Settlement — {body.bioregion or 'Unknown'} — {date_str}"
+
+        safe_bio = (body.bioregion or "unknown").strip().replace(" ", "-")[:30]
+        safe_id = body.settlement_id[:16]
+        vault_rid = f"orn:openclaw.entity:Evidence/tbff-settlement-{safe_id}"
+        vault_path = f"Evidence/{evidence_name}.md"
+
+        # 2. Build settlement summary
+        settlement_summary = {
+            "settlement_id": body.settlement_id,
+            "tx_hash": body.tx_hash,
+            "chain_id": body.chain_id,
+            "block_number": body.block_number,
+            "iterations": body.iterations,
+            "converged": body.converged,
+            "total_redistributed_usd": body.total_redistributed_usd,
+            "participant_count": len(body.node_balances),
+            "date": date_str,
+        }
+
+        # 3. Generate markdown content for vault note
+        balance_lines = []
+        for nb in body.node_balances:
+            name = nb.get("participant_name", "Unknown")
+            initial = nb.get("initial_balance", 0)
+            final = nb.get("final_balance", 0)
+            threshold = nb.get("threshold", 0)
+            balance_lines.append(
+                f"| {name} | ${initial:,.2f} | ${final:,.2f} | ${threshold:,.2f} |"
+            )
+
+        balance_table = (
+            "| Participant | Initial | Final | Threshold |\n"
+            "|---|---|---|---|\n"
+            + "\n".join(balance_lines)
+        )
+
+        markdown_content = (
+            f'---\n'
+            f'"@type": Evidence\n'
+            f'name: "{evidence_name}"\n'
+            f'description: "{body.description.strip()}"\n'
+            f'settlement_id: "{body.settlement_id}"\n'
+            + (f'tx_hash: "{body.tx_hash}"\n' if body.tx_hash else "")
+            + (f'chain_id: {body.chain_id}\n' if body.chain_id else "")
+            + f'---\n\n'
+            f'# {evidence_name}\n\n'
+            f'{body.description.strip()}\n\n'
+            f'## Settlement Details\n\n'
+            f'- **Iterations:** {body.iterations}\n'
+            f'- **Converged:** {body.converged}\n'
+            f'- **Total redistributed:** ${body.total_redistributed_usd:,.2f}\n'
+            + (f'- **TX hash:** `{body.tx_hash}`\n' if body.tx_hash else "")
+            + (f'- **Chain:** {body.chain_id}\n' if body.chain_id else "")
+            + (f'- **Block:** {body.block_number}\n' if body.block_number else "")
+            + f'\n## Final Balances\n\n'
+            f'{balance_table}\n'
+        )
+
+        content_hash = hashlib.sha256(markdown_content.encode()).hexdigest()
+
+        # 4. Register via /register-entity path
+        reg_request = RegisterEntityRequest(
+            vault_rid=vault_rid,
+            vault_path=vault_path,
+            entity_type="Evidence",
+            name=evidence_name,
+            content_hash=content_hash,
+            visibility_scope="public",
+            publication_scope="local_graph",
+            frontmatter={
+                "@type": "Evidence",
+                "name": evidence_name,
+                "description": body.description.strip(),
+                "settlement_id": body.settlement_id,
+                "tx_hash": body.tx_hash,
+                "chain_id": body.chain_id,
+            },
+        )
+
+        reg_response = await register_vault_entity(reg_request)
+        evidence_uri = reg_response.canonical_uri
+        is_new = reg_response.is_new
+
+        # 5. Create `documents` edges to participant Person entities (if in graph)
+        async with pool.acquire() as conn:
+            for nb in body.node_balances:
+                participant_uri = nb.get("participant_uri")
+                if participant_uri:
+                    await conn.execute("""
+                        INSERT INTO entity_relationships
+                            (subject_uri, predicate, object_uri, confidence, source)
+                        VALUES ($1, 'documents', $2, 1.0, 'evidence-from-settlement')
+                        ON CONFLICT DO NOTHING
+                    """, evidence_uri, participant_uri)
+
+        # 6. Create CAT receipt for provenance tracking
+        receipt_id = generate_receipt_id("tbff_settlement", f"tbff:{body.settlement_id}", evidence_uri)
+        try:
+            async with pool.acquire() as conn:
+                receipt = await create_receipt(
+                    conn,
+                    transformation_type="tbff_settlement",
+                    input_rid=f"tbff:{body.settlement_id}",
+                    output_rid=evidence_uri,
+                    processor_name="claims_router.evidence_from_settlement",
+                    source_sensor="tbff",
+                    metadata={
+                        "settlement_id": body.settlement_id,
+                        "tx_hash": body.tx_hash,
+                        "iterations": body.iterations,
+                        "converged": body.converged,
+                        "total_redistributed_usd": body.total_redistributed_usd,
+                        "participant_count": len(body.node_balances),
+                    },
+                    parent_receipt_id=body.parent_receipt_id,
+                    content_hash=content_hash,
+                )
+                receipt_id = receipt.receipt_id
+                receipt_persisted = True
+        except Exception as e:
+            logger.error(f"Failed to create TBFF settlement receipt: {e}")
+            receipt_persisted = False
+
+        logger.info(
+            f"Evidence from settlement: uri={evidence_uri} is_new={is_new} "
+            f"settlement={body.settlement_id} redistributed=${body.total_redistributed_usd}"
+        )
+
+        return EvidenceFromSettlementResponse(
+            evidence_uri=evidence_uri,
+            receipt_id=receipt_id,
+            receipt_persisted=receipt_persisted,
+            is_new=is_new,
+            settlement_summary=settlement_summary,
+        )
+
+    # ------------------------------------------------------------------ #
     # Prepare anchor (Phase 4)                                             #
     # ------------------------------------------------------------------ #
 
@@ -1149,15 +1325,16 @@ def create_router(pool, caps=None):
                     WHERE claim_rid = $1
                 """, rid, result["ledger_iri"], ledger_ts, content_hash, result.get("tx_hash"))
 
+                chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
                     VALUES ($1, 'verified', 'ledger_anchored', 'ledger_anchor_service',
-                            'Anchored on Regen Ledger mainnet', $2::jsonb)
+                            $3, $2::jsonb)
                 """, rid, json.dumps({
                     "tx_hash": result.get("tx_hash"),
                     "ledger_iri": result["ledger_iri"],
-                    "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-1"),
-                }))
+                    "chain_id": chain_id,
+                }), f"Anchored on Regen Ledger ({chain_id})")
 
         logger.info(f"claim.anchored rid={rid} iri={result['ledger_iri']} tx={result.get('tx_hash')}")
         return AnchorResponse(
@@ -1883,5 +2060,19 @@ def create_router(pool, caps=None):
             attest_timestamp=str(ts_raw) if ts_raw else None,
             message="Attestation anchor confirmed on-chain.",
         )
+
+    # ------------------------------------------------------------------ #
+    # Chain Info (expose current chain config)                             #
+    # ------------------------------------------------------------------ #
+
+    @router.get("/chain-info")
+    async def chain_info():
+        """Return current chain configuration for portal and eval harness."""
+        chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
+        return {
+            "chain_id": chain_id,
+            "rpc_url": os.getenv("REGEN_RPC_URL", ""),
+            "is_testnet": chain_id != "regen-1",
+        }
 
     return router

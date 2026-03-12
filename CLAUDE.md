@@ -499,8 +499,8 @@ Added 9 new entity types for BKC COP project: Practice, Pattern, CaseStudy, Bior
 
 ---
 
-**Last Updated**: 2026-03-04
-**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Sync-1.5 COMPLETE + E2EE COMPLETE + Invite-Token Onboarding
+**Last Updated**: 2026-03-11
+**Phase**: Complete - All major milestones achieved + Personal KOI active development + TerminusDB Phase 1 validated + Vault Sync Sync-1.5 COMPLETE + E2EE COMPLETE + Invite-Token Onboarding + Claims Engine V2 Dogfooding Setup
 
 ---
 
@@ -552,6 +552,27 @@ MCP changes (personal-koi-mcp):
 - `evals/claims_smoke.ts` — 8-tool MCP smoke test
 
 Docs: [`docs/claims-engine-v1.md`](docs/claims-engine-v1.md)
+
+---
+
+## Claims Engine — Dogfooding Setup (2026-03-11)
+
+Status: implemented. Team decision (Mar 10 call): use mainnet for all dogfooding — "mainnet is our testnet" (Gregory).
+
+**New endpoint:** `GET /claims/chain-info` — returns `{chain_id, rpc_url, is_testnet}` for portal and eval harness chain detection.
+
+**Dynamic chain_id:** State log entries now use `f"Anchored on Regen Ledger ({chain_id})"` instead of hardcoded "mainnet".
+
+**Portal testnet indicator:** `static/demo.html` fetches `/claims/chain-info` on load — shows yellow "TESTNET" badge and chain_id in status bar when `is_testnet=true`. On mainnet, shows "Connected — regen-1".
+
+**Eval harness:** `scripts/eval_claims_pipeline.py` — runs full 8-step claims lifecycle (create → attest → verify → prepare-anchor → anchor → proof-pack), produces structured JSON metrics. Flags: `--runs N`, `--skip-anchor`, `--save`, `--compare`. Stdlib-only, no external deps.
+
+Key files:
+- `api/routers/claims_router.py` — chain-info endpoint + dynamic chain_id in state log
+- `static/demo.html` — testnet badge + chain_id in status bar
+- `scripts/eval_claims_pipeline.py` — pipeline eval harness
+- `config/personal.env` — commented testnet config block (optional)
+- `docs/claims-engine-v1.md` — eval harness docs section
 
 ---
 

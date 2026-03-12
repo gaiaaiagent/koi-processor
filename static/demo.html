@@ -284,6 +284,22 @@
 
     // ==================== INIT ====================
     document.addEventListener('DOMContentLoaded', async () => {
+      // Fetch chain info and show testnet badge if applicable
+      try {
+        const { data: chainInfo } = await api('/claims/chain-info');
+        if (chainInfo.is_testnet) {
+          const badge = document.createElement('span');
+          badge.className = 'text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full font-medium border border-yellow-300';
+          badge.textContent = 'TESTNET';
+          const v2Badge = document.querySelector('header .text-xs.bg-regen-100');
+          if (v2Badge) v2Badge.parentNode.insertBefore(badge, v2Badge.nextSibling);
+        }
+        const statusEl = document.getElementById('serverStatus');
+        if (statusEl) statusEl.textContent = 'Connected — ' + chainInfo.chain_id;
+      } catch (e) {
+        console.warn('Failed to fetch chain info:', e);
+      }
+
       await Promise.all([loadAllClaims(), loadOrgs()]);
       // Enrich orgList/orgMap from claims so claimants appear in dropdowns
       // even if their entity_type isn't ORGANIZATION

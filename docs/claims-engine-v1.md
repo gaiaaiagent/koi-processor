@@ -394,4 +394,37 @@ V2 introduces:
 
 ---
 
+## Eval Harness
+
+Pipeline evaluation script for dogfooding and regression tracking. Runs directly against mainnet — per team decision (Mar 10, 2026), mainnet *is* the testnet: "we have infinite Regen to spend... let's just instrument it straight into production."
+
+### Run eval
+
+```bash
+# Full pipeline without anchoring (fast, tests API flow)
+python -m scripts.eval_claims_pipeline --skip-anchor
+
+# Full pipeline with on-chain anchoring (mainnet regen-1)
+python -m scripts.eval_claims_pipeline
+
+# Multiple runs for statistical significance
+python -m scripts.eval_claims_pipeline --runs 3 --skip-anchor
+
+# Compare against saved baseline
+python -m scripts.eval_claims_pipeline --compare docs/eval/claims-baseline.json
+```
+
+### Check chain config
+
+```bash
+curl localhost:8351/claims/chain-info
+# Returns: {"chain_id":"regen-1","rpc_url":"...","is_testnet":false}
+```
+
+### Testnet (optional)
+
+Chain config is env-driven. A commented testnet block exists in `config/personal.env` if needed for isolated testing, but the default workflow is mainnet.
+
+---
+
 *Last updated: March 11, 2026*
