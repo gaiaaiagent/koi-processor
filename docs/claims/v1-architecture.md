@@ -2,9 +2,9 @@
 
 **Status:** V1 Complete + V2 Phase 2 (Attestation Anchoring + Proof-Pack Download) Deployed
 **Environment:** Live on Regen Ledger mainnet (`regen-1`)
-**Dogfooding:** 49+ claims across 3 organizations (CEC, Blue Forest, ZFP)
+**Dogfooding:** 50+ claims across 3 organizations (CEC, Blue Forest, ZFP)
 **Steel Thread:** Phase A (22/22) + Phase B (25/25) proven on Octo with on-chain anchors
-**Next:** [V2 Attestation Layer Design](claims-engine-v2-attestations.md) — Phase 3 (on-chain attestation)
+**Next:** [V2 Attestation Layer Design](v2-attestations.md) — Phase 3 (per-reviewer on-chain signing via cosmos.authz)
 
 ---
 
@@ -47,7 +47,9 @@ Each state transition is recorded in an append-only audit log (`claim_state_log`
 | Zero Foodprint (ZFP) | 3 | ecological | self_reported |
 | **Total** | **16+** | — | Mixed states |
 
-Plus additional claims from AI extraction testing, bringing the total to 49.
+Plus additional claims from AI extraction testing, bringing the total to 50+.
+
+**V2 Phase 2 Status (Mar 12):** Attestation layer fully deployed — identity-bound reviewers, policy gates, attestation anchoring on mainnet, proof-pack download with hash verification. 4 attestations anchored on-chain. `MsgAttest` confirmed production-ready (auto-anchors data).
 
 ---
 
@@ -327,7 +329,7 @@ Content-addressable, append-only:
 
 ## Roadmap: What's Coming
 
-### V2: Attestation Layer (Design Complete — see [V2 Design Doc](claims-engine-v2-attestations.md))
+### V2: Attestation Layer (Design Complete — see [V2 Design Doc](v2-attestations.md))
 
 The key gap in V1: **the system records who reviewed a claim, but doesn't prove it.** The `actor` field on verification transitions is free-text — "David Fortson" is just a string someone typed, not an identity-bound attestation.
 
@@ -390,7 +392,7 @@ V2 introduces:
 | `tests/test_steel_thread_phase_a.sh` | 22-check end-to-end steel thread proof |
 | `tests/test_steel_thread_phase_b.sh` | 25-check voice-to-graph pipeline proof |
 | `tests/test_consent_leakage.sh` | 18-check consent leakage smoke test |
-| `docs/claims-engine-v2-attestations.md` | V2 attestation layer design |
+| `docs/claims/v2-attestations.md` | V2 attestation layer design |
 
 ---
 
@@ -427,4 +429,4 @@ Chain config is env-driven. A commented testnet block exists in `config/personal
 
 ---
 
-*Last updated: March 11, 2026*
+*Last updated: March 12, 2026*

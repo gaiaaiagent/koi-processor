@@ -384,7 +384,7 @@ curl -X POST "http://localhost:8350/test-extraction?source_code=..."
 
 ## Related Documentation
 
-- [Architecture](./ARCHITECTURE.md)
+- [Architecture](./overview.md)
 - [KOI Pipeline](./KOI_PIPELINE_COMPLETE.md)
 - [API Documentation](./API.md)
-- [Deployment Guide](./DEPLOYMENT.md)
+- [Deployment Guide](../operations/deployment.md)

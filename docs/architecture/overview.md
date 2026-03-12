@@ -445,4 +445,4 @@ Automatic fallback when BGE server unavailable.
 
 ---
 
-For implementation details, see the [README](README.md). For deployment instructions, see [DEPLOYMENT](DEPLOYMENT.md).
+For implementation details, see the [README](README.md). For deployment instructions, see [DEPLOYMENT](../operations/deployment.md).

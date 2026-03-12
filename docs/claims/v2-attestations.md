@@ -1,9 +1,9 @@
 # Claims Engine V2 — Attestation Layer Design
 
-**Status:** Design Document (Mar 10, 2026)
+**Status:** Design Document (Mar 10, 2026 — updated Mar 12, 2026)
 **Prerequisite:** Claims Engine V1 + V2 Hardening (deployed Mar 9, 2026)
 **Author:** Darren Zal
-**See also:** [Claims Engine V1 — Current State & Roadmap](claims-engine-v1.md)
+**See also:** [Claims Engine V1 — Current State & Roadmap](v1-architecture.md)
 
 ---
 
@@ -320,14 +320,19 @@ Serialized with `json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(
 
 | Phase | Signer | How |
 |-------|--------|-----|
-| Near-term | Service account (`claims-service` key) | Same as V1 `MsgAnchor` — `regen` CLI with `--keyring-backend test` |
-| Longer-term | Per-reviewer delegated key | `cosmos.authz` `MsgGrant` — service account delegates `MsgAttest` permission to reviewer addresses |
+| Current | Service account (`claims-service` key) | Same as V1 `MsgAnchor` — `regen` CLI with `--keyring-backend test` |
+| Phase 3 | Per-reviewer via `cosmos.authz` | Reviewer's Keplr wallet signs `MsgExec`-wrapped `MsgAttest` — grantee identity shows on-chain |
 
-The per-reviewer model requires:
-1. Reviewer generates or receives a Regen address
-2. Service account grants `MsgAttest` authorization via `cosmos.authz`
-3. Reviewer signs attestation tx with their own key
-4. On-chain record binds: reviewer address → content hash → attestation
+**Key insight (confirmed March 12 with Marie):** `MsgAttest` auto-anchors data if not already anchored. This means attestation + anchoring can be a single transaction instead of two separate calls (`MsgAnchor` + `MsgAttest`).
+
+**`cosmos.authz` delegation confirmed viable:** When a reviewer uses `MsgExec` to execute `MsgAttest` via an authz grant, the grantee's address is visible on-chain (verified via Mintscan proof tx). This provides the per-reviewer identity binding we need.
+
+The per-reviewer model (Phase 3):
+1. Reviewer creates a Regen address via Keplr wallet
+2. Service account grants `MsgAttest` authorization via `cosmos.authz` `MsgGrant`
+3. Reviewer signs attestation tx with their own key (Keplr)
+4. Service account covers gas fees
+5. On-chain record binds: reviewer address → content hash → attestation
 
 ---
 
@@ -408,7 +413,7 @@ The per-reviewer model requires:
 | `migrations/064_claims_engine.sql` | Core `claims` + `claim_state_log` tables | No changes |
 | `migrations/065_claims_tx_hash.sql` | `tx_hash` column on `claims` | No changes |
 | `migrations/066_attestations.sql` | *(new)* | `claim_attestations` table, `operator_uri` column, new predicates |
-| `docs/claims-engine-v1.md` | V1 implementation reference | Add "V2 Design" cross-reference |
+| `docs/claims/v1-architecture.md` | V1 implementation reference | Add "V2 Design" cross-reference |
 
 ---
 
@@ -476,4 +481,4 @@ Another approach: enrich the existing audit log with reviewer identity and evide
 
 ---
 
-*Last updated: March 10, 2026*
+*Last updated: March 12, 2026*

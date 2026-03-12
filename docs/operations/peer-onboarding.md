@@ -43,10 +43,11 @@ The invite flow reduces peer onboarding to **one command** on the peer side. Wir
 
 ```bash
 cd ~/projects/RegenAI/koi-processor
-./scripts/federation/create-invite.sh shawn-personal 3
+./scripts/federation/create-invite.sh shawn-personal
 ```
 
 Options: `--ttl <hours>` (default 24), `--vault-sync-folder <folder>` (default Shared), `--dry-run`.
+`peer-number` is optional: if omitted, `create-invite.sh` auto-selects the lowest free live number in `3..254`.
 
 This outputs a single-line token starting with `KOI-INVITE-1:...`. Send it to the peer via Signal.
 

@@ -1,7 +1,7 @@
 # KOI Storage Architecture
 
 
-see ../IMPROVED_STORAGE_ARCHITECTURE.md
+see ../archive/IMPROVED_STORAGE_ARCHITECTURE.md
 
 ## Overview
 

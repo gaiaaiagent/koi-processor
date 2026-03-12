@@ -249,8 +249,8 @@ Response: {"status": "healthy", "version": "2.0.0"}
 ## 🔗 Useful Links
 
 - [Full Documentation](README.md)
-- [Architecture Guide](ARCHITECTURE.md)
-- [Deployment Guide](DEPLOYMENT.md)
+- [Architecture Guide](../architecture/overview.md)
+- [Deployment Guide](deployment.md)
 - [API Reference](README.md#api-reference)
 - [Troubleshooting](README.md#troubleshooting)
 

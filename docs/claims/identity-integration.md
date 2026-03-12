@@ -44,15 +44,15 @@ The Claims Engine uses a **4-role model**: Claimant, Subject (about_uri), Operat
 
 1. **Regen Ledger org identity** — What's the current state of on-chain organization identity? Is there an org registry module, or just addresses? Can an organization be represented on-chain beyond a multisig?
 
-2. **`MsgAttest` vs `MsgAnchor`** — ~~Is `MsgAttest` ready for production use?~~ **ANSWERED (pre-meeting, Mar 12):** Yes — Marie confirmed MsgAttest has been used for several years on mainnet. Production-ready, no caveats.
+2. ~~**`MsgAttest` vs `MsgAnchor`**~~ — **ANSWERED**: `MsgAttest` is production-ready, auto-anchors data. See Section 6.
 
-3. **`cosmos.authz` delegation** — ~~Does MsgExec reflect grantee identity on-chain?~~ **ANSWERED (pre-meeting, Mar 12):** Yes — Marie confirmed the grantee's identity is reflected on-chain. [Mintscan proof tx](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347). This confirms Option B is viable.
+3. ~~**`cosmos.authz` delegation**~~ — **ANSWERED**: Grantee identity shows on-chain ([Mintscan proof tx](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347)). Option B is viable. See Section 6.
 
-4. **DID / identity standards** — Has any DID system been considered for Regen? Or is the practical path: Regen address + entity registry URI mapping?
+4. ~~**DID / identity standards**~~ — **ANSWERED**: No DID on Regen Ledger. Practical path = Regen address + entity registry URI. See Section 6.
 
-5. **Key management UX** — For non-crypto-native reviewers (e.g., project developers), what's the lightest-weight path to a signing key? Browser wallet (Keplr)? Custodial service? Something else?
+5. ~~**Key management UX**~~ — **ANSWERED**: Keplr wallet + fee coverage. Custodial options being investigated by Marie. See Section 6.
 
-6. **Compatibility** — ~~Any upcoming changes affecting the data module?~~ **ANSWERED (pre-meeting, Mar 12):** No upcoming ledger changes affecting the data module. Safe to build on current APIs.
+6. ~~**Compatibility**~~ — **ANSWERED**: No upcoming breaking changes to data module. Safe to build. See Section 6.
 
 ---
 
@@ -63,11 +63,10 @@ Keep single signer. Map `attestor_address` → entity registry URI in our DB. On
 - **Pro**: Zero UX change, deployable today
 - **Con**: Weakest identity binding — relies entirely on trust in the service operator
 
-### Option B — `cosmos.authz` delegation (CONFIRMED VIABLE)
-Reviewer gets own Regen address. Service account grants them `MsgAttest` permission via `MsgGrant`. When we submit via `MsgExec`, the grantee's identity is reflected on-chain.
-- **Pro**: Leverages existing Cosmos infrastructure, grantee identity confirmed on-chain ([Mintscan proof](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347))
-- **Con**: Reviewer still needs a Regen address and gas — key management UX TBD
-- **Status**: Marie confirmed viability pre-meeting Mar 12. Remaining question: lightest key management path for non-crypto-native reviewers.
+### Option B — `cosmos.authz` delegation (**Confirmed viable — recommended**)
+Reviewer gets own Regen address. Service account grants them `MsgAttest` permission via `MsgGrant`.
+- **Pro**: Leverages existing Cosmos infrastructure. Grantee identity shows on-chain (confirmed via [Mintscan proof tx](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347) on March 12).
+- **Con**: Requires reviewer to have a Regen address (Keplr wallet is simplest path)
 
 ### Option C — Per-reviewer direct signing
 Each reviewer has their own key (Keplr, CLI, or custodial). They sign `MsgAttest` directly with their own address.
@@ -113,38 +112,43 @@ WebCrypto or OAuth-backed signing for off-chain attestation records. Service acc
 
 ### Related docs
 
-- [Claims Engine V2 Attestation Design](claims-engine-v2-attestations.md) — §8 covers MsgAttest signing model
-- [Claims Engine V1](claims-engine-v1.md) — Core architecture and dogfooding results
+- [Claims Engine V2 Attestation Design](v2-attestations.md) — §8 covers MsgAttest signing model
+- [Claims Engine V1](v1-architecture.md) — Core architecture and dogfooding results
 
 ---
 
-## 6. Post-Call Outcomes
+## 6. Post-Call Outcomes (March 12, 2026)
 
 **Owner**: Darren
+**Attendees**: Marie (Regen Ledger core), Darren, team
 
-### Pre-meeting answers (Marie, Mar 12 overnight)
+### Confirmed Answers
 
-Marie answered 3 of 6 questions before the meeting via Dave:
+1. **`MsgAttest` — Production-ready.** Used for years on Regen Ledger. Bonus: `MsgAttest` auto-anchors data if not already anchored, so no separate `MsgAnchor` call is needed. This simplifies the pipeline (one tx instead of two for attestation + anchoring).
 
-| Question | Answer |
-|----------|--------|
-| MsgAttest production-ready? | Yes — used for several years on mainnet |
-| cosmos.authz grantee identity? | Yes — grantee reflected on-chain ([Mintscan proof](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347)) |
-| Upcoming ledger changes? | None affecting the data module |
+2. **`cosmos.authz` — Viable for per-reviewer signing (Option B confirmed).** Grantee identity shows on-chain — verified via [Mintscan proof tx](https://www.mintscan.io/regen/tx/2cab48df2357f8f0ddb815e7dabadfd656708510ae4351d1b8f44eace2986472?height=20268347). When a reviewer uses `MsgExec` to execute `MsgAttest` on behalf of the service account, the grantee's address is visible in the transaction, providing the per-reviewer identity binding we need.
 
-**Impact:** Option B (authz delegation) confirmed viable. Discussion shifts from "is this possible?" to "how do we implement it?"
+3. **Key management — Keplr wallet + fee coverage is simplest path.** Marie's team previously explored custodial key management but simplified to Keplr. She will investigate recent custodial options and report back. For MVP, Keplr wallet signing is the recommended approach.
 
-### Still open for meeting discussion
+4. **Marketplace auth model — Hybrid Web2/Web3.** Google/email for Web2 authentication + Keplr arbitrary tx signing against user system for Web3. This is the pattern the Regen Marketplace uses.
 
-- Key management UX for non-crypto-native reviewers
-- authz grant flow implementation details
-- DID / identity standards direction
-- Org identity on-chain (beyond multisig)
+5. **Ledger compatibility — Safe to build.** No upcoming changes to the data module that would affect our integration. No breaking Cosmos SDK upgrades planned that impact `MsgAttest` or `MsgAnchor`.
 
-### Meeting outcomes (fill after call)
+6. **DID — No DID infrastructure on Regen Ledger.** Practical path = Regen address + entity registry URI mapping. No plans to add DID modules.
 
-- *TBD*
+### Updated Design Option Assessment
+
+- **Option A** (service account + URI mapping): Still valid as MVP/fallback
+- **Option B** (cosmos.authz delegation): **Confirmed viable** — grantee identity shows on-chain. Recommended path for Phase 3.
+- **Option C** (per-reviewer direct signing): Viable with Keplr, but heavier UX than Option B
+- **Option D** (hybrid off-chain/on-chain): Not needed given Option B viability
+
+### Agreed Next Steps
+
+- **Marie**: Reviews claims portal + investigates custodial key options
+- **Darren**: Implement `MsgAttest` integration (replaces separate `MsgAnchor` for attestations)
+- **Recurring**: Thursdays reserved for Marie-centric technical discussions
 
 ---
 
-*Prepared: March 11, 2026*
+*Prepared: March 11, 2026 | Updated: March 12, 2026*

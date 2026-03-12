@@ -1,15 +1,15 @@
 # Claims Engine Demo — Playbook
 
 **URL:** https://regen.gaiaai.xyz/claims
-**Last updated:** 2026-03-10
+**Last updated:** 2026-03-12
 
 ---
 
 ## Preflight (5 min before demo)
 
 - [ ] Open https://regen.gaiaai.xyz/claims — confirm **"Connected"** badge (top-right, green dot)
-- [ ] Dashboard shows **3 Total Claims** with By Type breakdown (Financial, Ecological, Governance)
-- [ ] Click **Claims Browser** tab — 3 rows visible
+- [ ] Dashboard shows **50+ Total Claims** with By Type breakdown (Financial, Ecological, Governance)
+- [ ] Click **Claims Browser** tab — claims visible across 3+ organizations
 - [ ] Have this playbook open in a second tab
 
 **If "Connected" is missing or dashboard is empty:**
@@ -28,15 +28,15 @@ ssh darren@202.61.196.119 "nohup /opt/projects/koi-processor/start-claims-api.sh
 
 - Point out the **4 summary cards**: Total Claims, Verified, AI-Extracted, On-Chain
 - Show **By Type** breakdown — Financial / Ecological / Governance
-- Show **By Organization** — 3 orgs with 1 claim each
+- Show **By Organization** — 3+ orgs (CEC, Blue Forest, ZFP) with 50+ claims
 - Show **Claims Pipeline** visualization: Self-Reported → Peer Reviewed → Verified → On-Chain
-- "Right now all 3 are self-reported. The pipeline shows the verification journey each claim takes."
+- "We've dogfooded 50+ claims across 3 organizations, with 2+ anchored on-chain on Regen Ledger mainnet."
 
 ### 2. Claims Browser (3 min)
 
 **Story:** "The browser lets you explore, filter, and drill into claim detail."
 
-- Show the table with all 3 claims
+- Show the table with claims (filter to a manageable view if needed)
 - **Filter by type:** Select "Ecological" from the Type dropdown — only CEC's claim appears
 - Reset to "All Types"
 - **Click a claim row** to open the slide-over detail panel:
@@ -74,7 +74,7 @@ ssh darren@202.61.196.119 "nohup /opt/projects/koi-processor/start-claims-api.sh
 - Statement: "CEC reduced methane emissions by 800 tons CO2e through composting in Q4 2025"
 - Type: "ecological"
 - Click **Create Claim**
-- Switch to Dashboard — count should now be 4
+- Switch to Dashboard — count should increment
 
 > **Backup:** If typeahead doesn't load, skip this section: "Manual creation uses entity resolution to match against 29,000+ entities — I'll show that flow separately."
 
@@ -86,7 +86,7 @@ ssh darren@202.61.196.119 "nohup /opt/projects/koi-processor/start-claims-api.sh
 |---------|--------|
 | **Verification pipeline** | Self-reported → peer reviewed → verified → ledger anchored. Each transition logged with actor + reason. |
 | **Provenance** | Every claim tracks source document, AI confidence, and content hash. |
-| **Blockchain anchoring** | Verified claims anchor on-chain via Regen Ledger MsgAnchor, producing an immutable IRI. |
+| **Blockchain anchoring** | Verified claims anchor on-chain via Regen Ledger `MsgAnchor` (timestamping) or `MsgAttest` (veracity attestation, auto-anchors). 2+ claims already anchored on mainnet `regen-1`. |
 | **Entity resolution** | Orgs matched against 29K+ entities using fuzzy (Jaro-Winkler) + semantic (embeddings) matching. |
 | **Extensible metadata** | JSONB field supports any structured data — quantities, SDG tags, locations, methodologies. |
 
@@ -94,12 +94,12 @@ ssh darren@202.61.196.119 "nohup /opt/projects/koi-processor/start-claims-api.sh
 
 | Question | Answer |
 |----------|--------|
-| How does peer review work? | V1 is manual state transition via API. V2 will add a review UI — the reconcile endpoint is already built. |
+| How does peer review work? | V2 attestation layer is live — identity-bound reviewers create first-class attestation records with verdict, rationale, and evidence references. Policy gates enforce attestation thresholds before state transitions. |
 | What if extraction gets it wrong? | Candidates are previewed before creation. Confidence scores flag uncertainty. Nothing auto-commits. |
-| Is this connected to the real ledger? | Anchoring code tested on Regen testnet. Mainnet anchoring needs a funded account. |
+| Is this connected to the real ledger? | YES — live on Regen Ledger mainnet (`regen-1`) with 2+ claims anchored on-chain. We use mainnet as our testnet. |
 | How do you clean up demo data? | All demo claims tagged `source_document LIKE 'claims-demo-portal:%'`. One SQL delete cleans up. |
 | Can this handle documents at scale? | Extraction is per-document. Batch processing would be a sensor integration (same pattern as GitHub/Discourse sensors). |
-| What's the data model? | See [claims-engine-v1.md](claims-engine-v1.md) for full schema and API reference. |
+| What's the data model? | See [V1 Architecture](v1-architecture.md) for full schema and API reference. |
 
 ---
 
@@ -107,4 +107,4 @@ ssh darren@202.61.196.119 "nohup /opt/projects/koi-processor/start-claims-api.sh
 
 If the production server is unreachable:
 1. **Local demo:** `cd ~/projects/RegenAI/koi-server && ~/.config/personal-koi/start.sh` → open `http://localhost:8351/demo`
-2. **Architecture walkthrough:** Use [claims-engine-v1.md](claims-engine-v1.md) as reference
+2. **Architecture walkthrough:** Use [V1 Architecture](v1-architecture.md) as reference
