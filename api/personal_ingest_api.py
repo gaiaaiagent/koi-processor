@@ -1402,7 +1402,9 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Close database connection pool"""
+    """Stop background tasks and close database connection pool"""
+    from api.koi_net_router import shutdown_koi_net
+    await shutdown_koi_net()
     global db_pool
     if db_pool:
         await db_pool.close()
