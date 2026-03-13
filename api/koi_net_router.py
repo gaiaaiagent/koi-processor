@@ -18,6 +18,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -270,15 +271,23 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
 async def shutdown_koi_net():
     """Stop poller and clean up. Called from app shutdown."""
     global _poller, _commons_ingest_worker
+    logger.info("shutdown_koi_net: stopping background tasks")
+    # Stop poller FIRST to prevent new poll/vault-sync cycles during cleanup
+    if _poller:
+        try:
+            await asyncio.wait_for(_poller.stop(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("shutdown_koi_net: poller stop timed out after 5s")
+        _poller = None
     if _commons_ingest_worker:
         await _commons_ingest_worker.stop()
         _commons_ingest_worker = None
     if _vault_sync:
-        _vault_sync.stop_watcher()
+        # Run observer.join in executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _vault_sync.stop_watcher)
         await _vault_sync.persist_metrics()
-    if _poller:
-        await _poller.stop()
-        _poller = None
+    logger.info("shutdown_koi_net: complete")
 
 
 # =============================================================================
