@@ -265,7 +265,7 @@ def create_router(pool, caps=None):
             params = []
             i = 1
             if state:
-                conditions.append(f"state = ${i}::commitment_state")
+                conditions.append(f"c.state = ${i}::commitment_state")
                 params.append(state.upper())
                 i += 1
             if pledger_uri:

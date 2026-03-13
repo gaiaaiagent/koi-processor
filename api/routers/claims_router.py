@@ -53,6 +53,7 @@ class ClaimCreateRequest(BaseModel):
     supersedes_rid: Optional[str] = Field(None, description="Previous version claim_rid (for versioning)")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible fields: quantity, unit, dates, SDGs, methodology, etc.")
     operator_uri: Optional[str] = Field(None, description="entity_registry.fuseki_uri of the operator who entered the claim")
+    credit_class_id: Optional[str] = Field(None, description="Regen credit class ID (e.g., C04, C05)")
     created_by: Optional[str] = None
 
 
@@ -71,6 +72,7 @@ class ClaimResponse(BaseModel):
     ledger_iri: Optional[str]
     tx_hash: Optional[str] = None
     supersedes_rid: Optional[str]
+    credit_class_id: Optional[str] = None
     metadata: Dict[str, Any]
     created_by: Optional[str] = None
     operator_uri: Optional[str] = None
@@ -196,6 +198,7 @@ class ClaimFromSettlementRequest(BaseModel):
     claim_type: str = Field("financial", description="ecological | social | financial | governance")
     operator_uri: Optional[str] = Field(None, description="entity_registry.fuseki_uri of the operator")
     reviewer_uri: Optional[str] = Field(None, description="Reviewer for system attestation (required for auto-advance)")
+    credit_class_id: Optional[str] = Field(None, description="Regen credit class ID (e.g., C04, C05)")
     manual_override: bool = Field(False, description="Force self_reported regardless of threshold band")
 
 
@@ -284,6 +287,9 @@ _ABOUT_ALLOWED_TYPES = {
     "bioregion", "location", "organization", "person",
 }
 
+# ADR-004: valid claim types per FWG ClaimType enum (regen-data-standards PR #53)
+_VALID_CLAIM_TYPES = {"ecological", "social", "financial", "governance", "biocultural"}
+
 # ---------------------------------------------------------------------------
 # TBFF threshold policy bands (settlement evidence path only)
 # ---------------------------------------------------------------------------
@@ -302,12 +308,11 @@ _TRANSITION_PRECONDITIONS = {
 }
 
 
-def _canonical_json(claimant_uri: str, statement: str, claim_type: str,
-                    about_uri: str | None, metadata: dict) -> str:
-    """Deterministic JSON serialization of claim content fields.
+def _canonical_json_v2(claimant_uri: str, statement: str, claim_type: str,
+                       about_uri: str | None, metadata: dict) -> str:
+    """Legacy canonical JSON (pre-#11, no @context/@type/credit_class_id).
 
-    Includes about_uri so that identical statements about different entities
-    produce distinct RIDs instead of collapsing into the same claim.
+    Used only by _legacy_claim_rid() for cross-cutover idempotency checks.
     """
     obj = {
         "about_uri": about_uri or "",
@@ -319,18 +324,54 @@ def _canonical_json(claimant_uri: str, statement: str, claim_type: str,
     return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
 
 
+def _canonical_json(claimant_uri: str, statement: str, claim_type: str,
+                    about_uri: str | None, metadata: dict,
+                    credit_class_id: str | None = None) -> str:
+    """Deterministic JSON serialization of claim content fields (ADR-004).
+
+    Includes @context, @type, and credit_class_id per FWG schema alignment.
+    Two claims with different credit classes produce distinct RIDs.
+    """
+    obj = {
+        "@context": "https://framework.regen.network/schema/",
+        "@type": "rfs:Claim",
+        "about_uri": about_uri or "",
+        "claimant_uri": claimant_uri,
+        "claim_type": claim_type,
+        "credit_class_id": credit_class_id or "",
+        "metadata": metadata,
+        "statement": statement,
+    }
+    return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+
+
 def _legacy_claim_rid(claimant_uri: str, statement: str, claim_type: str,
-                      about_uri: str | None, metadata: dict) -> str:
-    """Legacy RID (SHA256, 16-char) for cross-cutover idempotency checks."""
-    canonical = _canonical_json(claimant_uri, statement, claim_type, about_uri, metadata)
-    h = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-    return f"orn:koi-net.claim:{h}"
+                      about_uri: str | None, metadata: dict) -> tuple:
+    """Legacy RIDs for cross-cutover idempotency checks.
+
+    Returns (rid1, rid2) covering two cutover boundaries:
+    1. SHA256/16-char (pre-#12)
+    2. BLAKE2b/32-char without @context/@type (post-#12, pre-#11)
+    """
+    canonical_v2 = _canonical_json_v2(claimant_uri, statement, claim_type, about_uri, metadata)
+
+    # Boundary 1: SHA256
+    h1 = hashlib.sha256(canonical_v2.encode()).hexdigest()[:16]
+    rid1 = f"orn:koi-net.claim:{h1}"
+
+    # Boundary 2: BLAKE2b without schema fields
+    h2 = hashlib.blake2b(canonical_v2.encode(), digest_size=32).hexdigest()[:32]
+    rid2 = f"orn:koi-net.claim:{h2}"
+
+    return rid1, rid2
 
 
 def _claim_rid(claimant_uri: str, statement: str, claim_type: str,
-               about_uri: str | None, metadata: dict) -> str:
-    """Content-addressable RID: BLAKE2b hash of all content fields including about_uri."""
-    canonical = _canonical_json(claimant_uri, statement, claim_type, about_uri, metadata)
+               about_uri: str | None, metadata: dict,
+               credit_class_id: str | None = None) -> str:
+    """Content-addressable RID: BLAKE2b hash of all content fields (ADR-004)."""
+    canonical = _canonical_json(claimant_uri, statement, claim_type, about_uri, metadata,
+                                credit_class_id=credit_class_id)
     h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:32]
     return f"orn:koi-net.claim:{h}"
 
@@ -439,6 +480,7 @@ def _row_to_claim(row, evidence=None, attestation_count=0, attestation_summary=N
         ledger_iri=row.get("ledger_iri"),
         tx_hash=row.get("tx_hash"),
         supersedes_rid=row.get("supersedes_rid"),
+        credit_class_id=row.get("credit_class_id"),
         metadata=meta or {},
         created_by=row.get("created_by"),
         operator_uri=row.get("operator_uri"),
@@ -491,6 +533,14 @@ def create_router(pool, caps=None):
     @router.post("/", response_model=ClaimResponse, status_code=201)
     async def create_claim(body: ClaimCreateRequest):
         """Create a new impact claim. Registers as entity, writes graph edges."""
+        # ADR-004: normalize and validate claim_type against FWG ClaimType enum
+        body.claim_type = body.claim_type.lower().strip()
+        if body.claim_type not in _VALID_CLAIM_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid claim_type '{body.claim_type}'. Must be one of: {sorted(_VALID_CLAIM_TYPES)}",
+            )
+
         helpers = _get_entity_helpers()
         generate_entity_uri = helpers['generate_entity_uri']
         normalize_entity_text = helpers['normalize_entity_text']
@@ -528,13 +578,13 @@ def create_router(pool, caps=None):
                                f"not valid for 'about' predicate. Allowed: {sorted(_ABOUT_ALLOWED_TYPES)}",
                     )
 
-            # 3. Generate content-addressable RID (includes about_uri in identity)
+            # 3. Generate content-addressable RID (includes about_uri + credit_class_id in identity)
             claim_rid = _claim_rid(body.claimant_uri, body.statement, body.claim_type,
-                                   body.about_uri, body.metadata)
+                                   body.about_uri, body.metadata,
+                                   credit_class_id=body.credit_class_id)
 
             # 3. Idempotency check (before transaction — read-only)
-            #    Also check the legacy SHA256-16 RID to prevent duplicates across
-            #    the hash cutover boundary (pre-existing dogfood claims).
+            #    Also check legacy RIDs to prevent duplicates across cutover boundaries.
             existing = await conn.fetchrow(
                 "SELECT * FROM claims WHERE claim_rid = $1", claim_rid
             )
@@ -542,15 +592,17 @@ def create_router(pool, caps=None):
                 logger.info(f"claim.idempotent_hit rid={claim_rid}")
                 return await _fetch_enriched_claim(conn, claim_rid)
 
-            legacy_rid = _legacy_claim_rid(body.claimant_uri, body.statement, body.claim_type,
-                                           body.about_uri, body.metadata)
-            if legacy_rid != claim_rid:
-                existing_legacy = await conn.fetchrow(
-                    "SELECT * FROM claims WHERE claim_rid = $1", legacy_rid
-                )
-                if existing_legacy:
-                    logger.info(f"claim.idempotent_hit_legacy rid={legacy_rid}")
-                    return await _fetch_enriched_claim(conn, legacy_rid)
+            legacy_rid1, legacy_rid2 = _legacy_claim_rid(body.claimant_uri, body.statement,
+                                                          body.claim_type, body.about_uri,
+                                                          body.metadata)
+            for legacy_rid in (legacy_rid1, legacy_rid2):
+                if legacy_rid != claim_rid:
+                    existing_legacy = await conn.fetchrow(
+                        "SELECT * FROM claims WHERE claim_rid = $1", legacy_rid
+                    )
+                    if existing_legacy:
+                        logger.info(f"claim.idempotent_hit_legacy rid={legacy_rid}")
+                        return await _fetch_enriched_claim(conn, legacy_rid)
 
             # All writes in a single transaction — no partial state on failure.
             # Catch UniqueViolationError for concurrent-request idempotency:
@@ -597,14 +649,15 @@ def create_router(pool, caps=None):
                     row = await conn.fetchrow("""
                         INSERT INTO claims (claim_rid, entity_uri, claimant_uri, statement,
                                             claim_type, source_document, ai_confidence,
-                                            supersedes_rid, metadata, created_by, operator_uri)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+                                            supersedes_rid, metadata, created_by, operator_uri,
+                                            credit_class_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
                         RETURNING *
                     """,
                         claim_rid, entity_uri, body.claimant_uri, body.statement,
                         body.claim_type, body.source_document, body.ai_confidence,
                         body.supersedes_rid, _json_dumps(body.metadata), body.created_by,
-                        body.operator_uri,
+                        body.operator_uri, body.credit_class_id,
                     )
 
                     # 8b. Write operates_claim edge if operator provided
@@ -631,7 +684,8 @@ def create_router(pool, caps=None):
                 "claimant_uri": body.claimant_uri, "statement": body.statement,
                 "claim_type": body.claim_type, "verification": "self_reported",
                 "source_document": body.source_document, "ai_confidence": body.ai_confidence,
-                "supersedes_rid": body.supersedes_rid, "metadata": body.metadata or {},
+                "supersedes_rid": body.supersedes_rid, "credit_class_id": body.credit_class_id,
+                "metadata": body.metadata or {},
                 "created_by": body.created_by, "operator_uri": body.operator_uri,
                 "state_transition": {"from_state": None, "to_state": "self_reported",
                                      "actor": body.created_by, "reason": "created",
@@ -730,6 +784,14 @@ def create_router(pool, caps=None):
 
         manual_override=true forces self_reported regardless of amount.
         """
+        # ADR-004: normalize and validate claim_type against FWG ClaimType enum
+        body.claim_type = body.claim_type.lower().strip()
+        if body.claim_type not in _VALID_CLAIM_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid claim_type '{body.claim_type}'. Must be one of: {sorted(_VALID_CLAIM_TYPES)}",
+            )
+
         # 1. Determine threshold band
         amount = body.settlement.total_redistributed_usd
         if body.manual_override:
@@ -751,6 +813,7 @@ def create_router(pool, caps=None):
             claim_type=body.claim_type,
             about_uri=body.about_uri,
             operator_uri=body.operator_uri,
+            credit_class_id=body.credit_class_id,
             metadata={
                 "settlement_id": body.settlement.settlement_id,
                 "total_redistributed_usd": amount,
@@ -1505,21 +1568,26 @@ def create_router(pool, caps=None):
             if not row:
                 raise HTTPException(status_code=404, detail=f"Claim not found: {rid}")
 
-            # Compute and store content hash
-            content_hash = compute_content_hash(row)
+            # Preserve existing content_hash (pre-#11 claims keep their legacy hash).
+            # Only compute on first prepare-anchor (content_hash IS NULL).
+            content_hash = row.get("content_hash")
+            if not content_hash:
+                content_hash = compute_content_hash(row)
 
             # Derive data_iri (non-fatal if regen binary not available)
-            data_iri = None
+            data_iri = row.get("data_iri")
             reason = None
-            try:
-                data_iri = derive_ledger_iri(content_hash)
-            except RuntimeError as e:
-                reason = str(e)
-            except Exception as e:
-                reason = f"IRI derivation failed: {e}"
+            if not data_iri:
+                try:
+                    data_iri = derive_ledger_iri(content_hash)
+                except RuntimeError as e:
+                    reason = str(e)
+                except Exception as e:
+                    reason = f"IRI derivation failed: {e}"
 
             await conn.execute("""
-                UPDATE claims SET content_hash = $2, data_iri = COALESCE($3, data_iri),
+                UPDATE claims SET content_hash = COALESCE(content_hash, $2),
+                       data_iri = COALESCE(data_iri, $3),
                        updated_at = NOW()
                 WHERE claim_rid = $1
             """, rid, content_hash, data_iri)
@@ -1904,9 +1972,11 @@ def create_router(pool, caps=None):
                     WHERE a.claim_rid = $1
                     ORDER BY a.created_at ASC
                 """, rid)
-                from api.ledger_anchor import compute_attestation_hash, derive_ledger_iri
+                from api.ledger_anchor import compute_attestation_hash, compute_legacy_attestation_hash, derive_ledger_iri
                 for a in att_rows:
                     att_entry = {
+                        "@context": "https://framework.regen.network/schema/",
+                        "@type": "rfs:Attestation",
                         "attestation_rid": a["attestation_rid"],
                         "reviewer_uri": a["reviewer_uri"],
                         "reviewer_name": a.get("reviewer_name"),
@@ -1930,8 +2000,10 @@ def create_router(pool, caps=None):
                             except Exception:
                                 att_entry["hash_verified"] = False
                         else:
-                            # Not anchored: verify via recomputation
+                            # Not anchored: verify via recomputation (try current, then legacy)
                             recomputed = compute_attestation_hash(a)
+                            if recomputed != a["content_hash"]:
+                                recomputed = compute_legacy_attestation_hash(a)
                             att_entry["hash_verified"] = (recomputed == a["content_hash"])
                     else:
                         att_entry["hash_verified"] = None
@@ -1949,7 +2021,7 @@ def create_router(pool, caps=None):
         # IRI instead of recomputing from fields.
         claim_hash_verified = False
         if row.get("content_hash"):
-            from api.ledger_anchor import compute_content_hash
+            from api.ledger_anchor import compute_content_hash, compute_legacy_content_hash
             if row.get("ledger_iri") and row.get("tx_hash"):
                 # Anchored: verify stored hash → IRI derivation matches
                 from api.ledger_anchor import derive_ledger_iri
@@ -1959,8 +2031,10 @@ def create_router(pool, caps=None):
                 except Exception:
                     claim_hash_verified = False
             else:
-                # Not anchored: recompute from fields
+                # Not anchored: recompute from fields (try current, then legacy)
                 recomputed = compute_content_hash(row)
+                if recomputed != row["content_hash"]:
+                    recomputed = compute_legacy_content_hash(row)
                 claim_hash_verified = (recomputed == row["content_hash"])
 
         chain_id = os.getenv("REGEN_CHAIN_ID", "regen-1")
@@ -1976,6 +2050,8 @@ def create_router(pool, caps=None):
             claim_rid=rid,
             verification=row["verification"],
             claim={
+                "@context": "https://framework.regen.network/schema/",
+                "@type": "rfs:Claim",
                 "claim_rid": row["claim_rid"],
                 "entity_uri": row.get("entity_uri"),
                 "claimant_uri": row["claimant_uri"],
@@ -1983,6 +2059,7 @@ def create_router(pool, caps=None):
                 "statement": row["statement"],
                 "claim_type": row["claim_type"],
                 "about_uri": about_uri,
+                "credit_class_id": row.get("credit_class_id"),
                 "source_document": row.get("source_document"),
                 "ai_confidence": float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
                 "supersedes_rid": row.get("supersedes_rid"),

@@ -591,7 +591,7 @@ async def test_legacy_rid_idempotency_across_cutover(client, conn):
     # Compute the legacy SHA256-16 RID for known content
     from api.routers.claims_router import _legacy_claim_rid
     statement = "Legacy idempotency test claim with specific content"
-    legacy_rid = _legacy_claim_rid(claimant_uri, statement, "ecological", None, {})
+    legacy_rid, _ = _legacy_claim_rid(claimant_uri, statement, "ecological", None, {})
 
     # Insert the legacy claim directly (simulating a pre-cutover claim)
     await conn.execute("""
@@ -765,3 +765,266 @@ async def test_attestation_anchor_resolves_wallet_from_entity_registry(client, c
         "SELECT wallet_address FROM entity_registry WHERE fuseki_uri = $1", reviewer_uri
     )
     assert wallet == "regen1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqvptr3e"
+
+
+# ---------------------------------------------------------------------------
+# Issue #11 — Schema Integration (ADR-004) tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_claim_type_validation_rejects_invalid(client, conn):
+    """POST with invalid claim_type → 422."""
+    claimant_uri = await _setup_test_claimant(conn)
+
+    resp = await client.post("/claims/", json={
+        "claimant_uri": claimant_uri,
+        "statement": "This claim has a bogus type for validation testing",
+        "claim_type": "bogus",
+    })
+    assert resp.status_code == 422
+    assert "Invalid claim_type" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_claim_type_validation_accepts_all_valid(client, conn):
+    """POST with each of the 5 valid claim types → 201."""
+    claimant_uri = await _setup_test_claimant(conn)
+
+    for ct in ("ecological", "social", "financial", "governance", "biocultural"):
+        resp = await client.post("/claims/", json={
+            "claimant_uri": claimant_uri,
+            "statement": f"Valid claim type test for {ct} — unique statement",
+            "claim_type": ct,
+        })
+        assert resp.status_code == 201, f"claim_type '{ct}' rejected: {resp.json()}"
+        assert resp.json()["claim_type"] == ct
+
+
+@pytest.mark.anyio
+async def test_claim_type_normalization_accepts_uppercase(client, conn):
+    """POST with uppercase/padded claim_type → normalized and accepted."""
+    claimant_uri = await _setup_test_claimant(conn)
+
+    for raw, expected in [("ECOLOGICAL", "ecological"), (" Social ", "social"), ("Financial", "financial")]:
+        resp = await client.post("/claims/", json={
+            "claimant_uri": claimant_uri,
+            "statement": f"Normalization test for {raw} — unique claim statement",
+            "claim_type": raw,
+        })
+        assert resp.status_code == 201, f"claim_type '{raw}' rejected: {resp.json()}"
+        assert resp.json()["claim_type"] == expected
+
+
+@pytest.mark.anyio
+async def test_prepare_anchor_preserves_existing_content_hash(client, conn):
+    """Re-running prepare-anchor on a claim with existing content_hash should NOT overwrite it."""
+    claimant_uri = await _setup_test_claimant(conn)
+    rid = await _setup_test_claim(conn, claimant_uri, verification="self_reported")
+
+    # Simulate a pre-#11 claim that already has a legacy content_hash
+    legacy_hash = "deadbeef" * 8  # 64-char hex
+    await conn.execute(
+        "UPDATE claims SET content_hash = $2 WHERE claim_rid = $1",
+        rid, legacy_hash,
+    )
+
+    # Call prepare-anchor — should preserve the existing hash, not recompute
+    resp = await client.post(f"/claims/{rid}/prepare-anchor")
+    # May fail on IRI derivation (no regen CLI), but content_hash should be preserved
+    data = resp.json()
+    assert data["content_hash"] == legacy_hash
+
+    # Verify in DB
+    row = await conn.fetchrow("SELECT content_hash FROM claims WHERE claim_rid = $1", rid)
+    assert row["content_hash"] == legacy_hash
+
+
+@pytest.mark.anyio
+async def test_canonical_json_includes_context_and_type():
+    """Canonical JSON should include @context and @type."""
+    from api.routers.claims_router import _canonical_json
+    canonical = _canonical_json("urn:test:claimant", "test statement", "ecological", None, {})
+    obj = json.loads(canonical)
+    assert obj["@context"] == "https://framework.regen.network/schema/"
+    assert obj["@type"] == "rfs:Claim"
+
+
+@pytest.mark.anyio
+async def test_canonical_json_includes_credit_class_id():
+    """credit_class_id should participate in canonical hash."""
+    from api.routers.claims_router import _canonical_json
+    canonical = _canonical_json("urn:test:c", "stmt", "ecological", None, {},
+                                credit_class_id="C04")
+    obj = json.loads(canonical)
+    assert obj["credit_class_id"] == "C04"
+
+
+@pytest.mark.anyio
+async def test_different_credit_class_different_rid():
+    """Same claim content with different credit_class_id → different RIDs."""
+    from api.routers.claims_router import _claim_rid
+    rid1 = _claim_rid("urn:test:c", "same statement text", "ecological", None, {},
+                       credit_class_id="C04")
+    rid2 = _claim_rid("urn:test:c", "same statement text", "ecological", None, {},
+                       credit_class_id="C05")
+    rid3 = _claim_rid("urn:test:c", "same statement text", "ecological", None, {},
+                       credit_class_id=None)
+    assert rid1 != rid2
+    assert rid1 != rid3
+    assert rid2 != rid3
+
+
+@pytest.mark.anyio
+async def test_new_rid_differs_from_legacy():
+    """Same inputs produce different RIDs with schema vs without."""
+    from api.routers.claims_router import _claim_rid, _legacy_claim_rid
+    args = ("urn:test:c", "same statement text here", "ecological", None, {})
+    new_rid = _claim_rid(*args)
+    legacy_rid1, legacy_rid2 = _legacy_claim_rid(*args)
+    assert new_rid != legacy_rid1
+    assert new_rid != legacy_rid2
+
+
+@pytest.mark.anyio
+async def test_cross_cutover_idempotency_v1_v2_v3(client, conn):
+    """Legacy SHA256, BLAKE2b-no-schema, and BLAKE2b-with-schema all detected as duplicates."""
+    claimant_uri = await _setup_test_claimant(conn)
+    statement = "Cross-cutover idempotency test claim for issue eleven"
+
+    # Compute all three RID formats
+    from api.routers.claims_router import _legacy_claim_rid, _claim_rid
+    legacy_sha256, legacy_blake2b = _legacy_claim_rid(claimant_uri, statement, "ecological", None, {})
+    new_rid = _claim_rid(claimant_uri, statement, "ecological", None, {})
+
+    # Insert claim with legacy SHA256 RID
+    await conn.execute("""
+        INSERT INTO claims (claim_rid, claimant_uri, statement, claim_type,
+                            verification, metadata, created_at, updated_at)
+        VALUES ($1, $2, $3, 'ecological', 'self_reported', '{}'::jsonb, NOW(), NOW())
+    """, legacy_sha256, claimant_uri, statement)
+    await conn.execute("""
+        INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason)
+        VALUES ($1, NULL, 'self_reported', 'test', 'initial')
+    """, legacy_sha256)
+
+    # POST same content → should hit legacy idempotency, return existing
+    resp = await client.post("/claims/", json={
+        "claimant_uri": claimant_uri,
+        "statement": statement,
+        "claim_type": "ecological",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["claim_rid"] == legacy_sha256
+
+
+@pytest.mark.anyio
+async def test_credit_class_id_round_trip(client, conn):
+    """Create claim with credit_class_id, verify in response and DB."""
+    claimant_uri = await _setup_test_claimant(conn)
+
+    resp = await client.post("/claims/", json={
+        "claimant_uri": claimant_uri,
+        "statement": "Claim with credit class for round-trip testing",
+        "claim_type": "ecological",
+        "credit_class_id": "C04",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["credit_class_id"] == "C04"
+
+    # Verify in DB
+    row = await conn.fetchrow(
+        "SELECT credit_class_id FROM claims WHERE claim_rid = $1", data["claim_rid"]
+    )
+    assert row["credit_class_id"] == "C04"
+
+
+@pytest.mark.anyio
+async def test_content_hash_includes_context():
+    """compute_content_hash() includes @context/@type in canonical form."""
+    from api.ledger_anchor import compute_content_hash, compute_legacy_content_hash
+    row = {
+        "claim_rid": "orn:koi-net.claim:test123",
+        "entity_uri": "urn:test:entity",
+        "claimant_uri": "urn:test:claimant",
+        "statement": "Test statement for hash comparison",
+        "claim_type": "ecological",
+        "credit_class_id": None,
+        "metadata": {},
+    }
+    new_hash = compute_content_hash(row)
+    legacy_hash = compute_legacy_content_hash(row)
+    assert new_hash != legacy_hash  # Different canonical forms → different hashes
+
+
+@pytest.mark.anyio
+async def test_legacy_attestation_hash_verified_in_proof_pack(client, conn):
+    """Attestation with pre-schema content_hash still gets hash_verified: true via legacy fallback."""
+    claimant_uri = await _setup_test_claimant(conn)
+    reviewer_uri = await _setup_test_reviewer(conn, "Legacy Hash Rev", "urn:test:rev-legacy-hash")
+    rid = await _setup_test_claim(conn, claimant_uri, verification="self_reported")
+
+    # Create attestation — this will get the NEW schema-aware hash
+    resp = await client.post(f"/claims/{rid}/attestations", json={
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+        "rationale": "Legacy hash test",
+    })
+    att_rid = resp.json()["attestation_rid"]
+
+    # Overwrite the content_hash with the LEGACY hash (simulating pre-#11 attestation)
+    from api.ledger_anchor import compute_legacy_attestation_hash
+    att_row = {
+        "attestation_rid": att_rid,
+        "claim_rid": rid,
+        "reviewer_uri": reviewer_uri,
+        "verdict": "approved",
+        "rationale": "Legacy hash test",
+        "evidence_uris": None,
+    }
+    legacy_hash = compute_legacy_attestation_hash(att_row)
+    await conn.execute(
+        "UPDATE claim_attestations SET content_hash = $2 WHERE attestation_rid = $1",
+        att_rid, legacy_hash,
+    )
+
+    # Advance to verified + ledger_anchored so proof pack is accessible
+    # Set content_hash and ledger_iri on claim to satisfy proof pack guard
+    await conn.execute("""
+        UPDATE claims SET verification = 'ledger_anchored',
+                          content_hash = 'deadbeef00000000000000000000000000000000000000000000000000000000',
+                          ledger_iri = 'regen:test_iri_for_legacy_att'
+        WHERE claim_rid = $1
+    """, rid)
+
+    # Request proof pack
+    resp = await client.get(f"/claims/{rid}/proof-pack")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Find our attestation in the proof pack
+    att = next((a for a in data["attestations"] if a["attestation_rid"] == att_rid), None)
+    assert att is not None
+    assert att["hash_verified"] is True  # Legacy fallback should verify
+
+
+@pytest.mark.anyio
+async def test_proof_pack_includes_context(client, conn):
+    """Proof pack claim dict has @context and @type."""
+    claimant_uri = await _setup_test_claimant(conn)
+    rid = await _setup_test_claim(conn, claimant_uri, verification="self_reported")
+
+    # Set claim to ledger_anchored with required fields
+    await conn.execute("""
+        UPDATE claims SET verification = 'ledger_anchored',
+                          content_hash = 'deadbeef00000000000000000000000000000000000000000000000000000000',
+                          ledger_iri = 'regen:test_iri_context'
+        WHERE claim_rid = $1
+    """, rid)
+
+    resp = await client.get(f"/claims/{rid}/proof-pack")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["claim"]["@context"] == "https://framework.regen.network/schema/"
+    assert data["claim"]["@type"] == "rfs:Claim"

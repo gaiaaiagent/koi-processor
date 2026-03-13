@@ -24,10 +24,39 @@ REGEN_KEY_NAME = os.getenv("REGEN_KEY_NAME", "claims-service")
 
 
 def _canonical_claim_json(row) -> str:
-    """Canonical JSON serialization of a claim for hashing.
+    """Canonical JSON serialization of a claim for content hashing (on-chain MsgAnchor).
 
+    Includes @context and @type per ADR-004 (FWG schema alignment).
     Includes all content fields that define the claim's identity.
     Sorted keys + deterministic serialization ensures same content → same hash.
+    """
+    meta = row["metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+
+    obj = {
+        "@context": "https://framework.regen.network/schema/",
+        "@type": "rfs:Claim",
+        "claim_rid": row["claim_rid"],
+        "entity_uri": row.get("entity_uri") or "",
+        "claimant_uri": row["claimant_uri"],
+        "statement": row["statement"],
+        "claim_type": row["claim_type"],
+        "credit_class_id": row.get("credit_class_id") or "",
+        "metadata": meta or {},
+    }
+
+    # Include versioning if present
+    if row.get("supersedes_rid"):
+        obj["supersedes_rid"] = row["supersedes_rid"]
+
+    return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+
+
+def _legacy_canonical_claim_json(row) -> str:
+    """Pre-schema canonical claim JSON (no @context/@type/credit_class_id).
+
+    Used for hash verification of claims created before Issue #11.
     """
     meta = row["metadata"]
     if isinstance(meta, str):
@@ -41,12 +70,20 @@ def _canonical_claim_json(row) -> str:
         "claim_type": row["claim_type"],
         "metadata": meta or {},
     }
-
-    # Include versioning if present
     if row.get("supersedes_rid"):
         obj["supersedes_rid"] = row["supersedes_rid"]
 
     return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+
+
+def compute_legacy_content_hash(row) -> str:
+    """Compute BLAKE2b-256 hash using the pre-schema canonical form.
+
+    Used for verifying content_hash of claims created before Issue #11.
+    """
+    canonical = _legacy_canonical_claim_json(row)
+    h = hashlib.blake2b(canonical.encode(), digest_size=32)
+    return h.hexdigest()
 
 
 def compute_content_hash(row) -> str:
@@ -59,12 +96,41 @@ def compute_content_hash(row) -> str:
     return h.hexdigest()
 
 
+def _legacy_attestation_canonical(row) -> dict:
+    """Pre-schema attestation canonical form (no @context/@type).
+
+    Used for hash verification of attestations created before Issue #11.
+    """
+    return {
+        "attestation_rid": row["attestation_rid"],
+        "claim_rid": row["claim_rid"],
+        "reviewer_uri": row["reviewer_uri"],
+        "verdict": row["verdict"],
+        "rationale": row.get("rationale") or "",
+        "evidence_uris": sorted(row.get("evidence_uris") or []),
+    }
+
+
+def compute_legacy_attestation_hash(row) -> str:
+    """Compute BLAKE2b-256 hash using the pre-schema canonical form.
+
+    Used for verifying content_hash of attestations created before Issue #11.
+    """
+    canonical = json.dumps(_legacy_attestation_canonical(row),
+                           sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    h = hashlib.blake2b(canonical.encode(), digest_size=32)
+    return h.hexdigest()
+
+
 def compute_attestation_hash(row) -> str:
     """Compute BLAKE2b-256 hash of canonical attestation serialization.
 
+    Includes @context and @type per ADR-004 (FWG schema alignment).
     Returns hex-encoded hash string. Same pattern as compute_content_hash().
     """
     obj = {
+        "@context": "https://framework.regen.network/schema/",
+        "@type": "rfs:Attestation",
         "attestation_rid": row["attestation_rid"],
         "claim_rid": row["claim_rid"],
         "reviewer_uri": row["reviewer_uri"],
