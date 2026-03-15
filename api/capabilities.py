@@ -31,6 +31,7 @@ class Capabilities:
     graph_queries: bool = True          # pure SQL, no deps — always on
     coordinator_endpoints: bool = False
     assertion_history: bool = True      # ADR-001 core invariant
+    query_endpoint: bool = False        # dynamic SQL query endpoint (personal only)
 
     deployment_profile: str = "personal"
 
@@ -51,6 +52,7 @@ class Capabilities:
             graph_queries=_flag("GRAPH_QUERIES_ENABLED", default=True),
             coordinator_endpoints=_flag("COORDINATOR_ENDPOINTS_ENABLED"),
             assertion_history=_flag("ASSERTION_HISTORY_ENABLED", default=True),
+            query_endpoint=_flag("QUERY_ENDPOINT_ENABLED"),
             deployment_profile=profile,
         )
 
@@ -63,6 +65,7 @@ class Capabilities:
                 terminusdb=False,
                 graph_queries=True,
                 assertion_history=True,
+                query_endpoint=True,
                 deployment_profile="personal",
             ),
             "bkc_coordinator": cls(

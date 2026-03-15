@@ -1322,6 +1322,15 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Claims router not mounted: {e}")
 
+            # Dynamic query endpoint (personal deployments only)
+            if _caps.query_endpoint:
+                try:
+                    from api.routers.query_router import create_router as create_query_router
+                    app.include_router(create_query_router(db_pool, _caps), prefix="/sql")
+                    logger.info("Query router mounted (/sql)")
+                except Exception as e:
+                    logger.warning(f"Query router not mounted: {e}")
+
             # SeaTrees Bloom export router (always on, no capability gate)
             try:
                 from api.routers.seatrees_router import create_router as create_seatrees_router
