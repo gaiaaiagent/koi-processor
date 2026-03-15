@@ -104,6 +104,44 @@ class PledgeToPoolRequest(BaseModel):
     actor: Optional[str] = None
 
 
+class TranscriptExtractRequest(BaseModel):
+    """Request to extract commitments from transcript text."""
+    document_text: str = Field(..., min_length=50)
+    source_document: str = Field(..., description="Interview ID or document reference")
+    bioregion: Optional[str] = None
+    confidence_threshold: float = Field(0.6, ge=0.0, le=1.0)
+    auto_create: bool = Field(False, description="If True, resolve entities and create commitments")
+
+
+class CommitmentCandidate(BaseModel):
+    pledger_name: str
+    pledger_organization: Optional[str] = None
+    title: str
+    description: str = ""
+    offer_type: str = "labor"
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    validity_start: Optional[str] = None
+    validity_end: Optional[str] = None
+    estimated_value_usd: Optional[float] = None
+    routing_tags: List[str] = []
+    wants: List[str] = []
+    limits: List[str] = []
+    confidence: float = 0.5
+    source_snippet: str = ""
+    source_document: Optional[str] = None
+
+
+class TranscriptExtractResponse(BaseModel):
+    candidates: List[CommitmentCandidate]
+    summary: str
+    auto_created: Optional[List[Dict[str, Any]]] = None
+
+
+class CreateClaimRequest(BaseModel):
+    actor: Optional[str] = None
+
+
 class RoutingSuggestionRequest(BaseModel):
     """Draft commitment payload for routing scoring. Same shape as CommitmentCreateRequest."""
     pledger_uri: Optional[str] = None
@@ -300,6 +338,116 @@ def create_router(pool, caps=None):
         suggestions = await _score_pools(pool, body)
         return RoutingSuggestionResponse(suggestions=suggestions)
 
+    @router.post("/extract-from-transcript", response_model=TranscriptExtractResponse)
+    async def extract_commitments_from_transcript(body: TranscriptExtractRequest):
+        """Extract commitment candidates from transcript text via LLM.
+
+        Returns candidates for human review. If auto_create=True, also resolves
+        pledger entities and creates commitments in PROPOSED state.
+        """
+        from api.commitment_extractor import extract_commitments_from_text
+
+        result = await extract_commitments_from_text(
+            document_text=body.document_text,
+            source_document=body.source_document,
+            bioregion=body.bioregion,
+            confidence_threshold=body.confidence_threshold,
+        )
+
+        candidates = [CommitmentCandidate(**c) for c in result["candidates"]]
+        auto_created = None
+
+        if body.auto_create and candidates:
+            auto_created = []
+            async with pool.acquire() as conn:
+                for candidate in candidates:
+                    # Resolve pledger entity
+                    pledger_name = candidate.pledger_organization or candidate.pledger_name
+                    pledger_row = await conn.fetchrow(
+                        "SELECT fuseki_uri FROM entity_registry WHERE LOWER(entity_text) = LOWER($1) LIMIT 1",
+                        pledger_name,
+                    )
+                    if not pledger_row:
+                        auto_created.append({
+                            "title": candidate.title,
+                            "status": "skipped",
+                            "reason": f"Pledger '{pledger_name}' not found in entity registry",
+                        })
+                        continue
+
+                    pledger_uri = pledger_row["fuseki_uri"]
+
+                    # Resolve bioregion URI
+                    bioregion_uri = ""
+                    if body.bioregion:
+                        bio_row = await conn.fetchrow(
+                            "SELECT fuseki_uri FROM entity_registry WHERE LOWER(entity_text) = LOWER($1) AND entity_type = 'Bioregion' LIMIT 1",
+                            body.bioregion,
+                        )
+                        if bio_row:
+                            bioregion_uri = bio_row["fuseki_uri"]
+
+                    metadata = {
+                        "wants": candidate.wants,
+                        "limits": candidate.limits,
+                        "routing_tags": candidate.routing_tags,
+                        "estimated_value_usd": candidate.estimated_value_usd,
+                        "bioregion_uri": bioregion_uri,
+                        "source_interview_id": body.source_document,
+                        "ai_confidence": candidate.confidence,
+                    }
+
+                    rid = _commitment_rid(pledger_uri, candidate.title)
+                    try:
+                        row = await conn.fetchrow("""
+                            INSERT INTO commitments
+                                (commitment_rid, pledger_uri, title, description, offer_type,
+                                 quantity, unit, validity_start, validity_end, state, metadata, created_by)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'PROPOSED',$10::jsonb,$11)
+                            ON CONFLICT (commitment_rid) DO UPDATE SET updated_at = NOW()
+                            RETURNING commitment_rid
+                        """,
+                            rid, pledger_uri, candidate.title, candidate.description,
+                            candidate.offer_type, candidate.quantity, candidate.unit,
+                            None, None, _json_dumps(metadata),
+                            f"commitment-extractor:{body.source_document}",
+                        )
+
+                        await conn.execute("""
+                            INSERT INTO commitment_state_log
+                                (commitment_rid, from_state, to_state, actor, reason)
+                            VALUES ($1, NULL, 'PROPOSED', $2, 'auto-created from transcript extraction')
+                            ON CONFLICT DO NOTHING
+                        """, rid, f"commitment-extractor:{body.source_document}")
+
+                        try:
+                            await conn.execute("""
+                                INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
+                                VALUES ($1, 'pledges_commitment', $2, 'commitment_extractor')
+                                ON CONFLICT DO NOTHING
+                            """, pledger_uri, rid)
+                        except Exception:
+                            pass
+
+                        auto_created.append({
+                            "title": candidate.title,
+                            "commitment_rid": rid,
+                            "pledger_uri": pledger_uri,
+                            "status": "created",
+                        })
+                    except Exception as e:
+                        auto_created.append({
+                            "title": candidate.title,
+                            "status": "error",
+                            "reason": str(e),
+                        })
+
+        return TranscriptExtractResponse(
+            candidates=candidates,
+            summary=result["summary"],
+            auto_created=auto_created,
+        )
+
     @router.get("/{rid}", response_model=CommitmentResponse)
     async def get_commitment(rid: str):
         """Fetch a commitment by RID."""
@@ -411,6 +559,90 @@ def create_router(pool, caps=None):
                                  "created_at": datetime.now(timezone.utc).isoformat()},
         })
         return _row_to_commitment(updated)
+
+    @router.post("/{rid}/create-claim")
+    async def create_claim_from_commitment(rid: str, body: CreateClaimRequest = CreateClaimRequest()):
+        """Create a claim entity from a VERIFIED commitment for EAS attestation.
+
+        Reads the commitment, creates a claim with type 'governance',
+        embeds source_commitment_rid in claim metadata.
+        Returns claim_rid for the existing EAS attest.ts pipeline.
+        """
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT c.*, cp.pool_rid AS pool_rid_text
+                FROM commitments c
+                LEFT JOIN commitment_pools cp ON cp.id = c.pool_id
+                WHERE c.commitment_rid = $1
+            """, rid)
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Commitment not found: {rid}")
+
+            if row["state"] not in ("VERIFIED", "ACTIVE", "EVIDENCE_LINKED"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Commitment must be VERIFIED, ACTIVE, or EVIDENCE_LINKED to create a claim. Current state: {row['state']}",
+                )
+
+            import json as _json
+            meta = row["metadata"]
+            if isinstance(meta, str):
+                meta = _json.loads(meta)
+
+            # Build claim statement from commitment
+            statement = f"Commitment: {row['title']}"
+            if row.get("description"):
+                statement += f" — {row['description']}"
+
+            # Derive claim RID
+            claim_h = hashlib.sha256(f"claim:commitment:{rid}".encode()).hexdigest()[:32]
+            claim_rid = f"orn:koi-net.claim:{claim_h}"
+
+            # Create the claim
+            claim_meta = {
+                "source_commitment_rid": rid,
+                "pledger_uri": row["pledger_uri"],
+                "offer_type": row["offer_type"],
+                "commitment_state": row["state"],
+                **({"pool_rid": row.get("pool_rid_text")} if row.get("pool_rid_text") else {}),
+            }
+
+            # operator_uri has FK to entity_registry — use pledger_uri (guaranteed to exist)
+            try:
+                await conn.execute("""
+                    INSERT INTO claims
+                        (claim_rid, statement, claimant_uri, claim_type, verification, operator_uri, metadata, created_by)
+                    VALUES ($1, $2, $3, 'governance', 'self_reported', $3, $4::jsonb, $5)
+                    ON CONFLICT (claim_rid) DO UPDATE SET updated_at = NOW()
+                """,
+                    claim_rid,
+                    statement,
+                    row["pledger_uri"],
+                    _json_dumps(claim_meta),
+                    body.actor or f"commitment-bridge:{rid}",
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to create claim: {e}")
+
+            # Link claim to commitment subject via 'about' relationship
+            try:
+                await conn.execute("""
+                    INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
+                    VALUES ($1, 'about', $2, 'commitment_claim_bridge')
+                    ON CONFLICT DO NOTHING
+                """, claim_rid, rid)
+            except Exception:
+                pass
+
+        logger.info(f"commitment.create_claim commitment_rid={rid} claim_rid={claim_rid}")
+        return {
+            "claim_rid": claim_rid,
+            "commitment_rid": rid,
+            "statement": statement,
+            "claim_type": "governance",
+            "verification": "self_reported",
+            "metadata": claim_meta,
+        }
 
     return router
 
