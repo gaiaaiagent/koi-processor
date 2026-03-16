@@ -155,6 +155,51 @@
       "id": "bkc:063_mediawiki_import",
       "file": "063_mediawiki_import.sql",
       "checksum": "46cc0bbbcd8be2ad48705bfae56f38212b70aef07bfd056c141a78d2fbe19824"
+    },
+    {
+      "id": "bkc:064_claims_engine",
+      "file": "064_claims_engine.sql",
+      "checksum": "7a389ff0cc24a31ea1b14baf37ed894991163585a8ea6f1952c45a2dde29af17"
+    },
+    {
+      "id": "bkc:065_claims_tx_hash",
+      "file": "065_claims_tx_hash.sql",
+      "checksum": "b2dbb6ef3ea1032d438297b604b8b0901448252db65d0b4e3122340541c5ea28"
+    },
+    {
+      "id": "bkc:066_attestations",
+      "file": "066_attestations.sql",
+      "checksum": "931cef27258f6b3623bc937ef3a505b69e08f5b395f1bec0b66c597f4816c4e9"
+    },
+    {
+      "id": "bkc:067_evidence_from_artifacts",
+      "file": "067_evidence_from_artifacts.sql",
+      "checksum": "6f50ea25768fe7e81a06f347d6fc7cfaf8b621b71772275f0f5ed9cb25c61788"
+    },
+    {
+      "id": "bkc:068_entity_registry_missing_columns",
+      "file": "068_entity_registry_missing_columns.sql",
+      "checksum": "3771353603cd3b7f78c4052f3de5f60eef29122419675748dfff0d2284de7127"
+    },
+    {
+      "id": "bkc:069_rename_graph_iri",
+      "file": "069_rename_graph_iri.sql",
+      "checksum": "d3d111ee7406e28ebb9c8f072a878c6234e1e699c13076e9ad7633384f059e56"
+    },
+    {
+      "id": "bkc:070_data_iri",
+      "file": "070_data_iri.sql",
+      "checksum": "ba149e2a1e580ef714cfcbbedbeaa9c1bacc81c7bb90bd025766c330f24faa01"
+    },
+    {
+      "id": "bkc:071_wallet_address",
+      "file": "071_wallet_address.sql",
+      "checksum": "6a338125c2e13cc1c8503890fd4accc6490848e2617150117ea10f8927ed4c15"
+    },
+    {
+      "id": "bkc:072_credit_class_id",
+      "file": "072_credit_class_id.sql",
+      "checksum": "13094bf1023850dee598f3bdb305f0ae78b00ca80bc45d6de529798d19dde954"
     }
   ]
 }
