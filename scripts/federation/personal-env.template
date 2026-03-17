@@ -82,3 +82,8 @@ KOI_BASE_URL=http://{{WG_IP}}:8351
 KOI_STRICT_MODE=false
 KOI_NET_REQUIRE_APPROVED_EDGE_FOR_POLL=true
 KOI_ENFORCE_SOURCE_KEY_RID_BINDING=true
+
+# ============================================
+# VAULT SYNC
+# ============================================
+VAULT_SYNC_ENABLED=true
