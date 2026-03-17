@@ -86,12 +86,17 @@ def _resolve_if_symlink(path: Path, vault_root: Path) -> Optional[Path]:
         return None
     if not resolved.is_file():
         return None
-    # Safety: resolved target must be under *some* known path — not necessarily
-    # vault_root, since the whole point is linking external files in.
-    # But we do NOT allow linking to sensitive system paths.
-    _blocked_prefixes = (Path("/etc"), Path("/root"), Path("/proc"), Path("/sys"))
-    if any(resolved == bp or bp in resolved.parents for bp in _blocked_prefixes):
-        logger.warning("Symlink target in blocked path, skipping: %s -> %s", path, resolved)
+    # Safety: resolved target must be under vault_root OR an explicitly
+    # allowed root. Default allowed roots include the user's home directory.
+    # Operators can extend via VAULT_SYNC_SYMLINK_ALLOWED_ROOTS (colon-separated).
+    _extra_roots_str = os.getenv("VAULT_SYNC_SYMLINK_ALLOWED_ROOTS", "")
+    _extra_roots = [Path(p) for p in _extra_roots_str.split(":") if p.strip()]
+    _allowed_roots = [vault_root, Path.home()] + _extra_roots
+    if not any(resolved == root or root in resolved.parents for root in _allowed_roots):
+        logger.warning(
+            "Symlink target outside allowed roots, skipping: %s -> %s (allowed: %s)",
+            path, resolved, [str(r) for r in _allowed_roots],
+        )
         return None
     return resolved
 
@@ -1265,9 +1270,11 @@ class VaultSyncManager:
             await self._record_applied(source_node, event_id, rid)
             return
 
-        # Safe to delete
+        # Safe to delete — but never remove a symlink (user-managed)
         try:
-            if target_path.exists():
+            if target_path.is_symlink():
+                logger.warning("vault_sync.apply_forget_skipped_symlink path=%s", target_path)
+            elif target_path.exists():
                 target_path.unlink()
         except OSError as e:
             logger.error("vault_sync.delete_error path=%s error=%s", target_path, e)
