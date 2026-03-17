@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _FEW_SHOT_EXAMPLES = """
-Example commitments extracted from a bioregional mapping workshop transcript:
+Example commitments and needs extracted from a bioregional mapping workshop transcript:
 
 Transcript excerpt: "I can offer our team for about 200 hours of watershed restoration work through the summer. We've got expertise in riparian planting and stream bank stabilization."
 Extracted:
@@ -21,6 +21,7 @@ Extracted:
   pledger_organization: "Regenerate Cascadia"
   title: "Watershed restoration labor"
   description: "200 hours of watershed restoration work including riparian planting and stream bank stabilization"
+  declaration_type: "commitment"
   offer_type: "labor"
   quantity: 200
   unit: "hours"
@@ -39,6 +40,7 @@ Extracted:
   pledger_organization: "Kinship Earth"
   title: "Soil monitoring equipment loan"
   description: "Quarterly loan of 4 portable soil monitoring kits including pH meters, moisture sensors, and sampling tools"
+  declaration_type: "commitment"
   offer_type: "goods"
   quantity: 4
   unit: "kits/quarter"
@@ -50,19 +52,56 @@ Extracted:
   limits: ["quarterly rotation", "must return in working condition"]
   confidence: 0.91
   source_snippet: "We have four portable soil monitoring kits that we can lend out quarterly."
+
+Transcript excerpt: "Our rent for the community workshop space is about $1,500 a month. We really need that covered in cash — can't pay the landlord in volunteer hours."
+Extracted:
+- pledger_name: "Sarah"
+  pledger_organization: "Regenerate Cascadia"
+  title: "Workshop space rental"
+  description: "Monthly rent for community workshop space, $1,500/month, must be paid in fiat currency"
+  declaration_type: "need"
+  offer_type: "service"
+  need_category: "housing"
+  fiat_only: true
+  monthly_amount_usd: 1500
+  estimated_value_usd: 1500
+  routing_tags: ["workspace", "overhead", "facilities"]
+  wants: []
+  limits: ["must be fiat payment"]
+  confidence: 0.85
+  source_snippet: "Our rent for the community workshop space is about $1,500 a month."
+
+Transcript excerpt: "We could use help with food for our volunteer crews — if someone has a garden surplus or can do group meals, that would save us around $300 a month."
+Extracted:
+- pledger_name: "Randy"
+  pledger_organization: "Kinship Earth"
+  title: "Volunteer crew food support"
+  description: "Food for volunteer crews, approximately $300/month, open to in-kind contributions like garden surplus or group meals"
+  declaration_type: "need"
+  offer_type: "goods"
+  need_category: "food"
+  fiat_only: false
+  monthly_amount_usd: 300
+  estimated_value_usd: 300
+  routing_tags: ["food", "volunteer-support", "community-meals"]
+  wants: []
+  limits: []
+  confidence: 0.82
+  source_snippet: "We could use help with food for our volunteer crews"
 """
 
-_EXTRACTION_PROMPT = """You are a commitment extraction system for a bioregional knowledge commons. Extract structured commitments from the provided transcript text.
+_EXTRACTION_PROMPT = """You are a commitment extraction system for a bioregional knowledge commons. Extract structured commitments AND needs from the provided transcript text.
 
-A commitment is a concrete offer of labor, goods, service, knowledge, or stewardship that someone pledges to contribute. Commitments must be:
+A commitment is a concrete offer of labor, goods, service, knowledge, or stewardship that someone pledges to contribute. A need is a concrete resource requirement that a person or organization has. Both must be:
 - Specific and actionable (not vague aspirations)
 - Attributed to an identifiable person or organization
-- An offer or pledge (not a request or wish)
+
+Commitments are offers/pledges. Needs are requirements/costs/expenses that must be met.
 
 {few_shot}
 
 Rules:
-1. Each commitment must have an identifiable pledger (person making the offer)
+1. Each entry must have an identifiable pledger (person or org)
 2. If the pledger's organization is mentioned or identifiable from context, include it
 3. offer_type must be exactly one of: labor, goods, service, knowledge, stewardship
 4. routing_tags should include 2-5 relevant domain keywords for pool matching
@@ -72,15 +111,20 @@ Rules:
 8. Assign confidence 0.0-1.0 based on how explicit and concrete the commitment is
 9. Include the relevant quote from the transcript as source_snippet
 10. Do NOT extract generic statements, aspirations, or questions as commitments
-11. Do NOT invent information not present in the transcript{bioregion_hint}
+11. Do NOT invent information not present in the transcript
+12. For needs: set declaration_type to "need", include need_category (housing, food, compute, storage, transport, utilities, equipment, services), fiat_only (true if must be paid in cash/stablecoin, false if substitutable via vouchers or in-kind), and monthly_amount_usd if mentioned{bioregion_hint}
 
-Respond with a JSON object containing a "commitments" array. Each commitment object:
+Respond with a JSON object containing a "commitments" array. Each object:
 {{
   "pledger_name": "...",
   "pledger_organization": "..." or null,
   "title": "short title (under 80 chars)",
-  "description": "full description of the commitment",
+  "description": "full description",
+  "declaration_type": "commitment" or "need",
   "offer_type": "labor|goods|service|knowledge|stewardship",
+  "need_category": "string or null (for needs only)",
+  "fiat_only": boolean or null (for needs only),
+  "monthly_amount_usd": number or null (for needs only),
   "quantity": number or null,
   "unit": "string" or null,
   "validity_start": "ISO date" or null,
@@ -93,7 +137,7 @@ Respond with a JSON object containing a "commitments" array. Each commitment obj
   "source_snippet": "relevant quote from transcript"
 }}
 
-If no valid commitments found, return: {{"commitments": []}}
+If no valid commitments or needs found, return: {{"commitments": []}}
 
 Transcript text:
 {document_text}
@@ -147,7 +191,11 @@ def _normalize_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
     c.setdefault("pledger_organization", None)
     c.setdefault("title", "")
     c.setdefault("description", "")
+    c.setdefault("declaration_type", "commitment")
     c.setdefault("offer_type", "labor")
+    c.setdefault("need_category", None)
+    c.setdefault("fiat_only", None)
+    c.setdefault("monthly_amount_usd", None)
     c.setdefault("validity_start", None)
     c.setdefault("validity_end", None)
     c.setdefault("quantity", None)
@@ -163,6 +211,14 @@ def _normalize_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
     valid_types = {"labor", "goods", "service", "knowledge", "stewardship"}
     if c["offer_type"] not in valid_types:
         c["offer_type"] = "labor"
+
+    # Validate declaration_type
+    if c["declaration_type"] not in ("commitment", "need"):
+        c["declaration_type"] = "commitment"
+
+    # For needs, carry estimated_value_usd from monthly_amount_usd if not set
+    if c["declaration_type"] == "need" and not c["estimated_value_usd"] and c["monthly_amount_usd"]:
+        c["estimated_value_usd"] = c["monthly_amount_usd"]
 
     return c
 
