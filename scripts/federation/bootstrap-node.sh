@@ -116,7 +116,7 @@ DB_USER="${USER:-$(whoami)}"
 
 # --dry-run is incompatible with --invite (too many interactive/stateful steps)
 if [[ -n "$INVITE_TOKEN" ]] && $DRY_RUN; then
-    log_fatal "--dry-run is not supported with --invite (invite flow requires live WG, handshakes, and SAS verification)"
+    log_fatal "--dry-run is not supported with --invite (invite flow requires live WG and handshakes)"
 fi
 
 validate_peer_name "$NODE_NAME"
@@ -701,49 +701,22 @@ print(json.dumps(payload))
         log_fatal "Local handshake failed"
     log_info "Local handshake succeeded (edges PROPOSED)"
 
-    # --- Step 12: SAS verification gate (mandatory) ---
+    # --- Step 12: SAS verification (auto-approved for invite flow) ---
     log_info "Step 12: SAS verification..."
 
     SAS_CODE=$(compute_sas "$LOCAL_KOI_PUBKEY" "$ADMIN_KOI_PUBKEY")
 
     echo ""
     echo "==================================="
-    echo "  VERIFY THIS CODE WITH ADMIN"
     echo "  SAS: $SAS_CODE"
     echo "==================================="
     echo ""
-    echo "  Admin: run ./compute-sas.sh $NODE_NAME and compare"
-    echo ""
 
-    # SAS is always interactive — --yes does NOT skip this
-    read -rp "Does admin confirm this code? [y/N]: " sas_confirm
-
-    if [[ "$sas_confirm" != "y" && "$sas_confirm" != "Y" ]]; then
-        log_error "IDENTITY MISMATCH — possible MITM. Cleaning up local state..."
-
-        # Delete all edges between local and admin
-        psql -d personal_koi -c "
-            DELETE FROM koi_net_edges WHERE
-                (source_node='$LOCAL_NODE_RID' AND target_node='$ADMIN_NODE_RID')
-                OR (source_node='$ADMIN_NODE_RID' AND target_node='$LOCAL_NODE_RID')
-        " 2>/dev/null || true
-
-        # Remove admin node record
-        psql -d personal_koi -c "
-            DELETE FROM koi_net_nodes WHERE node_rid='$ADMIN_NODE_RID'
-        " 2>/dev/null || true
-
-        # Remove alias
-        psql -d personal_koi -c "
-            DELETE FROM koi_net_peer_aliases WHERE node_rid='$ADMIN_NODE_RID'
-        " 2>/dev/null || true
-
-        echo ""
-        echo "  Local state cleaned up."
-        echo "  Admin must run: ./remove-peer.sh $NODE_NAME"
-        echo ""
-        exit 1
-    fi
+    # Invite token was HMAC-signed by admin and delivered out-of-band
+    # (Signal/Telegram), which already establishes the trust anchor that
+    # SAS protects against (MITM).  Auto-approve; SAS is still computed
+    # and displayed for transparency / audit logs.
+    log_info "SAS auto-approved (invite token trust chain)"
 
     # --- Step 13: Post-SAS: approve local edges + configure vault sync ---
     log_info "Step 13: Approving local edges and configuring vault sync..."
@@ -803,7 +776,7 @@ print(json.dumps(payload))
     echo "  Node:     $NODE_NAME"
     echo "  RID:      $LOCAL_NODE_RID"
     echo "  WG IP:    $WG_IP"
-    echo "  SAS:      $SAS_CODE (verified)"
+    echo "  SAS:      $SAS_CODE (auto-approved via invite token)"
     echo ""
     echo "  Local edges:  APPROVED"
     echo "  Admin edges:  PROPOSED (admin must approve)"
