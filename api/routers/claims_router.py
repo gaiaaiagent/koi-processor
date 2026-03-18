@@ -1492,7 +1492,17 @@ def create_router(pool, caps=None):
             },
         )
 
-        reg_response = await register_vault_entity(reg_request)
+        try:
+            reg_response = await register_vault_entity(reg_request)
+        except Exception as e:
+            logger.error(
+                f"register_vault_entity failed for settlement evidence: "
+                f"vault_rid={vault_rid} name={evidence_name} err={e}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to register settlement evidence entity: {e}",
+            )
         evidence_uri = reg_response.canonical_uri
         is_new = reg_response.is_new
 
