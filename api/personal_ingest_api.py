@@ -1322,6 +1322,19 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Claims router not mounted: {e}")
 
+            # Intent registry router (always on, no capability gate)
+            # Privacy note: router is local-only (localhost:8351 / WireGuard).
+            # Response model separation (Discovery/Detail/Coordinator) is the
+            # enforcement mechanism at pilot scale. If the API ever becomes
+            # externally accessible, add capability/auth gates to /detail and
+            # /digest endpoints.
+            try:
+                from api.routers.intent_router import create_router as create_intent_router
+                app.include_router(create_intent_router(db_pool), prefix="/intents")
+                logger.info("Intent router mounted (/intents)")
+            except Exception as e:
+                logger.warning(f"Intent router not mounted: {e}")
+
             # Dynamic query endpoint (personal deployments only)
             if _caps.query_endpoint:
                 try:
@@ -5071,7 +5084,7 @@ def _rerank_chunks(query: str, chunks: list, top_k: int = 8) -> list:
     if ranker is None:
         return chunks[:top_k]
     from flashrank import RerankRequest
-    passages = [{"id": i, "text": c.get("text", "")[:1500]} for i, c in enumerate(chunks)]
+    passages = [{"id": i, "text": ((c.get("context") or "") + "\n" + c.get("text", ""))[:1500]} for i, c in enumerate(chunks)]
     req = RerankRequest(query=query, passages=passages)
     results = ranker.rerank(req)
     reranked = []
@@ -5276,6 +5289,7 @@ async def chat_endpoint(request: ChatRequest):
                         SELECT c.id, c.document_rid,
                                m.content->>'title' AS title,
                                LEFT(c.content->>'text', 2000) AS chunk_text,
+                               c.content->>'context' AS chunk_context,
                                c.content->>'section_id' AS section_id,
                                c.content->>'section_title' AS section_title,
                                c.content->>'wiki_url' AS wiki_url,
@@ -5289,6 +5303,7 @@ async def chat_endpoint(request: ChatRequest):
                         SELECT c.id, c.document_rid,
                                m.content->>'title' AS title,
                                LEFT(c.content->>'text', 2000) AS chunk_text,
+                               c.content->>'context' AS chunk_context,
                                c.content->>'section_id' AS section_id,
                                c.content->>'section_title' AS section_title,
                                c.content->>'wiki_url' AS wiki_url,
@@ -5302,6 +5317,7 @@ async def chat_endpoint(request: ChatRequest):
                            COALESCE(v.document_rid, b.document_rid) AS document_rid,
                            COALESCE(v.title, b.title) AS title,
                            LEFT(COALESCE(v.chunk_text, b.chunk_text), 2000) AS chunk_text,
+                           COALESCE(v.chunk_context, b.chunk_context) AS chunk_context,
                            COALESCE(v.section_id, b.section_id) AS section_id,
                            COALESCE(v.section_title, b.section_title) AS section_title,
                            COALESCE(v.wiki_url, b.wiki_url) AS wiki_url,
@@ -5312,10 +5328,12 @@ async def chat_endpoint(request: ChatRequest):
                     LIMIT 20
                 """, embedding_str, query_text)
                 for cr in chunk_rows:
+                    _ctx = cr['chunk_context'] or ""
                     doc_chunks.append({
                         "rid": cr['document_rid'],
                         "title": cr['title'] or cr['document_rid'],
                         "text": cr['chunk_text'] or "",
+                        "context": _ctx,
                         "score": round(float(cr['rrf_score']), 4),
                         "section_id": cr['section_id'],
                         "section_title": cr['section_title'],
@@ -5326,7 +5344,7 @@ async def chat_endpoint(request: ChatRequest):
                         "label": cr['title'] or cr['document_rid'],
                         "entity_type": "Document",
                         "score": round(float(cr['rrf_score']), 4),
-                        "description": (cr['chunk_text'] or "")[:200],
+                        "description": ((_ctx + " " if _ctx else "") + (cr['chunk_text'] or ""))[:400],
                         "url": cr['wiki_url'],
                     })
             except (asyncpg.exceptions.UndefinedTableError,
@@ -5342,6 +5360,7 @@ async def chat_endpoint(request: ChatRequest):
                         SELECT c.document_rid,
                                m.content->>'title' AS title,
                                LEFT(c.content->>'text', 2000) AS chunk_text,
+                               c.content->>'context' AS chunk_context,
                                c.content->>'section_id' AS section_id,
                                c.content->>'section_title' AS section_title,
                                c.content->>'wiki_url' AS wiki_url,
@@ -5353,10 +5372,12 @@ async def chat_endpoint(request: ChatRequest):
                         LIMIT 20
                     """, query_text)
                     for cr in chunk_rows:
+                        _ctx = cr['chunk_context'] or ""
                         doc_chunks.append({
                             "rid": cr['document_rid'],
                             "title": cr['title'] or cr['document_rid'],
                             "text": cr['chunk_text'] or "",
+                            "context": _ctx,
                             "score": round(float(cr['rrf_score']), 4),
                             "section_id": cr['section_id'],
                             "section_title": cr['section_title'],
@@ -5367,7 +5388,7 @@ async def chat_endpoint(request: ChatRequest):
                             "label": cr['title'] or cr['document_rid'],
                             "entity_type": "Document",
                             "score": round(float(cr['rrf_score']), 4),
-                            "description": (cr['chunk_text'] or "")[:200],
+                            "description": ((_ctx + " " if _ctx else "") + (cr['chunk_text'] or ""))[:400],
                             "url": cr['wiki_url'],
                         })
                 except Exception as bm25_err:
@@ -5442,6 +5463,7 @@ async def chat_endpoint(request: ChatRequest):
         f"- **{d['title']}**"
         + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
         + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
+        + (f" Context: {d['context']}." if d.get('context') else "")
         + f": {d['text'][:1500]}"
         for d in doc_chunks
     ) if doc_chunks else ""

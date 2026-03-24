@@ -334,6 +334,15 @@ DEFAULT_SCHEMAS = {
         semantic_threshold=0.92,
         require_token_overlap=True,
     ),
+    'Intent': EntityTypeConfig(
+        type_key='Intent',
+        label='Intent',
+        folder='Intents',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=False,
+    ),
 }
 
 # Safe default schema for unknown types (never returns None)
