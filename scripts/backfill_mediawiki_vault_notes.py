@@ -271,13 +271,68 @@ async def backfill(
             content += f"\n# {name}\n"
 
             # Append lead section text from parsed JSON if available
+            lead_text = ""
             if parsed_pages:
                 slug = _page_slug(name)
                 page_data = parsed_pages.get(slug)
                 if page_data:
-                    lead = page_data.get("lead_text") or page_data.get("lead", "")
+                    # Try multiple possible locations for lead text
+                    lead = (
+                        page_data.get("lead_text")
+                        or page_data.get("lead")
+                        or (page_data.get("section_texts") or {}).get("lead")
+                        or ""
+                    )
                     if isinstance(lead, str) and lead.strip():
-                        content += f"\n{lead.strip()}\n"
+                        # Clean up wiki markup artifacts
+                        lead_text = lead.strip()
+                        # Remove image markup like "[[File:...]]" and "[[Image:...]]"
+                        lead_text = re.sub(r'\[\[(?:File|Image):[^\]]+\]\]', '', lead_text)
+                        # Remove image alignment/size prefixes like "left|400px|caption..."
+                        # These appear as: alignment|sizepx|caption text followed by actual content
+                        lead_text = re.sub(r'(?:left|right|center)\|\d+px\|[^)]*\)', '', lead_text)
+                        # Remove Category:... tags
+                        lead_text = re.sub(r'Category:[^\s]+', '', lead_text)
+                        # Remove leftover wiki formatting
+                        lead_text = re.sub(r"'{2,3}", '', lead_text)  # bold/italic wiki markup
+                        lead_text = lead_text.strip()
+                        if lead_text:
+                            content += f"\n{lead_text}\n"
+
+            # Render relationships as body content (visible in Quartz)
+            entity_rels_for_body = rels_by_uri.get(uri, [])
+            if entity_rels_for_body:
+                rel_lines = []
+                for rel in entity_rels_for_body:
+                    predicate = rel["predicate"]
+                    if rel["subject_uri"] == uri:
+                        target_uri = rel["object_uri"]
+                    elif rel["object_uri"] == uri:
+                        target_uri = rel["subject_uri"]
+                    else:
+                        continue
+                    target_info = uri_to_entity.get(target_uri)
+                    if not target_info:
+                        continue
+                    target_name, target_type = target_info
+                    target_folder = type_to_folder(target_type) if target_type else "Concepts"
+                    safe_target = sanitize_filename(target_name)
+                    if not safe_target:
+                        continue
+                    display_pred = predicate.replace("_", " ")
+                    rel_lines.append(f"- {display_pred}: [[{target_folder}/{safe_target}]]")
+
+                if rel_lines:
+                    content += "\n## Relationships\n\n"
+                    # Deduplicate and sort
+                    seen = set()
+                    for line in sorted(rel_lines):
+                        if line not in seen:
+                            content += line + "\n"
+                            seen.add(line)
+
+            # Add wiki source link
+            content += f"\n---\n*Source: [{name} on Salish Sea Wiki]({wiki_base}/wiki/{wiki_title})*\n"
 
             if dry_run:
                 logger.info(f"  WOULD CREATE: {vault_rel}")

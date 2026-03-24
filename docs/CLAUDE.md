@@ -35,4 +35,10 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #15618 | 5:35 PM | ✅ | Claims engine dogfooding setup pushed to regen-prod branch | ~396 |
+
+### Mar 17, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #17177 | 11:31 AM | ✅ | Claims Engine Anchoring Documentation Updated for TX Confirmation Behavior | ~480 |
 </claude-mem-context>
