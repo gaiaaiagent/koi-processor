@@ -1,0 +1,142 @@
+[
+  {
+    "id": "entity_lookup_1",
+    "category": "entity_lookup",
+    "question": "What is eelgrass?",
+    "expected_answer": "Eelgrass (Zostera marina) is a marine flowering plant found in the Salish Sea that provides critical habitat for fish, invertebrates, and migratory birds. It is important for carbon sequestration and shoreline stabilization.",
+    "expected_entities": ["Eelgrass"]
+  },
+  {
+    "id": "entity_lookup_2",
+    "category": "entity_lookup",
+    "question": "What is the Salish Sea?",
+    "expected_answer": "The Salish Sea is a marginal sea of the Pacific Ocean encompassing the inland marine waters of Washington state and British Columbia, including Puget Sound, the Strait of Juan de Fuca, and the Strait of Georgia.",
+    "expected_entities": ["Salish Sea"]
+  },
+  {
+    "id": "entity_lookup_3",
+    "category": "entity_lookup",
+    "question": "What are Southern Resident Killer Whales?",
+    "expected_answer": "Southern Resident Killer Whales (SRKW) are an endangered population of orcas that inhabit the Salish Sea. Their survival is threatened by declining Chinook salmon populations, vessel noise, and pollution.",
+    "expected_entities": ["Southern Resident Killer Whales"]
+  },
+  {
+    "id": "entity_lookup_4",
+    "category": "entity_lookup",
+    "question": "What is bioregionalism?",
+    "expected_answer": "Bioregionalism is a political, cultural, and ecological philosophy that emphasizes organizing human activity around naturally-defined ecological regions (bioregions) rather than arbitrary political boundaries.",
+    "expected_entities": ["Bioregionalism"]
+  },
+  {
+    "id": "entity_lookup_5",
+    "category": "entity_lookup",
+    "question": "What is Threshold-Based Flow Funding?",
+    "expected_answer": "Threshold-Based Flow Funding (TBFF) is a funding mechanism that redistributes resources among participants based on configurable thresholds, ensuring each participant reaches a minimum funding level before excess flows to others.",
+    "expected_entities": ["Threshold-Based Flow Funding"]
+  },
+  {
+    "id": "relationship_1",
+    "category": "relationship",
+    "question": "Which organizations work on restoration in the Salish Sea?",
+    "expected_answer": "Organizations working on restoration in the Salish Sea include Regenerate Cascadia, Victoria Landscape Hub, and other groups focused on ecological stewardship and habitat restoration.",
+    "expected_entities": ["Regenerate Cascadia", "Victoria Landscape Hub", "Salish Sea"]
+  },
+  {
+    "id": "relationship_2",
+    "category": "relationship",
+    "question": "What is the relationship between the Bioregional Knowledge Commons and KOI?",
+    "expected_answer": "The Bioregional Knowledge Commons (BKC) uses Knowledge Organization Infrastructure (KOI) as its technical backbone for organizing, federating, and sharing knowledge across bioregional nodes.",
+    "expected_entities": ["Bioregional Knowledge Commons", "KOI"]
+  },
+  {
+    "id": "relationship_3",
+    "category": "relationship",
+    "question": "What species are connected to Chinook salmon in the Salish Sea ecosystem?",
+    "expected_answer": "Chinook salmon are a keystone species connected to Southern Resident Killer Whales (their primary food source), as well as bears, eagles, and marine ecosystems. Their decline directly threatens orca populations.",
+    "expected_entities": ["Chinook Salmon", "Southern Resident Killer Whales"]
+  },
+  {
+    "id": "relationship_4",
+    "category": "relationship",
+    "question": "What is Commitment Pooling and how does it relate to flow funding?",
+    "expected_answer": "Commitment Pooling is a mechanism for aggregating verified commitments from community members into pools that can then be funded and settled through mechanisms like Threshold-Based Flow Funding (TBFF).",
+    "expected_entities": ["Commitment Pooling", "Flow Funding"]
+  },
+  {
+    "id": "multi_hop_1",
+    "category": "multi_hop",
+    "question": "What restoration practices does the Victoria Landscape Hub focus on?",
+    "expected_answer": "The Victoria Landscape Hub focuses on ecological restoration practices in the Greater Victoria area, including habitat restoration, community stewardship, and coordinating with organizations like Kinship Earth and Mycopunks.",
+    "expected_entities": ["Victoria Landscape Hub"]
+  },
+  {
+    "id": "multi_hop_2",
+    "category": "multi_hop",
+    "question": "How does the KOI federation protocol enable knowledge sharing between bioregions?",
+    "expected_answer": "KOI-net federation enables knowledge sharing through signed event envelopes exchanged between nodes. Each bioregional node maintains its own database and identity, while federation edges control which entity types flow between nodes.",
+    "expected_entities": ["KOI", "Federation"]
+  },
+  {
+    "id": "multi_hop_3",
+    "category": "multi_hop",
+    "question": "What is the connection between reef nets, Indigenous knowledge, and the Salish Sea?",
+    "expected_answer": "Reef nets are a traditional Indigenous fishing technology used by Coast Salish peoples in the Salish Sea. They represent an example of traditional ecological knowledge that informs contemporary approaches to sustainable fisheries management.",
+    "expected_entities": ["Reef Nets", "Salish Sea"]
+  },
+  {
+    "id": "multi_hop_4",
+    "category": "multi_hop",
+    "question": "How does cosmolocalism relate to bioregional knowledge commoning?",
+    "expected_answer": "Cosmolocalism is the principle of sharing knowledge globally while producing locally. In bioregional knowledge commoning, this means sharing patterns, protocols, and ecological knowledge across bioregions while keeping governance and stewardship rooted in local communities.",
+    "expected_entities": ["Cosmolocalism"]
+  },
+  {
+    "id": "thematic_1",
+    "category": "thematic",
+    "question": "What is the overall approach to ecological stewardship in the Cascadia bioregion?",
+    "expected_answer": "The Cascadia bioregion takes a holistic approach to ecological stewardship that combines Indigenous knowledge systems, regenerative practices, community governance, and networked coordination across sub-bioregions like the Salish Sea and Greater Victoria.",
+    "expected_entities": ["Cascadia"]
+  },
+  {
+    "id": "thematic_2",
+    "category": "thematic",
+    "question": "How does the Bioregional Knowledge Commons handle data sovereignty?",
+    "expected_answer": "The BKC addresses data sovereignty through OCAP principles (Ownership, Control, Access, Possession), FPIC (Free Prior and Informed Consent), visibility scoping (public vs node_private), and federation membrane governance that controls what data flows between nodes.",
+    "expected_entities": ["Data Sovereignty", "OCAP", "FPIC"]
+  },
+  {
+    "id": "thematic_3",
+    "category": "thematic",
+    "question": "What role do discourse graphs play in the knowledge commons?",
+    "expected_answer": "Discourse graphs structure knowledge as claims supported or opposed by evidence, enabling communities to track arguments, synthesize positions, and make decisions based on transparent reasoning chains.",
+    "expected_entities": ["Discourse Graphs"]
+  },
+  {
+    "id": "thematic_4",
+    "category": "thematic",
+    "question": "What is Two-Eyed Seeing and why is it important for bioregional work?",
+    "expected_answer": "Two-Eyed Seeing (Etuaptmumk) is a guiding principle from Mi'kmaw Elder Albert Marshall that brings together Indigenous and Western knowledge systems. It is important for bioregional work because ecological stewardship benefits from integrating traditional ecological knowledge with scientific approaches.",
+    "expected_entities": ["Two-Eyed Seeing"]
+  },
+  {
+    "id": "negative_1",
+    "category": "negative",
+    "question": "What is the population of Mars?",
+    "expected_answer": "I don't have information about the population of Mars in my knowledge base. My knowledge focuses on bioregional ecology, stewardship, and community governance in regions like the Salish Sea and Cascadia.",
+    "expected_entities": []
+  },
+  {
+    "id": "negative_2",
+    "category": "negative",
+    "question": "What is the stock price of Apple Inc today?",
+    "expected_answer": "I don't have information about stock prices. My knowledge base focuses on bioregional knowledge commoning, ecological stewardship, and community governance.",
+    "expected_entities": []
+  },
+  {
+    "id": "negative_3",
+    "category": "negative",
+    "question": "How do I install TensorFlow on Windows?",
+    "expected_answer": "I don't have information about installing TensorFlow. My focus is on bioregional knowledge, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
+    "expected_entities": []
+  }
+]

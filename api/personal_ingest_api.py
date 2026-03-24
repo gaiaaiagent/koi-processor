@@ -4880,6 +4880,209 @@ async def _graph_guided_retrieval(
     return sources, relationships_ctx, doc_chunks, web_sources
 
 
+# ---------------------------------------------------------------------------
+# Structured graph query (Step 7) — template-based entity/relationship lookup
+# ---------------------------------------------------------------------------
+import re as _re_module
+
+# Known entity types for pattern matching
+_ENTITY_TYPES = {
+    "organization": "Organization", "organizations": "Organization",
+    "project": "Project", "projects": "Project",
+    "location": "Location", "locations": "Location",
+    "concept": "Concept", "concepts": "Concept",
+    "practice": "Practice", "practices": "Practice",
+    "person": "Person", "people": "Person",
+    "bioregion": "Bioregion", "bioregions": "Bioregion",
+}
+
+# Patterns: (regex, template_name)
+_GRAPH_QUERY_PATTERNS = [
+    # "which/what organizations work on/related to/involved in X"
+    (_re_module.compile(
+        r"(?:which|what|list|show)\s+(\w+)\s+(?:work on|related to|involved in|involved with|associated with|connected to)\s+(.+?)[\?.]?$",
+        _re_module.IGNORECASE
+    ), "related_entities_typed"),
+    # "what is related to X" / "what relates to X"
+    (_re_module.compile(
+        r"(?:what|which|who)\s+(?:is|are)\s+(?:related|connected|linked)\s+to\s+(.+?)[\?.]?$",
+        _re_module.IGNORECASE
+    ), "related_entities_all"),
+    # "how many X in Y" / "how many X"
+    (_re_module.compile(
+        r"how many\s+(\w+)(?:\s+in\s+(.+?))?[\?.]?$",
+        _re_module.IGNORECASE
+    ), "count_entities"),
+]
+
+
+async def _resolve_entity_uri(name: str, conn) -> Optional[str]:
+    """Resolve a free-text entity name to its fuseki_uri."""
+    row = await conn.fetchrow(
+        "SELECT fuseki_uri FROM entity_registry WHERE entity_text ILIKE $1 AND NOT node_private LIMIT 1",
+        name.strip()
+    )
+    if row:
+        return row["fuseki_uri"]
+    # Try fuzzy match with %
+    row = await conn.fetchrow(
+        "SELECT fuseki_uri FROM entity_registry WHERE entity_text ILIKE $1 AND NOT node_private ORDER BY LENGTH(entity_text) LIMIT 1",
+        f"%{name.strip()}%"
+    )
+    return row["fuseki_uri"] if row else None
+
+
+async def _try_structured_graph_query(query: str, conn, db_pool) -> str:
+    """
+    Attempt to match the query against structured graph patterns.
+    Returns a formatted block of results, or empty string if no pattern matches.
+    """
+    if conn is None:
+        conn = await db_pool.acquire()
+        _acquired = True
+    else:
+        _acquired = False
+
+    try:
+        for pattern, template_name in _GRAPH_QUERY_PATTERNS:
+            m = pattern.search(query)
+            if not m:
+                continue
+
+            if template_name == "related_entities_typed":
+                type_word = m.group(1).lower()
+                entity_name = m.group(2).strip()
+                target_type = _ENTITY_TYPES.get(type_word)
+                if not target_type:
+                    continue
+
+                uri = await _resolve_entity_uri(entity_name, conn)
+                if not uri:
+                    continue
+
+                rows = await conn.fetch("""
+                    SELECT DISTINCT e.entity_text, e.entity_type, e.description
+                    FROM entity_registry e
+                    JOIN entity_relationships r
+                        ON (e.fuseki_uri = r.subject_uri OR e.fuseki_uri = r.object_uri)
+                    WHERE (r.subject_uri = $1 OR r.object_uri = $1)
+                      AND e.fuseki_uri != $1
+                      AND e.entity_type = $2
+                      AND NOT COALESCE(e.node_private, false)
+                    ORDER BY e.entity_text
+                    LIMIT 20
+                """, uri, target_type)
+
+                if not rows:
+                    return ""
+
+                lines = [f"Graph query: {target_type}s related to \"{entity_name}\""]
+                for r in rows:
+                    desc = f": {r['description'][:100]}" if r['description'] else ""
+                    lines.append(f"- {r['entity_text']} ({r['entity_type']}){desc}")
+                logger.info(f"Structured graph query matched: {template_name}, {len(rows)} results")
+                return "\n".join(lines)
+
+            elif template_name == "related_entities_all":
+                entity_name = m.group(1).strip()
+                uri = await _resolve_entity_uri(entity_name, conn)
+                if not uri:
+                    continue
+
+                rows = await conn.fetch("""
+                    SELECT DISTINCT e.entity_text, e.entity_type, r.predicate
+                    FROM entity_registry e
+                    JOIN entity_relationships r
+                        ON (e.fuseki_uri = r.subject_uri OR e.fuseki_uri = r.object_uri)
+                    WHERE (r.subject_uri = $1 OR r.object_uri = $1)
+                      AND e.fuseki_uri != $1
+                      AND NOT COALESCE(e.node_private, false)
+                    ORDER BY e.entity_type, e.entity_text
+                    LIMIT 20
+                """, uri)
+
+                if not rows:
+                    return ""
+
+                lines = [f"Graph query: entities related to \"{entity_name}\""]
+                for r in rows:
+                    lines.append(f"- {r['entity_text']} ({r['entity_type']}) [{r['predicate']}]")
+                logger.info(f"Structured graph query matched: {template_name}, {len(rows)} results")
+                return "\n".join(lines)
+
+            elif template_name == "count_entities":
+                type_word = m.group(1).lower()
+                location_name = m.group(2).strip() if m.group(2) else None
+                target_type = _ENTITY_TYPES.get(type_word)
+                if not target_type:
+                    continue
+
+                if location_name:
+                    # Count entities of type related to a location
+                    loc_uri = await _resolve_entity_uri(location_name, conn)
+                    if not loc_uri:
+                        continue
+                    row = await conn.fetchrow("""
+                        SELECT COUNT(DISTINCT e.fuseki_uri) as cnt
+                        FROM entity_registry e
+                        JOIN entity_relationships r
+                            ON (e.fuseki_uri = r.subject_uri OR e.fuseki_uri = r.object_uri)
+                        WHERE (r.subject_uri = $1 OR r.object_uri = $1)
+                          AND e.fuseki_uri != $1
+                          AND e.entity_type = $2
+                          AND NOT COALESCE(e.node_private, false)
+                    """, loc_uri, target_type)
+                    count = row['cnt']
+                    logger.info(f"Structured graph query matched: {template_name}, count={count}")
+                    return f"Graph query: {count} {target_type}(s) related to \"{location_name}\""
+                else:
+                    row = await conn.fetchrow(
+                        "SELECT COUNT(*) as cnt FROM entity_registry WHERE entity_type = $1 AND NOT COALESCE(node_private, false)",
+                        target_type
+                    )
+                    count = row['cnt']
+                    logger.info(f"Structured graph query matched: {template_name}, count={count}")
+                    return f"Graph query: {count} {target_type}(s) in the knowledge graph"
+
+        return ""  # No pattern matched
+    finally:
+        if _acquired:
+            await db_pool.release(conn)
+
+
+# ── B7: Cross-encoder reranking via FlashRank ──
+_reranker = None
+
+def _get_reranker():
+    global _reranker
+    if _reranker is None:
+        try:
+            from flashrank import Ranker
+            _reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+        except ImportError:
+            logger.warning("flashrank not installed — reranking disabled")
+    return _reranker
+
+def _rerank_chunks(query: str, chunks: list, top_k: int = 8) -> list:
+    """Rerank doc_chunks dicts using FlashRank cross-encoder (B7)."""
+    if not chunks:
+        return chunks
+    ranker = _get_reranker()
+    if ranker is None:
+        return chunks[:top_k]
+    from flashrank import RerankRequest
+    passages = [{"id": i, "text": c.get("text", "")[:1500]} for i, c in enumerate(chunks)]
+    req = RerankRequest(query=query, passages=passages)
+    results = ranker.rerank(req)
+    reranked = []
+    for r in results[:top_k]:
+        idx = r["id"]
+        chunk = chunks[idx].copy()
+        chunk["rerank_score"] = float(r["score"])
+        reranked.append(chunk)
+    return reranked
+
+
 class ChatRequest(BaseModel):
     """Request for RAG chat."""
     query: str
@@ -5062,33 +5265,99 @@ async def chat_endpoint(request: ChatRequest):
                 relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
 
         # ------------------------------------------------------------------
-        # 2b. Search document chunks for grounding text (B1.1)
+        # 2b. Hybrid BM25 + dense retrieval with RRF for document chunks (B6)
         # ------------------------------------------------------------------
         doc_chunks: List[Dict[str, Any]] = []
         if query_embedding:
+            query_text = request.query  # raw text for BM25
             try:
                 chunk_rows = await conn.fetch("""
-                    SELECT
-                        c.document_rid,
-                        m.content->>'title' AS title,
-                        LEFT(c.content->>'text', 500) AS chunk_text,
-                        c.content->>'section_id' AS section_id,
-                        c.content->>'section_title' AS section_title,
-                        c.content->>'wiki_url' AS wiki_url,
-                        1 - (c.embedding <=> $1::vector) AS similarity
-                    FROM koi_memory_chunks c
-                    JOIN koi_memories m ON m.rid = c.document_rid
-                    WHERE c.embedding IS NOT NULL
-                    ORDER BY c.embedding <=> $1::vector
-                    LIMIT 8
-                """, embedding_str)
+                    WITH vector_results AS (
+                        SELECT c.id, c.document_rid,
+                               m.content->>'title' AS title,
+                               LEFT(c.content->>'text', 2000) AS chunk_text,
+                               c.content->>'section_id' AS section_id,
+                               c.content->>'section_title' AS section_title,
+                               c.content->>'wiki_url' AS wiki_url,
+                               ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vrank
+                        FROM koi_memory_chunks c
+                        JOIN koi_memories m ON m.rid = c.document_rid
+                        WHERE c.embedding IS NOT NULL
+                        ORDER BY c.embedding <=> $1::vector LIMIT 40
+                    ),
+                    bm25_results AS (
+                        SELECT c.id, c.document_rid,
+                               m.content->>'title' AS title,
+                               LEFT(c.content->>'text', 2000) AS chunk_text,
+                               c.content->>'section_id' AS section_id,
+                               c.content->>'section_title' AS section_title,
+                               c.content->>'wiki_url' AS wiki_url,
+                               ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC) AS brank
+                        FROM koi_memory_chunks c
+                        JOIN koi_memories m ON m.rid = c.document_rid
+                        WHERE c.tsv @@ plainto_tsquery('english', $2)
+                        ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC LIMIT 40
+                    )
+                    SELECT COALESCE(v.id, b.id) AS id,
+                           COALESCE(v.document_rid, b.document_rid) AS document_rid,
+                           COALESCE(v.title, b.title) AS title,
+                           LEFT(COALESCE(v.chunk_text, b.chunk_text), 2000) AS chunk_text,
+                           COALESCE(v.section_id, b.section_id) AS section_id,
+                           COALESCE(v.section_title, b.section_title) AS section_title,
+                           COALESCE(v.wiki_url, b.wiki_url) AS wiki_url,
+                           COALESCE(1.0/(v.vrank+60), 0) + COALESCE(1.0/(b.brank+60), 0) AS rrf_score
+                    FROM vector_results v
+                    FULL OUTER JOIN bm25_results b ON v.id = b.id
+                    ORDER BY rrf_score DESC
+                    LIMIT 20
+                """, embedding_str, query_text)
                 for cr in chunk_rows:
-                    if float(cr['similarity']) > 0.3:
+                    doc_chunks.append({
+                        "rid": cr['document_rid'],
+                        "title": cr['title'] or cr['document_rid'],
+                        "text": cr['chunk_text'] or "",
+                        "score": round(float(cr['rrf_score']), 4),
+                        "section_id": cr['section_id'],
+                        "section_title": cr['section_title'],
+                        "wiki_url": cr['wiki_url'],
+                    })
+                    sources.append({
+                        "uri": cr['document_rid'],
+                        "label": cr['title'] or cr['document_rid'],
+                        "entity_type": "Document",
+                        "score": round(float(cr['rrf_score']), 4),
+                        "description": (cr['chunk_text'] or "")[:200],
+                        "url": cr['wiki_url'],
+                    })
+            except (asyncpg.exceptions.UndefinedTableError,
+                    asyncpg.exceptions.UndefinedColumnError):
+                pass  # koi_memory_chunks or expected columns not available
+            except asyncpg.exceptions.DataError as e:
+                # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
+                # while generate_embedding() may output a different dimension (e.g. 1536).
+                # Fall back to BM25-only retrieval (B6 degraded mode).
+                logger.warning(f"koi_memory_chunks vector dimension mismatch, falling back to BM25-only: {e}")
+                try:
+                    chunk_rows = await conn.fetch("""
+                        SELECT c.document_rid,
+                               m.content->>'title' AS title,
+                               LEFT(c.content->>'text', 2000) AS chunk_text,
+                               c.content->>'section_id' AS section_id,
+                               c.content->>'section_title' AS section_title,
+                               c.content->>'wiki_url' AS wiki_url,
+                               ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
+                        FROM koi_memory_chunks c
+                        JOIN koi_memories m ON m.rid = c.document_rid
+                        WHERE c.tsv @@ plainto_tsquery('english', $1)
+                        ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
+                        LIMIT 20
+                    """, query_text)
+                    for cr in chunk_rows:
                         doc_chunks.append({
                             "rid": cr['document_rid'],
                             "title": cr['title'] or cr['document_rid'],
                             "text": cr['chunk_text'] or "",
-                            "score": round(float(cr['similarity']), 4),
+                            "score": round(float(cr['rrf_score']), 4),
                             "section_id": cr['section_id'],
                             "section_title": cr['section_title'],
                             "wiki_url": cr['wiki_url'],
@@ -5097,18 +5366,18 @@ async def chat_endpoint(request: ChatRequest):
                             "uri": cr['document_rid'],
                             "label": cr['title'] or cr['document_rid'],
                             "entity_type": "Document",
-                            "score": round(float(cr['similarity']), 4),
+                            "score": round(float(cr['rrf_score']), 4),
                             "description": (cr['chunk_text'] or "")[:200],
                             "url": cr['wiki_url'],
                         })
-            except (asyncpg.exceptions.UndefinedTableError,
-                    asyncpg.exceptions.UndefinedColumnError):
-                pass  # koi_memory_chunks or expected columns not available
-            except asyncpg.exceptions.DataError as e:
-                # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
-                # while generate_embedding() may output a different dimension (e.g. 1536).
-                logger.warning(f"koi_memory_chunks vector dimension mismatch (BGE vs provider): {e}")
-                pass  # skip chunk results, /chat still works with entity context
+                except Exception as bm25_err:
+                    logger.warning(f"BM25 fallback also failed: {bm25_err}")
+
+        # ── B7: Rerank doc_chunks (top 20 from RRF → top 8 via cross-encoder) ──
+        if doc_chunks:
+            doc_chunks = _rerank_chunks(request.query, doc_chunks, top_k=8)
+            reranked_rids = {c['rid'] for c in doc_chunks}
+            sources = [s for s in sources if s['entity_type'] != 'Document' or s['uri'] in reranked_rids]
 
         # ------------------------------------------------------------------
         # 2c. Fetch web sources linked to matched entities (B1.3)
@@ -5147,6 +5416,17 @@ async def chat_endpoint(request: ChatRequest):
                 pass  # web_submissions or expected columns not available
 
     # ------------------------------------------------------------------
+    # 2d. Structured graph query (template-based, Step 7)
+    # ------------------------------------------------------------------
+    graph_query_block = ""
+    try:
+        graph_query_block = await _try_structured_graph_query(
+            request.query, None, db_pool
+        )
+    except Exception as e:
+        logger.warning(f"Structured graph query failed (non-fatal): {e}")
+
+    # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context
     # ------------------------------------------------------------------
     entity_block = "\n".join(
@@ -5162,12 +5442,12 @@ async def chat_endpoint(request: ChatRequest):
         f"- **{d['title']}**"
         + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
         + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
-        + f": {d['text'][:300]}"
+        + f": {d['text'][:1500]}"
         for d in doc_chunks
     ) if doc_chunks else ""
 
     web_block = "\n".join(
-        f"- [{w['title']}]({w['url']}): {w['summary'][:200]}"
+        f"- [{w['title']}]({w['url']}): {w['summary'][:500]}"
         for w in web_sources
     ) if web_sources else ""
 
@@ -5183,6 +5463,8 @@ async def chat_endpoint(request: ChatRequest):
 
     prompt_sections = [f"## Relevant Entities\n{entity_block}"]
     prompt_sections.append(f"## Relationships\n{rel_block}")
+    if graph_query_block:
+        prompt_sections.append(f"## Graph Query Results\n{graph_query_block}")
     if doc_block:
         prompt_sections.append(f"## Relevant Documents\n{doc_block}")
     if web_block:
