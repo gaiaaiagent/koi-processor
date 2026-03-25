@@ -108,3 +108,9 @@ data/mediawiki_parsed/
 
 # Soak test runtime data
 docs/soak-results/
+
+# Eval results and generated artifacts
+.deepeval/
+tests/eval/results/
+scripts/reextraction/bakeoff_cache/
+tmp_*.jsonl
