@@ -15,12 +15,16 @@
  *
  * Environment:
  *   KOI_API_ENDPOINT - API base URL (default: http://localhost:8301/api/koi)
- *   KOI_INTERNAL_API_KEY - Internal API key for MCP-only endpoints (REQUIRED)
+ *   KOI_INTERNAL_API_KEY - Internal API key for headless auth path (optional)
+ *   KOI_SESSION_TOKEN - OAuth session token for interactive auth path (optional)
  *   TEST_METADATA_IRI - IRI to test (overrides --iri)
+ *
+ * At least one of KOI_INTERNAL_API_KEY or KOI_SESSION_TOKEN must be set.
  */
 
 const KOI_API_ENDPOINT = process.env.KOI_API_ENDPOINT || 'http://localhost:8301/api/koi';
 const KOI_INTERNAL_API_KEY = process.env.KOI_INTERNAL_API_KEY || '';
+const KOI_SESSION_TOKEN = process.env.KOI_SESSION_TOKEN || '';
 
 // Canonical test IRI (prod-validated per handoff prompt)
 const DEFAULT_TEST_IRI = 'regen:13toVfvfM5B7yuJqq8h3iVRHp3PKUJ4ABxHyvn4MeUMwwv1pWQGL295.rdf';
@@ -42,19 +46,25 @@ console.log('='.repeat(60));
 console.log(`API Endpoint: ${KOI_API_ENDPOINT}`);
 console.log(`Test IRI: ${testIri}`);
 console.log(`Internal API Key: ${KOI_INTERNAL_API_KEY ? '***configured***' : '⚠️  NOT SET'}`);
+console.log(`Session Token: ${KOI_SESSION_TOKEN ? '***configured***' : '⚠️  NOT SET'}`);
 console.log('');
 
-if (!KOI_INTERNAL_API_KEY) {
-  console.warn('⚠️  WARNING: KOI_INTERNAL_API_KEY not set. Auth tests will fail.');
-  console.warn('   Set it with: export KOI_INTERNAL_API_KEY=your-key');
+if (!KOI_INTERNAL_API_KEY && !KOI_SESSION_TOKEN) {
+  console.warn('⚠️  WARNING: Neither KOI_INTERNAL_API_KEY nor KOI_SESSION_TOKEN is set. Auth tests will fail.');
+  console.warn('   Set one with: export KOI_INTERNAL_API_KEY=your-key');
+  console.warn('   Or:           export KOI_SESSION_TOKEN=your-token');
   console.log('');
 }
 
-// Headers for authenticated requests
-const authHeaders = {
+// Headers for authenticated requests (prefer session token, fall back to internal key)
+const authHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
-  'X-Internal-API-Key': KOI_INTERNAL_API_KEY,
 };
+if (KOI_SESSION_TOKEN) {
+  authHeaders['Authorization'] = `Bearer ${KOI_SESSION_TOKEN}`;
+} else if (KOI_INTERNAL_API_KEY) {
+  authHeaders['X-Internal-API-Key'] = KOI_INTERNAL_API_KEY;
+}
 
 interface TestResult {
   name: string;
@@ -243,28 +253,79 @@ await runTest('GET /metadata/stats - Statistics', async () => {
 });
 
 // =============================================================================
-// Test 5: Public Access Blocking (no auth header)
+// Test 5: Unauthenticated Access Blocking (no auth header)
 // =============================================================================
-await runTest('POST /metadata/resolve - Public access BLOCKED', async () => {
+await runTest('POST /metadata/resolve - Unauthenticated access BLOCKED', async () => {
   const response = await fetch(`${KOI_API_ENDPOINT}/metadata/resolve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, // No X-Internal-API-Key
+    headers: { 'Content-Type': 'application/json' }, // No auth headers
     body: JSON.stringify({ iri: testIri })
   });
 
   const data = await response.json();
 
-  // Public access must be blocked. Depending on deployment routing, this may surface as:
-  // - 401/403 when the route exists but is auth-gated
-  // - 404 when the route is not exposed publicly at all
-  const isBlocked = response.status === 401 || response.status === 403 || response.status === 404;
+  // Unauthenticated access must return 401
+  const isBlocked = response.status === 401;
 
   return {
     passed: isBlocked,
     details: isBlocked
-      ? `Correctly blocked public access: HTTP ${response.status} - ${data.error?.code}`
-      : `Expected 401/403/404, got HTTP ${response.status}: ${JSON.stringify(data)}`,
+      ? `Correctly blocked unauthenticated access: HTTP ${response.status} - ${data.error?.code}`
+      : `Expected 401, got HTTP ${response.status}: ${JSON.stringify(data)}`,
     data
+  };
+});
+
+// =============================================================================
+// Test 6: /document/full - Public doc with auth (requires known public RID)
+// =============================================================================
+await runTest('GET /document/full - Authenticated access', async () => {
+  // Use a known public document RID — skip if not available
+  const testRid = process.env.TEST_PUBLIC_RID;
+  if (!testRid) {
+    return {
+      passed: true,
+      details: 'SKIPPED: Set TEST_PUBLIC_RID to test /document/full',
+    };
+  }
+
+  const response = await fetch(`${KOI_API_ENDPOINT}/document/full?rid=${encodeURIComponent(testRid)}`, {
+    method: 'GET',
+    headers: authHeaders,
+  });
+
+  const data = await response.json();
+  const passed = response.status === 200;
+
+  return {
+    passed,
+    details: passed
+      ? `Document retrieved: ${(data.data || data).title || 'untitled'}`
+      : `HTTP ${response.status}: ${data.error?.message || JSON.stringify(data)}`,
+    data,
+  };
+});
+
+// =============================================================================
+// Test 7: /document/full - Unauthenticated access BLOCKED
+// =============================================================================
+await runTest('GET /document/full - Unauthenticated access BLOCKED', async () => {
+  const testRid = process.env.TEST_PUBLIC_RID || 'orn:test:fake-rid';
+
+  const response = await fetch(`${KOI_API_ENDPOINT}/document/full?rid=${encodeURIComponent(testRid)}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' }, // No auth
+  });
+
+  const data = await response.json();
+  const isBlocked = response.status === 401;
+
+  return {
+    passed: isBlocked,
+    details: isBlocked
+      ? `Correctly blocked: HTTP ${response.status} - ${data.error?.code}`
+      : `Expected 401, got HTTP ${response.status}: ${JSON.stringify(data)}`,
+    data,
   };
 });
 
