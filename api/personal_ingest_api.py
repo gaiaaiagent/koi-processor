@@ -5101,6 +5101,7 @@ class ChatRequest(BaseModel):
     query: str
     max_context_entities: int = Field(default=5, ge=1, le=20)
     retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
+    include_code: bool = Field(default=False, description="Include code entity chunks in retrieval (default: exclude)")
 
 
 @app.post("/chat")
@@ -5281,10 +5282,12 @@ async def chat_endpoint(request: ChatRequest):
         # 2b. Hybrid BM25 + dense retrieval with RRF for document chunks (B6)
         # ------------------------------------------------------------------
         doc_chunks: List[Dict[str, Any]] = []
+        # Code entity filter: exclude code chunks by default (source-aware retrieval)
+        _code_filter = "" if request.include_code else "AND c.content->>'entity_name' IS NULL"
         if query_embedding:
             query_text = request.query  # raw text for BM25
             try:
-                chunk_rows = await conn.fetch("""
+                chunk_rows = await conn.fetch(f"""
                     WITH vector_results AS (
                         SELECT c.id, c.document_rid,
                                m.content->>'title' AS title,
@@ -5296,7 +5299,7 @@ async def chat_endpoint(request: ChatRequest):
                                ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vrank
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.embedding IS NOT NULL
+                        WHERE c.embedding IS NOT NULL {_code_filter}
                         ORDER BY c.embedding <=> $1::vector LIMIT 40
                     ),
                     bm25_results AS (
@@ -5310,7 +5313,7 @@ async def chat_endpoint(request: ChatRequest):
                                ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC) AS brank
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.tsv @@ plainto_tsquery('english', $2)
+                        WHERE c.tsv @@ plainto_tsquery('english', $2) {_code_filter}
                         ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC LIMIT 40
                     )
                     SELECT COALESCE(v.id, b.id) AS id,
@@ -5356,7 +5359,7 @@ async def chat_endpoint(request: ChatRequest):
                 # Fall back to BM25-only retrieval (B6 degraded mode).
                 logger.warning(f"koi_memory_chunks vector dimension mismatch, falling back to BM25-only: {e}")
                 try:
-                    chunk_rows = await conn.fetch("""
+                    chunk_rows = await conn.fetch(f"""
                         SELECT c.document_rid,
                                m.content->>'title' AS title,
                                LEFT(c.content->>'text', 2000) AS chunk_text,
@@ -5367,7 +5370,7 @@ async def chat_endpoint(request: ChatRequest):
                                ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.tsv @@ plainto_tsquery('english', $1)
+                        WHERE c.tsv @@ plainto_tsquery('english', $1) {_code_filter}
                         ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
                         LIMIT 20
                     """, query_text)
