@@ -5225,7 +5225,7 @@ async def chat_endpoint(request: ChatRequest):
             meta = row['metadata'] or {}
             if isinstance(meta, str):
                 meta = json_module_global.loads(meta)
-            description = meta.get('description', '') if isinstance(meta, dict) else ''
+            description = (meta.get('description') or meta.get('context') or '') if isinstance(meta, dict) else ''
             sources.append({
                 "uri": row['fuseki_uri'],
                 "label": row['entity_text'],
