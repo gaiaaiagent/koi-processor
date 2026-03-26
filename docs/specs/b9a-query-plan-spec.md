@@ -1,0 +1,157 @@
+# B9a — QueryPlan IR Specification
+
+**Status:** Design complete, pending implementation
+**Schema:** `api/schemas/query_plan.py`
+**Architecture ref:** `BioregionalKnowledgeCommoning/docs/foundations/federated-memory-architecture.md`
+
+## 1. Overview
+
+B9a introduces the QueryPlan IR — a typed retrieval plan layer between the user query and the existing retrieval pipeline. The planner classifies queries, extracts entities, assembles an ordered plan of typed retrieval operations, and hands execution to trusted executors. The LLM never writes raw SQL.
+
+## 2. Router Contract
+
+Three layers, applied in order:
+
+### Layer 1: PolicyScope (deterministic, no LLM)
+
+- **Input:** Request context (currently: no auth identity)
+- **Output:** `PolicyScope(visibility_tier="public", include_node_private=false)`
+- **v0 implementation:** Hardcoded public scope with local-only behavior. Mirrors existing `node_private` filtering in `/chat` (personal_ingest_api.py lines 5199, 5299).
+- **Future:** Derive from `commons_memberships` + edge governance tables when auth is wired.
+
+### Layer 2: Query Classification (LLM-driven)
+
+- **Input:** `original_query` + `PolicyScope`
+- **Output:** `ClassifierOutput` (taxonomy + depth_tier + entities + reasoning)
+- **Implementation:** GPT-4o-mini structured output (see classifier prompt template below)
+- **Cost:** ~100-200 tokens input, ~50 tokens output, ~200ms
+
+### Layer 3: Plan Assembly (deterministic, no LLM)
+
+- **Input:** `ClassifierOutput`
+- **Output:** `QueryPlan` with ordered `steps`
+- **Implementation:** Decision matrix lookup (see §3)
+
+## 3. Decision Matrix
+
+**B9a matrix** — only uses live ops. Stub ops noted in "Future" column.
+
+| QueryTaxonomy | B9a Steps (live ops only) | Default Depth | Default Budget | Future |
+|---------------|---------------------------|---------------|----------------|--------|
+| `entity_definition` | entity_lookup → text_search | standard | max_results=5, top_k=8 | — |
+| `relationship_path` | entity_lookup → relationship_traverse(hops=2) → text_search | standard | max_results=10, top_k=8 | — |
+| `governance_policy` | text_search(multi_query=true) → entity_lookup | deep | max_results=8, top_k=12 | — |
+| `roadmap_status` | entity_lookup → text_search | standard | max_results=5, top_k=8 | B9b: structured_sql first |
+| `commitment_claim` | entity_lookup → text_search(multi_query=true) | standard | max_results=10, top_k=8 | B9b: structured_sql first |
+| `cross_node_provenance` | entity_lookup → text_search | standard | max_results=5, top_k=8 | B12: peer_query first |
+| `out_of_domain` | (none — immediate abstention) | — | — | — |
+
+### Depth tier overrides
+
+The classifier may recommend a depth tier. The plan assembly applies it:
+
+| Depth | Effect |
+|-------|--------|
+| `shallow` | entity_lookup only. Skip text_search and relationship_traverse. |
+| `standard` | Use steps from decision matrix as-is. |
+| `deep` | Add `multi_query=true` to all text_search steps. Increase `max_results` by 50%. |
+
+## 4. Typed Retrieval Op Set
+
+Each op maps to a trusted executor. All executors return `list[EvidenceBundle]`.
+
+### Live ops (B9a)
+
+#### entity_lookup
+- **Wraps:** Semantic + keyword search on `entity_registry` (personal_ingest_api.py lines 5193-5248)
+- **Params:** `query: str`, `max_results: int`, `entity_type: str | None`
+- **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`
+
+#### relationship_traverse
+- **Wraps:** N-hop recursive CTE on `entity_relationships` (lines 5268-5307)
+- **Params:** `entity_uris: list[str]`, `max_hops: int = 2`, `predicate_filter: list[str] | None`
+- **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`, text = "subject --[predicate]--> object"
+
+#### text_search
+- **Wraps:** BM25+vector RRF fusion + FlashRank rerank (lines 5310-5448)
+- **Params:** `query: str`, `multi_query: bool = false`, `include_code: bool = false`, `top_k: int = 8`
+- **Returns:** EvidenceBundles with `source_type=LOCAL_DOCUMENT`
+
+### Stub ops (future phases)
+
+#### graph_query (B9c)
+- **Future:** Cypher via Apache AGE for typed pattern matching
+- **B9a behavior:** Returns empty list, logs "graph_query not implemented in B9a"
+
+#### structured_sql (B9b)
+- **Future:** Schema-aware SQL generation via typed DSL
+- **B9a behavior:** Returns empty list, logs "structured_sql not implemented in B9a"
+
+#### peer_query (B12)
+- **Future:** Federation fan-out to eligible peers. Requires PolicyScope.eligible_peers (not in v0).
+- **B9a behavior:** Returns empty list, logs "peer_query not implemented in B9a"
+
+## 5. Classifier Prompt Template
+
+```
+You are a query classifier for a bioregional knowledge commons (BKC).
+Given a user question, classify it into exactly one taxonomy category
+and extract any entity mentions.
+
+## Taxonomy
+
+- entity_definition: "What is X?" — asking for a definition or description of a single concept, species, place, organization, or person.
+- relationship_path: "How does X relate to Y?" — asking about connections, relationships, or multi-hop paths between entities.
+- governance_policy: "What is the policy on X?" — asking about protocols, governance rules, data sovereignty, meta-protocol, or decision-making frameworks.
+- roadmap_status: "What is the status of X?" — asking about project status, milestones, work items, timelines.
+- commitment_claim: "What commitments exist for X?" — asking about pledges, claims, evidence, commitment pools, flow funding settlements.
+- cross_node_provenance: "What does node Y know about X?" — asking about information from a specific bioregional node or cross-node comparison.
+- out_of_domain: Questions about topics outside bioregional knowledge (technology installs, stock prices, general knowledge unrelated to ecology/governance/stewardship).
+
+## Depth
+
+- shallow: Simple lookup, single entity, well-known concept
+- standard: Typical question requiring entity + document search
+- deep: Complex question requiring multiple search strategies or synthesis
+
+## Entities
+
+Extract named entities mentioned in the question. Include:
+- Species, ecosystems, locations, bioregions
+- Organizations, people, projects
+- Concepts, protocols, practices
+- Specific items like "commitment pool", "Victoria Landscape Hub"
+
+## Output format (JSON)
+
+{
+  "query_taxonomy": "<one of the 7 categories>",
+  "depth_tier": "shallow | standard | deep",
+  "entities": [
+    {"name": "<entity name>", "type": "<entity type or null>"}
+  ],
+  "reasoning": "<1 sentence explaining classification>"
+}
+```
+
+## 6. Acceptance Criteria
+
+### Design-complete (this document)
+
+1. Schema committed: all models in `api/schemas/query_plan.py` import cleanly and export valid JSON Schema.
+2. Decision matrix spec'd: each taxonomy maps to ordered live ops with future stubs documented separately.
+3. Router contract documented: Layer 1 (PolicyScope v0), Layer 2 (classifier prompt), Layer 3 (plan assembly rules).
+4. Classifier prompt template drafted with taxonomy definitions, examples, and output format.
+5. This spec doc committed.
+
+### Implementation-complete (follow-up session)
+
+6. Classifier works: query string → `ClassifierOutput` via GPT-4o-mini structured output.
+7. Plan assembly works: `ClassifierOutput` → valid `QueryPlan` with correct step ordering per decision matrix.
+8. 3 executors work: entity_lookup, relationship_traverse, text_search produce `EvidenceBundle[]`.
+9. 3 executors stub: graph_query, structured_sql, peer_query return empty lists with log messages.
+10. End-to-end path: `POST /chat?planner=true` uses QueryPlan path, same answer quality, plan/trace in response.
+11. Trace captured: StepTrace populated with timing, result counts, errors.
+12. Safety guards enforced: max_steps, max_tokens, timeout_ms respected; violations logged and halt execution.
+13. Eval regression: B5.5 eval scores do not regress with `planner=true` (within 5% of baseline).
+14. No B9b/B9c implementation: structured_sql and graph_query are stubs only.

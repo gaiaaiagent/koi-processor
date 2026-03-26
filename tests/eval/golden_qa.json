@@ -138,5 +138,295 @@
     "question": "How do I install TensorFlow on Windows?",
     "expected_answer": "I don't have information about installing TensorFlow. My focus is on bioregional knowledge, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
     "expected_entities": []
+  },
+
+  {
+    "id": "governance_1",
+    "category": "governance",
+    "question": "What is the BKC meta-protocol?",
+    "expected_answer": "The BKC meta-protocol defines the minimal machine commitments for interoperability between bioregional nodes: what is shared, who attests, and who can use the data and how. It sits between the human-readable pattern language and concrete implementation profiles like CommonsChange.",
+    "expected_entities": ["Meta-Protocol"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_2",
+    "category": "governance",
+    "question": "What are OCAP principles and how do they apply to the knowledge commons?",
+    "expected_answer": "OCAP stands for Ownership, Control, Access, and Possession — principles from First Nations governance that ensure Indigenous communities maintain sovereignty over their data. In the BKC, OCAP informs visibility scoping, consent requirements, and federation membrane governance.",
+    "expected_entities": ["OCAP"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_3",
+    "category": "governance",
+    "question": "How does federation membrane governance work in the BKC?",
+    "expected_answer": "Federation membrane governance controls what data flows between bioregional nodes through edge-approval gating. Unknown handshake attempts are deferred, edges can be approved or rejected by node administrators, and each edge specifies which entity types can flow across it.",
+    "expected_entities": ["Federation"],
+    "difficulty": "hard",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_4",
+    "category": "governance",
+    "question": "What is the CommonsChange reference profile?",
+    "expected_answer": "CommonsChange is a concrete serialization of the BKC meta-protocol. It defines the specific data formats, attestation requirements, and sharing rules that nodes use to exchange knowledge in a standardized way.",
+    "expected_entities": ["CommonsChange"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_5",
+    "category": "governance",
+    "question": "What is FPIC and why is it relevant to bioregional knowledge sharing?",
+    "expected_answer": "FPIC (Free, Prior and Informed Consent) is a principle from Indigenous rights that requires meaningful consultation and consent before sharing traditional knowledge. In the BKC, FPIC guides how sensitive ecological and cultural knowledge is handled across federation boundaries.",
+    "expected_entities": ["FPIC"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_6",
+    "category": "governance",
+    "question": "What is the BKC pattern language?",
+    "expected_answer": "The BKC pattern language is a collection of reusable social and governance patterns for bioregional knowledge commoning. It provides the human-readable layer of the three-layer architecture, sitting above the meta-protocol and reference profiles.",
+    "expected_entities": ["Pattern Language"],
+    "difficulty": "easy",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_7",
+    "category": "governance",
+    "question": "How does the BKC handle visibility scoping for sensitive data?",
+    "expected_answer": "The BKC uses visibility scoping with tiers including public and node_private. Node-private entities are only visible within their home node and are excluded from federation, public API responses, and chat retrieval by default.",
+    "expected_entities": [],
+    "difficulty": "hard",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_8",
+    "category": "governance",
+    "question": "What is the ontology commoning framework?",
+    "expected_answer": "The ontology commoning framework describes how the BKC develops and maintains its shared ontology collaboratively across bioregions. It defines entity types, predicates, and the process for proposing changes to the shared knowledge structure.",
+    "expected_entities": ["Ontology"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_9",
+    "category": "governance",
+    "question": "What is a node participation profile in the BKC?",
+    "expected_answer": "A node participation profile defines how a bioregional node engages with the broader BKC network, including what entity types it shares, what federation edges it maintains, and what governance rules it follows for data exchange.",
+    "expected_entities": [],
+    "difficulty": "hard",
+    "source_domain": "doc"
+  },
+  {
+    "id": "governance_10",
+    "category": "governance",
+    "question": "What is the bioregion onboarding playbook?",
+    "expected_answer": "The bioregion onboarding playbook is a guide for new bioregions joining the BKC network. It covers the governance steps (establishing a charter, decision processes, stewardship roles) and technical steps (deploying a KOI node, configuring federation edges).",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "doc"
+  },
+
+  {
+    "id": "roadmap_status_1",
+    "category": "roadmap_status",
+    "question": "What is the current status of commitment pooling in the BKC?",
+    "expected_answer": "Commitment pooling (C0) is implemented with ontology support (Commitment, CommitmentPool, CommitmentAction entity types), API endpoints for the full commitment lifecycle (PROPOSED through VERIFIED to ACTIVE to REDEEMED), and two active pools: Victoria Landscape Hub Restoration Pool and Cascadia Bioregion Stewardship Pool.",
+    "expected_entities": ["Commitment Pooling"],
+    "difficulty": "medium",
+    "source_domain": "roadmap"
+  },
+  {
+    "id": "roadmap_status_2",
+    "category": "roadmap_status",
+    "question": "What bioregional nodes are currently active in the BKC network?",
+    "expected_answer": "The BKC network currently has four active nodes: Octo (Salish Sea coordinator at 45.132.245.30), Front Range (localhost:8355 on the Octo server), Greater Victoria (on poly at 37.27.48.12), and Cowichan Valley (at 202.61.242.194).",
+    "expected_entities": ["Octo", "Front Range", "Greater Victoria", "Cowichan Valley"],
+    "difficulty": "easy",
+    "source_domain": "roadmap"
+  },
+  {
+    "id": "roadmap_status_3",
+    "category": "roadmap_status",
+    "question": "What is the status of the dual-bioregion pilot?",
+    "expected_answer": "The dual-bioregion pilot connects the Front Range and Salish Sea (Cascadia) bioregions. It has a charter, decision log, and tooling map. Both nodes are deployed and federated, with entity seeding completed on both sides.",
+    "expected_entities": ["Front Range", "Salish Sea", "Cascadia"],
+    "difficulty": "medium",
+    "source_domain": "roadmap"
+  },
+  {
+    "id": "roadmap_status_4",
+    "category": "roadmap_status",
+    "question": "What retrieval techniques does the BKC knowledge system use?",
+    "expected_answer": "The BKC knowledge system uses hybrid retrieval combining BM25 keyword search and dense vector search with Reciprocal Rank Fusion (RRF), cross-encoder reranking via FlashRank, and contextual retrieval that generates per-chunk context summaries. Chunks are sourced from wiki imports, GitHub docs, and entity descriptions.",
+    "expected_entities": [],
+    "difficulty": "medium",
+    "source_domain": "doc",
+    "notes": "Asks about techniques (which are documented in corpus), not numeric results (which may not be ingested)."
+  },
+  {
+    "id": "roadmap_status_5",
+    "category": "roadmap_status",
+    "question": "What is the Victoria Commitment Voucher?",
+    "expected_answer": "The Victoria Commitment Voucher (VCV) is a GiftableToken deployed on the Celo blockchain that represents verified commitments from community members. It is used in the commitment economy to track and settle community pledges through TBFF mechanisms.",
+    "expected_entities": ["Victoria Commitment Voucher"],
+    "difficulty": "medium",
+    "source_domain": "commitment"
+  },
+
+  {
+    "id": "commitment_claim_1",
+    "category": "commitment_claim",
+    "question": "What is the lifecycle of a commitment in the BKC?",
+    "expected_answer": "Commitments follow a state machine: PROPOSED → VERIFIED → ACTIVE → REDEEMED. Community members propose commitments, which are verified through review, then activated when conditions are met. Active commitments can be routed to commitment pools for settlement via TBFF.",
+    "expected_entities": ["Commitment"],
+    "difficulty": "medium",
+    "source_domain": "commitment",
+    "notes": "Describes the commitment state machine, not the claims threshold policy (which is a separate path for claim-from-settlement)."
+  },
+  {
+    "id": "commitment_claim_2",
+    "category": "commitment_claim",
+    "question": "What is a commitment pool?",
+    "expected_answer": "A commitment pool aggregates verified commitments from community members around a shared goal or bioregion. Pools have thresholds and can be settled through TBFF, redistributing resources among participants based on configurable rules.",
+    "expected_entities": ["CommitmentPool"],
+    "difficulty": "easy",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_3",
+    "category": "commitment_claim",
+    "question": "How does the claims engine work?",
+    "expected_answer": "The claims engine tracks assertions about the world with evidence and provenance. Claims follow a state machine (self_reported → peer_reviewed → verified → ledger_anchored) and can be anchored on the Regen Ledger and attested on Celo EAS for dual-chain proof.",
+    "expected_entities": ["Claim"],
+    "difficulty": "hard",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_4",
+    "category": "commitment_claim",
+    "question": "What is the relationship between commitments and flow funding settlements?",
+    "expected_answer": "Verified commitments can be routed to commitment pools. When a pool reaches its threshold, a TBFF settlement redistributes resources among participants. Settlements generate evidence entities that can be linked to claims for on-chain anchoring and attestation.",
+    "expected_entities": ["Commitment", "Flow Funding"],
+    "difficulty": "hard",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_5",
+    "category": "commitment_claim",
+    "question": "What are commitment routing scores?",
+    "expected_answer": "Commitment routing scores determine how well a commitment matches a pool using five factors: bioregion match (same or umbrella), offer-need overlap, timeframe alignment, capacity fit, and governance compatibility. Each factor contributes to a score out of 100.",
+    "expected_entities": [],
+    "difficulty": "medium",
+    "source_domain": "commitment"
+  },
+
+  {
+    "id": "entity_definition_6",
+    "category": "entity_definition",
+    "question": "What is Regenerate Cascadia?",
+    "expected_answer": "Regenerate Cascadia is an organization focused on ecological restoration and community stewardship in the Cascadia bioregion, working on habitat restoration and coordinating with groups like the Victoria Landscape Hub and Kinship Earth.",
+    "expected_entities": ["Regenerate Cascadia"],
+    "difficulty": "easy",
+    "source_domain": "entity"
+  },
+  {
+    "id": "entity_definition_7",
+    "category": "entity_definition",
+    "question": "What is Kinship Earth?",
+    "expected_answer": "Kinship Earth is an organization involved in bioregional stewardship in the Greater Victoria area, working alongside the Victoria Landscape Hub and Regenerate Cascadia on ecological restoration and community coordination.",
+    "expected_entities": ["Kinship Earth"],
+    "difficulty": "easy",
+    "source_domain": "entity"
+  },
+  {
+    "id": "entity_definition_8",
+    "category": "entity_definition",
+    "question": "What is the Cascadia bioregion?",
+    "expected_answer": "Cascadia is a bioregion spanning the Pacific Northwest from northern California through British Columbia, defined by shared watersheds, ecosystems, and ecological features rather than political boundaries. It includes sub-bioregions like the Salish Sea.",
+    "expected_entities": ["Cascadia"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_9",
+    "category": "entity_definition",
+    "question": "What are Chinook salmon?",
+    "expected_answer": "Chinook salmon (Oncorhynchus tshawytscha) are the largest Pacific salmon species and a keystone species in the Salish Sea ecosystem. They are the primary food source for Southern Resident Killer Whales, and their population decline is a major conservation concern.",
+    "expected_entities": ["Chinook Salmon"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_10",
+    "category": "entity_definition",
+    "question": "What is the KOI protocol?",
+    "expected_answer": "KOI (Knowledge Organization Infrastructure) is the technical protocol for organizing, federating, and sharing knowledge across bioregional nodes. It uses signed event envelopes, entity resolution, and federation edges to enable decentralized knowledge exchange.",
+    "expected_entities": ["KOI"],
+    "difficulty": "easy",
+    "source_domain": "doc"
+  },
+
+  {
+    "id": "relationship_5",
+    "category": "relationship",
+    "question": "Which organizations are part of the Victoria Landscape Hub network?",
+    "expected_answer": "The Victoria Landscape Hub coordinates with organizations including Kinship Earth, Mycopunks, and Regenerate Cascadia for ecological restoration and community stewardship in the Greater Victoria area.",
+    "expected_entities": ["Victoria Landscape Hub", "Kinship Earth", "Mycopunks", "Regenerate Cascadia"],
+    "difficulty": "medium",
+    "source_domain": "entity"
+  },
+  {
+    "id": "relationship_6",
+    "category": "relationship",
+    "question": "What is the relationship between the Salish Sea and Cascadia bioregions?",
+    "expected_answer": "The Salish Sea is a sub-bioregion within the broader Cascadia bioregion. In the BKC ontology, the Salish Sea has a 'broader' relationship to Cascadia, meaning knowledge and commitments can be matched across the hierarchy.",
+    "expected_entities": ["Salish Sea", "Cascadia"],
+    "difficulty": "medium",
+    "source_domain": "entity"
+  },
+  {
+    "id": "multi_hop_5",
+    "category": "multi_hop",
+    "question": "How does a community member's verbal commitment become an on-chain attestation?",
+    "expected_answer": "A verbal commitment is transcribed (via Whisper), extracted by an LLM into commitment candidates, created as Commitment entities, verified through attestations, minted as Victoria Commitment Vouchers on Celo, settled via TBFF, and the settlement is anchored on Regen Ledger with an EAS attestation on Celo.",
+    "expected_entities": ["Commitment", "Victoria Commitment Voucher"],
+    "difficulty": "hard",
+    "source_domain": "mixed"
+  },
+  {
+    "id": "multi_hop_6",
+    "category": "multi_hop",
+    "question": "What ecological threats face the Salish Sea and which species are most affected?",
+    "expected_answer": "The Salish Sea faces threats including declining salmon populations, vessel noise, pollution, habitat loss, and ocean acidification. Southern Resident Killer Whales are critically affected due to their dependence on Chinook salmon. Eelgrass habitats, herring populations, and marine invertebrates are also impacted.",
+    "expected_entities": ["Salish Sea", "Southern Resident Killer Whales", "Chinook Salmon", "Eelgrass"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
+
+  {
+    "id": "negative_4",
+    "category": "negative",
+    "question": "What is the capital of France?",
+    "expected_answer": "I don't have information about world capitals in my knowledge base. My focus is on bioregional ecology, knowledge commoning, and community governance in regions like the Salish Sea and Cascadia.",
+    "expected_entities": []
+  },
+  {
+    "id": "negative_5",
+    "category": "negative",
+    "question": "Can you write me a Python script to scrape Amazon product prices?",
+    "expected_answer": "I'm not able to help with web scraping scripts. My knowledge focuses on bioregional knowledge commoning, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
+    "expected_entities": []
+  },
+  {
+    "id": "negative_6",
+    "category": "negative",
+    "question": "What are the lyrics to Bohemian Rhapsody?",
+    "expected_answer": "I don't have song lyrics in my knowledge base. My focus is on bioregional ecology, stewardship practices, and community governance in regions like the Salish Sea and Cascadia.",
+    "expected_entities": []
   }
 ]
