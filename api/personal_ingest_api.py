@@ -1314,6 +1314,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Task router not mounted: {e}")
 
+            # Project briefing router (always on, no capability gate)
+            try:
+                from api.routers.project_router import create_router as create_project_router
+                app.include_router(create_project_router(db_pool), prefix="/project")
+                logger.info("Project router mounted (/project)")
+            except Exception as e:
+                logger.warning(f"Project router not mounted: {e}")
+
             # Claims engine router (always on, no capability gate)
             try:
                 from api.routers.claims_router import create_router as create_claims_router
@@ -5184,304 +5192,44 @@ async def chat_endpoint(request: ChatRequest):
             web_sources = _gr_web
             _graphrag_done = True
 
-    # ── B1 hybrid retrieval (skipped when graphrag produced results) ──
+    # ── B1 hybrid retrieval via extracted executors (B9a refactor) ──
     if not _graphrag_done:
-        sources: List[Dict[str, Any]] = []
-
-    if not _graphrag_done:
+      from api.retrieval_executors import (
+          entity_lookup as _entity_lookup,
+          relationship_traverse as _relationship_traverse,
+          text_search as _text_search,
+          web_source_lookup as _web_source_lookup,
+          evidence_bundles_to_legacy_format,
+      )
       async with db_pool.acquire() as conn:
-        if query_embedding:
-            embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
-            try:
-                rows = await conn.fetch("""
-                    SELECT fuseki_uri, entity_text, entity_type, metadata,
-                           1 - (embedding <=> $1::vector) AS similarity
-                    FROM entity_registry
-                    WHERE embedding IS NOT NULL AND NOT node_private
-                    ORDER BY embedding <=> $1::vector
-                    LIMIT $2
-                """, embedding_str, request.max_context_entities)
-            except (asyncpg.exceptions.UndefinedColumnError,
-                    asyncpg.exceptions.UndefinedFunctionError,
-                    asyncpg.exceptions.DataError) as e:
-                logger.warning("entity_registry.embedding vector search failed, falling back to text search: %s", e)
-                # Extract meaningful words (3+ chars) from query for keyword matching
-                words = [w for w in request.query.lower().split() if len(w) >= 3]
-                if words:
-                    conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
-                    match_score = " + ".join(
-                        f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
-                        for i in range(len(words))
-                    )
-                    params = [f"%{w}%" for w in words]
-                    params.append(request.max_context_entities)
-                    rows = await conn.fetch(f"""
-                        SELECT fuseki_uri, entity_text, entity_type, metadata,
-                               ({match_score})::float / {len(words)} AS similarity
-                        FROM entity_registry
-                        WHERE ({conditions}) AND NOT node_private
-                        ORDER BY ({match_score}) DESC, created_at DESC
-                        LIMIT ${len(words)+1}
-                    """, *params)
-                else:
-                    rows = []
-        else:
-            # Fallback: text search on entity names using keyword splitting
-            words = [w for w in request.query.lower().split() if len(w) >= 3]
-            if words:
-                conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
-                match_score = " + ".join(
-                    f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
-                    for i in range(len(words))
-                )
-                params = [f"%{w}%" for w in words]
-                params.append(request.max_context_entities)
-                rows = await conn.fetch(f"""
-                    SELECT fuseki_uri, entity_text, entity_type, metadata,
-                           ({match_score})::float / {len(words)} AS similarity
-                    FROM entity_registry
-                    WHERE ({conditions}) AND NOT node_private
-                    ORDER BY ({match_score}) DESC, created_at DESC
-                    LIMIT ${len(words)+1}
-                """, *params)
-            else:
-                rows = []
+        # Step 1: Entity lookup
+        entity_bundles = await _entity_lookup(
+            request.query, query_embedding, conn,
+            max_results=request.max_context_entities,
+            quartz_url_fn=quartz_url,
+        )
+        entity_uris = [b.source_uri for b in entity_bundles]
 
-        # Build source list and collect URIs for relationship lookup
-        entity_uris = []
-        for row in rows:
-            meta = row['metadata'] or {}
-            if isinstance(meta, str):
-                meta = json_module_global.loads(meta)
-            description = (meta.get('description') or meta.get('context') or '') if isinstance(meta, dict) else ''
-            sources.append({
-                "uri": row['fuseki_uri'],
-                "label": row['entity_text'],
-                "entity_type": row['entity_type'],
-                "score": round(float(row['similarity']), 4),
-                "description": description,
-                "quartz_url": quartz_url(row['entity_type'], row['entity_text']),
-            })
-            entity_uris.append(row['fuseki_uri'])
+        # Step 2: Relationship traverse
+        rel_bundles = await _relationship_traverse(entity_uris, conn)
 
-        # ------------------------------------------------------------------
-        # 2. Fetch 2-hop relationships for matched entities (richer context)
-        # ------------------------------------------------------------------
-        relationships_ctx: List[str] = []
-        if entity_uris:
-            rel_rows = await conn.fetch("""
-                WITH RECURSIVE traverse AS (
-                    SELECT
-                        r.subject_uri, r.object_uri, r.predicate,
-                        1 AS depth
-                    FROM entity_relationships r
-                    WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
-                    UNION
-                    SELECT
-                        r2.subject_uri, r2.object_uri, r2.predicate,
-                        t.depth + 1
-                    FROM traverse t
-                    JOIN entity_relationships r2
-                        ON r2.subject_uri IN (t.subject_uri, t.object_uri)
-                        OR r2.object_uri IN (t.subject_uri, t.object_uri)
-                    WHERE t.depth < 2
-                )
-                SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
-                    t.subject_uri,
-                    s.entity_text AS subject_label,
-                    t.predicate,
-                    t.object_uri,
-                    o.entity_text AS object_label,
-                    t.depth
-                FROM traverse t
-                LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
-                LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
-                WHERE NOT COALESCE(s.node_private, false)
-                  AND NOT COALESCE(o.node_private, false)
-                ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
-                LIMIT 50
-            """, entity_uris)
-            for rr in rel_rows:
-                subj = rr['subject_label'] or rr['subject_uri']
-                obj = rr['object_label'] or rr['object_uri']
-                relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+        # Step 3: Text search (hybrid BM25+vector + reranking)
+        text_bundles = await _text_search(
+            request.query, query_embedding, conn,
+            multi_query=request.multi_query,
+            include_code=request.include_code,
+            top_k=8,
+            generate_embedding_fn=generate_embedding,
+            expand_queries_fn=_expand_queries,
+            rerank_fn=_rerank_chunks,
+        )
 
-        # ------------------------------------------------------------------
-        # 2b. Hybrid BM25 + dense retrieval with RRF for document chunks (B6)
-        #      + B8b multi-query expansion (optional)
-        # ------------------------------------------------------------------
-        doc_chunks: List[Dict[str, Any]] = []
-        # Code entity filter: exclude code chunks by default (source-aware retrieval)
-        _code_filter = "" if request.include_code else "AND c.content->>'entity_name' IS NULL"
+        # Step 4: Web source enrichment (deterministic post-step)
+        web_bundles = await _web_source_lookup(entity_uris, conn)
 
-        # B8b: Determine query variants
-        if request.multi_query:
-            _query_variants = await _expand_queries(request.query, n=3)
-            if len(_query_variants) > 1:
-                logger.info(f"B8b multi-query: {len(_query_variants)} variants (original + {len(_query_variants)-1} expansions)")
-        else:
-            _query_variants = [request.query]
-
-        # Accumulator for cross-query RRF fusion (keyed by chunk id or document_rid)
-        _all_chunk_rows: Dict[str, dict] = {}  # dedup key → row dict
-
-        for _q_idx, _q_text in enumerate(_query_variants):
-            # Get embedding for this query variant (reuse original for first query)
-            if _q_idx == 0:
-                _q_embedding = query_embedding
-                _q_embedding_str = embedding_str if query_embedding else None
-            else:
-                _q_embedding = await generate_embedding(_q_text)
-                _q_embedding_str = '[' + ','.join(str(x) for x in _q_embedding) + ']' if _q_embedding else None
-
-            if _q_embedding_str:
-                try:
-                    chunk_rows = await conn.fetch(f"""
-                        WITH vector_results AS (
-                            SELECT c.id, c.document_rid,
-                                   m.content->>'title' AS title,
-                                   LEFT(c.content->>'text', 2000) AS chunk_text,
-                                   c.content->>'context' AS chunk_context,
-                                   c.content->>'section_id' AS section_id,
-                                   c.content->>'section_title' AS section_title,
-                                   c.content->>'wiki_url' AS wiki_url,
-                                   ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vrank
-                            FROM koi_memory_chunks c
-                            JOIN koi_memories m ON m.rid = c.document_rid
-                            WHERE c.embedding IS NOT NULL {_code_filter}
-                            ORDER BY c.embedding <=> $1::vector LIMIT 40
-                        ),
-                        bm25_results AS (
-                            SELECT c.id, c.document_rid,
-                                   m.content->>'title' AS title,
-                                   LEFT(c.content->>'text', 2000) AS chunk_text,
-                                   c.content->>'context' AS chunk_context,
-                                   c.content->>'section_id' AS section_id,
-                                   c.content->>'section_title' AS section_title,
-                                   c.content->>'wiki_url' AS wiki_url,
-                                   ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC) AS brank
-                            FROM koi_memory_chunks c
-                            JOIN koi_memories m ON m.rid = c.document_rid
-                            WHERE c.tsv @@ plainto_tsquery('english', $2) {_code_filter}
-                            ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC LIMIT 40
-                        )
-                        SELECT COALESCE(v.id, b.id) AS id,
-                               COALESCE(v.document_rid, b.document_rid) AS document_rid,
-                               COALESCE(v.title, b.title) AS title,
-                               LEFT(COALESCE(v.chunk_text, b.chunk_text), 2000) AS chunk_text,
-                               COALESCE(v.chunk_context, b.chunk_context) AS chunk_context,
-                               COALESCE(v.section_id, b.section_id) AS section_id,
-                               COALESCE(v.section_title, b.section_title) AS section_title,
-                               COALESCE(v.wiki_url, b.wiki_url) AS wiki_url,
-                               COALESCE(1.0/(v.vrank+60), 0) + COALESCE(1.0/(b.brank+60), 0) AS rrf_score
-                        FROM vector_results v
-                        FULL OUTER JOIN bm25_results b ON v.id = b.id
-                        ORDER BY rrf_score DESC
-                        LIMIT 20
-                    """, _q_embedding_str, _q_text)
-                    for cr in chunk_rows:
-                        # Dedup key: prefer id, fall back to document_rid for BM25-only path
-                        _dedup_key = str(cr['id']) if cr['id'] is not None else cr['document_rid']
-                        if _dedup_key in _all_chunk_rows:
-                            # Cross-query RRF fusion: sum scores
-                            _all_chunk_rows[_dedup_key]['rrf_score'] += cr['rrf_score']
-                        else:
-                            _all_chunk_rows[_dedup_key] = dict(cr)
-                except (asyncpg.exceptions.UndefinedTableError,
-                        asyncpg.exceptions.UndefinedColumnError):
-                    pass  # koi_memory_chunks or expected columns not available
-                except asyncpg.exceptions.DataError as e:
-                    # Dimension mismatch — fall back to BM25-only for this query variant
-                    logger.warning(f"koi_memory_chunks vector dimension mismatch (variant {_q_idx}), falling back to BM25-only: {e}")
-                    try:
-                        chunk_rows = await conn.fetch(f"""
-                            SELECT c.id, c.document_rid,
-                                   m.content->>'title' AS title,
-                                   LEFT(c.content->>'text', 2000) AS chunk_text,
-                                   c.content->>'context' AS chunk_context,
-                                   c.content->>'section_id' AS section_id,
-                                   c.content->>'section_title' AS section_title,
-                                   c.content->>'wiki_url' AS wiki_url,
-                                   ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
-                            FROM koi_memory_chunks c
-                            JOIN koi_memories m ON m.rid = c.document_rid
-                            WHERE c.tsv @@ plainto_tsquery('english', $1) {_code_filter}
-                            ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
-                            LIMIT 20
-                        """, _q_text)
-                        for cr in chunk_rows:
-                            _dedup_key = str(cr['id']) if cr.get('id') is not None else cr['document_rid']
-                            if _dedup_key in _all_chunk_rows:
-                                _all_chunk_rows[_dedup_key]['rrf_score'] += cr['rrf_score']
-                            else:
-                                _all_chunk_rows[_dedup_key] = dict(cr)
-                    except Exception as bm25_err:
-                        logger.warning(f"BM25 fallback also failed (variant {_q_idx}): {bm25_err}")
-
-        # Sort fused results by aggregate RRF score, take top 20, build doc_chunks + sources
-        _sorted_chunks = sorted(_all_chunk_rows.values(), key=lambda r: r['rrf_score'], reverse=True)[:20]
-        for cr in _sorted_chunks:
-            _ctx = cr.get('chunk_context') or ""
-            doc_chunks.append({
-                "rid": cr['document_rid'],
-                "title": cr.get('title') or cr['document_rid'],
-                "text": cr.get('chunk_text') or "",
-                "context": _ctx,
-                "score": round(float(cr['rrf_score']), 4),
-                "section_id": cr.get('section_id'),
-                "section_title": cr.get('section_title'),
-                "wiki_url": cr.get('wiki_url'),
-            })
-            sources.append({
-                "uri": cr['document_rid'],
-                "label": cr.get('title') or cr['document_rid'],
-                "entity_type": "Document",
-                "score": round(float(cr['rrf_score']), 4),
-                "description": ((_ctx + " " if _ctx else "") + (cr.get('chunk_text') or ""))[:400],
-                "url": cr.get('wiki_url'),
-            })
-
-        # ── B7: Rerank doc_chunks (top 20 from RRF → top 8 via cross-encoder) ──
-        if doc_chunks:
-            doc_chunks = _rerank_chunks(request.query, doc_chunks, top_k=8)
-            reranked_rids = {c['rid'] for c in doc_chunks}
-            sources = [s for s in sources if s['entity_type'] != 'Document' or s['uri'] in reranked_rids]
-
-        # ------------------------------------------------------------------
-        # 2c. Fetch web sources linked to matched entities (B1.3)
-        # ------------------------------------------------------------------
-        web_sources: List[Dict[str, Any]] = []
-        if entity_uris:
-            try:
-                ws_rows = await conn.fetch("""
-                    SELECT DISTINCT ON (ws.url)
-                        ws.url,
-                        ws.title,
-                        ws.description
-                    FROM web_submissions ws
-                    JOIN document_entity_links del
-                        ON del.document_rid = 'web:' || ws.rid::text
-                    WHERE del.entity_uri = ANY($1)
-                      AND ws.status IN ('ingested', 'monitoring')
-                    LIMIT 5
-                """, entity_uris)
-                for wr in ws_rows:
-                    desc = wr['description'] or ""
-                    web_sources.append({
-                        "url": wr['url'],
-                        "title": wr['title'] or wr['url'],
-                        "summary": desc,
-                    })
-                    sources.append({
-                        "uri": wr['url'],
-                        "label": wr['title'] or wr['url'],
-                        "entity_type": "WebSource",
-                        "score": 0.8,
-                        "description": desc[:200],
-                    })
-            except (asyncpg.exceptions.UndefinedTableError,
-                    asyncpg.exceptions.UndefinedColumnError):
-                pass  # web_submissions or expected columns not available
+      # Convert to legacy format for prompt builder
+      all_bundles = entity_bundles + rel_bundles + text_bundles + web_bundles
+      sources, relationships_ctx, doc_chunks, web_sources = evidence_bundles_to_legacy_format(all_bundles)
 
     # ------------------------------------------------------------------
     # 2d. Structured graph query (template-based, Step 7)
