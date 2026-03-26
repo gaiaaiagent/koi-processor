@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 SPEC_SOURCE = "spec-dag-ingest"
 
 VALID_DOC_KINDS = frozenset(
-    ["vision", "foundation", "architecture", "spec", "operations", "research", "positioning"]
+    ["vision", "foundation", "architecture", "spec", "operations", "research", "positioning", "pattern", "roadmap"]
 )
 
 
