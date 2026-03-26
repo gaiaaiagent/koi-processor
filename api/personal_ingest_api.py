@@ -5096,12 +5096,40 @@ def _rerank_chunks(query: str, chunks: list, top_k: int = 8) -> list:
     return reranked
 
 
+async def _expand_queries(query: str, n: int = 3) -> list:
+    """Generate n query reformulations for multi-query retrieval (B8b).
+    Returns [original_query] + up to n reformulations.
+    """
+    if not openai_client:
+        return [query]
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": f"""Generate {n} alternative search queries for a bioregional knowledge commons.
+Original query: "{query}"
+
+Return ONLY the alternative queries, one per line. No numbering, no explanation.
+Each should rephrase the question using different terminology to find relevant documents."""
+            }],
+            max_tokens=200,
+            temperature=0.7,
+        )
+        lines = [l.strip() for l in resp.choices[0].message.content.strip().split('\n') if l.strip()]
+        return [query] + lines[:n]
+    except Exception as e:
+        logger.warning(f"B8b query expansion failed: {e}")
+        return [query]
+
+
 class ChatRequest(BaseModel):
     """Request for RAG chat."""
     query: str
     max_context_entities: int = Field(default=5, ge=1, le=20)
     retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
     include_code: bool = Field(default=False, description="Include code entity chunks in retrieval (default: exclude)")
+    multi_query: bool = Field(default=False, description="Enable multi-query expansion for broader retrieval (B8b)")
 
 
 @app.post("/chat")
@@ -5280,122 +5308,138 @@ async def chat_endpoint(request: ChatRequest):
 
         # ------------------------------------------------------------------
         # 2b. Hybrid BM25 + dense retrieval with RRF for document chunks (B6)
+        #      + B8b multi-query expansion (optional)
         # ------------------------------------------------------------------
         doc_chunks: List[Dict[str, Any]] = []
         # Code entity filter: exclude code chunks by default (source-aware retrieval)
         _code_filter = "" if request.include_code else "AND c.content->>'entity_name' IS NULL"
-        if query_embedding:
-            query_text = request.query  # raw text for BM25
-            try:
-                chunk_rows = await conn.fetch(f"""
-                    WITH vector_results AS (
-                        SELECT c.id, c.document_rid,
-                               m.content->>'title' AS title,
-                               LEFT(c.content->>'text', 2000) AS chunk_text,
-                               c.content->>'context' AS chunk_context,
-                               c.content->>'section_id' AS section_id,
-                               c.content->>'section_title' AS section_title,
-                               c.content->>'wiki_url' AS wiki_url,
-                               ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vrank
-                        FROM koi_memory_chunks c
-                        JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.embedding IS NOT NULL {_code_filter}
-                        ORDER BY c.embedding <=> $1::vector LIMIT 40
-                    ),
-                    bm25_results AS (
-                        SELECT c.id, c.document_rid,
-                               m.content->>'title' AS title,
-                               LEFT(c.content->>'text', 2000) AS chunk_text,
-                               c.content->>'context' AS chunk_context,
-                               c.content->>'section_id' AS section_id,
-                               c.content->>'section_title' AS section_title,
-                               c.content->>'wiki_url' AS wiki_url,
-                               ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC) AS brank
-                        FROM koi_memory_chunks c
-                        JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.tsv @@ plainto_tsquery('english', $2) {_code_filter}
-                        ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC LIMIT 40
-                    )
-                    SELECT COALESCE(v.id, b.id) AS id,
-                           COALESCE(v.document_rid, b.document_rid) AS document_rid,
-                           COALESCE(v.title, b.title) AS title,
-                           LEFT(COALESCE(v.chunk_text, b.chunk_text), 2000) AS chunk_text,
-                           COALESCE(v.chunk_context, b.chunk_context) AS chunk_context,
-                           COALESCE(v.section_id, b.section_id) AS section_id,
-                           COALESCE(v.section_title, b.section_title) AS section_title,
-                           COALESCE(v.wiki_url, b.wiki_url) AS wiki_url,
-                           COALESCE(1.0/(v.vrank+60), 0) + COALESCE(1.0/(b.brank+60), 0) AS rrf_score
-                    FROM vector_results v
-                    FULL OUTER JOIN bm25_results b ON v.id = b.id
-                    ORDER BY rrf_score DESC
-                    LIMIT 20
-                """, embedding_str, query_text)
-                for cr in chunk_rows:
-                    _ctx = cr['chunk_context'] or ""
-                    doc_chunks.append({
-                        "rid": cr['document_rid'],
-                        "title": cr['title'] or cr['document_rid'],
-                        "text": cr['chunk_text'] or "",
-                        "context": _ctx,
-                        "score": round(float(cr['rrf_score']), 4),
-                        "section_id": cr['section_id'],
-                        "section_title": cr['section_title'],
-                        "wiki_url": cr['wiki_url'],
-                    })
-                    sources.append({
-                        "uri": cr['document_rid'],
-                        "label": cr['title'] or cr['document_rid'],
-                        "entity_type": "Document",
-                        "score": round(float(cr['rrf_score']), 4),
-                        "description": ((_ctx + " " if _ctx else "") + (cr['chunk_text'] or ""))[:400],
-                        "url": cr['wiki_url'],
-                    })
-            except (asyncpg.exceptions.UndefinedTableError,
-                    asyncpg.exceptions.UndefinedColumnError):
-                pass  # koi_memory_chunks or expected columns not available
-            except asyncpg.exceptions.DataError as e:
-                # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
-                # while generate_embedding() may output a different dimension (e.g. 1536).
-                # Fall back to BM25-only retrieval (B6 degraded mode).
-                logger.warning(f"koi_memory_chunks vector dimension mismatch, falling back to BM25-only: {e}")
+
+        # B8b: Determine query variants
+        if request.multi_query:
+            _query_variants = await _expand_queries(request.query, n=3)
+            if len(_query_variants) > 1:
+                logger.info(f"B8b multi-query: {len(_query_variants)} variants (original + {len(_query_variants)-1} expansions)")
+        else:
+            _query_variants = [request.query]
+
+        # Accumulator for cross-query RRF fusion (keyed by chunk id or document_rid)
+        _all_chunk_rows: Dict[str, dict] = {}  # dedup key → row dict
+
+        for _q_idx, _q_text in enumerate(_query_variants):
+            # Get embedding for this query variant (reuse original for first query)
+            if _q_idx == 0:
+                _q_embedding = query_embedding
+                _q_embedding_str = embedding_str if query_embedding else None
+            else:
+                _q_embedding = await generate_embedding(_q_text)
+                _q_embedding_str = '[' + ','.join(str(x) for x in _q_embedding) + ']' if _q_embedding else None
+
+            if _q_embedding_str:
                 try:
                     chunk_rows = await conn.fetch(f"""
-                        SELECT c.document_rid,
-                               m.content->>'title' AS title,
-                               LEFT(c.content->>'text', 2000) AS chunk_text,
-                               c.content->>'context' AS chunk_context,
-                               c.content->>'section_id' AS section_id,
-                               c.content->>'section_title' AS section_title,
-                               c.content->>'wiki_url' AS wiki_url,
-                               ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
-                        FROM koi_memory_chunks c
-                        JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.tsv @@ plainto_tsquery('english', $1) {_code_filter}
-                        ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
+                        WITH vector_results AS (
+                            SELECT c.id, c.document_rid,
+                                   m.content->>'title' AS title,
+                                   LEFT(c.content->>'text', 2000) AS chunk_text,
+                                   c.content->>'context' AS chunk_context,
+                                   c.content->>'section_id' AS section_id,
+                                   c.content->>'section_title' AS section_title,
+                                   c.content->>'wiki_url' AS wiki_url,
+                                   ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vrank
+                            FROM koi_memory_chunks c
+                            JOIN koi_memories m ON m.rid = c.document_rid
+                            WHERE c.embedding IS NOT NULL {_code_filter}
+                            ORDER BY c.embedding <=> $1::vector LIMIT 40
+                        ),
+                        bm25_results AS (
+                            SELECT c.id, c.document_rid,
+                                   m.content->>'title' AS title,
+                                   LEFT(c.content->>'text', 2000) AS chunk_text,
+                                   c.content->>'context' AS chunk_context,
+                                   c.content->>'section_id' AS section_id,
+                                   c.content->>'section_title' AS section_title,
+                                   c.content->>'wiki_url' AS wiki_url,
+                                   ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC) AS brank
+                            FROM koi_memory_chunks c
+                            JOIN koi_memories m ON m.rid = c.document_rid
+                            WHERE c.tsv @@ plainto_tsquery('english', $2) {_code_filter}
+                            ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC LIMIT 40
+                        )
+                        SELECT COALESCE(v.id, b.id) AS id,
+                               COALESCE(v.document_rid, b.document_rid) AS document_rid,
+                               COALESCE(v.title, b.title) AS title,
+                               LEFT(COALESCE(v.chunk_text, b.chunk_text), 2000) AS chunk_text,
+                               COALESCE(v.chunk_context, b.chunk_context) AS chunk_context,
+                               COALESCE(v.section_id, b.section_id) AS section_id,
+                               COALESCE(v.section_title, b.section_title) AS section_title,
+                               COALESCE(v.wiki_url, b.wiki_url) AS wiki_url,
+                               COALESCE(1.0/(v.vrank+60), 0) + COALESCE(1.0/(b.brank+60), 0) AS rrf_score
+                        FROM vector_results v
+                        FULL OUTER JOIN bm25_results b ON v.id = b.id
+                        ORDER BY rrf_score DESC
                         LIMIT 20
-                    """, query_text)
+                    """, _q_embedding_str, _q_text)
                     for cr in chunk_rows:
-                        _ctx = cr['chunk_context'] or ""
-                        doc_chunks.append({
-                            "rid": cr['document_rid'],
-                            "title": cr['title'] or cr['document_rid'],
-                            "text": cr['chunk_text'] or "",
-                            "context": _ctx,
-                            "score": round(float(cr['rrf_score']), 4),
-                            "section_id": cr['section_id'],
-                            "section_title": cr['section_title'],
-                            "wiki_url": cr['wiki_url'],
-                        })
-                        sources.append({
-                            "uri": cr['document_rid'],
-                            "label": cr['title'] or cr['document_rid'],
-                            "entity_type": "Document",
-                            "score": round(float(cr['rrf_score']), 4),
-                            "description": ((_ctx + " " if _ctx else "") + (cr['chunk_text'] or ""))[:400],
-                            "url": cr['wiki_url'],
-                        })
-                except Exception as bm25_err:
-                    logger.warning(f"BM25 fallback also failed: {bm25_err}")
+                        # Dedup key: prefer id, fall back to document_rid for BM25-only path
+                        _dedup_key = str(cr['id']) if cr['id'] is not None else cr['document_rid']
+                        if _dedup_key in _all_chunk_rows:
+                            # Cross-query RRF fusion: sum scores
+                            _all_chunk_rows[_dedup_key]['rrf_score'] += cr['rrf_score']
+                        else:
+                            _all_chunk_rows[_dedup_key] = dict(cr)
+                except (asyncpg.exceptions.UndefinedTableError,
+                        asyncpg.exceptions.UndefinedColumnError):
+                    pass  # koi_memory_chunks or expected columns not available
+                except asyncpg.exceptions.DataError as e:
+                    # Dimension mismatch — fall back to BM25-only for this query variant
+                    logger.warning(f"koi_memory_chunks vector dimension mismatch (variant {_q_idx}), falling back to BM25-only: {e}")
+                    try:
+                        chunk_rows = await conn.fetch(f"""
+                            SELECT c.id, c.document_rid,
+                                   m.content->>'title' AS title,
+                                   LEFT(c.content->>'text', 2000) AS chunk_text,
+                                   c.content->>'context' AS chunk_context,
+                                   c.content->>'section_id' AS section_id,
+                                   c.content->>'section_title' AS section_title,
+                                   c.content->>'wiki_url' AS wiki_url,
+                                   ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
+                            FROM koi_memory_chunks c
+                            JOIN koi_memories m ON m.rid = c.document_rid
+                            WHERE c.tsv @@ plainto_tsquery('english', $1) {_code_filter}
+                            ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
+                            LIMIT 20
+                        """, _q_text)
+                        for cr in chunk_rows:
+                            _dedup_key = str(cr['id']) if cr.get('id') is not None else cr['document_rid']
+                            if _dedup_key in _all_chunk_rows:
+                                _all_chunk_rows[_dedup_key]['rrf_score'] += cr['rrf_score']
+                            else:
+                                _all_chunk_rows[_dedup_key] = dict(cr)
+                    except Exception as bm25_err:
+                        logger.warning(f"BM25 fallback also failed (variant {_q_idx}): {bm25_err}")
+
+        # Sort fused results by aggregate RRF score, take top 20, build doc_chunks + sources
+        _sorted_chunks = sorted(_all_chunk_rows.values(), key=lambda r: r['rrf_score'], reverse=True)[:20]
+        for cr in _sorted_chunks:
+            _ctx = cr.get('chunk_context') or ""
+            doc_chunks.append({
+                "rid": cr['document_rid'],
+                "title": cr.get('title') or cr['document_rid'],
+                "text": cr.get('chunk_text') or "",
+                "context": _ctx,
+                "score": round(float(cr['rrf_score']), 4),
+                "section_id": cr.get('section_id'),
+                "section_title": cr.get('section_title'),
+                "wiki_url": cr.get('wiki_url'),
+            })
+            sources.append({
+                "uri": cr['document_rid'],
+                "label": cr.get('title') or cr['document_rid'],
+                "entity_type": "Document",
+                "score": round(float(cr['rrf_score']), 4),
+                "description": ((_ctx + " " if _ctx else "") + (cr.get('chunk_text') or ""))[:400],
+                "url": cr.get('wiki_url'),
+            })
 
         # ── B7: Rerank doc_chunks (top 20 from RRF → top 8 via cross-encoder) ──
         if doc_chunks:

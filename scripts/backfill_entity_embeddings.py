@@ -7,6 +7,7 @@ Usage:
   python3 scripts/backfill_entity_embeddings.py --limit 100   # first 100 only
   python3 scripts/backfill_entity_embeddings.py --entity-type Concept
   python3 scripts/backfill_entity_embeddings.py --dry-run     # count only
+  python3 scripts/backfill_entity_embeddings.py --re-embed-enriched  # re-embed B8a-enriched entities
 """
 
 import argparse
@@ -44,16 +45,21 @@ async def main(args):
     pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
 
     # Build query — entity_registry uses fuseki_uri and entity_text (not uri/name)
-    where = "WHERE embedding IS NULL"
+    if args.re_embed_enriched:
+        where = "WHERE metadata->>'context' IS NOT NULL"
+        logger.info("Mode: re-embed B8a-enriched entities (metadata->>'context' IS NOT NULL)")
+    else:
+        where = "WHERE embedding IS NULL"
     params = []
     if args.entity_type:
-        where += " AND entity_type = $1"
+        where += f" AND entity_type = ${1}"
         params.append(args.entity_type)
 
     async with pool.acquire() as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM entity_registry {where}", *params)
 
-    logger.info(f"Entities missing embeddings: {total}")
+    label = "enriched entities to re-embed" if args.re_embed_enriched else "entities missing embeddings"
+    logger.info(f"{label}: {total}")
     if args.entity_type:
         logger.info(f"  (filtered to type: {args.entity_type})")
 
@@ -61,16 +67,24 @@ async def main(args):
         # Show breakdown
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT entity_type, COUNT(*) as cnt FROM entity_registry "
-                "WHERE embedding IS NULL GROUP BY entity_type ORDER BY cnt DESC"
+                f"SELECT entity_type, COUNT(*) as cnt FROM entity_registry "
+                f"{where} GROUP BY entity_type ORDER BY cnt DESC",
+                *params
             )
             for r in rows:
                 logger.info(f"  {r['entity_type']}: {r['cnt']}")
-            with_desc = await conn.fetchval(
-                "SELECT COUNT(*) FROM entity_registry WHERE embedding IS NULL "
-                "AND description IS NOT NULL AND description != ''"
-            )
-            logger.info(f"  With description: {with_desc}, Name-only: {total - with_desc}")
+            if args.re_embed_enriched:
+                with_ctx = await conn.fetchval(
+                    f"SELECT COUNT(*) FROM entity_registry {where} "
+                    "AND LENGTH(metadata->>'context') > 10", *params
+                )
+                logger.info(f"  With context > 10 chars: {with_ctx}")
+            else:
+                with_desc = await conn.fetchval(
+                    "SELECT COUNT(*) FROM entity_registry WHERE embedding IS NULL "
+                    "AND description IS NOT NULL AND description != ''"
+                )
+                logger.info(f"  With description: {with_desc}, Name-only: {total - with_desc}")
         return
 
     limit_clause = f"LIMIT {args.limit}" if args.limit else ""
@@ -78,7 +92,7 @@ async def main(args):
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT fuseki_uri, entity_text, description FROM entity_registry {where} {order} {limit_clause}",
+            f"SELECT fuseki_uri, entity_text, description, metadata->>'context' AS context FROM entity_registry {where} {order} {limit_clause}",
             *params
         )
 
@@ -97,9 +111,12 @@ async def main(args):
 
         for row in batch:
             name = row["entity_text"] or ""
-            desc = row["description"] or ""
-            if desc.strip():
-                text = f"{name}: {desc}"
+            ctx = (row["context"] or "").strip()
+            desc = (row["description"] or "").strip()
+            # Combine: context (B8a LLM-generated from doc links) + description (original metadata)
+            combined = ". ".join(filter(None, [ctx, desc]))
+            if combined:
+                text = f"{name}: {combined}"
                 with_desc += 1
             else:
                 text = name
@@ -150,6 +167,8 @@ async def main(args):
             "SELECT COUNT(*) FROM entity_registry WHERE embedding IS NULL"
         )
     logger.info(f"  Remaining without embedding: {remaining}")
+    if args.re_embed_enriched:
+        logger.info("  (re-embed mode: entities already had embeddings, they were updated)")
 
     await pool.close()
 
@@ -159,5 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, help="Max entities to process")
     parser.add_argument("--entity-type", help="Filter to specific entity type")
     parser.add_argument("--dry-run", action="store_true", help="Count only, no embedding")
+    parser.add_argument("--re-embed-enriched", action="store_true",
+                        help="Re-embed entities with B8a-enriched metadata context (instead of only missing embeddings)")
     args = parser.parse_args()
     asyncio.run(main(args))

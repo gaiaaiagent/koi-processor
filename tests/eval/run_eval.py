@@ -44,18 +44,21 @@ THRESHOLDS = {
 }
 
 
-def query_chat(base_url: str, question: str) -> dict:
+def query_chat(base_url: str, question: str, multi_query: bool = False) -> dict:
     """Hit /chat endpoint and return response."""
+    payload = {"query": question}
+    if multi_query:
+        payload["multi_query"] = True
     resp = requests.post(
         f"{base_url}/chat",
-        json={"query": question},
-        timeout=30,
+        json=payload,
+        timeout=60 if multi_query else 30,  # multi-query needs more time
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def run_eval(base_url: str, tag: str = "") -> dict:
+def run_eval(base_url: str, tag: str = "", multi_query: bool = False) -> dict:
     """Run evaluation against all golden QA pairs."""
     with open(GOLDEN_QA_PATH) as f:
         golden_qa = json.load(f)
@@ -76,7 +79,7 @@ def run_eval(base_url: str, tag: str = "") -> dict:
 
         try:
             t0 = time.time()
-            chat_resp = query_chat(base_url, question)
+            chat_resp = query_chat(base_url, question, multi_query=multi_query)
             latency = time.time() - t0
 
             answer = chat_resp.get("answer", "")
@@ -195,6 +198,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run RAG evaluation")
     parser.add_argument("--base-url", default="http://localhost:8351", help="KOI API base URL")
     parser.add_argument("--tag", default="", help="Tag for the report filename (e.g. 'baseline', 'post-bm25')")
+    parser.add_argument("--multi-query", action="store_true", help="Enable B8b multi-query expansion in /chat requests")
     args = parser.parse_args()
 
-    run_eval(args.base_url, args.tag)
+    run_eval(args.base_url, args.tag, multi_query=args.multi_query)
