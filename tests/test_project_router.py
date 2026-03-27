@@ -226,6 +226,36 @@ async def test_briefing_with_external_deps(client):
 
 
 @pytest.mark.anyio
+async def test_briefing_hierarchy_includes_cross_project_edges(client):
+    """include_external_deps=true → cross-project edges and nodes in spec_hierarchy."""
+    resp = await client.get("/project/briefing", params={
+        "project": "project:test-b",
+        "include_external_deps": "true",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+
+    hierarchy = data["spec_hierarchy"]
+    assert hierarchy is not None
+
+    # Cross-project edge should appear in edges
+    edge_pairs = [(e["from"], e["to"]) for e in hierarchy["edges"]]
+    assert ("tb.alignment", "ta.some-spec") in edge_pairs
+
+    # Local edge still present
+    assert ("tb.alignment", "tb.project-vision") in edge_pairs
+
+    # External node present with external=True
+    node_map = {n["doc_id"]: n for n in hierarchy["nodes"]}
+    assert "ta.some-spec" in node_map
+    assert node_map["ta.some-spec"]["external"] is True
+
+    # Local nodes not marked external
+    assert node_map["tb.project-vision"]["external"] is False
+    assert node_map["tb.alignment"]["external"] is False
+
+
+@pytest.mark.anyio
 async def test_briefing_without_external_deps_flag(client):
     """Default → external_dependencies is null."""
     resp = await client.get("/project/briefing", params={"project": "project:test-b"})

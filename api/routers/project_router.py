@@ -29,6 +29,7 @@ class SpecNode(BaseModel):
     file_path: Optional[str] = None
     depends_on: List[str] = []
     primary_for: List[str] = []
+    external: bool = False
 
 
 class SpecHierarchy(BaseModel):
@@ -116,7 +117,7 @@ def create_router(pool, caps=None) -> APIRouter:
             tier = metadata.get("tier", 0)
 
             # Step 2: Find spec DAG root(s) via governs predicate
-            spec_hierarchy = await _build_spec_hierarchy(conn, project_uri)
+            spec_hierarchy = await _build_spec_hierarchy(conn, project_uri, include_external=include_external_deps)
 
             # Step 3: Get active tasks
             active_tasks = await _get_active_tasks(conn, project_uri)
@@ -192,7 +193,7 @@ async def _resolve_project(conn, project_query: str) -> Optional[dict]:
     return None
 
 
-async def _build_spec_hierarchy(conn, project_uri: str) -> Optional[SpecHierarchy]:
+async def _build_spec_hierarchy(conn, project_uri: str, include_external: bool = False) -> Optional[SpecHierarchy]:
     """Build the spec hierarchy by walking governs + incoming depends_on edges."""
     # Find spec DAG root(s) — SpecDoc entities that govern this project
     roots = await conn.fetch(
@@ -244,11 +245,43 @@ async def _build_spec_hierarchy(conn, project_uri: str) -> Optional[SpecHierarch
             root_node = node
 
     # Get edges (depends_on between spec docs)
-    edges = await conn.fetch(
-        "SELECT subject_uri, object_uri FROM entity_relationships "
-        "WHERE predicate = 'depends_on' AND subject_uri LIKE $1 AND object_uri LIKE $1",
-        uri_pattern,
-    )
+    if include_external:
+        edges = await conn.fetch(
+            "SELECT subject_uri, object_uri FROM entity_relationships "
+            "WHERE predicate = 'depends_on' AND subject_uri LIKE $1 AND object_uri LIKE 'spec:%'",
+            uri_pattern,
+        )
+    else:
+        edges = await conn.fetch(
+            "SELECT subject_uri, object_uri FROM entity_relationships "
+            "WHERE predicate = 'depends_on' AND subject_uri LIKE $1 AND object_uri LIKE $1",
+            uri_pattern,
+        )
+
+    if include_external:
+        local_uris = {n.uri for n in nodes}
+        external_uris = {e["object_uri"] for e in edges if e["object_uri"] not in local_uris}
+        if external_uris:
+            ext_rows = await conn.fetch(
+                "SELECT fuseki_uri, entity_text, metadata FROM entity_registry "
+                "WHERE fuseki_uri = ANY($1::text[])",
+                list(external_uris),
+            )
+            for row in ext_rows:
+                meta = row["metadata"] or {}
+                if isinstance(meta, str):
+                    meta = json.loads(meta)
+                nodes.append(SpecNode(
+                    doc_id=row["fuseki_uri"].replace("spec:", ""),
+                    doc_kind=meta.get("doc_kind", "unknown"),
+                    uri=row["fuseki_uri"],
+                    status=meta.get("status"),
+                    file_path=meta.get("file_path"),
+                    depends_on=meta.get("depends_on", []),
+                    primary_for=meta.get("primary_for", []),
+                    external=True,
+                ))
+
     edge_list = [
         {"from": e["subject_uri"].replace("spec:", ""),
          "to": e["object_uri"].replace("spec:", ""),
