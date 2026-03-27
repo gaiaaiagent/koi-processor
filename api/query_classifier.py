@@ -30,19 +30,19 @@ and extract any entity mentions.
 
 ## Taxonomy
 
-- entity_definition: "What is X?" — asking for a definition or description of a single concept, species, place, organization, or person.
-- relationship_path: "How does X relate to Y?" — asking about connections, relationships, or multi-hop paths between entities.
-- governance_policy: "What is the policy on X?" — asking about protocols, governance rules, data sovereignty, meta-protocol, or decision-making frameworks.
-- roadmap_status: "What is the status of X?" — asking about project status, milestones, work items, timelines.
-- commitment_claim: "What commitments exist for X?" — asking about pledges, claims, evidence, commitment pools, flow funding settlements.
+- entity_definition: "What is X?" — asking for a definition or description of a single concept, species, place, organization, or person. Examples: "What is eelgrass?", "What is the Salish Sea?", "What is bioregionalism?"
+- relationship_path: "How does X relate to Y?" — asking about connections, relationships, or multi-hop paths between entities. Examples: "Which organizations work on restoration?", "What species are connected to Chinook salmon?", "How does cosmolocalism relate to bioregional knowledge?"
+- governance_policy: "What is the policy on X?" — asking about protocols, governance rules, data sovereignty, meta-protocol, decision-making frameworks, indigenous data principles, or organizational decision processes. Examples: "What are OCAP principles?", "How does data sovereignty work in the BKC?", "What is the federation membrane governance?", "How does the BKC handle data sovereignty?"
+- roadmap_status: "What is the status of X?" — asking about project status, milestones, work items, timelines. Examples: "What is the status of commitment pooling?", "What milestones have been completed?"
+- commitment_claim: "What commitments exist for X?" — asking about pledges, claims, evidence, commitment pools, flow funding settlements, or the claims engine. Examples: "What commitments has Victoria Landscape Hub made?", "How does the claims engine work?", "What is a commitment pool?"
 - cross_node_provenance: "What does node Y know about X?" — asking about information from a specific bioregional node or cross-node comparison.
-- out_of_domain: Questions about topics outside bioregional knowledge (technology installs, stock prices, general knowledge unrelated to ecology/governance/stewardship).
+- out_of_domain: Questions clearly outside bioregional knowledge commons scope — technology installs, stock prices, pop culture, general knowledge unrelated to ecology/governance/stewardship. If the question mentions bioregional concepts, organizations, or ecological topics, it is NOT out_of_domain even if you are unsure of the specific answer.
 
 ## Depth
 
-- shallow: Simple lookup, single entity, well-known concept
-- standard: Typical question requiring entity + document search
-- deep: Complex question requiring multiple search strategies or synthesis
+- shallow: ONLY for simple single-entity lookups where the entity name is explicit and well-known (e.g., "What is eelgrass?"). If the question asks about a complex concept, protocol, framework, or process, use standard or deep even if it looks like "What is X?".
+- standard: Typical question requiring entity + document search. DEFAULT choice when unsure.
+- deep: Complex question requiring multiple search strategies or synthesis across sources.
 
 ## Entities
 
@@ -51,6 +51,16 @@ Extract named entities mentioned in the question. Include:
 - Organizations, people, projects
 - Concepts, protocols, practices
 - Specific items like "commitment pool", "Victoria Landscape Hub"
+
+## Confidence
+
+Rate your confidence in the classification:
+- 0.9-1.0: Clear match to one category, no ambiguity
+- 0.7-0.9: Good match but could arguably fit another category
+- 0.5-0.7: Ambiguous, could reasonably be classified differently
+- below 0.5: Very unsure
+
+Default to 0.85 for typical bioregional questions. Only go below 0.7 if genuinely ambiguous.
 
 ## Output format (JSON)
 
