@@ -274,22 +274,24 @@ def resolve_or_create_project(cur, project_config: dict) -> str:
     project_uri = project_config["project_uri"]
     project_name = project_config["project_name"]
     meta = _project_metadata(project_config)
+    normalized = normalize_text(project_name)
 
     # Check if it exists
     cur.execute("SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = %s", (project_uri,))
     row = cur.fetchone()
     if row:
-        # Merge all project.json fields into existing metadata
+        # Merge all project.json fields into existing metadata + sync display name
         cur.execute("""
             UPDATE entity_registry
-            SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+                entity_text = %s,
+                normalized_text = %s
             WHERE fuseki_uri = %s
-        """, (json.dumps(meta), project_uri))
-        log.info(f"  Found existing Project entity: {project_uri} (updated metadata: {list(meta.keys())})")
+        """, (json.dumps(meta), project_name, normalized, project_uri))
+        log.info(f"  Found existing Project entity: {project_uri} (updated name={project_name!r}, metadata: {list(meta.keys())})")
         return project_uri
 
     # Try to find by name
-    normalized = normalize_text(project_name)
     cur.execute("""
         SELECT fuseki_uri FROM entity_registry
         WHERE entity_type = 'Project' AND normalized_text = %s
@@ -299,10 +301,12 @@ def resolve_or_create_project(cur, project_config: dict) -> str:
         existing_uri = row[0]
         cur.execute("""
             UPDATE entity_registry
-            SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+                entity_text = %s,
+                normalized_text = %s
             WHERE fuseki_uri = %s
-        """, (json.dumps(meta), existing_uri))
-        log.info(f"  Found Project by name: {existing_uri} (updated metadata: {list(meta.keys())})")
+        """, (json.dumps(meta), project_name, normalized, existing_uri))
+        log.info(f"  Found Project by name: {existing_uri} (updated name={project_name!r}, metadata: {list(meta.keys())})")
         return existing_uri
 
     # Create new
