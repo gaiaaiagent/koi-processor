@@ -103,9 +103,15 @@ def collect_docs(docs_root: Path) -> tuple[dict[str, DocNode], list[str]]:
     return nodes, unclassified
 
 
-def validate_doc_dag(nodes: dict[str, DocNode], project_id: str) -> list[str]:
-    """Validate the doc DAG. Returns a list of error messages."""
+def validate_doc_dag(nodes: dict[str, DocNode], project_id: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Validate the doc DAG. Returns (errors, external_refs).
+
+    Phase A (local, pure): prefix checks, vision root, doc_kind, cycle detection.
+    External depends_on targets (different project prefix) are collected into
+    external_refs for Phase B validation against the DB.
+    """
     errors: list[str] = []
+    external_refs: list[tuple[str, str]] = []  # (doc_id, dep) tuples
 
     # Check doc_id prefix matches project_id
     for doc_id in nodes:
@@ -132,17 +138,22 @@ def validate_doc_dag(nodes: dict[str, DocNode], project_id: str) -> list[str]:
                 f"(must be one of {sorted(VALID_DOC_KINDS)})"
             )
 
-    # Check depends_on targets exist
+    # Check depends_on targets exist (local or external)
     for doc_id, node in nodes.items():
         for dep in node.depends_on:
             if dep not in nodes:
-                errors.append(f"Doc {doc_id}: depends_on target '{dep}' not found")
+                dep_prefix = dep.split(".", 1)[0] if "." in dep else ""
+                if dep_prefix and dep_prefix != project_id:
+                    external_refs.append((doc_id, dep))
+                else:
+                    errors.append(f"Doc {doc_id}: depends_on target '{dep}' not found")
 
-    # Cycle detection (DFS)
+    # Cycle detection (DFS) — only on local edges
     graph: dict[str, list[str]] = defaultdict(list)
     for doc_id, node in nodes.items():
         for dep in node.depends_on:
-            graph[doc_id].append(dep)
+            if dep in nodes:
+                graph[doc_id].append(dep)
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -162,6 +173,27 @@ def validate_doc_dag(nodes: dict[str, DocNode], project_id: str) -> list[str]:
     for nid in nodes:
         dfs(nid)
 
+    return errors, external_refs
+
+
+def validate_external_refs(external_refs: list[tuple[str, str]], args) -> list[str]:
+    """Validate that external depends_on targets exist as SpecDoc entities in the DB."""
+    errors = []
+    conn = get_db_connection(args)
+    cur = conn.cursor()
+    try:
+        for doc_id, dep in external_refs:
+            cur.execute(
+                "SELECT 1 FROM entity_registry WHERE entity_type = 'SpecDoc' "
+                "AND fuseki_uri = %s", (f"spec:{dep}",)
+            )
+            if not cur.fetchone():
+                errors.append(f"Doc {doc_id}: external depends_on target '{dep}' "
+                              f"not found in knowledge graph (spec:{dep})")
+            else:
+                log.info(f"  Cross-project ref: {doc_id} --> {dep} (verified)")
+    finally:
+        conn.close()
     return errors
 
 
@@ -454,12 +486,22 @@ def main():
         log.error("No frontmattered docs found")
         sys.exit(1)
 
-    errors = validate_doc_dag(nodes, project_id)
+    errors, external_refs = validate_doc_dag(nodes, project_id)
     if errors:
         log.error(f"Validation failed with {len(errors)} errors:")
         for err in errors:
             log.error(f"  - {err}")
         sys.exit(1)
+
+    if external_refs:
+        log.info(f"Found {len(external_refs)} cross-project reference(s), validating against DB...")
+        ext_errors = validate_external_refs(external_refs, args)
+        if ext_errors:
+            log.error("External reference validation failed:")
+            for err in ext_errors:
+                log.error(f"  - {err}")
+            sys.exit(1)
+        log.info("External references validated")
 
     log.info("Validation passed")
 

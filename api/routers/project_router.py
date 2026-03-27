@@ -51,6 +51,7 @@ class ProjectBriefing(BaseModel):
     spec_hierarchy: Optional[SpecHierarchy] = None
     active_tasks: List[TaskSummary] = []
     recent_sessions: Optional[List[Dict[str, Any]]] = None
+    external_dependencies: Optional[List[Dict[str, Any]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -60,9 +61,41 @@ class ProjectBriefing(BaseModel):
 def create_router(pool, caps=None) -> APIRouter:
     router = APIRouter(tags=["project"])
 
+    @router.get("/projects")
+    async def list_projects():
+        """List all governed projects (those with a SpecDoc governs edge)."""
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT e.fuseki_uri, e.entity_text, e.metadata
+                FROM entity_registry e
+                JOIN entity_relationships r ON r.object_uri = e.fuseki_uri
+                WHERE e.entity_type = 'Project'
+                  AND r.predicate = 'governs'
+                  AND r.subject_uri LIKE 'spec:%'
+                ORDER BY e.entity_text
+            """)
+            seen = set()
+            projects = []
+            for row in rows:
+                uri = row["fuseki_uri"]
+                if uri in seen:
+                    continue
+                seen.add(uri)
+                meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {})
+                projects.append({
+                    "name": row["entity_text"],
+                    "uri": uri,
+                    "project_id": meta.get("project_id"),
+                    "tier": meta.get("tier", 0),
+                    "docs_root": meta.get("docs_root"),
+                    "repos": meta.get("repos", []),
+                })
+            return projects
+
     @router.get("/briefing", response_model=ProjectBriefing)
     async def project_briefing(
         project: str = Query(..., description="Project name or entity URI"),
+        include_external_deps: bool = Query(False, description="Include cross-project dependencies"),
     ):
         """Assemble a project context briefing from the knowledge graph."""
         async with pool.acquire() as conn:
@@ -91,15 +124,25 @@ def create_router(pool, caps=None) -> APIRouter:
             # Step 4: Attempt session search (graceful degradation)
             recent_sessions = None  # Deferred — session search endpoint may 404
 
+            # Step 5: Cross-project external dependencies
+            external_dependencies = None
+            if include_external_deps and spec_hierarchy:
+                prefix = spec_hierarchy.root.doc_id.split(".", 1)[0] if spec_hierarchy.root else None
+                if prefix:
+                    external_dependencies = await _get_external_dependencies(conn, prefix)
+
             return ProjectBriefing(
                 project={
                     "name": project_name,
                     "uri": project_uri,
                     "tier": tier,
+                    "project_id": metadata.get("project_id"),
+                    "docs_root": metadata.get("docs_root"),
                 },
                 spec_hierarchy=spec_hierarchy,
                 active_tasks=active_tasks,
                 recent_sessions=recent_sessions,
+                external_dependencies=external_dependencies,
             )
 
     return router
@@ -240,3 +283,31 @@ async def _get_active_tasks(conn, project_uri: str) -> List[TaskSummary]:
         )
         for r in rows
     ]
+
+
+async def _get_external_dependencies(conn, project_prefix: str) -> List[Dict[str, Any]]:
+    """Find depends_on edges from this project's specs to other projects' specs."""
+    local_pattern = f"spec:{project_prefix}.%"
+    rows = await conn.fetch(
+        "SELECT r.subject_uri, r.object_uri, e.metadata "
+        "FROM entity_relationships r "
+        "JOIN entity_registry e ON e.fuseki_uri = r.object_uri "
+        "WHERE r.predicate = 'depends_on' "
+        "  AND r.subject_uri LIKE $1 "
+        "  AND r.object_uri LIKE 'spec:%' "
+        "  AND r.object_uri NOT LIKE $1",
+        local_pattern,
+    )
+    deps = []
+    for row in rows:
+        meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {})
+        target_doc_id = row["object_uri"].replace("spec:", "")
+        source_project = target_doc_id.split(".", 1)[0] if "." in target_doc_id else None
+        deps.append({
+            "doc_id": target_doc_id,
+            "doc_kind": meta.get("doc_kind"),
+            "uri": row["object_uri"],
+            "source_project": source_project,
+            "referenced_by": row["subject_uri"].replace("spec:", ""),
+        })
+    return deps
