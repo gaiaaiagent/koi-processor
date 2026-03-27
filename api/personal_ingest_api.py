@@ -5138,6 +5138,7 @@ class ChatRequest(BaseModel):
     retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
     include_code: bool = Field(default=False, description="Include code entity chunks in retrieval (default: exclude)")
     multi_query: bool = Field(default=False, description="Enable multi-query expansion for broader retrieval (B8b)")
+    planner: bool = Field(default=False, description="B9a QueryPlan IR path (experimental)")
 
 
 @app.post("/chat")
@@ -5174,6 +5175,67 @@ async def chat_endpoint(request: ChatRequest):
     # ------------------------------------------------------------------
     query_embedding = await generate_embedding(request.query)
 
+    # ── B9a Planner path (opt-in via planner=true) ──
+    planner_requested = request.planner and request.retrieval_mode != "graphrag"
+    planner_executed = False
+    plan_trace = None
+
+    if planner_requested:
+        from api.query_classifier import classify_query, CLASSIFIER_CONFIDENCE_THRESHOLD
+        from api.query_planner import assemble_plan
+        from api.plan_executor import execute_plan as _execute_plan
+        from api.retrieval_executors import evidence_bundles_to_legacy_format
+        from api.schemas.query_plan import QueryTaxonomy
+
+        classifier_output = await classify_query(request.query, openai_client)
+
+        if classifier_output.query_taxonomy == QueryTaxonomy.OUT_OF_DOMAIN and \
+           classifier_output.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+            # ABSTENTION: early-return, bypasses prompt builder + LLM entirely
+            return {
+                "answer": "This question appears to be outside the scope of bioregional knowledge. "
+                          "I can help with questions about ecology, governance, organizations, "
+                          "commitments, and projects in the Bioregional Knowledge Commons.",
+                "sources": [],
+                "intent": {"intent": "out_of_domain", "entities": [], "confidence": classifier_output.confidence},
+                "retrieval_mode": request.retrieval_mode,
+                "plan_trace": {
+                    "plan_id": None, "taxonomy": "out_of_domain",
+                    "confidence": classifier_output.confidence,
+                    "fallback": False, "abstained": True,
+                },
+            }
+        elif classifier_output.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+            planner_executed = True
+            plan = assemble_plan(classifier_output, request.query)
+            async with db_pool.acquire() as conn:
+                evidence, traces = await _execute_plan(
+                    plan, conn, query_embedding,
+                    generate_embedding_fn=generate_embedding,
+                    expand_queries_fn=_expand_queries,
+                    rerank_fn=_rerank_chunks,
+                    quartz_url_fn=quartz_url,
+                )
+                sources, relationships_ctx, doc_chunks, web_sources = evidence_bundles_to_legacy_format(evidence)
+            plan_trace = {
+                "plan_id": plan.plan_id,
+                "taxonomy": plan.query_taxonomy.value,
+                "confidence": classifier_output.confidence,
+                "depth_tier": classifier_output.depth_tier.value,
+                "steps": len(plan.steps),
+                "fallback": False,
+            }
+        else:
+            # HARD FALLBACK: low confidence -> run full monolithic baseline
+            logger.info(f"Planner confidence {classifier_output.confidence:.2f} < {CLASSIFIER_CONFIDENCE_THRESHOLD}, falling back")
+            plan_trace = {
+                "fallback": True,
+                "confidence": classifier_output.confidence,
+                "taxonomy": classifier_output.query_taxonomy.value,
+                "fallback_reason": "low_confidence",
+            }
+            # Falls through to monolithic path below
+
     # ── B2 GraphRAG dispatch ──
     _use_graphrag = request.retrieval_mode == "graphrag"
     _graphrag_done = False  # True when graphrag produced usable results
@@ -5193,7 +5255,8 @@ async def chat_endpoint(request: ChatRequest):
             _graphrag_done = True
 
     # ── B1 hybrid retrieval via extracted executors (B9a refactor) ──
-    if not _graphrag_done:
+    # Skipped when planner already executed or graphrag produced results
+    if not planner_executed and not _graphrag_done:
       from api.retrieval_executors import (
           entity_lookup as _entity_lookup,
           relationship_traverse as _relationship_traverse,
@@ -5321,12 +5384,16 @@ async def chat_endpoint(request: ChatRequest):
         "confidence": round(max((s['score'] for s in sources), default=0.0), 4),
     }
 
-    return {
+    response = {
         "answer": answer,
         "sources": sources,
         "intent": intent,
         "retrieval_mode": request.retrieval_mode,
     }
+    # Always emit plan_trace when planner was requested (including fallback)
+    if planner_requested and plan_trace is not None:
+        response["plan_trace"] = plan_trace
+    return response
 
 
 if __name__ == "__main__":

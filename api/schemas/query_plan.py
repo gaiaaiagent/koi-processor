@@ -171,3 +171,7 @@ class ClassifierOutput(BaseModel):
     depth_tier: DepthTier = DepthTier.STANDARD
     entities: list[EntityCandidate] = Field(default_factory=list)
     reasoning: str = ""  # brief explanation of classification choice
+    confidence: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Classifier self-reported confidence. Below threshold triggers fallback to baseline.",
+    )
