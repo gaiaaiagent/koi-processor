@@ -132,6 +132,54 @@ class TestPlanAssembly:
         assert all(s.op == RetrievalOp.ENTITY_LOOKUP for s in plan.steps)
         assert len(plan.steps) == 1
 
+    def test_commitment_claim_includes_structured_sql(self):
+        """commitment_claim plan: ENTITY_LOOKUP -> STRUCTURED_SQL -> TEXT_SEARCH."""
+        co = ClassifierOutput(
+            query_taxonomy=QueryTaxonomy.COMMITMENT_CLAIM,
+            depth_tier=DepthTier.STANDARD,
+            confidence=0.9,
+        )
+        plan = assemble_plan(co, "What commitments have been made?")
+
+        ops = [s.op for s in plan.steps]
+        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.STRUCTURED_SQL, RetrievalOp.TEXT_SEARCH]
+        # STRUCTURED_SQL step has commitment template
+        sql_step = plan.steps[1]
+        assert sql_step.params.get("template") == "commitment"
+        assert sql_step.budget.max_results == 15
+        assert sql_step.depends_on == [0]
+
+    def test_roadmap_status_includes_structured_sql(self):
+        """roadmap_status plan: ENTITY_LOOKUP -> STRUCTURED_SQL -> TEXT_SEARCH."""
+        co = ClassifierOutput(
+            query_taxonomy=QueryTaxonomy.ROADMAP_STATUS,
+            depth_tier=DepthTier.STANDARD,
+            confidence=0.9,
+        )
+        plan = assemble_plan(co, "What is the status of the roadmap?")
+
+        ops = [s.op for s in plan.steps]
+        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.STRUCTURED_SQL, RetrievalOp.TEXT_SEARCH]
+        sql_step = plan.steps[1]
+        assert sql_step.params.get("template") == "roadmap"
+        assert sql_step.budget.max_results == 15
+
+    def test_governance_policy_includes_relationship_traverse(self):
+        """governance_policy plan: TEXT_SEARCH -> ENTITY_LOOKUP -> RELATIONSHIP_TRAVERSE."""
+        co = ClassifierOutput(
+            query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
+            depth_tier=DepthTier.STANDARD,
+            confidence=0.9,
+        )
+        plan = assemble_plan(co, "How does the BKC handle governance?")
+
+        ops = [s.op for s in plan.steps]
+        assert ops == [RetrievalOp.TEXT_SEARCH, RetrievalOp.ENTITY_LOOKUP, RetrievalOp.RELATIONSHIP_TRAVERSE]
+        rel_step = plan.steps[2]
+        assert rel_step.params.get("max_hops") == 1
+        assert rel_step.budget.max_results == 30
+        assert rel_step.depends_on == [1]
+
     def test_assemble_depth_deep(self):
         """Deep depth -> multi_query=true, max_results +50%."""
         co = ClassifierOutput(

@@ -116,7 +116,13 @@ async def execute_plan(
                 step_evidence = await graph_query()
 
             elif step.op == RetrievalOp.STRUCTURED_SQL:
-                step_evidence = await structured_sql()
+                step_evidence = await structured_sql(
+                    plan.original_query,
+                    conn,
+                    template=step.params.get("template", "commitment"),
+                    entity_uris=entity_uris if entity_uris else None,
+                    max_results=step.budget.max_results,
+                )
 
             elif step.op == RetrievalOp.PEER_QUERY:
                 step_evidence = await peer_query()

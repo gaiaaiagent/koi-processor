@@ -411,10 +411,160 @@ async def graph_query(**kwargs) -> list[EvidenceBundle]:
     return []
 
 
-async def structured_sql(**kwargs) -> list[EvidenceBundle]:
-    """B9b stub — Schema-aware SQL. Not implemented in B9a."""
-    logger.debug("structured_sql stub called — returning empty (B9b not implemented)")
-    return []
+async def structured_sql(
+    query: str,
+    conn: asyncpg.Connection,
+    *,
+    template: str = "commitment",
+    entity_uris: list[str] | None = None,
+    max_results: int = 20,
+) -> list[EvidenceBundle]:
+    """B9b — Deterministic SQL templates for structured data retrieval.
+
+    Uses allowlisted query templates with parameterized entity_uri filtering.
+    Never generates freeform SQL from user queries.
+
+    Templates:
+        commitment: commitments + claims tables (filtered by pledger/pool/claimant)
+        roadmap: entity_registry roadmap types (Initiative, WorkItem, Milestone, etc.)
+    """
+    # Cap unfiltered results to avoid noisy global dumps
+    effective_max = min(max_results, 5) if not entity_uris else max_results
+    uri_param = entity_uris if entity_uris else None
+
+    if template == "commitment":
+        return await _structured_sql_commitment(conn, uri_param, effective_max)
+    elif template == "roadmap":
+        return await _structured_sql_roadmap(conn, uri_param, effective_max)
+    else:
+        logger.warning(f"structured_sql: unknown template '{template}', returning empty")
+        return []
+
+
+async def _structured_sql_commitment(
+    conn: asyncpg.Connection,
+    entity_uris: list[str] | None,
+    max_results: int,
+) -> list[EvidenceBundle]:
+    """Commitment + claim template: queries commitments and claims tables."""
+    bundles: list[EvidenceBundle] = []
+
+    # Sub-query 1: Commitments
+    try:
+        commitment_rows = await conn.fetch("""
+            SELECT c.commitment_rid, c.title, c.description, c.offer_type,
+                   c.state::text AS state, c.quantity, c.unit,
+                   cp.name AS pool_name, cp.state::text AS pool_state, cp.bioregion_uri
+            FROM commitments c
+            LEFT JOIN commitment_pools cp ON cp.id = c.pool_id
+            WHERE ($1::text[] IS NULL OR c.pledger_uri = ANY($1)
+                   OR cp.steward_uri = ANY($1) OR cp.bioregion_uri = ANY($1))
+            ORDER BY c.updated_at DESC
+            LIMIT $2
+        """, entity_uris, max_results)
+
+        for row in commitment_rows:
+            title = row['title'] or 'Untitled commitment'
+            offer_type = row['offer_type'] or 'unknown'
+            state = row['state'] or 'unknown'
+            pool_name = row['pool_name'] or 'no pool'
+            desc = (row['description'] or '')[:200]
+            text = f"Commitment: {title} ({offer_type}, {state}) in pool {pool_name} — {desc}"
+            bundles.append(EvidenceBundle(
+                source_uri=row['commitment_rid'],
+                source_type=SourceType.LOCAL_AUTHORITATIVE,
+                retrieval_op=RetrievalOp.STRUCTURED_SQL,
+                confidence=0.9,
+                text=text,
+                metadata={
+                    "label": title,
+                    "entity_type": "Commitment",
+                    "template": "commitment",
+                    "state": state,
+                    "pool_name": pool_name,
+                },
+            ))
+    except Exception as e:
+        logger.warning(f"structured_sql commitment query failed: {e}")
+
+    # Sub-query 2: Claims
+    try:
+        claim_rows = await conn.fetch("""
+            SELECT cl.claim_rid, cl.claim_type, cl.verification, cl.statement,
+                   cl.claimant_uri
+            FROM claims cl
+            WHERE ($1::text[] IS NULL OR cl.claimant_uri = ANY($1)
+                   OR cl.entity_uri = ANY($1))
+            ORDER BY cl.created_at DESC
+            LIMIT $2
+        """, entity_uris, max_results)
+
+        for row in claim_rows:
+            claim_type = row['claim_type'] or 'unknown'
+            verification = row['verification'] or 'unverified'
+            statement = row['statement'] or ''
+            text = f"Claim ({claim_type}, {verification}): {statement[:300]}"
+            bundles.append(EvidenceBundle(
+                source_uri=row['claim_rid'],
+                source_type=SourceType.LOCAL_AUTHORITATIVE,
+                retrieval_op=RetrievalOp.STRUCTURED_SQL,
+                confidence=0.85,
+                text=text,
+                metadata={
+                    "label": statement[:80] if statement else "Untitled claim",
+                    "entity_type": "Claim",
+                    "template": "commitment",
+                    "verification": verification,
+                },
+            ))
+    except Exception as e:
+        logger.warning(f"structured_sql claims query failed: {e}")
+
+    return bundles
+
+
+async def _structured_sql_roadmap(
+    conn: asyncpg.Connection,
+    entity_uris: list[str] | None,
+    max_results: int,
+) -> list[EvidenceBundle]:
+    """Roadmap template: queries entity_registry for roadmap entity types."""
+    bundles: list[EvidenceBundle] = []
+
+    try:
+        rows = await conn.fetch("""
+            SELECT er.fuseki_uri, er.entity_text, er.entity_type, er.description,
+                   er.metadata, er.last_seen_at
+            FROM entity_registry er
+            WHERE er.entity_type IN ('Initiative', 'WorkItem', 'Milestone', 'Outcome',
+                                     'Decision', 'Metric', 'Risk')
+              AND (er.node_private IS NULL OR er.node_private = false)
+              AND ($1::text[] IS NULL OR er.fuseki_uri = ANY($1))
+            ORDER BY er.last_seen_at DESC NULLS LAST
+            LIMIT $2
+        """, entity_uris, max_results)
+
+        for row in rows:
+            entity_text = row['entity_text'] or 'Untitled'
+            entity_type = row['entity_type'] or 'WorkItem'
+            desc = (row['description'] or '')[:300]
+            text = f"{entity_type}: {entity_text} — {desc}"
+            bundles.append(EvidenceBundle(
+                source_uri=row['fuseki_uri'],
+                source_type=SourceType.LOCAL_AUTHORITATIVE,
+                retrieval_op=RetrievalOp.STRUCTURED_SQL,
+                confidence=0.9,
+                text=text,
+                metadata={
+                    "label": entity_text,
+                    "entity_type": entity_type,
+                    "template": "roadmap",
+                },
+            ))
+    except Exception as e:
+        logger.warning(f"structured_sql roadmap query failed: {e}")
+
+    return bundles
 
 
 async def peer_query(**kwargs) -> list[EvidenceBundle]:
@@ -484,6 +634,15 @@ def evidence_bundles_to_legacy_format(
                 "score": b.confidence,
                 "description": ((ctx + " " if ctx else "") + b.text)[:400],
                 "url": b.metadata.get("wiki_url"),
+            })
+
+        elif b.retrieval_op == RetrievalOp.STRUCTURED_SQL and b.source_type == SourceType.LOCAL_AUTHORITATIVE:
+            sources.append({
+                "uri": b.source_uri,
+                "label": b.metadata.get("label", ""),
+                "entity_type": b.metadata.get("entity_type", ""),
+                "score": b.confidence,
+                "description": b.text,
             })
 
         elif b.retrieval_op == RetrievalOp.ENTITY_LOOKUP and b.source_type == SourceType.LOCAL_AUTHORITATIVE:
