@@ -88,9 +88,11 @@ def _commitment_claim_steps() -> list[PlanStep]:
     return [
         _step(RetrievalOp.ENTITY_LOOKUP, "entity_registry", max_results=10),
         _step(RetrievalOp.STRUCTURED_SQL, "commitments",
-              params={"template": "commitment"}, max_results=15, depends_on=[0]),
+              params={"template": "commitment"}, max_results=10, depends_on=[0]),
         _step(RetrievalOp.TEXT_SEARCH, "koi_memory_chunks",
-              params={"multi_query": True, "top_k": 6}, max_results=15, depends_on=[0]),
+              params={"multi_query": True, "top_k": 10}, max_results=20, depends_on=[0]),
+        _step(RetrievalOp.RELATIONSHIP_TRAVERSE, "entity_relationships",
+              params={"max_hops": 1}, max_results=20, depends_on=[0]),
     ]
 
 
