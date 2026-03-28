@@ -278,12 +278,12 @@ class TestRescoreValidation:
 # ---------------------------------------------------------------------------
 
 class TestCommitmentClaimSteps:
-    """Verify _commitment_claim_steps produces the B9b.1 plan (tightened)."""
+    """Verify _commitment_claim_steps: text-search-first, minimal entity lookup."""
 
     def test_step_count(self):
         from api.query_planner import _commitment_claim_steps
         steps = _commitment_claim_steps()
-        assert len(steps) == 3, f"Expected 3 steps, got {len(steps)}"
+        assert len(steps) == 2, f"Expected 2 steps (entity_lookup + text_search), got {len(steps)}"
 
     def test_text_search_top_k(self):
         from api.query_planner import _commitment_claim_steps
@@ -293,13 +293,13 @@ class TestCommitmentClaimSteps:
         assert len(text_steps) == 1
         assert text_steps[0].params.get("top_k") == 8
 
-    def test_structured_sql_max_reduced(self):
+    def test_no_structured_sql(self):
+        """STRUCTURED_SQL removed — DB rows for specific commitments don't help conceptual questions."""
         from api.query_planner import _commitment_claim_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _commitment_claim_steps()
         sql_steps = [s for s in steps if s.op == RetrievalOp.STRUCTURED_SQL]
-        assert len(sql_steps) == 1
-        assert sql_steps[0].budget.max_results == 5
+        assert len(sql_steps) == 0
 
     def test_entity_lookup_budget(self):
         from api.query_planner import _commitment_claim_steps
@@ -307,10 +307,9 @@ class TestCommitmentClaimSteps:
         steps = _commitment_claim_steps()
         el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
         assert len(el_steps) == 1
-        assert el_steps[0].budget.max_results == 5
+        assert el_steps[0].budget.max_results == 3
 
     def test_no_relationship_traverse(self):
-        """Relationship traverse removed — adds noise for conceptual questions."""
         from api.query_planner import _commitment_claim_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _commitment_claim_steps()
