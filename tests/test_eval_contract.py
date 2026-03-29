@@ -329,12 +329,12 @@ class TestCommitmentClaimSteps:
 # ---------------------------------------------------------------------------
 
 class TestRelationshipPathSteps:
-    """Verify _relationship_path_steps: tightened budgets (B9c Approach A)."""
+    """Verify _relationship_path_steps: text-search-first (B9c Approach B)."""
 
     def test_step_count(self):
         from api.query_planner import _relationship_path_steps
         steps = _relationship_path_steps()
-        assert len(steps) == 3
+        assert len(steps) == 2
 
     def test_entity_lookup_budget(self):
         from api.query_planner import _relationship_path_steps
@@ -344,14 +344,13 @@ class TestRelationshipPathSteps:
         assert len(el_steps) == 1
         assert el_steps[0].budget.max_results == 3
 
-    def test_relationship_traverse_params(self):
+    def test_no_relationship_traverse(self):
+        """RELATIONSHIP_TRAVERSE removed — Approach A showed it still adds noise."""
         from api.query_planner import _relationship_path_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _relationship_path_steps()
         rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
-        assert len(rel_steps) == 1
-        assert rel_steps[0].params.get("max_hops") == 1
-        assert rel_steps[0].budget.max_results == 10
+        assert len(rel_steps) == 0
 
     def test_text_search_multi_query(self):
         from api.query_planner import _relationship_path_steps

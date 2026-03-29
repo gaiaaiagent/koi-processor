@@ -94,7 +94,7 @@ class TestPlanAssembly:
         assert plan.steps[1].op == RetrievalOp.TEXT_SEARCH
 
     def test_assemble_relationship_path(self):
-        """Relationship path -> 3 steps with tightened budgets (B9c)."""
+        """Relationship path -> 2 steps, text-search-first (B9c Approach B)."""
         co = ClassifierOutput(
             query_taxonomy=QueryTaxonomy.RELATIONSHIP_PATH,
             depth_tier=DepthTier.STANDARD,
@@ -102,13 +102,11 @@ class TestPlanAssembly:
         )
         plan = assemble_plan(co, "How does X relate to Y?")
 
-        assert len(plan.steps) == 3
+        assert len(plan.steps) == 2
         ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.RELATIONSHIP_TRAVERSE, RetrievalOp.TEXT_SEARCH]
+        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.TEXT_SEARCH]
         assert plan.steps[0].budget.max_results == 3
-        assert plan.steps[1].params.get("max_hops") == 1
-        assert plan.steps[1].budget.max_results == 10
-        assert plan.steps[2].params.get("multi_query") is True
+        assert plan.steps[1].params.get("multi_query") is True
 
     def test_assemble_out_of_domain(self):
         """Out of domain -> empty steps list."""
