@@ -1,6 +1,6 @@
 # B9a — QueryPlan IR Specification
 
-**Status:** Design complete, pending implementation
+**Status:** Implemented (B9a+B9b+B9b.1+B9c). Decision matrix updated to match deployed code at `27c23daa`.
 **Schema:** `api/schemas/query_plan.py`
 **Architecture ref:** `BioregionalKnowledgeCommoning/docs/foundations/federated-memory-architecture.md`
 
@@ -34,16 +34,16 @@ Three layers, applied in order:
 
 ## 3. Decision Matrix
 
-**B9a matrix** — only uses live ops. Stub ops noted in "Future" column.
+**Current matrix** — reflects B9b.1+B9c tuning. Text-search-first + multi_query proved superior to STRUCTURED_SQL and RELATIONSHIP_TRAVERSE for commitment_claim and relationship_path (over-retrieval noise).
 
-| QueryTaxonomy | B9a Steps (live ops only) | Default Depth | Default Budget | Future |
-|---------------|---------------------------|---------------|----------------|--------|
-| `entity_definition` | entity_lookup → text_search | standard | max_results=5, top_k=8 | — |
-| `relationship_path` | entity_lookup → relationship_traverse(hops=2) → text_search | standard | max_results=10, top_k=8 | — |
-| `governance_policy` | text_search(multi_query=true) → entity_lookup | deep | max_results=8, top_k=12 | — |
-| `roadmap_status` | entity_lookup → text_search | standard | max_results=5, top_k=8 | B9b: structured_sql first |
-| `commitment_claim` | entity_lookup → text_search(multi_query=true) | standard | max_results=10, top_k=8 | B9b: structured_sql first |
-| `cross_node_provenance` | entity_lookup → text_search | standard | max_results=5, top_k=8 | B12: peer_query first |
+| QueryTaxonomy | Steps | Depth | Key Params | Notes |
+|---------------|-------|-------|------------|-------|
+| `entity_definition` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
+| `relationship_path` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9c: RELATIONSHIP_TRAVERSE removed (over-retrieval) |
+| `governance_policy` | text_search(multi_query) → entity_lookup → relationship_traverse(hops=1) | deep | el=8, top_k=12, rt=30 | — |
+| `roadmap_status` | entity_lookup → structured_sql(roadmap) → text_search | standard | el=5, sql=15, top_k=6 | — |
+| `commitment_claim` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9b.1: STRUCTURED_SQL removed (over-retrieval) |
+| `cross_node_provenance` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
 | `out_of_domain` | (none — immediate abstention) | — | — | — |
 
 ### Depth tier overrides
@@ -68,28 +68,31 @@ Each op maps to a trusted executor. All executors return `list[EvidenceBundle]`.
 - **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`
 
 #### relationship_traverse
-- **Wraps:** N-hop recursive CTE on `entity_relationships` (lines 5268-5307)
-- **Params:** `entity_uris: list[str]`, `max_hops: int = 2`, `predicate_filter: list[str] | None`
+- **Wraps:** N-hop recursive CTE on `entity_relationships` (`retrieval_executors.py`)
+- **Params:** `entity_uris: list[str]`, `max_hops: int = 1`, `predicate_filter: list[str] | None`
 - **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`, text = "subject --[predicate]--> object"
+- **Used by:** governance_policy (max_hops=1, max=30). Removed from relationship_path in B9c (over-retrieval even at 1-hop).
 
 #### text_search
 - **Wraps:** BM25+vector RRF fusion + FlashRank rerank (lines 5310-5448)
 - **Params:** `query: str`, `multi_query: bool = false`, `include_code: bool = false`, `top_k: int = 8`
 - **Returns:** EvidenceBundles with `source_type=LOCAL_DOCUMENT`
 
+#### structured_sql (B9b — live)
+- **Wraps:** Template-driven SQL queries against `commitment_registry`, `entity_registry` (roadmap types)
+- **Params:** `template: str`, `entity_uris: list[str] | None`, `max_results: int`
+- **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`
+- **Used by:** roadmap_status. Removed from commitment_claim in B9b.1 (over-retrieval).
+
 ### Stub ops (future phases)
 
-#### graph_query (B9c)
+#### graph_query
 - **Future:** Cypher via Apache AGE for typed pattern matching
-- **B9a behavior:** Returns empty list, logs "graph_query not implemented in B9a"
-
-#### structured_sql (B9b)
-- **Future:** Schema-aware SQL generation via typed DSL
-- **B9a behavior:** Returns empty list, logs "structured_sql not implemented in B9a"
+- **Current behavior:** Returns empty list
 
 #### peer_query (B12)
 - **Future:** Federation fan-out to eligible peers. Requires PolicyScope.eligible_peers (not in v0).
-- **B9a behavior:** Returns empty list, logs "peer_query not implemented in B9a"
+- **Current behavior:** Returns empty list
 
 ## 5. Classifier Prompt Template
 
