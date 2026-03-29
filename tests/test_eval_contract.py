@@ -329,13 +329,35 @@ class TestCommitmentClaimSteps:
 # ---------------------------------------------------------------------------
 
 class TestRelationshipPathSteps:
-    """Verify _relationship_path_steps current state (Phase 3 will modify if gate passes)."""
+    """Verify _relationship_path_steps: tightened budgets (B9c Approach A)."""
 
-    def test_current_max_hops_is_2(self):
-        """Before Phase 3, max_hops should be 2."""
+    def test_step_count(self):
+        from api.query_planner import _relationship_path_steps
+        steps = _relationship_path_steps()
+        assert len(steps) == 3
+
+    def test_entity_lookup_budget(self):
+        from api.query_planner import _relationship_path_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _relationship_path_steps()
+        el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
+        assert len(el_steps) == 1
+        assert el_steps[0].budget.max_results == 3
+
+    def test_relationship_traverse_params(self):
         from api.query_planner import _relationship_path_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _relationship_path_steps()
         rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
         assert len(rel_steps) == 1
-        assert rel_steps[0].params.get("max_hops") == 2
+        assert rel_steps[0].params.get("max_hops") == 1
+        assert rel_steps[0].budget.max_results == 10
+
+    def test_text_search_multi_query(self):
+        from api.query_planner import _relationship_path_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _relationship_path_steps()
+        text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
+        assert len(text_steps) == 1
+        assert text_steps[0].params.get("multi_query") is True
+        assert text_steps[0].params.get("top_k") == 8

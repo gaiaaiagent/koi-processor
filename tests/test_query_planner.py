@@ -94,7 +94,7 @@ class TestPlanAssembly:
         assert plan.steps[1].op == RetrievalOp.TEXT_SEARCH
 
     def test_assemble_relationship_path(self):
-        """Relationship path -> 3 steps with relationship_traverse."""
+        """Relationship path -> 3 steps with tightened budgets (B9c)."""
         co = ClassifierOutput(
             query_taxonomy=QueryTaxonomy.RELATIONSHIP_PATH,
             depth_tier=DepthTier.STANDARD,
@@ -104,9 +104,11 @@ class TestPlanAssembly:
 
         assert len(plan.steps) == 3
         ops = [s.op for s in plan.steps]
-        assert RetrievalOp.ENTITY_LOOKUP in ops
-        assert RetrievalOp.RELATIONSHIP_TRAVERSE in ops
-        assert RetrievalOp.TEXT_SEARCH in ops
+        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.RELATIONSHIP_TRAVERSE, RetrievalOp.TEXT_SEARCH]
+        assert plan.steps[0].budget.max_results == 3
+        assert plan.steps[1].params.get("max_hops") == 1
+        assert plan.steps[1].budget.max_results == 10
+        assert plan.steps[2].params.get("multi_query") is True
 
     def test_assemble_out_of_domain(self):
         """Out of domain -> empty steps list."""
@@ -132,8 +134,8 @@ class TestPlanAssembly:
         assert all(s.op == RetrievalOp.ENTITY_LOOKUP for s in plan.steps)
         assert len(plan.steps) == 1
 
-    def test_commitment_claim_includes_structured_sql(self):
-        """commitment_claim plan: ENTITY_LOOKUP -> STRUCTURED_SQL -> TEXT_SEARCH."""
+    def test_commitment_claim_text_search_first(self):
+        """commitment_claim plan: ENTITY_LOOKUP -> TEXT_SEARCH (multi_query)."""
         co = ClassifierOutput(
             query_taxonomy=QueryTaxonomy.COMMITMENT_CLAIM,
             depth_tier=DepthTier.STANDARD,
@@ -142,12 +144,11 @@ class TestPlanAssembly:
         plan = assemble_plan(co, "What commitments have been made?")
 
         ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.STRUCTURED_SQL, RetrievalOp.TEXT_SEARCH]
-        # STRUCTURED_SQL step has commitment template
-        sql_step = plan.steps[1]
-        assert sql_step.params.get("template") == "commitment"
-        assert sql_step.budget.max_results == 15
-        assert sql_step.depends_on == [0]
+        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.TEXT_SEARCH]
+        assert plan.steps[0].budget.max_results == 3
+        text_step = plan.steps[1]
+        assert text_step.params.get("multi_query") is True
+        assert text_step.params.get("top_k") == 8
 
     def test_roadmap_status_includes_structured_sql(self):
         """roadmap_status plan: ENTITY_LOOKUP -> STRUCTURED_SQL -> TEXT_SEARCH."""
