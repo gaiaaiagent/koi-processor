@@ -203,7 +203,7 @@ This repo is the **canonical** KOI runtime. The Octo deployment repo pins a spec
 ### Router Modules
 Capability-gated endpoint groups, mounted conditionally at startup:
 - `api/routers/graph_router.py` — `/graph/*` traversal + temporal queries (assertion history)
-- `api/routers/web_router.py` — `/web/*` content curation (BKC only)
+- `api/routers/web_router.py` — `/web/*` content preview/ingest when `web_sensor` is enabled (personal + coordinator profiles)
 - `api/routers/github_router.py` — `/github/*` repo scanning (BKC only)
 - `api/routers/vault_sync_router.py` — `/koi-net/vault-sync/*` (personal only)
 - `api/routers/network_router.py` — `/network/*` coordinator aggregation (BKC coordinator only)

@@ -7,6 +7,7 @@
 # DEPLOYMENT MODE
 # ============================================
 KOI_MODE=personal
+DEPLOYMENT_PROFILE=personal
 
 # ============================================
 # DATABASE CONFIGURATION
@@ -41,6 +42,8 @@ OPENAI_API_KEY="{{OPENAI_API_KEY}}"
 # PERSONAL KOI API
 # ============================================
 KOI_API_PORT=8351
+WEB_SENSOR_ENABLED=true
+QUERY_ENDPOINT_ENABLED=true
 
 # ============================================
 # OBSIDIAN VAULT CONFIGURATION

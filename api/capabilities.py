@@ -39,20 +39,29 @@ class Capabilities:
 
     @classmethod
     def from_env(cls) -> Capabilities:
-        """Build capabilities from environment variables."""
-        profile = os.environ.get("DEPLOYMENT_PROFILE", "personal").strip()
+        """Build capabilities from environment variables.
+
+        Named deployment profiles provide the baseline capability set.
+        Individual env vars can then override specific flags.
+        """
+        profile = (
+            os.environ.get("DEPLOYMENT_PROFILE")
+            or os.environ.get("KOI_MODE")
+            or "personal"
+        ).strip()
+        base = cls.from_profile(profile)
         return cls(
-            web_sensor=_flag("WEB_SENSOR_ENABLED"),
-            github_sensor=_flag("GITHUB_SENSOR_ENABLED"),
-            mediawiki_sensor=_flag("MEDIAWIKI_SENSOR_ENABLED"),
-            llm_enrichment=_flag("LLM_ENRICHMENT_ENABLED"),
-            vault_sync=_flag("VAULT_SYNC_ENABLED"),
-            terminusdb=_flag("TERMINUSDB_ENABLED"),
-            pipeline=_flag("PIPELINE_ENABLED"),
-            graph_queries=_flag("GRAPH_QUERIES_ENABLED", default=True),
-            coordinator_endpoints=_flag("COORDINATOR_ENDPOINTS_ENABLED"),
-            assertion_history=_flag("ASSERTION_HISTORY_ENABLED", default=True),
-            query_endpoint=_flag("QUERY_ENDPOINT_ENABLED"),
+            web_sensor=_flag("WEB_SENSOR_ENABLED", default=base.web_sensor),
+            github_sensor=_flag("GITHUB_SENSOR_ENABLED", default=base.github_sensor),
+            mediawiki_sensor=_flag("MEDIAWIKI_SENSOR_ENABLED", default=base.mediawiki_sensor),
+            llm_enrichment=_flag("LLM_ENRICHMENT_ENABLED", default=base.llm_enrichment),
+            vault_sync=_flag("VAULT_SYNC_ENABLED", default=base.vault_sync),
+            terminusdb=_flag("TERMINUSDB_ENABLED", default=base.terminusdb),
+            pipeline=_flag("PIPELINE_ENABLED", default=base.pipeline),
+            graph_queries=_flag("GRAPH_QUERIES_ENABLED", default=base.graph_queries),
+            coordinator_endpoints=_flag("COORDINATOR_ENDPOINTS_ENABLED", default=base.coordinator_endpoints),
+            assertion_history=_flag("ASSERTION_HISTORY_ENABLED", default=base.assertion_history),
+            query_endpoint=_flag("QUERY_ENDPOINT_ENABLED", default=base.query_endpoint),
             deployment_profile=profile,
         )
 
@@ -61,6 +70,7 @@ class Capabilities:
         """Return sensible defaults for a named deployment profile."""
         profiles = {
             "personal": cls(
+                web_sensor=True,
                 vault_sync=True,
                 terminusdb=False,
                 graph_queries=True,
