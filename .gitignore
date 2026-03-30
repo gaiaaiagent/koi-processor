@@ -113,4 +113,6 @@ docs/soak-results/
 .deepeval/
 tests/eval/results/
 scripts/reextraction/bakeoff_cache/
+scripts/reextraction/BAKEOFF_*
+scripts/reextraction/CONTEXTUAL_*
 tmp_*.jsonl
