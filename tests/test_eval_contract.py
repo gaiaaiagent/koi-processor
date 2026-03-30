@@ -328,35 +328,68 @@ class TestCommitmentClaimSteps:
 # Relationship path steps (pre-Phase 3 — verify current state)
 # ---------------------------------------------------------------------------
 
-class TestGovernancePolicySteps:
-    """Verify _governance_policy_steps: B9d.1 Variant B (TEXT_SEARCH only, no entity lookup)."""
+class TestGovernanceDefinitionSteps:
+    """Verify _governance_policy_steps with definition query: ENTITY_LOOKUP → TEXT_SEARCH (B9d.2)."""
 
     def test_step_count(self):
         from api.query_planner import _governance_policy_steps
-        steps = _governance_policy_steps()
-        assert len(steps) == 1, f"Expected 1 step (text_search only), got {len(steps)}"
+        steps = _governance_policy_steps("What is the CommonsChange reference profile?")
+        assert len(steps) == 2, f"Expected 2 steps (entity_lookup + text_search), got {len(steps)}"
+
+    def test_has_entity_lookup(self):
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps("What is the CommonsChange reference profile?")
+        el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
+        assert len(el_steps) == 1
+        assert el_steps[0].budget.max_results == 5
+
+    def test_text_search_params(self):
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps("What is a node participation profile?")
+        text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
+        assert len(text_steps) == 1
+        assert text_steps[0].params.get("multi_query") is True
+        assert text_steps[0].params.get("top_k") == 10
 
     def test_no_relationship_traverse(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps()
+        steps = _governance_policy_steps("What are OCAP principles?")
         rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
         assert len(rel_steps) == 0
+
+
+class TestGovernancePolicyMechanismSteps:
+    """Verify _governance_policy_steps with policy query: TEXT_SEARCH only (B9d.2)."""
+
+    def test_step_count(self):
+        from api.query_planner import _governance_policy_steps
+        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
+        assert len(steps) == 1, f"Expected 1 step (text_search only), got {len(steps)}"
 
     def test_no_entity_lookup(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps()
+        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
         el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
         assert len(el_steps) == 0
 
     def test_text_search_params(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps()
+        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
         assert steps[0].op == RetrievalOp.TEXT_SEARCH
         assert steps[0].params.get("multi_query") is True
         assert steps[0].params.get("top_k") == 12
+
+    def test_no_relationship_traverse(self):
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
+        rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
+        assert len(rel_steps) == 0
 
 
 # ---------------------------------------------------------------------------

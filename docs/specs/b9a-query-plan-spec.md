@@ -40,7 +40,7 @@ Three layers, applied in order:
 |---------------|-------|-------|------------|-------|
 | `entity_definition` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
 | `relationship_path` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9c: RELATIONSHIP_TRAVERSE removed (over-retrieval) |
-| `governance_policy` | text_search(multi_query, top_k=12) | standard | top_k=12 | B9d.1 Variant B: text-only, no entity lookup |
+| `governance_policy` | **sub-routed** (see below) | standard | varies | B9d.2: within-category sub-routing by query shape |
 | `roadmap_status` | entity_lookup → structured_sql(roadmap) → text_search | standard | el=5, sql=15, top_k=6 | — |
 | `commitment_claim` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9b.1: STRUCTURED_SQL removed (over-retrieval) |
 | `cross_node_provenance` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
@@ -55,6 +55,17 @@ The classifier may recommend a depth tier. The plan assembly applies it:
 | `shallow` | entity_lookup only. Skip text_search and relationship_traverse. |
 | `standard` | Use steps from decision matrix as-is. |
 | `deep` | Add `multi_query=true` to all text_search steps. Increase `max_results` by 50%. |
+
+### governance_policy sub-routing (B9d.2)
+
+The `governance_policy` category contains two distinct sub-intents. A keyword heuristic in `_governance_policy_steps(query)` routes to the appropriate sub-plan:
+
+| Sub-route | Trigger | Steps | Key Params |
+|-----------|---------|-------|------------|
+| **definition** | Query starts with "What is " / "What are " | entity_lookup(5) → text_search(multi_query, top_k=10) | Entity anchors + targeted text |
+| **policy** | All other queries | text_search(multi_query, top_k=12) | Broad document coverage |
+
+Hybrid questions (e.g. "What are OCAP principles and how do they apply...") route to **definition** because the leading phrase signals concept anchoring. Depth overrides apply after sub-routing.
 
 ## 4. Typed Retrieval Op Set
 
