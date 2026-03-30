@@ -5149,6 +5149,7 @@ class ChatRequest(BaseModel):
     include_code: bool = Field(default=False, description="Include code entity chunks in retrieval (default: exclude)")
     multi_query: bool = Field(default=False, description="Enable multi-query expansion for broader retrieval (B8b)")
     planner: bool = Field(default=False, description="B9a QueryPlan IR path (experimental)")
+    debug_prompt: bool = Field(default=False, description="Include assembled prompt in response (requires CHAT_DEBUG_PROMPT env)")
 
 
 @app.post("/chat")
@@ -5399,6 +5400,12 @@ async def chat_endpoint(request: ChatRequest):
     # Always emit plan_trace when planner was requested (including fallback)
     if planner_requested and plan_trace is not None:
         response["plan_trace"] = plan_trace
+    # Debug prompt capture (double-gated: request flag + server env var)
+    if request.debug_prompt and os.getenv("CHAT_DEBUG_PROMPT"):
+        response["_debug_prompt"] = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
     return response
 
 

@@ -502,3 +502,90 @@ class TestChatEndpointOrchestration:
         assert "intent" in response
         assert response["answer"] == "Mock answer about eelgrass"
         assert len(response["sources"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# debug_prompt gating tests
+# ---------------------------------------------------------------------------
+
+def _chat_endpoint_patches():
+    """Common patches for chat endpoint tests. Returns a context manager stack."""
+    from api.schemas.query_plan import EvidenceBundle, RetrievalOp, SourceType
+
+    entity_bundle = EvidenceBundle(
+        source_uri="urn:e:1", source_type=SourceType.LOCAL_AUTHORITATIVE,
+        retrieval_op=RetrievalOp.ENTITY_LOOKUP, confidence=0.9,
+        text="Mock entity",
+        metadata={"entity_type": "Concept", "label": "Test", "fuseki_uri": "urn:e:1"},
+    )
+
+    mock_chat_provider = AsyncMock()
+    mock_chat_provider.complete = AsyncMock(return_value="Mock answer")
+
+    mock_cm = AsyncMock()
+    mock_conn = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = mock_cm
+
+    return {
+        "api.personal_ingest_api.db_pool": mock_pool,
+        "api.personal_ingest_api.classifier_provider": mock_chat_provider,
+        "api.personal_ingest_api.chat_answer_provider": mock_chat_provider,
+        "api.personal_ingest_api.expansion_provider": mock_chat_provider,
+        "api.personal_ingest_api.generate_embedding": AsyncMock(return_value=[0.1] * 1536),
+        "api.personal_ingest_api._try_structured_graph_query": AsyncMock(return_value=""),
+        "api.retrieval_executors.entity_lookup": AsyncMock(return_value=[entity_bundle]),
+        "api.retrieval_executors.relationship_traverse": AsyncMock(return_value=[]),
+        "api.retrieval_executors.text_search": AsyncMock(return_value=[]),
+        "api.retrieval_executors.web_source_lookup": AsyncMock(return_value=[]),
+    }
+
+
+class TestDebugPromptGating:
+
+    @pytest.mark.asyncio
+    async def test_debug_prompt_absent_by_default(self):
+        """Default request has no _debug_prompt in response."""
+        patches = _chat_endpoint_patches()
+        import contextlib
+        with contextlib.ExitStack() as stack:
+            for target, mock_obj in patches.items():
+                stack.enter_context(patch(target, mock_obj))
+            from api.personal_ingest_api import chat_endpoint, ChatRequest
+            response = await chat_endpoint(ChatRequest(query="test"))
+        assert "_debug_prompt" not in response
+
+    @pytest.mark.asyncio
+    async def test_debug_prompt_gated_by_env(self):
+        """debug_prompt=True but no CHAT_DEBUG_PROMPT env -> no _debug_prompt."""
+        patches = _chat_endpoint_patches()
+        import contextlib
+        with contextlib.ExitStack() as stack:
+            for target, mock_obj in patches.items():
+                stack.enter_context(patch(target, mock_obj))
+            stack.enter_context(patch.dict("os.environ", {}, clear=False))
+            # Ensure CHAT_DEBUG_PROMPT is not set
+            import os
+            os.environ.pop("CHAT_DEBUG_PROMPT", None)
+            from api.personal_ingest_api import chat_endpoint, ChatRequest
+            response = await chat_endpoint(ChatRequest(query="test", debug_prompt=True))
+        assert "_debug_prompt" not in response
+
+    @pytest.mark.asyncio
+    async def test_debug_prompt_present_when_gated(self):
+        """debug_prompt=True + CHAT_DEBUG_PROMPT=1 -> _debug_prompt with prompts."""
+        patches = _chat_endpoint_patches()
+        import contextlib
+        with contextlib.ExitStack() as stack:
+            for target, mock_obj in patches.items():
+                stack.enter_context(patch(target, mock_obj))
+            stack.enter_context(patch.dict("os.environ", {"CHAT_DEBUG_PROMPT": "1"}, clear=False))
+            from api.personal_ingest_api import chat_endpoint, ChatRequest
+            response = await chat_endpoint(ChatRequest(query="test", debug_prompt=True))
+        assert "_debug_prompt" in response
+        assert "system_prompt" in response["_debug_prompt"]
+        assert "user_prompt" in response["_debug_prompt"]
+        assert len(response["_debug_prompt"]["system_prompt"]) > 0
+        assert len(response["_debug_prompt"]["user_prompt"]) > 0
