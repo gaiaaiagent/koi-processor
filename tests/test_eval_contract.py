@@ -329,15 +329,15 @@ class TestCommitmentClaimSteps:
 # ---------------------------------------------------------------------------
 
 class TestGovernancePolicySteps:
-    """Verify _governance_policy_steps: text-search-first (B9d)."""
+    """Verify _governance_policy_steps: B9d.1 Variant A (TEXT_SEARCH-first, top_k=12, entity=3)."""
 
     def test_step_count(self):
         from api.query_planner import _governance_policy_steps
         steps = _governance_policy_steps()
-        assert len(steps) == 2, f"Expected 2 steps (entity_lookup + text_search), got {len(steps)}"
+        assert len(steps) == 2, f"Expected 2 steps, got {len(steps)}"
 
     def test_no_relationship_traverse(self):
-        """RELATIONSHIP_TRAVERSE removed — over-retrieval pattern confirmed."""
+        """RELATIONSHIP_TRAVERSE removed — over-retrieval confirmed in B9c/B9d."""
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps()
@@ -352,14 +352,13 @@ class TestGovernancePolicySteps:
         assert len(el_steps) == 1
         assert el_steps[0].budget.max_results == 3
 
-    def test_text_search_params(self):
+    def test_text_search_first_with_budget(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps()
-        text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
-        assert len(text_steps) == 1
-        assert text_steps[0].params.get("multi_query") is True
-        assert text_steps[0].params.get("top_k") == 8
+        assert steps[0].op == RetrievalOp.TEXT_SEARCH
+        assert steps[0].params.get("multi_query") is True
+        assert steps[0].params.get("top_k") == 12
 
 
 # ---------------------------------------------------------------------------
