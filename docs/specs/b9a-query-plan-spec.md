@@ -40,7 +40,7 @@ Three layers, applied in order:
 |---------------|-------|-------|------------|-------|
 | `entity_definition` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
 | `relationship_path` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9c: RELATIONSHIP_TRAVERSE removed (over-retrieval) |
-| `governance_policy` | text_search(multi_query) → entity_lookup → relationship_traverse(hops=1) | deep | el=8, top_k=12, rt=30 | — |
+| `governance_policy` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9d: RELATIONSHIP_TRAVERSE removed (over-retrieval) |
 | `roadmap_status` | entity_lookup → structured_sql(roadmap) → text_search | standard | el=5, sql=15, top_k=6 | — |
 | `commitment_claim` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9b.1: STRUCTURED_SQL removed (over-retrieval) |
 | `cross_node_provenance` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
@@ -71,7 +71,7 @@ Each op maps to a trusted executor. All executors return `list[EvidenceBundle]`.
 - **Wraps:** N-hop recursive CTE on `entity_relationships` (`retrieval_executors.py`)
 - **Params:** `entity_uris: list[str]`, `max_hops: int = 1`, `predicate_filter: list[str] | None`
 - **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`, text = "subject --[predicate]--> object"
-- **Used by:** governance_policy (max_hops=1, max=30). Removed from relationship_path in B9c (over-retrieval even at 1-hop).
+- **Used by:** None currently. Removed from relationship_path in B9c and governance_policy in B9d (over-retrieval even at 1-hop).
 
 #### text_search
 - **Wraps:** BM25+vector RRF fusion + FlashRank rerank (lines 5310-5448)

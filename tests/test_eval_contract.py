@@ -328,6 +328,44 @@ class TestCommitmentClaimSteps:
 # Relationship path steps (pre-Phase 3 — verify current state)
 # ---------------------------------------------------------------------------
 
+class TestGovernancePolicySteps:
+    """Verify _governance_policy_steps: text-search-first (B9d)."""
+
+    def test_step_count(self):
+        from api.query_planner import _governance_policy_steps
+        steps = _governance_policy_steps()
+        assert len(steps) == 2, f"Expected 2 steps (entity_lookup + text_search), got {len(steps)}"
+
+    def test_no_relationship_traverse(self):
+        """RELATIONSHIP_TRAVERSE removed — over-retrieval pattern confirmed."""
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps()
+        rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
+        assert len(rel_steps) == 0
+
+    def test_entity_lookup_budget(self):
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps()
+        el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
+        assert len(el_steps) == 1
+        assert el_steps[0].budget.max_results == 3
+
+    def test_text_search_params(self):
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps()
+        text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
+        assert len(text_steps) == 1
+        assert text_steps[0].params.get("multi_query") is True
+        assert text_steps[0].params.get("top_k") == 8
+
+
+# ---------------------------------------------------------------------------
+# Relationship path steps (pre-Phase 3 — verify current state)
+# ---------------------------------------------------------------------------
+
 class TestRelationshipPathSteps:
     """Verify _relationship_path_steps: text-search-first (B9c Approach B)."""
 
