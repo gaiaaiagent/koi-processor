@@ -48,6 +48,11 @@ DELETE_EVENT_RESERVE = max(0, min(DELETE_EVENT_RESERVE, MAX_EVENTS_PER_SCAN))
 # Watcher constants (WP4)
 WATCHER_DEBOUNCE_MS = int(os.getenv("VAULT_SYNC_WATCHER_DEBOUNCE_MS", "500"))
 
+# Symlink following (opt-in) — resolves symlinks to their target files.
+# Only follows symlinks whose resolved path is still under the vault root
+# (prevents directory escape). Circular symlinks are caught by resolve(strict=True).
+FOLLOW_SYMLINKS = os.getenv("VAULT_SYNC_FOLLOW_SYMLINKS", "false").strip().lower() in ("1", "true", "yes", "on")
+
 # Metrics persistence
 METRICS_PERSIST_EVERY_N_SCANS = 5
 METRICS_PERSIST_EVERY_SECS = 300
@@ -56,6 +61,44 @@ METRICS_PERSIST_EVERY_SECS = 300
 class VaultUnavailableError(Exception):
     """Raised when vault/shared folder is not accessible."""
     pass
+
+
+def _resolve_if_symlink(path: Path, vault_root: Path) -> Optional[Path]:
+    """Resolve a symlink to its target, with safety checks.
+
+    Returns the resolved path if:
+    - FOLLOW_SYMLINKS is enabled
+    - The path is a symlink
+    - The resolved target exists and is a regular file
+    - The resolved target is still under vault_root (no directory escape)
+
+    Returns None if the symlink should be skipped (disabled, circular,
+    escapes vault boundary, or target doesn't exist).
+    """
+    if not FOLLOW_SYMLINKS:
+        return None
+    if not path.is_symlink():
+        return None
+    try:
+        resolved = path.resolve(strict=True)  # raises OSError on circular/broken
+    except OSError:
+        logger.debug("Skipping broken/circular symlink: %s", path)
+        return None
+    if not resolved.is_file():
+        return None
+    # Safety: resolved target must be under vault_root OR an explicitly
+    # allowed root. Default allowed roots include the user's home directory.
+    # Operators can extend via VAULT_SYNC_SYMLINK_ALLOWED_ROOTS (colon-separated).
+    _extra_roots_str = os.getenv("VAULT_SYNC_SYMLINK_ALLOWED_ROOTS", "")
+    _extra_roots = [Path(p) for p in _extra_roots_str.split(":") if p.strip()]
+    _allowed_roots = [vault_root, Path.home()] + _extra_roots
+    if not any(resolved == root or root in resolved.parents for root in _allowed_roots):
+        logger.warning(
+            "Symlink target outside allowed roots, skipping: %s -> %s (allowed: %s)",
+            path, resolved, [str(r) for r in _allowed_roots],
+        )
+        return None
+    return resolved
 
 
 @dataclasses.dataclass
@@ -708,14 +751,20 @@ class VaultSyncManager:
         for shared_folder in folder_set:
             base_dir = self.vault_path / shared_folder
             for md_file in base_dir.rglob("*.md"):
-                if md_file.is_symlink() or not md_file.is_file():
+                read_path = md_file
+                if md_file.is_symlink():
+                    resolved = _resolve_if_symlink(md_file, self.vault_path)
+                    if resolved is None:
+                        continue
+                    read_path = resolved
+                elif not md_file.is_file():
                     continue
                 try:
                     rel_path = f"{shared_folder}/{md_file.relative_to(base_dir)}"
                 except ValueError:
                     continue
                 try:
-                    content = md_file.read_bytes()
+                    content = read_path.read_bytes()
                     disk_files[rel_path] = hashlib.sha256(content).hexdigest()
                 except OSError:
                     continue
@@ -916,9 +965,14 @@ class VaultSyncManager:
         create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
 
         for md_file in base_dir.rglob("*.md"):
+            # Determine the actual file to read (may differ from md_file if symlink)
+            read_path = md_file
             if md_file.is_symlink():
-                continue
-            if not md_file.is_file():
+                resolved = _resolve_if_symlink(md_file, self.vault_path)
+                if resolved is None:
+                    continue
+                read_path = resolved
+            elif not md_file.is_file():
                 continue
 
             try:
@@ -929,9 +983,9 @@ class VaultSyncManager:
             seen_paths.add(rel_path)
             files_scanned += 1
 
-            # stat for mtime + size
+            # stat for mtime + size (use read_path for symlink targets)
             try:
-                stat = md_file.stat()
+                stat = read_path.stat()
             except OSError:
                 continue
 
@@ -951,7 +1005,7 @@ class VaultSyncManager:
             # Write debounce: wait and re-check before hashing
             await asyncio.sleep(WRITE_DEBOUNCE_MS / 1000)
             try:
-                stat2 = md_file.stat()
+                stat2 = read_path.stat()
             except OSError:
                 continue
             if stat2.st_mtime_ns != mtime_ns:
@@ -959,7 +1013,7 @@ class VaultSyncManager:
 
             # Read and hash
             try:
-                file_bytes = md_file.read_bytes()
+                file_bytes = read_path.read_bytes()
             except OSError as e:
                 logger.warning("vault_sync.scan_read_error path=%s error=%s", rel_path, e)
                 continue
@@ -1122,6 +1176,10 @@ class VaultSyncManager:
         source_node: str, event_id: str, rid: str,
         file_size: int, timestamp: str,
     ):
+        # Symlinks are never overwritten by incoming events — even with
+        # FOLLOW_SYMLINKS enabled (which only affects *outbound* scanning).
+        # An incoming file that would land on a symlink path is treated as
+        # non-existent, creating a conflict copy instead of clobbering the link.
         file_exists = target_path.exists() and not target_path.is_symlink()
 
         if event_type == "NEW" and file_exists:
@@ -1212,9 +1270,11 @@ class VaultSyncManager:
             await self._record_applied(source_node, event_id, rid)
             return
 
-        # Safe to delete
+        # Safe to delete — but never remove a symlink (user-managed)
         try:
-            if target_path.exists():
+            if target_path.is_symlink():
+                logger.warning("vault_sync.apply_forget_skipped_symlink path=%s", target_path)
+            elif target_path.exists():
                 target_path.unlink()
         except OSError as e:
             logger.error("vault_sync.delete_error path=%s error=%s", target_path, e)
