@@ -180,7 +180,7 @@ class TestPlanAssembly:
         assert text_step.params.get("top_k") == 10
 
     def test_governance_policy_mechanism_plan(self):
-        """governance_policy + 'How does X?' → TEXT_SEARCH only (B9d.2 policy sub-route)."""
+        """governance_policy + 'How does X?' → TEXT_SEARCH → ENTITY_LOOKUP (B9d.2 policy sub-route)."""
         co = ClassifierOutput(
             query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
             depth_tier=DepthTier.STANDARD,
@@ -189,10 +189,11 @@ class TestPlanAssembly:
         plan = assemble_plan(co, "How does the BKC handle visibility scoping?")
 
         ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.TEXT_SEARCH]
+        assert ops == [RetrievalOp.TEXT_SEARCH, RetrievalOp.ENTITY_LOOKUP]
         text_step = plan.steps[0]
         assert text_step.params.get("multi_query") is True
         assert text_step.params.get("top_k") == 12
+        assert plan.steps[1].budget.max_results == 3
 
     def test_governance_hybrid_routes_to_definition(self):
         """Hybrid questions starting with 'What are/is' route to definition sub-plan."""
@@ -227,12 +228,14 @@ class TestPlanAssembly:
             depth_tier=DepthTier.DEEP,
             confidence=0.9,
         )
-        # Policy + deep → text_search with boosted budget
+        # Policy + deep → text_search + entity_lookup, both with boosted budget
         plan2 = assemble_plan(co_deep, "How does the BKC handle visibility scoping?")
         text_steps = [s for s in plan2.steps if s.op == RetrievalOp.TEXT_SEARCH]
         assert len(text_steps) >= 1
         assert text_steps[0].params.get("multi_query") is True
         assert text_steps[0].budget.max_results > 20
+        el_steps = [s for s in plan2.steps if s.op == RetrievalOp.ENTITY_LOOKUP]
+        assert len(el_steps) == 1
 
     def test_assemble_depth_deep(self):
         """Deep depth -> multi_query=true, max_results +50%."""

@@ -362,27 +362,34 @@ class TestGovernanceDefinitionSteps:
 
 
 class TestGovernancePolicyMechanismSteps:
-    """Verify _governance_policy_steps with policy query: TEXT_SEARCH only (B9d.2)."""
+    """Verify _governance_policy_steps with policy query: TEXT_SEARCH → ENTITY_LOOKUP (B9d.2)."""
 
     def test_step_count(self):
         from api.query_planner import _governance_policy_steps
         steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        assert len(steps) == 1, f"Expected 1 step (text_search only), got {len(steps)}"
+        assert len(steps) == 2, f"Expected 2 steps (text_search + entity_lookup), got {len(steps)}"
 
-    def test_no_entity_lookup(self):
+    def test_step_order(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
-        assert len(el_steps) == 0
+        assert steps[0].op == RetrievalOp.TEXT_SEARCH
+        assert steps[1].op == RetrievalOp.ENTITY_LOOKUP
 
     def test_text_search_params(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        assert steps[0].op == RetrievalOp.TEXT_SEARCH
         assert steps[0].params.get("multi_query") is True
         assert steps[0].params.get("top_k") == 12
+
+    def test_entity_lookup_budget(self):
+        from api.query_planner import _governance_policy_steps
+        from api.schemas.query_plan import RetrievalOp
+        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
+        el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
+        assert len(el_steps) == 1
+        assert el_steps[0].budget.max_results == 3
 
     def test_no_relationship_traverse(self):
         from api.query_planner import _governance_policy_steps
