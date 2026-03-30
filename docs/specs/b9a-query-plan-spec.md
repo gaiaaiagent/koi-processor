@@ -40,7 +40,7 @@ Three layers, applied in order:
 |---------------|-------|-------|------------|-------|
 | `entity_definition` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
 | `relationship_path` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9c: RELATIONSHIP_TRAVERSE removed (over-retrieval) |
-| `governance_policy` | text_search(multi_query, top_k=12) → entity_lookup(3) | standard | top_k=12, el=3 | B9d.1 Variant A: text-first, restored budget, no RELATIONSHIP_TRAVERSE |
+| `governance_policy` | text_search(multi_query, top_k=12) | standard | top_k=12 | B9d.1 Variant B: text-only, no entity lookup |
 | `roadmap_status` | entity_lookup → structured_sql(roadmap) → text_search | standard | el=5, sql=15, top_k=6 | — |
 | `commitment_claim` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9b.1: STRUCTURED_SQL removed (over-retrieval) |
 | `cross_node_provenance` | entity_lookup → text_search | standard | el=5, top_k=8 | — |

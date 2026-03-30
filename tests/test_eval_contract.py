@@ -329,30 +329,28 @@ class TestCommitmentClaimSteps:
 # ---------------------------------------------------------------------------
 
 class TestGovernancePolicySteps:
-    """Verify _governance_policy_steps: B9d.1 Variant A (TEXT_SEARCH-first, top_k=12, entity=3)."""
+    """Verify _governance_policy_steps: B9d.1 Variant B (TEXT_SEARCH only, no entity lookup)."""
 
     def test_step_count(self):
         from api.query_planner import _governance_policy_steps
         steps = _governance_policy_steps()
-        assert len(steps) == 2, f"Expected 2 steps, got {len(steps)}"
+        assert len(steps) == 1, f"Expected 1 step (text_search only), got {len(steps)}"
 
     def test_no_relationship_traverse(self):
-        """RELATIONSHIP_TRAVERSE removed — over-retrieval confirmed in B9c/B9d."""
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps()
         rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
         assert len(rel_steps) == 0
 
-    def test_entity_lookup_budget(self):
+    def test_no_entity_lookup(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps()
         el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
-        assert len(el_steps) == 1
-        assert el_steps[0].budget.max_results == 3
+        assert len(el_steps) == 0
 
-    def test_text_search_first_with_budget(self):
+    def test_text_search_params(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps()
