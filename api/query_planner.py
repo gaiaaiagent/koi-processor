@@ -62,7 +62,21 @@ def _relationship_path_steps() -> list[PlanStep]:
     ]
 
 
-def _governance_policy_steps() -> list[PlanStep]:
+def _is_governance_definition(query: str) -> bool:
+    """Detect definition-style governance questions (e.g. 'What is X?')."""
+    q = query.lower().strip()
+    return q.startswith("what is ") or q.startswith("what are ")
+
+
+def _governance_policy_steps(query: str = "") -> list[PlanStep]:
+    if _is_governance_definition(query):
+        # Definition: entity anchors + targeted text
+        return [
+            _step(RetrievalOp.ENTITY_LOOKUP, "entity_registry", max_results=5),
+            _step(RetrievalOp.TEXT_SEARCH, "koi_memory_chunks",
+                  params={"multi_query": True, "top_k": 10}, max_results=20, depends_on=[0]),
+        ]
+    # Policy/mechanism: broad text coverage
     return [
         _step(RetrievalOp.TEXT_SEARCH, "koi_memory_chunks",
               params={"multi_query": True, "top_k": 12}, max_results=20),
@@ -137,7 +151,10 @@ def assemble_plan(
     """
     taxonomy = classifier_output.query_taxonomy
     step_factory = DECISION_MATRIX.get(taxonomy, lambda: [])
-    steps = step_factory()
+    if taxonomy == QueryTaxonomy.GOVERNANCE_POLICY:
+        steps = _governance_policy_steps(original_query)
+    else:
+        steps = step_factory()
 
     # Apply depth tier overrides
     steps = _apply_depth_overrides(steps, classifier_output.depth_tier)
