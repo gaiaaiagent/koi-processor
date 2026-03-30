@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
+from api.chat_provider import ChatProvider
 from api.schemas.query_plan import (
     ClassifierOutput,
     DepthTier,
@@ -25,6 +27,8 @@ from api.schemas.query_plan import (
 )
 
 logger = logging.getLogger(__name__)
+
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gpt-4o")
 
 CLASSIFIER_CONFIDENCE_THRESHOLD = 0.7
 
@@ -158,30 +162,26 @@ def _apply_guardrails(query: str, output: ClassifierOutput) -> ClassifierOutput:
 
 async def classify_query(
     query: str,
-    openai_client,
-    model: str = "gpt-4o",
+    provider: ChatProvider,
+    model: str | None = None,
 ) -> ClassifierOutput:
-    """Classify a query into a QueryTaxonomy category via GPT-4o.
+    """Classify a query into a QueryTaxonomy category via an LLM provider.
 
     Returns ClassifierOutput with confidence score.
     On parse error or unexpected output, returns OUT_OF_DOMAIN with confidence=0.0
     to trigger fallback to the baseline retrieval path.
     """
-    import asyncio
-
     try:
-        response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=model,
-            messages=[
+        raw = await provider.complete(
+            [
                 {"role": "system", "content": CLASSIFIER_PROMPT},
                 {"role": "user", "content": query},
             ],
+            model=model or CLASSIFIER_MODEL,
             temperature=0.0,
             max_tokens=200,
-            response_format={"type": "json_object"},
+            json_mode=True,
         )
-        raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
 
         # Parse taxonomy

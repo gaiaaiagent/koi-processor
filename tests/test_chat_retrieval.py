@@ -442,11 +442,9 @@ class TestChatEndpointOrchestration:
         mock_text = AsyncMock(return_value=[text_bundle])
         mock_web = AsyncMock(return_value=[web_bundle])
 
-        # Mock the LLM (wrap in asyncio.to_thread mock)
-        mock_openai = MagicMock()
-        mock_completion = MagicMock()
-        mock_completion.choices = [MagicMock(message=MagicMock(content="Mock answer about eelgrass"))]
-        mock_openai.chat.completions.create.return_value = mock_completion
+        # Mock the chat answer provider
+        mock_chat_provider = AsyncMock()
+        mock_chat_provider.complete = AsyncMock(return_value="Mock answer about eelgrass")
 
         # Mock DB pool with proper async context manager
         mock_conn = AsyncMock()
@@ -462,16 +460,12 @@ class TestChatEndpointOrchestration:
         # Mock _try_structured_graph_query
         mock_graph_query = AsyncMock(return_value="")
 
-        # Mock asyncio.to_thread so the OpenAI call doesn't need a real thread
-        async def _fake_to_thread(fn, *args, **kwargs):
-            return fn(*args, **kwargs)
-
         with patch("api.personal_ingest_api.db_pool", mock_pool), \
-             patch("api.personal_ingest_api.openai_client", mock_openai), \
-             patch("api.personal_ingest_api.OPENAI_API_KEY", "fake-key"), \
+             patch("api.personal_ingest_api.classifier_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.chat_answer_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.expansion_provider", mock_chat_provider), \
              patch("api.personal_ingest_api.generate_embedding", mock_embed), \
              patch("api.personal_ingest_api._try_structured_graph_query", mock_graph_query), \
-             patch("asyncio.to_thread", side_effect=_fake_to_thread), \
              patch("api.retrieval_executors.entity_lookup", mock_entity), \
              patch("api.retrieval_executors.relationship_traverse", mock_rel), \
              patch("api.retrieval_executors.text_search", mock_text), \

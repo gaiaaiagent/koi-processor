@@ -26,6 +26,10 @@ from api.schemas.query_plan import (
 )
 from api.query_classifier import classify_query
 
+import os
+_has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+_skip_no_key = pytest.mark.skipif(not _has_openai_key, reason="OPENAI_API_KEY not set")
+
 # ---------------------------------------------------------------------------
 # Regression cases: the 18 questions the current classifier gets wrong
 # ---------------------------------------------------------------------------
@@ -220,6 +224,16 @@ def _get_openai_client():
     return OpenAI()
 
 
+def _get_classifier_provider():
+    """Wrap a real OpenAI client in the ChatProvider interface for classify_query."""
+    from api.chat_provider import OpenAIChatProvider
+    import os
+    return OpenAIChatProvider(
+        api_key=os.environ["OPENAI_API_KEY"],
+        default_model=os.getenv("CLASSIFIER_MODEL", "gpt-4o"),
+    )
+
+
 async def _classify_with_prompt(
     query: str,
     client,
@@ -366,12 +380,13 @@ def test_classifier_regression_mocked():
 
 
 @pytest.mark.live
+@_skip_no_key
 def test_classifier_baseline():
     """Run current production classifier against the 18 failures. Expected: ~0/18."""
-    client = _get_openai_client()
+    provider = _get_classifier_provider()
 
     async def baseline_classify(query: str) -> ClassifierOutput:
-        return await classify_query(query, client)
+        return await classify_query(query, provider)
 
     report = asyncio.run(run_bakeoff(baseline_classify, REGRESSION_CASES))
     print_report("Baseline (current classifier)", report)
@@ -380,6 +395,7 @@ def test_classifier_baseline():
 
 
 @pytest.mark.live
+@_skip_no_key
 def test_bakeoff_all_variants():
     """Run all 4 variants against the 18-question regression set. Prints comparison."""
     client = _get_openai_client()
@@ -442,6 +458,7 @@ def test_bakeoff_all_variants():
 
 
 @pytest.mark.live
+@_skip_no_key
 def test_full_52_variant_b():
     """Run Variant B (winner) against all 52 questions BEFORE implementing.
 
@@ -506,6 +523,7 @@ def test_full_52_variant_b():
 
 
 @pytest.mark.live
+@_skip_no_key
 def test_full_52_variant_c():
     """Run Variant C (gpt-4o + tuned prompt + Guard 3) against all 52 questions."""
     golden_qa_path = Path(__file__).parent / "eval" / "golden_qa.json"
@@ -567,6 +585,7 @@ def test_full_52_variant_c():
 
 
 @pytest.mark.live
+@_skip_no_key
 def test_full_52_classification():
     """Run the CURRENT production classifier against all 52 golden QA questions.
 
@@ -578,13 +597,13 @@ def test_full_52_classification():
     with open(golden_qa_path) as f:
         golden_qa = json.load(f)
 
-    client = _get_openai_client()
+    provider = _get_classifier_provider()
 
     async def classify_all():
         results = []
         for qa in golden_qa:
             expected = _expected_taxonomy(qa)
-            output = await classify_query(qa["question"], client)
+            output = await classify_query(qa["question"], provider)
             actual = output.query_taxonomy.value
             results.append({
                 "id": qa["id"],

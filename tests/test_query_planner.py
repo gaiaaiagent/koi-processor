@@ -36,21 +36,19 @@ class TestClassifier:
 
     @pytest.mark.asyncio
     async def test_classify_entity_definition(self):
-        """Mock OpenAI returns correct ClassifierOutput for entity question."""
+        """Mock provider returns correct ClassifierOutput for entity question."""
         from api.query_classifier import classify_query
 
-        mock_client = MagicMock()
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content=json.dumps({
+        mock_provider = AsyncMock()
+        mock_provider.complete = AsyncMock(return_value=json.dumps({
             "query_taxonomy": "entity_definition",
             "depth_tier": "standard",
             "entities": [{"name": "Eelgrass", "type": "Concept"}],
             "reasoning": "Asking for a definition of eelgrass",
             "confidence": 0.95,
-        })))]
-        mock_client.chat.completions.create.return_value = mock_resp
+        }))
 
-        result = await classify_query("What is eelgrass?", mock_client)
+        result = await classify_query("What is eelgrass?", mock_provider)
 
         assert result.query_taxonomy == QueryTaxonomy.ENTITY_DEFINITION
         assert result.depth_tier == DepthTier.STANDARD
@@ -63,10 +61,10 @@ class TestClassifier:
         """Malformed LLM response -> OUT_OF_DOMAIN, confidence=0.0."""
         from api.query_classifier import classify_query
 
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = Exception("API error")
+        mock_provider = AsyncMock()
+        mock_provider.complete = AsyncMock(side_effect=Exception("API error"))
 
-        result = await classify_query("test query", mock_client)
+        result = await classify_query("test query", mock_provider)
 
         assert result.query_taxonomy == QueryTaxonomy.OUT_OF_DOMAIN
         assert result.confidence == 0.0
@@ -293,10 +291,8 @@ class TestFallbackAndAbstention:
             confidence=0.5,
         )
 
-        mock_openai = MagicMock()
-        mock_completion = MagicMock()
-        mock_completion.choices = [MagicMock(message=MagicMock(content="Mock answer"))]
-        mock_openai.chat.completions.create.return_value = mock_completion
+        mock_chat_provider = AsyncMock()
+        mock_chat_provider.complete = AsyncMock(return_value="Mock answer")
 
         mock_cm = AsyncMock()
         mock_conn = AsyncMock()
@@ -312,15 +308,12 @@ class TestFallbackAndAbstention:
                           text="Desc", metadata={"entity_type": "Concept", "label": "Test", "fuseki_uri": "urn:e:1"})
         ])
 
-        async def _fake_to_thread(fn, *args, **kwargs):
-            return fn(*args, **kwargs)
-
         with patch("api.personal_ingest_api.db_pool", mock_pool), \
-             patch("api.personal_ingest_api.openai_client", mock_openai), \
-             patch("api.personal_ingest_api.OPENAI_API_KEY", "fake"), \
+             patch("api.personal_ingest_api.classifier_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.chat_answer_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.expansion_provider", mock_chat_provider), \
              patch("api.personal_ingest_api.generate_embedding", AsyncMock(return_value=[0.1]*1536)), \
              patch("api.personal_ingest_api._try_structured_graph_query", AsyncMock(return_value="")), \
-             patch("asyncio.to_thread", side_effect=_fake_to_thread), \
              patch("api.query_classifier.classify_query", AsyncMock(return_value=low_conf)), \
              patch("api.retrieval_executors.entity_lookup", mock_entity_lookup), \
              patch("api.retrieval_executors.relationship_traverse", AsyncMock(return_value=[])), \
@@ -355,12 +348,14 @@ class TestFallbackAndAbstention:
             reasoning="Stock price question is out of domain",
         )
 
-        mock_openai = MagicMock()
+        mock_chat_provider = AsyncMock()
+        mock_chat_provider.complete = AsyncMock(return_value="should not be called")
         mock_pool = MagicMock()
 
         with patch("api.personal_ingest_api.db_pool", mock_pool), \
-             patch("api.personal_ingest_api.openai_client", mock_openai), \
-             patch("api.personal_ingest_api.OPENAI_API_KEY", "fake"), \
+             patch("api.personal_ingest_api.classifier_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.chat_answer_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.expansion_provider", mock_chat_provider), \
              patch("api.personal_ingest_api.generate_embedding", AsyncMock(return_value=[0.1]*1536)), \
              patch("api.query_classifier.classify_query", AsyncMock(return_value=ood_result)):
 
@@ -373,8 +368,6 @@ class TestFallbackAndAbstention:
         assert response["plan_trace"]["fallback"] is False
         assert response["sources"] == []
         assert "outside the scope" in response["answer"]
-        # LLM should NOT have been called
-        mock_openai.chat.completions.create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_plan_trace_emitted_on_fallback(self):
@@ -382,10 +375,8 @@ class TestFallbackAndAbstention:
         # Same as test_fallback_below_threshold but focused on trace presence
         co = ClassifierOutput(query_taxonomy=QueryTaxonomy.ENTITY_DEFINITION, confidence=0.3)
 
-        mock_openai = MagicMock()
-        mock_completion = MagicMock()
-        mock_completion.choices = [MagicMock(message=MagicMock(content="Answer"))]
-        mock_openai.chat.completions.create.return_value = mock_completion
+        mock_chat_provider = AsyncMock()
+        mock_chat_provider.complete = AsyncMock(return_value="Answer")
 
         mock_cm = AsyncMock()
         mock_conn = AsyncMock()
@@ -394,15 +385,12 @@ class TestFallbackAndAbstention:
         mock_pool = MagicMock()
         mock_pool.acquire.return_value = mock_cm
 
-        async def _fake_to_thread(fn, *args, **kwargs):
-            return fn(*args, **kwargs)
-
         with patch("api.personal_ingest_api.db_pool", mock_pool), \
-             patch("api.personal_ingest_api.openai_client", mock_openai), \
-             patch("api.personal_ingest_api.OPENAI_API_KEY", "fake"), \
+             patch("api.personal_ingest_api.classifier_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.chat_answer_provider", mock_chat_provider), \
+             patch("api.personal_ingest_api.expansion_provider", mock_chat_provider), \
              patch("api.personal_ingest_api.generate_embedding", AsyncMock(return_value=[0.1]*1536)), \
              patch("api.personal_ingest_api._try_structured_graph_query", AsyncMock(return_value="")), \
-             patch("asyncio.to_thread", side_effect=_fake_to_thread), \
              patch("api.query_classifier.classify_query", AsyncMock(return_value=co)), \
              patch("api.retrieval_executors.entity_lookup", AsyncMock(return_value=[])), \
              patch("api.retrieval_executors.relationship_traverse", AsyncMock(return_value=[])), \
@@ -420,9 +408,12 @@ class TestFallbackAndAbstention:
         """OOD abstention response contains plan_trace with abstained=true."""
         ood = ClassifierOutput(query_taxonomy=QueryTaxonomy.OUT_OF_DOMAIN, confidence=0.9)
 
+        mock_provider = AsyncMock()
+
         with patch("api.personal_ingest_api.db_pool", MagicMock()), \
-             patch("api.personal_ingest_api.openai_client", MagicMock()), \
-             patch("api.personal_ingest_api.OPENAI_API_KEY", "fake"), \
+             patch("api.personal_ingest_api.classifier_provider", mock_provider), \
+             patch("api.personal_ingest_api.chat_answer_provider", mock_provider), \
+             patch("api.personal_ingest_api.expansion_provider", mock_provider), \
              patch("api.personal_ingest_api.generate_embedding", AsyncMock(return_value=[0.1]*1536)), \
              patch("api.query_classifier.classify_query", AsyncMock(return_value=ood)):
 

@@ -175,10 +175,19 @@ def quartz_url(entity_type: str, name: str) -> Optional[str]:
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
-openai_client: Optional[Any] = None  # lazy init for /chat LLM calls
 
 from api.embedding_provider import EmbeddingProvider, create_embedding_provider
 embedding_provider: Optional[EmbeddingProvider] = None
+
+from api.chat_provider import (
+    ChatProvider,
+    create_classifier_provider,
+    create_chat_provider,
+    create_expansion_provider,
+)
+classifier_provider: Optional[ChatProvider] = None
+chat_answer_provider: Optional[ChatProvider] = None
+expansion_provider: Optional[ChatProvider] = None
 terminusdb_adapter: Optional[Any] = None  # TerminusDBAdapter instance (lazy init)
 
 
@@ -1225,7 +1234,7 @@ async def enqueue_outbox(
 @app.on_event("startup")
 async def startup():
     """Initialize database connection pool and embedding provider"""
-    global db_pool, openai_client, embedding_provider
+    global db_pool, embedding_provider
     try:
         db_pool = await asyncpg.create_pool(
             DB_URL,
@@ -4596,8 +4605,6 @@ async def graph_shortest_path(
 # /chat Endpoint — RAG-powered conversational interface
 # =============================================================================
 
-CHAT_LLM_MODEL = os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini')
-
 
 # ── B2 GraphRAG: graph-guided retrieval ──────────────────────────────
 
@@ -5104,16 +5111,18 @@ def _rerank_chunks(query: str, chunks: list, top_k: int = 8) -> list:
     return reranked
 
 
+EXPANSION_MODEL = os.getenv("EXPANSION_MODEL", "gpt-4o-mini")
+
+
 async def _expand_queries(query: str, n: int = 3) -> list:
     """Generate n query reformulations for multi-query retrieval (B8b).
     Returns [original_query] + up to n reformulations.
     """
-    if not openai_client:
+    if not expansion_provider:
         return [query]
     try:
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
+        result = await expansion_provider.complete(
+            [{
                 "role": "user",
                 "content": f"""Generate {n} alternative search queries for a bioregional knowledge commons.
 Original query: "{query}"
@@ -5121,10 +5130,11 @@ Original query: "{query}"
 Return ONLY the alternative queries, one per line. No numbering, no explanation.
 Each should rephrase the question using different terminology to find relevant documents."""
             }],
+            model=EXPANSION_MODEL,
             max_tokens=200,
             temperature=0.7,
         )
-        lines = [l.strip() for l in resp.choices[0].message.content.strip().split('\n') if l.strip()]
+        lines = [l.strip() for l in result.strip().split('\n') if l.strip()]
         return [query] + lines[:n]
     except Exception as e:
         logger.warning(f"B8b query expansion failed: {e}")
@@ -5153,21 +5163,20 @@ async def chat_endpoint(request: ChatRequest):
     """
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
-    # Lazy init openai_client for /chat LLM calls (separate from embedding provider)
-    global openai_client
-    if not openai_client:
-        if not OPENAI_API_KEY:
-            raise HTTPException(
-                status_code=503,
-                detail="LLM service not available (OPENAI_API_KEY not configured)",
-            )
+    # Lazy init chat providers (classifier, chat answer, expansion)
+    global classifier_provider, chat_answer_provider, expansion_provider
+    if not classifier_provider or not chat_answer_provider or not expansion_provider:
         try:
-            from openai import OpenAI
-            openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        except ImportError:
+            if not classifier_provider:
+                classifier_provider = create_classifier_provider()
+            if not chat_answer_provider:
+                chat_answer_provider = create_chat_provider()
+            if not expansion_provider:
+                expansion_provider = create_expansion_provider()
+        except (ValueError, ImportError) as e:
             raise HTTPException(
                 status_code=503,
-                detail="openai package not installed",
+                detail=f"LLM provider not available: {e}",
             )
 
     # ------------------------------------------------------------------
@@ -5187,7 +5196,7 @@ async def chat_endpoint(request: ChatRequest):
         from api.retrieval_executors import evidence_bundles_to_legacy_format
         from api.schemas.query_plan import QueryTaxonomy
 
-        classifier_output = await classify_query(request.query, openai_client)
+        classifier_output = await classify_query(request.query, classifier_provider)
 
         if classifier_output.query_taxonomy == QueryTaxonomy.OUT_OF_DOMAIN and \
            classifier_output.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD:
@@ -5356,17 +5365,14 @@ async def chat_endpoint(request: ChatRequest):
     # 4. Call LLM
     # ------------------------------------------------------------------
     try:
-        llm_response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=CHAT_LLM_MODEL,
-            messages=[
+        answer = await chat_answer_provider.complete(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
             max_tokens=1024,
         )
-        answer = llm_response.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         raise HTTPException(
