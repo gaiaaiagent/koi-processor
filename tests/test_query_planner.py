@@ -163,8 +163,8 @@ class TestPlanAssembly:
         assert sql_step.params.get("template") == "roadmap"
         assert sql_step.budget.max_results == 15
 
-    def test_governance_policy_text_search_first(self):
-        """governance_policy plan: TEXT_SEARCH(multi_query, top_k=12) -> ENTITY_LOOKUP(3). B9d.1 Variant A."""
+    def test_governance_policy_text_search_only(self):
+        """governance_policy plan: TEXT_SEARCH(multi_query, top_k=12) only. B9d.1 Variant B."""
         co = ClassifierOutput(
             query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
             depth_tier=DepthTier.STANDARD,
@@ -173,11 +173,10 @@ class TestPlanAssembly:
         plan = assemble_plan(co, "How does the BKC handle governance?")
 
         ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.TEXT_SEARCH, RetrievalOp.ENTITY_LOOKUP]
+        assert ops == [RetrievalOp.TEXT_SEARCH]
         text_step = plan.steps[0]
         assert text_step.params.get("multi_query") is True
         assert text_step.params.get("top_k") == 12
-        assert plan.steps[1].budget.max_results == 3
 
     def test_assemble_depth_deep(self):
         """Deep depth -> multi_query=true, max_results +50%."""
