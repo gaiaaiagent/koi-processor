@@ -66,9 +66,7 @@ def _governance_policy_steps() -> list[PlanStep]:
     return [
         _step(RetrievalOp.TEXT_SEARCH, "koi_memory_chunks",
               params={"multi_query": True, "top_k": 12}, max_results=20),
-        _step(RetrievalOp.ENTITY_LOOKUP, "entity_registry", max_results=8),
-        _step(RetrievalOp.RELATIONSHIP_TRAVERSE, "entity_relationships",
-              params={"max_hops": 1}, max_results=30, depends_on=[1]),
+        _step(RetrievalOp.ENTITY_LOOKUP, "entity_registry", max_results=3),
     ]
 
 
