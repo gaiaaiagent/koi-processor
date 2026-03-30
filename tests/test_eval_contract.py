@@ -325,82 +325,59 @@ class TestCommitmentClaimSteps:
 
 
 # ---------------------------------------------------------------------------
-# Relationship path steps (pre-Phase 3 — verify current state)
+# Governance policy steps — matches deployed B9c truth (27c23daa)
 # ---------------------------------------------------------------------------
 
-class TestGovernanceDefinitionSteps:
-    """Verify _governance_policy_steps with definition query: ENTITY_LOOKUP → TEXT_SEARCH (B9d.2)."""
+class TestGovernancePolicySteps:
+    """Verify _governance_policy_steps: 3-step plan (text_search → entity_lookup → relationship_traverse).
+
+    B9d/B9d.1/B9d.2 attempted governance-specific tuning (sub-routing, text-only,
+    entity anchors) but none beat default on the 5-question governance subset.
+    Governance drag (-3.4% CR) is accepted. This plan matches deployed truth.
+    """
 
     def test_step_count(self):
         from api.query_planner import _governance_policy_steps
-        steps = _governance_policy_steps("What is the CommonsChange reference profile?")
-        assert len(steps) == 2, f"Expected 2 steps (entity_lookup + text_search), got {len(steps)}"
-
-    def test_has_entity_lookup(self):
-        from api.query_planner import _governance_policy_steps
-        from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("What is the CommonsChange reference profile?")
-        el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
-        assert len(el_steps) == 1
-        assert el_steps[0].budget.max_results == 5
-
-    def test_text_search_params(self):
-        from api.query_planner import _governance_policy_steps
-        from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("What is a node participation profile?")
-        text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
-        assert len(text_steps) == 1
-        assert text_steps[0].params.get("multi_query") is True
-        assert text_steps[0].params.get("top_k") == 10
-
-    def test_no_relationship_traverse(self):
-        from api.query_planner import _governance_policy_steps
-        from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("What are OCAP principles?")
-        rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
-        assert len(rel_steps) == 0
-
-
-class TestGovernancePolicyMechanismSteps:
-    """Verify _governance_policy_steps with policy query: TEXT_SEARCH → ENTITY_LOOKUP (B9d.2)."""
-
-    def test_step_count(self):
-        from api.query_planner import _governance_policy_steps
-        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        assert len(steps) == 2, f"Expected 2 steps (text_search + entity_lookup), got {len(steps)}"
+        steps = _governance_policy_steps()
+        assert len(steps) == 3
 
     def test_step_order(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        assert steps[0].op == RetrievalOp.TEXT_SEARCH
-        assert steps[1].op == RetrievalOp.ENTITY_LOOKUP
+        steps = _governance_policy_steps()
+        ops = [s.op for s in steps]
+        assert ops == [RetrievalOp.TEXT_SEARCH, RetrievalOp.ENTITY_LOOKUP, RetrievalOp.RELATIONSHIP_TRAVERSE]
 
     def test_text_search_params(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        assert steps[0].params.get("multi_query") is True
-        assert steps[0].params.get("top_k") == 12
+        steps = _governance_policy_steps()
+        text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
+        assert len(text_steps) == 1
+        assert text_steps[0].params.get("multi_query") is True
+        assert text_steps[0].params.get("top_k") == 12
 
     def test_entity_lookup_budget(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
+        steps = _governance_policy_steps()
         el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
         assert len(el_steps) == 1
-        assert el_steps[0].budget.max_results == 3
+        assert el_steps[0].budget.max_results == 8
 
-    def test_no_relationship_traverse(self):
+    def test_relationship_traverse_params(self):
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
-        steps = _governance_policy_steps("How does the BKC handle visibility scoping?")
-        rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
-        assert len(rel_steps) == 0
+        steps = _governance_policy_steps()
+        rt_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
+        assert len(rt_steps) == 1
+        assert rt_steps[0].params.get("max_hops") == 1
+        assert rt_steps[0].budget.max_results == 30
+        assert rt_steps[0].depends_on == [1]
 
 
 # ---------------------------------------------------------------------------
-# Relationship path steps (pre-Phase 3 — verify current state)
+# Relationship path steps — matches deployed B9c truth (27c23daa)
 # ---------------------------------------------------------------------------
 
 class TestRelationshipPathSteps:

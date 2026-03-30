@@ -163,79 +163,21 @@ class TestPlanAssembly:
         assert sql_step.params.get("template") == "roadmap"
         assert sql_step.budget.max_results == 15
 
-    def test_governance_definition_plan(self):
-        """governance_policy + 'What is X?' → ENTITY_LOOKUP → TEXT_SEARCH (B9d.2 definition sub-route)."""
+    def test_governance_policy_includes_relationship_traverse(self):
+        """governance_policy plan: TEXT_SEARCH -> ENTITY_LOOKUP -> RELATIONSHIP_TRAVERSE."""
         co = ClassifierOutput(
             query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
             depth_tier=DepthTier.STANDARD,
             confidence=0.9,
         )
-        plan = assemble_plan(co, "What is the CommonsChange reference profile?")
+        plan = assemble_plan(co, "How does the BKC handle governance?")
 
         ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.TEXT_SEARCH]
-        assert plan.steps[0].budget.max_results == 5
-        text_step = plan.steps[1]
-        assert text_step.params.get("multi_query") is True
-        assert text_step.params.get("top_k") == 10
-
-    def test_governance_policy_mechanism_plan(self):
-        """governance_policy + 'How does X?' → TEXT_SEARCH → ENTITY_LOOKUP (B9d.2 policy sub-route)."""
-        co = ClassifierOutput(
-            query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
-            depth_tier=DepthTier.STANDARD,
-            confidence=0.9,
-        )
-        plan = assemble_plan(co, "How does the BKC handle visibility scoping?")
-
-        ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.TEXT_SEARCH, RetrievalOp.ENTITY_LOOKUP]
-        text_step = plan.steps[0]
-        assert text_step.params.get("multi_query") is True
-        assert text_step.params.get("top_k") == 12
-        assert plan.steps[1].budget.max_results == 3
-
-    def test_governance_hybrid_routes_to_definition(self):
-        """Hybrid questions starting with 'What are/is' route to definition sub-plan."""
-        co = ClassifierOutput(
-            query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
-            depth_tier=DepthTier.STANDARD,
-            confidence=0.9,
-        )
-        # governance_2: hybrid question
-        plan = assemble_plan(co, "What are OCAP principles and how do they apply to the BKC?")
-        ops = [s.op for s in plan.steps]
-        assert ops == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.TEXT_SEARCH]
-
-        # governance_5: hybrid question
-        plan2 = assemble_plan(co, "What is FPIC and why is it relevant to bioregional knowledge commoning?")
-        ops2 = [s.op for s in plan2.steps]
-        assert ops2 == [RetrievalOp.ENTITY_LOOKUP, RetrievalOp.TEXT_SEARCH]
-
-    def test_governance_depth_overrides_apply(self):
-        """Depth overrides still apply to governance after sub-routing special-case."""
-        co_shallow = ClassifierOutput(
-            query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
-            depth_tier=DepthTier.SHALLOW,
-            confidence=0.9,
-        )
-        # Definition + shallow → only entity_lookup kept
-        plan = assemble_plan(co_shallow, "What is the CommonsChange reference profile?")
-        assert all(s.op == RetrievalOp.ENTITY_LOOKUP for s in plan.steps)
-
-        co_deep = ClassifierOutput(
-            query_taxonomy=QueryTaxonomy.GOVERNANCE_POLICY,
-            depth_tier=DepthTier.DEEP,
-            confidence=0.9,
-        )
-        # Policy + deep → text_search + entity_lookup, both with boosted budget
-        plan2 = assemble_plan(co_deep, "How does the BKC handle visibility scoping?")
-        text_steps = [s for s in plan2.steps if s.op == RetrievalOp.TEXT_SEARCH]
-        assert len(text_steps) >= 1
-        assert text_steps[0].params.get("multi_query") is True
-        assert text_steps[0].budget.max_results > 20
-        el_steps = [s for s in plan2.steps if s.op == RetrievalOp.ENTITY_LOOKUP]
-        assert len(el_steps) == 1
+        assert ops == [RetrievalOp.TEXT_SEARCH, RetrievalOp.ENTITY_LOOKUP, RetrievalOp.RELATIONSHIP_TRAVERSE]
+        rel_step = plan.steps[2]
+        assert rel_step.params.get("max_hops") == 1
+        assert rel_step.budget.max_results == 30
+        assert rel_step.depends_on == [1]
 
     def test_assemble_depth_deep(self):
         """Deep depth -> multi_query=true, max_results +50%."""

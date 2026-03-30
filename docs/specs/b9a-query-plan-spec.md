@@ -40,7 +40,7 @@ Three layers, applied in order:
 |---------------|-------|-------|------------|-------|
 | `entity_definition` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
 | `relationship_path` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9c: RELATIONSHIP_TRAVERSE removed (over-retrieval) |
-| `governance_policy` | **sub-routed** (see below) | standard | varies | B9d.2: within-category sub-routing by query shape |
+| `governance_policy` | text_search(multi_query) → entity_lookup → relationship_traverse(hops=1) | deep | el=8, top_k=12, rt=30 | B9d/B9d.1/B9d.2 tuning attempted, none beat default. Drag accepted. |
 | `roadmap_status` | entity_lookup → structured_sql(roadmap) → text_search | standard | el=5, sql=15, top_k=6 | — |
 | `commitment_claim` | entity_lookup(3) → text_search(multi_query) | standard | el=3, top_k=8 | B9b.1: STRUCTURED_SQL removed (over-retrieval) |
 | `cross_node_provenance` | entity_lookup → text_search | standard | el=5, top_k=8 | — |
@@ -56,16 +56,15 @@ The classifier may recommend a depth tier. The plan assembly applies it:
 | `standard` | Use steps from decision matrix as-is. |
 | `deep` | Add `multi_query=true` to all text_search steps. Increase `max_results` by 50%. |
 
-### governance_policy sub-routing (B9d.2)
+### governance_policy tuning closeout (B9d/B9d.1/B9d.2)
 
-The `governance_policy` category contains two distinct sub-intents. A keyword heuristic in `_governance_policy_steps(query)` routes to the appropriate sub-plan:
+Governance retrieval was the last remaining category drag (-3.4% CR vs default). Three rounds of tuning were attempted:
 
-| Sub-route | Trigger | Steps | Key Params |
-|-----------|---------|-------|------------|
-| **definition** | Query starts with "What is " / "What are " | entity_lookup(5) → text_search(multi_query, top_k=10) | Entity anchors + targeted text |
-| **policy** | All other queries | text_search(multi_query, top_k=12) | Broad document coverage |
+- **B9d** (text-search-first, remove RELATIONSHIP_TRAVERSE): -3.4% CR, failed subset gate
+- **B9d.1** (Variant A: text+entity=3, Variant B: text-only): Both lost. Variant B won on policy questions, lost on definitions. Revealed governance is internally mixed (definition vs policy sub-intents).
+- **B9d.2** (within-category sub-routing): definition branch (ENTITY_LOOKUP→TEXT_SEARCH) massively improved over v7 planner (governance_4: 0.175→0.419, governance_5: 0.119→0.706, governance_9: 0.086→0.393). Policy branch still lost to default in both variants tested (text-only: -15.3% on governance_7; text+entity: -10.6%).
 
-Hybrid questions (e.g. "What are OCAP principles and how do they apply...") route to **definition** because the leading phrase signals concept anchoring. Depth overrides apply after sub-routing.
+**Conclusion:** The planner's governance plan produces different retrieval composition from the default path, and no configuration of planner-controlled steps has matched default's governance performance. The overall planner still passes canonically (+6.2% CR) with governance drag included. No further governance tuning unless product priorities change.
 
 ## 4. Typed Retrieval Op Set
 
@@ -82,7 +81,7 @@ Each op maps to a trusted executor. All executors return `list[EvidenceBundle]`.
 - **Wraps:** N-hop recursive CTE on `entity_relationships` (`retrieval_executors.py`)
 - **Params:** `entity_uris: list[str]`, `max_hops: int = 1`, `predicate_filter: list[str] | None`
 - **Returns:** EvidenceBundles with `source_type=LOCAL_AUTHORITATIVE`, text = "subject --[predicate]--> object"
-- **Used by:** None currently. Removed from relationship_path (B9c) and governance_policy (B9d.1).
+- **Used by:** governance_policy (max_hops=1, max=30). Removed from relationship_path in B9c (over-retrieval even at 1-hop).
 
 #### text_search
 - **Wraps:** BM25+vector RRF fusion + FlashRank rerank (lines 5310-5448)
