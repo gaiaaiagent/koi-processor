@@ -329,20 +329,22 @@ class TestCommitmentClaimSteps:
 # ---------------------------------------------------------------------------
 
 class TestGovernancePolicySteps:
-    """Verify _governance_policy_steps: text-search-first (B9d)."""
+    """Verify _governance_policy_steps: B9c baseline (TEXT_SEARCH → ENTITY_LOOKUP → RELATIONSHIP_TRAVERSE)."""
 
     def test_step_count(self):
         from api.query_planner import _governance_policy_steps
         steps = _governance_policy_steps()
-        assert len(steps) == 2, f"Expected 2 steps (entity_lookup + text_search), got {len(steps)}"
+        assert len(steps) == 3, f"Expected 3 steps, got {len(steps)}"
 
-    def test_no_relationship_traverse(self):
-        """RELATIONSHIP_TRAVERSE removed — over-retrieval pattern confirmed."""
+    def test_has_relationship_traverse(self):
+        """RELATIONSHIP_TRAVERSE present in B9c baseline."""
         from api.query_planner import _governance_policy_steps
         from api.schemas.query_plan import RetrievalOp
         steps = _governance_policy_steps()
         rel_steps = [s for s in steps if s.op == RetrievalOp.RELATIONSHIP_TRAVERSE]
-        assert len(rel_steps) == 0
+        assert len(rel_steps) == 1
+        assert rel_steps[0].params.get("max_hops") == 1
+        assert rel_steps[0].budget.max_results == 30
 
     def test_entity_lookup_budget(self):
         from api.query_planner import _governance_policy_steps
@@ -350,7 +352,7 @@ class TestGovernancePolicySteps:
         steps = _governance_policy_steps()
         el_steps = [s for s in steps if s.op == RetrievalOp.ENTITY_LOOKUP]
         assert len(el_steps) == 1
-        assert el_steps[0].budget.max_results == 3
+        assert el_steps[0].budget.max_results == 8
 
     def test_text_search_params(self):
         from api.query_planner import _governance_policy_steps
@@ -359,7 +361,7 @@ class TestGovernancePolicySteps:
         text_steps = [s for s in steps if s.op == RetrievalOp.TEXT_SEARCH]
         assert len(text_steps) == 1
         assert text_steps[0].params.get("multi_query") is True
-        assert text_steps[0].params.get("top_k") == 8
+        assert text_steps[0].params.get("top_k") == 12
 
 
 # ---------------------------------------------------------------------------
