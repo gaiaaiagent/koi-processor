@@ -1315,6 +1315,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Commitment routers not mounted: {e}")
 
+            # Protocol layer router (requirements, coverage, signals, gap computation)
+            try:
+                from api.routers.protocol_router import create_protocol_router
+                app.include_router(create_protocol_router(db_pool), prefix="/protocol")
+                logger.info("Protocol router mounted (/protocol/)")
+            except Exception as e:
+                logger.warning(f"Protocol router not mounted: {e}")
+
             # Task router is always mounted (no capability gate — core feature)
             try:
                 from api.routers.task_router import create_router as create_task_router
