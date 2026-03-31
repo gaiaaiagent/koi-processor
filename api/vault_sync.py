@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 MAX_VAULT_FILE_BYTES = 1_048_576  # 1 MB
+VAULT_SYNC_PATTERNS = ("*.md", "*.jsonl")
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
 TOMBSTONE_CLEANUP_DAYS = 30
@@ -707,7 +709,7 @@ class VaultSyncManager:
         disk_files: Dict[str, str] = {}
         for shared_folder in folder_set:
             base_dir = self.vault_path / shared_folder
-            for md_file in base_dir.rglob("*.md"):
+            for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
                 if md_file.is_symlink() or not md_file.is_file():
                     continue
                 try:
@@ -915,7 +917,7 @@ class VaultSyncManager:
         bytes_this_cycle = 0
         create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
 
-        for md_file in base_dir.rglob("*.md"):
+        for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
             if md_file.is_symlink():
                 continue
             if not md_file.is_file():
