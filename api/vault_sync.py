@@ -159,7 +159,7 @@ class VaultWatcher:
                     if event.is_directory:
                         return
                     src = getattr(event, "src_path", "")
-                    if src.endswith(".md") or src.endswith(".md.tmp"):
+                    if any(src.endswith(ext) or src.endswith(ext + ".tmp") for ext in (".md", ".jsonl")):
                         inner_self._watcher._loop.call_soon_threadsafe(inner_self._watcher._on_fs_event)
 
             self._observer = Observer()
@@ -419,8 +419,8 @@ class VaultSyncManager:
             return
 
         # Validate file extension
-        if not relative_path.endswith(".md"):
-            self._reject("invalid_type", rid, source_node, event_id, f"not a .md file: {relative_path}")
+        if not any(relative_path.endswith(ext) for ext in (".md", ".jsonl")):
+            self._reject("invalid_type", rid, source_node, event_id, f"unsupported file type: {relative_path}")
             return
 
         # Source allowlist — must be a configured vault sync peer
