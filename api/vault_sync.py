@@ -14,6 +14,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import itertools
 import os
 import re
 import uuid
@@ -162,8 +163,10 @@ _REJECT_FIELD_MAP = {
 }
 
 
+VAULT_SYNC_PATTERNS = ("*.md", "*.jsonl")
+
 class VaultWatcher:
-    """File system watcher using watchdog — signals change_event on *.md modifications."""
+    """File system watcher using watchdog — signals change_event on vault file modifications."""
 
     def __init__(self, vault_path: Path, shared_folder: str, change_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
         self._vault_path = vault_path
@@ -200,7 +203,7 @@ class VaultWatcher:
                     if event.is_directory:
                         return
                     src = getattr(event, "src_path", "")
-                    if src.endswith(".md") or src.endswith(".md.tmp"):
+                    if any(src.endswith(ext) or src.endswith(ext + ".tmp") for ext in (".md", ".jsonl")):
                         inner_self._watcher._loop.call_soon_threadsafe(inner_self._watcher._on_fs_event)
 
             self._observer = Observer()
@@ -460,8 +463,8 @@ class VaultSyncManager:
             return
 
         # Validate file extension
-        if not relative_path.endswith(".md"):
-            self._reject("invalid_type", rid, source_node, event_id, f"not a .md file: {relative_path}")
+        if not any(relative_path.endswith(ext) for ext in (".md", ".jsonl")):
+            self._reject("invalid_type", rid, source_node, event_id, f"unsupported file type: {relative_path}")
             return
 
         # Source allowlist — must be a configured vault sync peer
@@ -750,7 +753,7 @@ class VaultSyncManager:
         disk_files: Dict[str, str] = {}
         for shared_folder in folder_set:
             base_dir = self.vault_path / shared_folder
-            for md_file in base_dir.rglob("*.md"):
+            for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
                 read_path = md_file
                 if md_file.is_symlink():
                     resolved = _resolve_if_symlink(md_file, self.vault_path)
@@ -964,7 +967,7 @@ class VaultSyncManager:
         bytes_this_cycle = 0
         create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
 
-        for md_file in base_dir.rglob("*.md"):
+        for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
             # Determine the actual file to read (may differ from md_file if symlink)
             read_path = md_file
             if md_file.is_symlink():
