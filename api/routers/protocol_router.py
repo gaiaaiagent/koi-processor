@@ -144,12 +144,16 @@ _VALID_COVERAGE_TYPES = {"commitment_covers_requirement", "claim_covers_conditio
 _VALID_PROVENANCES = {"manual", "ai_inferred", "policy_rule"}
 
 
-def _requirement_rid(scope: str, scope_ref: Optional[str], policy_source: str, statement: str) -> str:
+def _requirement_rid(scope: str, scope_ref: Optional[str], policy_source: str,
+                     requirement_type: str, statement: str,
+                     subject_uri: Optional[str]) -> str:
     canonical = json.dumps({
         "policy_source": policy_source,
+        "requirement_type": requirement_type,
         "scope": scope,
         "scope_ref": scope_ref or "",
         "statement": statement,
+        "subject_uri": subject_uri or "",
     }, sort_keys=True, separators=(",", ":"))
     h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:32]
     return f"orn:koi-net.requirement:{h}"
@@ -166,13 +170,15 @@ def _coverage_rid(coverage_type: str, source_rid: str, target_rid: str) -> str:
 
 
 def _signal_rid(signal_type: str, source_kind: str, source_ref: Optional[str],
-                statement: str, scope: str) -> str:
+                statement: str, scope: str,
+                subject_uri: Optional[str] = None) -> str:
     canonical = json.dumps({
         "scope": scope,
         "signal_type": signal_type,
         "source_kind": source_kind,
         "source_ref": source_ref or "",
         "statement": statement,
+        "subject_uri": subject_uri or "",
     }, sort_keys=True, separators=(",", ":"))
     h = hashlib.blake2b(canonical.encode(), digest_size=32).hexdigest()[:32]
     return f"orn:koi-net.signal:{h}"
@@ -219,7 +225,8 @@ def create_protocol_router(pool) -> APIRouter:
         if body.frequency and body.frequency not in _VALID_FREQUENCIES:
             raise HTTPException(400, f"Invalid frequency: {body.frequency}")
 
-        rid = _requirement_rid(body.scope, body.scope_ref, body.policy_source, body.statement)
+        rid = _requirement_rid(body.scope, body.scope_ref, body.policy_source,
+                               body.requirement_type, body.statement, body.subject_uri)
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
@@ -374,7 +381,7 @@ def create_protocol_router(pool) -> APIRouter:
             raise HTTPException(400, f"Invalid scope: {body.scope}")
 
         rid = _signal_rid(body.signal_type, body.source_kind, body.source_ref,
-                         body.statement, body.scope)
+                         body.statement, body.scope, body.subject_uri)
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
@@ -457,7 +464,13 @@ def create_protocol_router(pool) -> APIRouter:
                 WHERE active = TRUE
                   AND scope = 'pool'
                   AND scope_ref = $1
-                ORDER BY severity DESC, created_at ASC
+                ORDER BY CASE severity
+                    WHEN 'critical' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 3
+                    ELSE 4 END ASC,
+                    created_at ASC
             """, pool_rid)
 
             gaps: list = []
@@ -489,9 +502,10 @@ def create_protocol_router(pool) -> APIRouter:
                         SELECT valid_until FROM coverage_links
                         WHERE target_rid = $1
                           AND coverage_type = 'commitment_covers_requirement'
+                          AND valid_from <= $2
                         ORDER BY valid_until DESC NULLS LAST
                         LIMIT 1
-                    """, req_rid)
+                    """, req_rid, now)
                     if expired and expired["valid_until"]:
                         gap_type = "stale"
                         latest_until = expired["valid_until"]
@@ -515,7 +529,7 @@ def create_protocol_router(pool) -> APIRouter:
                         f"({gap_type}, severity={req['severity']})"
                     )
                     sig_rid = _signal_rid("gap_computed", "gap_computation", pool_rid,
-                                          statement, "pool")
+                                          statement, "pool", req["subject_uri"])
                     sig_meta = json.dumps({
                         "requirement_rid": req_rid,
                         "gap_type": gap_type,

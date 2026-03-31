@@ -496,3 +496,58 @@ async def test_commitment_offer_type_filter(commitment_client):
     stew = r_stew.json()
     assert all(c["offer_type"] == "stewardship" for c in stew)
     assert len(stew) < all_count or all_count == 1
+
+
+# ===========================================================================
+# Test 15: Same-pool same-statement different subjects produce different RIDs
+# ===========================================================================
+
+async def test_requirement_rid_different_subjects_same_pool(protocol_client):
+    """Same statement in same pool but different subject_uri must produce different RIDs."""
+    client, conn = protocol_client
+    body = {
+        "scope": "pool",
+        "scope_ref": "pool-multi-subject",
+        "policy_source": "test-constitution",
+        "requirement_type": "monitoring",
+        "statement": "Quarterly monitoring required",
+        "frequency": "quarterly",
+        "severity": "high",
+    }
+
+    r1 = await client.post("/protocol/requirements/create",
+                           json={**body, "subject_uri": "urn:species:herring"})
+    assert r1.status_code == 201
+    rid_a = r1.json()["requirement_rid"]
+
+    r2 = await client.post("/protocol/requirements/create",
+                           json={**body, "subject_uri": "urn:species:salmon"})
+    assert r2.status_code == 201
+    rid_b = r2.json()["requirement_rid"]
+
+    assert rid_a != rid_b, "Same statement for different subjects must produce different RIDs"
+
+
+# ===========================================================================
+# Test 16: Future-dated coverage with finite end is unmet, not stale
+# ===========================================================================
+
+async def test_future_coverage_with_end_date_is_unmet(protocol_client):
+    """Coverage starting next week and ending next month should be unmet, not stale."""
+    client, conn = protocol_client
+    pool_rid = await _seed_pool(conn, pool_rid="orn:koi-net.pool:future-end-test")
+    req_rid = await _seed_requirement(conn, pool_rid)
+    commit_rid = await _seed_commitment(conn, pool_rid)
+
+    # Future-dated coverage with a finite end date
+    future_start = datetime.now(timezone.utc) + timedelta(days=7)
+    future_end = datetime.now(timezone.utc) + timedelta(days=37)
+    await _seed_coverage(conn, commit_rid, req_rid,
+                         valid_from=future_start, valid_until=future_end)
+
+    r = await client.get(f"/protocol/pools/{pool_rid}/gaps")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["unmet_count"] == 1, "Future coverage with end date should be unmet, not stale"
+    assert data["stale_count"] == 0, "No expired past coverage exists — should not be stale"
+    assert data["gaps"][0]["gap_type"] == "unmet"
