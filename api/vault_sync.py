@@ -27,7 +27,8 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 MAX_VAULT_FILE_BYTES = 1_048_576  # 1 MB
-VAULT_SYNC_PATTERNS = ("*.md", "*.jsonl")
+VAULT_SYNC_PATTERNS = ("*.md", "*.jsonl", "*.json", "*.jsonld", "*.txt", "*.csv", "*.yaml", "*.yml", "*.toml")
+_VAULT_SYNC_EXTENSIONS = tuple("." + p.lstrip("*.") for p in VAULT_SYNC_PATTERNS)  # (".md", ".jsonl", ...)
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
 TOMBSTONE_CLEANUP_DAYS = 30
@@ -159,7 +160,7 @@ class VaultWatcher:
                     if event.is_directory:
                         return
                     src = getattr(event, "src_path", "")
-                    if any(src.endswith(ext) or src.endswith(ext + ".tmp") for ext in (".md", ".jsonl")):
+                    if any(src.endswith(ext) or src.endswith(ext + ".tmp") for ext in _VAULT_SYNC_EXTENSIONS):
                         inner_self._watcher._loop.call_soon_threadsafe(inner_self._watcher._on_fs_event)
 
             self._observer = Observer()
@@ -419,7 +420,7 @@ class VaultSyncManager:
             return
 
         # Validate file extension
-        if not any(relative_path.endswith(ext) for ext in (".md", ".jsonl")):
+        if not any(relative_path.endswith(ext) for ext in _VAULT_SYNC_EXTENSIONS):
             self._reject("invalid_type", rid, source_node, event_id, f"unsupported file type: {relative_path}")
             return
 
