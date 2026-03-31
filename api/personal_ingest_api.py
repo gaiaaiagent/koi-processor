@@ -5218,6 +5218,21 @@ async def chat_endpoint(request: ChatRequest):
         elif classifier_output.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD:
             planner_executed = True
             plan = assemble_plan(classifier_output, request.query)
+
+            from api.confidence_gate import (
+                compute_signals as _compute_signals,
+                assess as _assess_confidence,
+            )
+            from api.schemas.query_plan import RetrievalOp as _RetrievalOp
+
+            # Check which executor types the plan includes
+            _plan_had_entity_lookup = any(
+                s.op == _RetrievalOp.ENTITY_LOOKUP for s in plan.steps
+            )
+            _plan_had_text_search = any(
+                s.op == _RetrievalOp.TEXT_SEARCH for s in plan.steps
+            )
+
             async with db_pool.acquire() as conn:
                 evidence, traces = await _execute_plan(
                     plan, conn, query_embedding,
@@ -5226,6 +5241,15 @@ async def chat_endpoint(request: ChatRequest):
                     rerank_fn=_rerank_chunks,
                     quartz_url_fn=quartz_url,
                 )
+
+                # ── B9.5 CRAG confidence gate (telemetry-only) ──
+                # Compute signals and gate decision for logging.
+                # Retry and abstention behavior disabled after Sprint 2
+                # eval showed quality-neutral results with latency cost.
+                # The signals are logged to plan_trace for future analysis.
+                _crag_signals = _compute_signals(evidence, _plan_had_entity_lookup, _plan_had_text_search)
+                _gate_decision = _assess_confidence(_crag_signals)
+
                 sources, relationships_ctx, doc_chunks, web_sources = evidence_bundles_to_legacy_format(evidence)
             plan_trace = {
                 "plan_id": plan.plan_id,
@@ -5234,6 +5258,8 @@ async def chat_endpoint(request: ChatRequest):
                 "depth_tier": classifier_output.depth_tier.value,
                 "steps": len(plan.steps),
                 "fallback": False,
+                "gate_decision": _gate_decision.value,
+                "confidence_signals": _crag_signals.to_dict(),
             }
         else:
             # HARD FALLBACK: low confidence -> run full monolithic baseline
