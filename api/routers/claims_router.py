@@ -179,6 +179,7 @@ class EvidenceFromSettlementRequest(BaseModel):
     bioregion: Optional[str] = Field(None, description="Bioregion name for path prefix")
     description: str = Field(..., min_length=10, max_length=5000, description="Human-readable description of the settlement")
     parent_receipt_id: Optional[str] = Field(None, description="Parent CAT receipt ID for provenance chaining")
+    pool_rids: Optional[List[str]] = Field(None, description="Pool RIDs to link via proves_commitment edges")
 
 
 class EvidenceFromSettlementResponse(BaseModel):
@@ -1491,7 +1492,17 @@ def create_router(pool, caps=None):
             },
         )
 
-        reg_response = await register_vault_entity(reg_request)
+        try:
+            reg_response = await register_vault_entity(reg_request)
+        except Exception as e:
+            logger.error(
+                f"register_vault_entity failed for settlement evidence: "
+                f"vault_rid={vault_rid} name={evidence_name} err={e}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to register settlement evidence entity: {e}",
+            )
         evidence_uri = reg_response.canonical_uri
         is_new = reg_response.is_new
 
@@ -1506,6 +1517,17 @@ def create_router(pool, caps=None):
                         VALUES ($1, 'documents', $2, 1.0, 'evidence-from-settlement')
                         ON CONFLICT DO NOTHING
                     """, evidence_uri, participant_uri)
+
+        # 5b. Link to commitment pools if provided
+        if body.pool_rids:
+            async with pool.acquire() as conn:
+                for pool_rid in body.pool_rids:
+                    await conn.execute("""
+                        INSERT INTO entity_relationships
+                            (subject_uri, predicate, object_uri, confidence, source)
+                        VALUES ($1, 'proves_commitment', $2, 1.0, 'tbff_settlement')
+                        ON CONFLICT DO NOTHING
+                    """, evidence_uri, pool_rid)
 
         # 6. Create CAT receipt for provenance tracking
         receipt_id = generate_receipt_id("tbff_settlement", f"tbff:{body.settlement_id}", evidence_uri)
@@ -1606,8 +1628,8 @@ def create_router(pool, caps=None):
     # ------------------------------------------------------------------ #
 
     @router.post("/{rid}/anchor", responses={
-        200: {"model": AnchorResponse, "description": "Anchor confirmed on-chain"},
-        202: {"model": AnchorPendingResponse, "description": "Tx broadcast but on-chain verification pending"},
+        200: {"model": AnchorResponse, "description": "Anchor confirmed — tx broadcast succeeded"},
+        202: {"model": AnchorPendingResponse, "description": "Tx broadcast timed out — use /reconcile to check status"},
     })
     async def anchor_claim(rid: str):
         """Anchor a verified claim on the Regen Ledger mainnet.
@@ -1615,9 +1637,10 @@ def create_router(pool, caps=None):
         Precondition: claim must be at 'verified' state.
         Requires content_hash (call prepare-anchor first if missing).
 
-        Returns AnchorResponse (200) on full success, or
-        AnchorPendingResponse (202) if tx broadcast succeeded but on-chain
-        verification is not yet available.
+        Returns AnchorResponse (200) when broadcast succeeds (tx confirmation
+        is treated as sufficient — IRI verification via REST is skipped as most
+        public endpoints don't support Data Module queries), or
+        AnchorPendingResponse (202) if broadcast times out.
         """
         from api.ledger_anchor import broadcast_anchor, compute_content_hash, derive_ledger_iri, verify_anchor_onchain
 
@@ -1750,6 +1773,11 @@ def create_router(pool, caps=None):
 
         For claims that have a tx_hash but haven't transitioned to ledger_anchored
         (e.g., broadcast timed out). Queries the tx on-chain and finalizes state.
+
+        When tx is confirmed (code=0), the claim is finalized to ledger_anchored
+        regardless of whether the IRI is queryable via REST (most public endpoints
+        don't support Data Module queries). The audit log records whether IRI
+        verification succeeded or was skipped.
         """
         from api.ledger_anchor import derive_ledger_iri, query_tx_status, verify_anchor_onchain
 
@@ -1835,6 +1863,12 @@ def create_router(pool, caps=None):
             except (ValueError, AttributeError):
                 ledger_ts = datetime.now(timezone.utc)
 
+        # Build accurate audit reason
+        if anchor_present:
+            audit_reason = "Reconciled: tx confirmed and anchor verified on-chain"
+        else:
+            audit_reason = "Reconciled: tx confirmed (code=0), anchor IRI not queryable via REST"
+
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
@@ -1859,13 +1893,14 @@ def create_router(pool, caps=None):
                 await conn.execute("""
                     INSERT INTO claim_state_log (claim_rid, from_state, to_state, actor, reason, metadata)
                     VALUES ($1, 'verified', 'ledger_anchored', 'reconcile_service',
-                            'Reconciled: tx confirmed and anchor verified on-chain', $2::jsonb)
+                            $3, $2::jsonb)
                 """, rid, json.dumps({
                     "tx_hash": tx_hash,
                     "ledger_iri": ledger_iri,
                     "chain_id": os.getenv("REGEN_CHAIN_ID", "regen-1"),
                     "reconciled": True,
-                }))
+                    "anchor_verified": anchor_present,
+                }), audit_reason)
 
         logger.info(f"claim.reconciled rid={rid} iri={ledger_iri} tx={tx_hash}")
         return ReconcileResponse(

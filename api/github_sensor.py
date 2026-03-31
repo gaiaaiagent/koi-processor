@@ -752,17 +752,34 @@ class GitHubSensor:
 
                         # Sentence-aware chunks
                         chunks = self._chunker.chunk_text(content_text)
-                        for chunk in chunks:
+
+                        # ── B8: Generate contextual retrieval snippets ──
+                        chunk_contexts = [""] * len(chunks)
+                        try:
+                            from api.contextual_retriever import generate_contexts_for_document
+                            chunk_dicts = [{"text": c["text"]} for c in chunks]
+                            chunk_contexts = await generate_contexts_for_document(
+                                document_text=content_text,
+                                chunks=chunk_dicts,
+                                document_title=title,
+                                concurrency=5,
+                            )
+                        except Exception as ctx_err:
+                            logger.warning(f"B8 context generation failed (non-fatal): {ctx_err}")
+
+                        for chunk, ctx in zip(chunks, chunk_contexts):
                             chunk_rid = f"{rid}#chunk{chunk['index']}"
                             chunk_content = json_module.dumps({
                                 "text": chunk["text"],
+                                "context": ctx,
                                 "file_path": fr["rel_path"],
                                 "chunk_index": chunk["index"],
                             })
 
                             chunk_embedding = None
                             if self._embed_fn and chunk["text"].strip():
-                                emb = await self._embed_fn(chunk["text"][:2000])
+                                embed_text = f"{ctx}\n\n{chunk['text']}" if ctx else chunk["text"]
+                                emb = await self._embed_fn(embed_text[:2000])
                                 if emb:
                                     chunk_embedding = '[' + ','.join(str(x) for x in emb) + ']'
 

@@ -118,9 +118,13 @@ class CommitmentCandidate(BaseModel):
     pledger_organization: Optional[str] = None
     title: str
     description: str = ""
+    declaration_type: str = "commitment"
     offer_type: str = "labor"
     quantity: Optional[float] = None
     unit: Optional[str] = None
+    need_category: Optional[str] = None
+    fiat_only: Optional[bool] = None
+    monthly_amount_usd: Optional[float] = None
     validity_start: Optional[str] = None
     validity_end: Optional[str] = None
     estimated_value_usd: Optional[float] = None
@@ -396,6 +400,11 @@ def create_router(pool, caps=None):
                         "source_interview_id": body.source_document,
                         "ai_confidence": candidate.confidence,
                     }
+                    # Carry needs-specific fields from extraction
+                    extra = candidate.model_dump(exclude_none=True)
+                    for k in ("declaration_type", "need_category", "fiat_only", "monthly_amount_usd"):
+                        if k in extra and extra[k] is not None:
+                            metadata[k] = extra[k]
 
                     rid = _commitment_rid(pledger_uri, candidate.title)
                     try:
@@ -643,6 +652,37 @@ def create_router(pool, caps=None):
             "verification": "self_reported",
             "metadata": claim_meta,
         }
+
+    # ------------------------------------------------------------------ #
+    # Metadata merge (for recording mint tx, token addresses, etc.)      #
+    # ------------------------------------------------------------------ #
+
+    class CommitmentMetadataUpdate(BaseModel):
+        metadata: Dict[str, Any] = Field(..., description="Partial metadata to merge into existing")
+
+    @router.patch("/{rid}/metadata")
+    async def update_commitment_metadata(rid: str, body: CommitmentMetadataUpdate):
+        """Merge partial metadata into an existing commitment's metadata field."""
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT metadata FROM commitments WHERE commitment_rid = $1", rid
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Commitment not found: {rid}")
+
+            import json
+            existing = json.loads(row["metadata"]) if row["metadata"] else {}
+            existing.update(body.metadata)
+
+            updated = await conn.fetchrow("""
+                UPDATE commitments
+                SET metadata = $2::jsonb, updated_at = NOW()
+                WHERE commitment_rid = $1
+                RETURNING *
+            """, rid, _json_dumps(existing))
+
+        logger.info(f"commitment.metadata_update rid={rid} keys={list(body.metadata.keys())}")
+        return _row_to_commitment(updated)
 
     return router
 

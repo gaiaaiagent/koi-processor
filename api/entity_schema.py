@@ -56,6 +56,7 @@ FOLDER_FALLBACKS = {
     'Decision': 'Decisions',
     'Risk': 'Risks',
     'Metric': 'Metrics',
+    'SpecDoc': 'Specs',
 }
 
 # Global default stopwords (union with per-type)
@@ -331,6 +332,25 @@ DEFAULT_SCHEMAS = {
         folder='Metrics',
         phonetic_matching=False,
         similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    'Intent': EntityTypeConfig(
+        type_key='Intent',
+        label='Intent',
+        folder='Intents',
+        phonetic_matching=False,
+        similarity_threshold=0.85,
+        semantic_threshold=0.92,
+        require_token_overlap=False,
+    ),
+    # ── Spec governance entity types ────────────────────────────────────
+    'SpecDoc': EntityTypeConfig(
+        type_key='SpecDoc',
+        label='Spec Doc',
+        folder='Specs',
+        phonetic_matching=False,
+        similarity_threshold=0.90,
         semantic_threshold=0.92,
         require_token_overlap=True,
     ),

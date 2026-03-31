@@ -167,6 +167,32 @@ The comparison report includes:
 - Test with 10 documents before running on full pilot set (100)
 - Always maintain SSH tunnel while running scripts
 
+## 2026-03-24 Model Bakeoff Notes
+
+Two separate bakeoffs were run for the upcoming B8 contextual retrieval work:
+
+1. **Proxy extraction bakeoff**
+   - Report: `BAKEOFF_REPORT_20260324_205823.md`
+   - Compared general extraction quality across `gpt-4o-mini`, `gemini-2.5-flash-lite`, `deepseek-chat`, and `gemini-3.1-flash-lite-preview`
+   - Result: `gemini-3.1-flash-lite-preview` looked strongest on that proxy task, but the task shape did not match B8
+
+2. **Direct contextual retrieval bakeoff**
+   - Script: `contextual_bakeoff.py`
+   - Report: `CONTEXTUAL_BAKEOFF_20260324_151212.md`
+   - Raw results: `CONTEXTUAL_BAKEOFF_20260324_151212.json`
+   - Method: reconstruct parent documents from chunked `koi_memories`, run the actual B8 prompt (`document + chunk -> 1-2 sentence context`), then use a blind `gemini-2.5-flash-lite` judge
+   - Result: `gpt-4o-mini` beat `gemini-3.1-flash-lite-preview` `21-3` on 24 samples
+
+**Decision for B8:** use `gpt-4o-mini` as the default context-generation model.
+
+Why:
+- The direct bakeoff matches the real contextual retrieval task
+- `gpt-4o-mini` produced more specific, document-anchored snippets
+- It was also cheaper in the direct run (`$0.0174` total generation cost vs `$0.0343` for Gemini)
+
+Known operational note:
+- Gemini sync works, but Gemini Batch is still unreliable in this environment, so it is not the default path for offline B8 generation
+
 ## Related Documentation
 
 - `BACKUPS.md` - Backup and restore procedures

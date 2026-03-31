@@ -7,6 +7,7 @@
 # DEPLOYMENT MODE
 # ============================================
 KOI_MODE=personal
+DEPLOYMENT_PROFILE=personal
 
 # ============================================
 # DATABASE CONFIGURATION
@@ -41,6 +42,8 @@ OPENAI_API_KEY="{{OPENAI_API_KEY}}"
 # PERSONAL KOI API
 # ============================================
 KOI_API_PORT=8351
+WEB_SENSOR_ENABLED=true
+QUERY_ENDPOINT_ENABLED=true
 
 # ============================================
 # OBSIDIAN VAULT CONFIGURATION
@@ -82,3 +85,8 @@ KOI_BASE_URL=http://{{WG_IP}}:8351
 KOI_STRICT_MODE=false
 KOI_NET_REQUIRE_APPROVED_EDGE_FOR_POLL=true
 KOI_ENFORCE_SOURCE_KEY_RID_BINDING=true
+
+# ============================================
+# VAULT SYNC
+# ============================================
+VAULT_SYNC_ENABLED=true

@@ -175,10 +175,19 @@ def quartz_url(entity_type: str, name: str) -> Optional[str]:
 
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
-openai_client: Optional[Any] = None  # lazy init for /chat LLM calls
 
 from api.embedding_provider import EmbeddingProvider, create_embedding_provider
 embedding_provider: Optional[EmbeddingProvider] = None
+
+from api.chat_provider import (
+    ChatProvider,
+    create_classifier_provider,
+    create_chat_provider,
+    create_expansion_provider,
+)
+classifier_provider: Optional[ChatProvider] = None
+chat_answer_provider: Optional[ChatProvider] = None
+expansion_provider: Optional[ChatProvider] = None
 terminusdb_adapter: Optional[Any] = None  # TerminusDBAdapter instance (lazy init)
 
 
@@ -1225,7 +1234,7 @@ async def enqueue_outbox(
 @app.on_event("startup")
 async def startup():
     """Initialize database connection pool and embedding provider"""
-    global db_pool, openai_client, embedding_provider
+    global db_pool, embedding_provider
     try:
         db_pool = await asyncpg.create_pool(
             DB_URL,
@@ -1314,6 +1323,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Task router not mounted: {e}")
 
+            # Project briefing router (always on, no capability gate)
+            try:
+                from api.routers.project_router import create_router as create_project_router
+                app.include_router(create_project_router(db_pool), prefix="/project")
+                logger.info("Project router mounted (/project)")
+            except Exception as e:
+                logger.warning(f"Project router not mounted: {e}")
+
             # Claims engine router (always on, no capability gate)
             try:
                 from api.routers.claims_router import create_router as create_claims_router
@@ -1321,6 +1338,19 @@ async def startup():
                 logger.info("Claims router mounted (/claims/)")
             except Exception as e:
                 logger.warning(f"Claims router not mounted: {e}")
+
+            # Intent registry router (always on, no capability gate)
+            # Privacy note: router is local-only (localhost:8351 / WireGuard).
+            # Response model separation (Discovery/Detail/Coordinator) is the
+            # enforcement mechanism at pilot scale. If the API ever becomes
+            # externally accessible, add capability/auth gates to /detail and
+            # /digest endpoints.
+            try:
+                from api.routers.intent_router import create_router as create_intent_router
+                app.include_router(create_intent_router(db_pool), prefix="/intents")
+                logger.info("Intent router mounted (/intents)")
+            except Exception as e:
+                logger.warning(f"Intent router not mounted: {e}")
 
             # Dynamic query endpoint (personal deployments only)
             if _caps.query_endpoint:
@@ -4575,8 +4605,6 @@ async def graph_shortest_path(
 # /chat Endpoint — RAG-powered conversational interface
 # =============================================================================
 
-CHAT_LLM_MODEL = os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini')
-
 
 # ── B2 GraphRAG: graph-guided retrieval ──────────────────────────────
 
@@ -4880,11 +4908,248 @@ async def _graph_guided_retrieval(
     return sources, relationships_ctx, doc_chunks, web_sources
 
 
+# ---------------------------------------------------------------------------
+# Structured graph query (Step 7) — template-based entity/relationship lookup
+# ---------------------------------------------------------------------------
+import re as _re_module
+
+# Known entity types for pattern matching
+_ENTITY_TYPES = {
+    "organization": "Organization", "organizations": "Organization",
+    "project": "Project", "projects": "Project",
+    "location": "Location", "locations": "Location",
+    "concept": "Concept", "concepts": "Concept",
+    "practice": "Practice", "practices": "Practice",
+    "person": "Person", "people": "Person",
+    "bioregion": "Bioregion", "bioregions": "Bioregion",
+}
+
+# Patterns: (regex, template_name)
+_GRAPH_QUERY_PATTERNS = [
+    # "which/what organizations work on/related to/involved in X"
+    (_re_module.compile(
+        r"(?:which|what|list|show)\s+(\w+)\s+(?:work on|related to|involved in|involved with|associated with|connected to)\s+(.+?)[\?.]?$",
+        _re_module.IGNORECASE
+    ), "related_entities_typed"),
+    # "what is related to X" / "what relates to X"
+    (_re_module.compile(
+        r"(?:what|which|who)\s+(?:is|are)\s+(?:related|connected|linked)\s+to\s+(.+?)[\?.]?$",
+        _re_module.IGNORECASE
+    ), "related_entities_all"),
+    # "how many X in Y" / "how many X"
+    (_re_module.compile(
+        r"how many\s+(\w+)(?:\s+in\s+(.+?))?[\?.]?$",
+        _re_module.IGNORECASE
+    ), "count_entities"),
+]
+
+
+async def _resolve_entity_uri(name: str, conn) -> Optional[str]:
+    """Resolve a free-text entity name to its fuseki_uri."""
+    row = await conn.fetchrow(
+        "SELECT fuseki_uri FROM entity_registry WHERE entity_text ILIKE $1 AND NOT node_private LIMIT 1",
+        name.strip()
+    )
+    if row:
+        return row["fuseki_uri"]
+    # Try fuzzy match with %
+    row = await conn.fetchrow(
+        "SELECT fuseki_uri FROM entity_registry WHERE entity_text ILIKE $1 AND NOT node_private ORDER BY LENGTH(entity_text) LIMIT 1",
+        f"%{name.strip()}%"
+    )
+    return row["fuseki_uri"] if row else None
+
+
+async def _try_structured_graph_query(query: str, conn, db_pool) -> str:
+    """
+    Attempt to match the query against structured graph patterns.
+    Returns a formatted block of results, or empty string if no pattern matches.
+    """
+    if conn is None:
+        conn = await db_pool.acquire()
+        _acquired = True
+    else:
+        _acquired = False
+
+    try:
+        for pattern, template_name in _GRAPH_QUERY_PATTERNS:
+            m = pattern.search(query)
+            if not m:
+                continue
+
+            if template_name == "related_entities_typed":
+                type_word = m.group(1).lower()
+                entity_name = m.group(2).strip()
+                target_type = _ENTITY_TYPES.get(type_word)
+                if not target_type:
+                    continue
+
+                uri = await _resolve_entity_uri(entity_name, conn)
+                if not uri:
+                    continue
+
+                rows = await conn.fetch("""
+                    SELECT DISTINCT e.entity_text, e.entity_type, e.description
+                    FROM entity_registry e
+                    JOIN entity_relationships r
+                        ON (e.fuseki_uri = r.subject_uri OR e.fuseki_uri = r.object_uri)
+                    WHERE (r.subject_uri = $1 OR r.object_uri = $1)
+                      AND e.fuseki_uri != $1
+                      AND e.entity_type = $2
+                      AND NOT COALESCE(e.node_private, false)
+                    ORDER BY e.entity_text
+                    LIMIT 20
+                """, uri, target_type)
+
+                if not rows:
+                    return ""
+
+                lines = [f"Graph query: {target_type}s related to \"{entity_name}\""]
+                for r in rows:
+                    desc = f": {r['description'][:100]}" if r['description'] else ""
+                    lines.append(f"- {r['entity_text']} ({r['entity_type']}){desc}")
+                logger.info(f"Structured graph query matched: {template_name}, {len(rows)} results")
+                return "\n".join(lines)
+
+            elif template_name == "related_entities_all":
+                entity_name = m.group(1).strip()
+                uri = await _resolve_entity_uri(entity_name, conn)
+                if not uri:
+                    continue
+
+                rows = await conn.fetch("""
+                    SELECT DISTINCT e.entity_text, e.entity_type, r.predicate
+                    FROM entity_registry e
+                    JOIN entity_relationships r
+                        ON (e.fuseki_uri = r.subject_uri OR e.fuseki_uri = r.object_uri)
+                    WHERE (r.subject_uri = $1 OR r.object_uri = $1)
+                      AND e.fuseki_uri != $1
+                      AND NOT COALESCE(e.node_private, false)
+                    ORDER BY e.entity_type, e.entity_text
+                    LIMIT 20
+                """, uri)
+
+                if not rows:
+                    return ""
+
+                lines = [f"Graph query: entities related to \"{entity_name}\""]
+                for r in rows:
+                    lines.append(f"- {r['entity_text']} ({r['entity_type']}) [{r['predicate']}]")
+                logger.info(f"Structured graph query matched: {template_name}, {len(rows)} results")
+                return "\n".join(lines)
+
+            elif template_name == "count_entities":
+                type_word = m.group(1).lower()
+                location_name = m.group(2).strip() if m.group(2) else None
+                target_type = _ENTITY_TYPES.get(type_word)
+                if not target_type:
+                    continue
+
+                if location_name:
+                    # Count entities of type related to a location
+                    loc_uri = await _resolve_entity_uri(location_name, conn)
+                    if not loc_uri:
+                        continue
+                    row = await conn.fetchrow("""
+                        SELECT COUNT(DISTINCT e.fuseki_uri) as cnt
+                        FROM entity_registry e
+                        JOIN entity_relationships r
+                            ON (e.fuseki_uri = r.subject_uri OR e.fuseki_uri = r.object_uri)
+                        WHERE (r.subject_uri = $1 OR r.object_uri = $1)
+                          AND e.fuseki_uri != $1
+                          AND e.entity_type = $2
+                          AND NOT COALESCE(e.node_private, false)
+                    """, loc_uri, target_type)
+                    count = row['cnt']
+                    logger.info(f"Structured graph query matched: {template_name}, count={count}")
+                    return f"Graph query: {count} {target_type}(s) related to \"{location_name}\""
+                else:
+                    row = await conn.fetchrow(
+                        "SELECT COUNT(*) as cnt FROM entity_registry WHERE entity_type = $1 AND NOT COALESCE(node_private, false)",
+                        target_type
+                    )
+                    count = row['cnt']
+                    logger.info(f"Structured graph query matched: {template_name}, count={count}")
+                    return f"Graph query: {count} {target_type}(s) in the knowledge graph"
+
+        return ""  # No pattern matched
+    finally:
+        if _acquired:
+            await db_pool.release(conn)
+
+
+# ── B7: Cross-encoder reranking via FlashRank ──
+_reranker = None
+
+def _get_reranker():
+    global _reranker
+    if _reranker is None:
+        try:
+            from flashrank import Ranker
+            _reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+        except ImportError:
+            logger.warning("flashrank not installed — reranking disabled")
+    return _reranker
+
+def _rerank_chunks(query: str, chunks: list, top_k: int = 8) -> list:
+    """Rerank doc_chunks dicts using FlashRank cross-encoder (B7)."""
+    if not chunks:
+        return chunks
+    ranker = _get_reranker()
+    if ranker is None:
+        return chunks[:top_k]
+    from flashrank import RerankRequest
+    passages = [{"id": i, "text": ((c.get("context") or "") + "\n" + c.get("text", ""))[:1500]} for i, c in enumerate(chunks)]
+    req = RerankRequest(query=query, passages=passages)
+    results = ranker.rerank(req)
+    reranked = []
+    for r in results[:top_k]:
+        idx = r["id"]
+        chunk = chunks[idx].copy()
+        chunk["rerank_score"] = float(r["score"])
+        reranked.append(chunk)
+    return reranked
+
+
+EXPANSION_MODEL = os.getenv("EXPANSION_MODEL", "gpt-4o-mini")
+
+
+async def _expand_queries(query: str, n: int = 3) -> list:
+    """Generate n query reformulations for multi-query retrieval (B8b).
+    Returns [original_query] + up to n reformulations.
+    """
+    if not expansion_provider:
+        return [query]
+    try:
+        result = await expansion_provider.complete(
+            [{
+                "role": "user",
+                "content": f"""Generate {n} alternative search queries for a bioregional knowledge commons.
+Original query: "{query}"
+
+Return ONLY the alternative queries, one per line. No numbering, no explanation.
+Each should rephrase the question using different terminology to find relevant documents."""
+            }],
+            model=EXPANSION_MODEL,
+            max_tokens=200,
+            temperature=0.7,
+        )
+        lines = [l.strip() for l in result.strip().split('\n') if l.strip()]
+        return [query] + lines[:n]
+    except Exception as e:
+        logger.warning(f"B8b query expansion failed: {e}")
+        return [query]
+
+
 class ChatRequest(BaseModel):
     """Request for RAG chat."""
     query: str
     max_context_entities: int = Field(default=5, ge=1, le=20)
     retrieval_mode: str = Field(default="hybrid", description="hybrid (B1 default) or graphrag (B2 experimental)")
+    include_code: bool = Field(default=False, description="Include code entity chunks in retrieval (default: exclude)")
+    multi_query: bool = Field(default=False, description="Enable multi-query expansion for broader retrieval (B8b)")
+    planner: bool = Field(default=False, description="B9a QueryPlan IR path (experimental)")
+    debug_prompt: bool = Field(default=False, description="Include assembled prompt in response (requires CHAT_DEBUG_PROMPT env)")
 
 
 @app.post("/chat")
@@ -4899,27 +5164,87 @@ async def chat_endpoint(request: ChatRequest):
     """
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
-    # Lazy init openai_client for /chat LLM calls (separate from embedding provider)
-    global openai_client
-    if not openai_client:
-        if not OPENAI_API_KEY:
-            raise HTTPException(
-                status_code=503,
-                detail="LLM service not available (OPENAI_API_KEY not configured)",
-            )
+    # Lazy init chat providers (classifier, chat answer, expansion)
+    global classifier_provider, chat_answer_provider, expansion_provider
+    if not classifier_provider or not chat_answer_provider or not expansion_provider:
         try:
-            from openai import OpenAI
-            openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        except ImportError:
+            if not classifier_provider:
+                classifier_provider = create_classifier_provider()
+            if not chat_answer_provider:
+                chat_answer_provider = create_chat_provider()
+            if not expansion_provider:
+                expansion_provider = create_expansion_provider()
+        except (ValueError, ImportError) as e:
             raise HTTPException(
                 status_code=503,
-                detail="openai package not installed",
+                detail=f"LLM provider not available: {e}",
             )
 
     # ------------------------------------------------------------------
     # 1. Semantic search over entity embeddings to find relevant entities
     # ------------------------------------------------------------------
     query_embedding = await generate_embedding(request.query)
+
+    # ── B9a Planner path (opt-in via planner=true) ──
+    planner_requested = request.planner and request.retrieval_mode != "graphrag"
+    planner_executed = False
+    plan_trace = None
+
+    if planner_requested:
+        from api.query_classifier import classify_query, CLASSIFIER_CONFIDENCE_THRESHOLD
+        from api.query_planner import assemble_plan
+        from api.plan_executor import execute_plan as _execute_plan
+        from api.retrieval_executors import evidence_bundles_to_legacy_format
+        from api.schemas.query_plan import QueryTaxonomy
+
+        classifier_output = await classify_query(request.query, classifier_provider)
+
+        if classifier_output.query_taxonomy == QueryTaxonomy.OUT_OF_DOMAIN and \
+           classifier_output.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+            # ABSTENTION: early-return, bypasses prompt builder + LLM entirely
+            return {
+                "answer": "This question appears to be outside the scope of bioregional knowledge. "
+                          "I can help with questions about ecology, governance, organizations, "
+                          "commitments, and projects in the Bioregional Knowledge Commons.",
+                "sources": [],
+                "intent": {"intent": "out_of_domain", "entities": [], "confidence": classifier_output.confidence},
+                "retrieval_mode": request.retrieval_mode,
+                "plan_trace": {
+                    "plan_id": None, "taxonomy": "out_of_domain",
+                    "confidence": classifier_output.confidence,
+                    "fallback": False, "abstained": True,
+                },
+            }
+        elif classifier_output.confidence >= CLASSIFIER_CONFIDENCE_THRESHOLD:
+            planner_executed = True
+            plan = assemble_plan(classifier_output, request.query)
+            async with db_pool.acquire() as conn:
+                evidence, traces = await _execute_plan(
+                    plan, conn, query_embedding,
+                    generate_embedding_fn=generate_embedding,
+                    expand_queries_fn=_expand_queries,
+                    rerank_fn=_rerank_chunks,
+                    quartz_url_fn=quartz_url,
+                )
+                sources, relationships_ctx, doc_chunks, web_sources = evidence_bundles_to_legacy_format(evidence)
+            plan_trace = {
+                "plan_id": plan.plan_id,
+                "taxonomy": plan.query_taxonomy.value,
+                "confidence": classifier_output.confidence,
+                "depth_tier": classifier_output.depth_tier.value,
+                "steps": len(plan.steps),
+                "fallback": False,
+            }
+        else:
+            # HARD FALLBACK: low confidence -> run full monolithic baseline
+            logger.info(f"Planner confidence {classifier_output.confidence:.2f} < {CLASSIFIER_CONFIDENCE_THRESHOLD}, falling back")
+            plan_trace = {
+                "fallback": True,
+                "confidence": classifier_output.confidence,
+                "taxonomy": classifier_output.query_taxonomy.value,
+                "fallback_reason": "low_confidence",
+            }
+            # Falls through to monolithic path below
 
     # ── B2 GraphRAG dispatch ──
     _use_graphrag = request.retrieval_mode == "graphrag"
@@ -4939,212 +5264,56 @@ async def chat_endpoint(request: ChatRequest):
             web_sources = _gr_web
             _graphrag_done = True
 
-    # ── B1 hybrid retrieval (skipped when graphrag produced results) ──
-    if not _graphrag_done:
-        sources: List[Dict[str, Any]] = []
-
-    if not _graphrag_done:
+    # ── B1 hybrid retrieval via extracted executors (B9a refactor) ──
+    # Skipped when planner already executed or graphrag produced results
+    if not planner_executed and not _graphrag_done:
+      from api.retrieval_executors import (
+          entity_lookup as _entity_lookup,
+          relationship_traverse as _relationship_traverse,
+          text_search as _text_search,
+          web_source_lookup as _web_source_lookup,
+          evidence_bundles_to_legacy_format,
+      )
       async with db_pool.acquire() as conn:
-        if query_embedding:
-            embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
-            try:
-                rows = await conn.fetch("""
-                    SELECT fuseki_uri, entity_text, entity_type, metadata,
-                           1 - (embedding <=> $1::vector) AS similarity
-                    FROM entity_registry
-                    WHERE embedding IS NOT NULL AND NOT node_private
-                    ORDER BY embedding <=> $1::vector
-                    LIMIT $2
-                """, embedding_str, request.max_context_entities)
-            except (asyncpg.exceptions.UndefinedColumnError,
-                    asyncpg.exceptions.UndefinedFunctionError,
-                    asyncpg.exceptions.DataError) as e:
-                logger.warning("entity_registry.embedding vector search failed, falling back to text search: %s", e)
-                # Extract meaningful words (3+ chars) from query for keyword matching
-                words = [w for w in request.query.lower().split() if len(w) >= 3]
-                if words:
-                    conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
-                    match_score = " + ".join(
-                        f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
-                        for i in range(len(words))
-                    )
-                    params = [f"%{w}%" for w in words]
-                    params.append(request.max_context_entities)
-                    rows = await conn.fetch(f"""
-                        SELECT fuseki_uri, entity_text, entity_type, metadata,
-                               ({match_score})::float / {len(words)} AS similarity
-                        FROM entity_registry
-                        WHERE ({conditions}) AND NOT node_private
-                        ORDER BY ({match_score}) DESC, created_at DESC
-                        LIMIT ${len(words)+1}
-                    """, *params)
-                else:
-                    rows = []
-        else:
-            # Fallback: text search on entity names using keyword splitting
-            words = [w for w in request.query.lower().split() if len(w) >= 3]
-            if words:
-                conditions = " OR ".join(f"normalized_text ILIKE ${i+1}" for i in range(len(words)))
-                match_score = " + ".join(
-                    f"CASE WHEN normalized_text ILIKE ${i+1} THEN 1 ELSE 0 END"
-                    for i in range(len(words))
-                )
-                params = [f"%{w}%" for w in words]
-                params.append(request.max_context_entities)
-                rows = await conn.fetch(f"""
-                    SELECT fuseki_uri, entity_text, entity_type, metadata,
-                           ({match_score})::float / {len(words)} AS similarity
-                    FROM entity_registry
-                    WHERE ({conditions}) AND NOT node_private
-                    ORDER BY ({match_score}) DESC, created_at DESC
-                    LIMIT ${len(words)+1}
-                """, *params)
-            else:
-                rows = []
+        # Step 1: Entity lookup
+        entity_bundles = await _entity_lookup(
+            request.query, query_embedding, conn,
+            max_results=request.max_context_entities,
+            quartz_url_fn=quartz_url,
+        )
+        entity_uris = [b.source_uri for b in entity_bundles]
 
-        # Build source list and collect URIs for relationship lookup
-        entity_uris = []
-        for row in rows:
-            meta = row['metadata'] or {}
-            if isinstance(meta, str):
-                meta = json_module_global.loads(meta)
-            description = meta.get('description', '') if isinstance(meta, dict) else ''
-            sources.append({
-                "uri": row['fuseki_uri'],
-                "label": row['entity_text'],
-                "entity_type": row['entity_type'],
-                "score": round(float(row['similarity']), 4),
-                "description": description,
-                "quartz_url": quartz_url(row['entity_type'], row['entity_text']),
-            })
-            entity_uris.append(row['fuseki_uri'])
+        # Step 2: Relationship traverse
+        rel_bundles = await _relationship_traverse(entity_uris, conn)
 
-        # ------------------------------------------------------------------
-        # 2. Fetch 2-hop relationships for matched entities (richer context)
-        # ------------------------------------------------------------------
-        relationships_ctx: List[str] = []
-        if entity_uris:
-            rel_rows = await conn.fetch("""
-                WITH RECURSIVE traverse AS (
-                    SELECT
-                        r.subject_uri, r.object_uri, r.predicate,
-                        1 AS depth
-                    FROM entity_relationships r
-                    WHERE r.subject_uri = ANY($1) OR r.object_uri = ANY($1)
-                    UNION
-                    SELECT
-                        r2.subject_uri, r2.object_uri, r2.predicate,
-                        t.depth + 1
-                    FROM traverse t
-                    JOIN entity_relationships r2
-                        ON r2.subject_uri IN (t.subject_uri, t.object_uri)
-                        OR r2.object_uri IN (t.subject_uri, t.object_uri)
-                    WHERE t.depth < 2
-                )
-                SELECT DISTINCT ON (t.subject_uri, t.predicate, t.object_uri)
-                    t.subject_uri,
-                    s.entity_text AS subject_label,
-                    t.predicate,
-                    t.object_uri,
-                    o.entity_text AS object_label,
-                    t.depth
-                FROM traverse t
-                LEFT JOIN entity_registry s ON s.fuseki_uri = t.subject_uri
-                LEFT JOIN entity_registry o ON o.fuseki_uri = t.object_uri
-                WHERE NOT COALESCE(s.node_private, false)
-                  AND NOT COALESCE(o.node_private, false)
-                ORDER BY t.subject_uri, t.predicate, t.object_uri, t.depth
-                LIMIT 50
-            """, entity_uris)
-            for rr in rel_rows:
-                subj = rr['subject_label'] or rr['subject_uri']
-                obj = rr['object_label'] or rr['object_uri']
-                relationships_ctx.append(f"{subj} --[{rr['predicate']}]--> {obj}")
+        # Step 3: Text search (hybrid BM25+vector + reranking)
+        text_bundles = await _text_search(
+            request.query, query_embedding, conn,
+            multi_query=request.multi_query,
+            include_code=request.include_code,
+            top_k=8,
+            generate_embedding_fn=generate_embedding,
+            expand_queries_fn=_expand_queries,
+            rerank_fn=_rerank_chunks,
+        )
 
-        # ------------------------------------------------------------------
-        # 2b. Search document chunks for grounding text (B1.1)
-        # ------------------------------------------------------------------
-        doc_chunks: List[Dict[str, Any]] = []
-        if query_embedding:
-            try:
-                chunk_rows = await conn.fetch("""
-                    SELECT
-                        c.document_rid,
-                        m.content->>'title' AS title,
-                        LEFT(c.content->>'text', 500) AS chunk_text,
-                        c.content->>'section_id' AS section_id,
-                        c.content->>'section_title' AS section_title,
-                        c.content->>'wiki_url' AS wiki_url,
-                        1 - (c.embedding <=> $1::vector) AS similarity
-                    FROM koi_memory_chunks c
-                    JOIN koi_memories m ON m.rid = c.document_rid
-                    WHERE c.embedding IS NOT NULL
-                    ORDER BY c.embedding <=> $1::vector
-                    LIMIT 8
-                """, embedding_str)
-                for cr in chunk_rows:
-                    if float(cr['similarity']) > 0.3:
-                        doc_chunks.append({
-                            "rid": cr['document_rid'],
-                            "title": cr['title'] or cr['document_rid'],
-                            "text": cr['chunk_text'] or "",
-                            "score": round(float(cr['similarity']), 4),
-                            "section_id": cr['section_id'],
-                            "section_title": cr['section_title'],
-                            "wiki_url": cr['wiki_url'],
-                        })
-                        sources.append({
-                            "uri": cr['document_rid'],
-                            "label": cr['title'] or cr['document_rid'],
-                            "entity_type": "Document",
-                            "score": round(float(cr['similarity']), 4),
-                            "description": (cr['chunk_text'] or "")[:200],
-                            "url": cr['wiki_url'],
-                        })
-            except (asyncpg.exceptions.UndefinedTableError,
-                    asyncpg.exceptions.UndefinedColumnError):
-                pass  # koi_memory_chunks or expected columns not available
-            except asyncpg.exceptions.DataError as e:
-                # Dimension mismatch: koi_memory_chunks uses BGE embeddings (1024-dim)
-                # while generate_embedding() may output a different dimension (e.g. 1536).
-                logger.warning(f"koi_memory_chunks vector dimension mismatch (BGE vs provider): {e}")
-                pass  # skip chunk results, /chat still works with entity context
+        # Step 4: Web source enrichment (deterministic post-step)
+        web_bundles = await _web_source_lookup(entity_uris, conn)
 
-        # ------------------------------------------------------------------
-        # 2c. Fetch web sources linked to matched entities (B1.3)
-        # ------------------------------------------------------------------
-        web_sources: List[Dict[str, Any]] = []
-        if entity_uris:
-            try:
-                ws_rows = await conn.fetch("""
-                    SELECT DISTINCT ON (ws.url)
-                        ws.url,
-                        ws.title,
-                        ws.description
-                    FROM web_submissions ws
-                    JOIN document_entity_links del
-                        ON del.document_rid = 'web:' || ws.rid::text
-                    WHERE del.entity_uri = ANY($1)
-                      AND ws.status IN ('ingested', 'monitoring')
-                    LIMIT 5
-                """, entity_uris)
-                for wr in ws_rows:
-                    desc = wr['description'] or ""
-                    web_sources.append({
-                        "url": wr['url'],
-                        "title": wr['title'] or wr['url'],
-                        "summary": desc,
-                    })
-                    sources.append({
-                        "uri": wr['url'],
-                        "label": wr['title'] or wr['url'],
-                        "entity_type": "WebSource",
-                        "score": 0.8,
-                        "description": desc[:200],
-                    })
-            except (asyncpg.exceptions.UndefinedTableError,
-                    asyncpg.exceptions.UndefinedColumnError):
-                pass  # web_submissions or expected columns not available
+      # Convert to legacy format for prompt builder
+      all_bundles = entity_bundles + rel_bundles + text_bundles + web_bundles
+      sources, relationships_ctx, doc_chunks, web_sources = evidence_bundles_to_legacy_format(all_bundles)
+
+    # ------------------------------------------------------------------
+    # 2d. Structured graph query (template-based, Step 7)
+    # ------------------------------------------------------------------
+    graph_query_block = ""
+    try:
+        graph_query_block = await _try_structured_graph_query(
+            request.query, None, db_pool
+        )
+    except Exception as e:
+        logger.warning(f"Structured graph query failed (non-fatal): {e}")
 
     # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context
@@ -5162,12 +5331,13 @@ async def chat_endpoint(request: ChatRequest):
         f"- **{d['title']}**"
         + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
         + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
-        + f": {d['text'][:300]}"
+        + (f" Context: {d['context']}." if d.get('context') else "")
+        + f": {d['text'][:1500]}"
         for d in doc_chunks
     ) if doc_chunks else ""
 
     web_block = "\n".join(
-        f"- [{w['title']}]({w['url']}): {w['summary'][:200]}"
+        f"- [{w['title']}]({w['url']}): {w['summary'][:500]}"
         for w in web_sources
     ) if web_sources else ""
 
@@ -5183,6 +5353,8 @@ async def chat_endpoint(request: ChatRequest):
 
     prompt_sections = [f"## Relevant Entities\n{entity_block}"]
     prompt_sections.append(f"## Relationships\n{rel_block}")
+    if graph_query_block:
+        prompt_sections.append(f"## Graph Query Results\n{graph_query_block}")
     if doc_block:
         prompt_sections.append(f"## Relevant Documents\n{doc_block}")
     if web_block:
@@ -5194,17 +5366,14 @@ async def chat_endpoint(request: ChatRequest):
     # 4. Call LLM
     # ------------------------------------------------------------------
     try:
-        llm_response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=CHAT_LLM_MODEL,
-            messages=[
+        answer = await chat_answer_provider.complete(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
             max_tokens=1024,
         )
-        answer = llm_response.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         raise HTTPException(
@@ -5222,12 +5391,22 @@ async def chat_endpoint(request: ChatRequest):
         "confidence": round(max((s['score'] for s in sources), default=0.0), 4),
     }
 
-    return {
+    response = {
         "answer": answer,
         "sources": sources,
         "intent": intent,
         "retrieval_mode": request.retrieval_mode,
     }
+    # Always emit plan_trace when planner was requested (including fallback)
+    if planner_requested and plan_trace is not None:
+        response["plan_trace"] = plan_trace
+    # Debug prompt capture (double-gated: request flag + server env var)
+    if request.debug_prompt and os.getenv("CHAT_DEBUG_PROMPT"):
+        response["_debug_prompt"] = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+    return response
 
 
 if __name__ == "__main__":

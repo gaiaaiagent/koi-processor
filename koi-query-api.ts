@@ -49,50 +49,49 @@ import {
 } from "./src/metadata/index.ts";
 
 // =============================================================================
-// Internal API Key Gating (MCP-only endpoints)
+// Authentication Gating (metadata/document endpoints)
 // =============================================================================
 const KOI_INTERNAL_API_KEY = process.env.KOI_INTERNAL_API_KEY || '';
 
 /**
- * Middleware to gate MCP-only endpoints with internal API key
- * Returns 401 if key missing, 403 if key invalid
+ * Dual-auth middleware: accepts EITHER a valid X-Internal-API-Key header
+ * (for headless services like regen-python-mcp) OR a valid OAuth session token
+ * via Authorization: Bearer (for interactive MCP clients like regen-koi-mcp).
+ *
+ * Sets req.authMethod, req.userEmail, req.isAuthenticated for downstream use.
+ * Internal key auth does NOT set isAuthenticated — private docs require session token.
  */
-function requireInternalApiKey(req: any, res: any, next: () => void) {
+async function requireInternalOrSessionAuth(req: any, res: any, next: () => void) {
   const requestId = generateRequestId();
   res.setHeader('X-Request-ID', requestId);
 
-  // Check if internal API key is configured
-  if (!KOI_INTERNAL_API_KEY) {
-    console.warn('[Metadata] KOI_INTERNAL_API_KEY not configured - blocking all requests');
-    const koiError: KoiError = {
-      code: 'NOT_CONFIGURED',
-      message: 'Internal API not configured',
-      retryable: false,
-    };
-    return res.status(503).json(createErrorEnvelope(requestId, koiError));
+  // Path 1: Internal API key (for headless services)
+  const internalKey = req.headers['x-internal-api-key'];
+  if (internalKey && KOI_INTERNAL_API_KEY && internalKey === KOI_INTERNAL_API_KEY) {
+    req.authMethod = 'internal_key';
+    return next();
   }
 
-  const providedKey = req.headers['x-internal-api-key'];
-
-  if (!providedKey) {
-    const koiError: KoiError = {
-      code: 'UNAUTHORIZED',
-      message: 'X-Internal-API-Key header required',
-      retryable: false,
-    };
-    return res.status(401).json(createErrorEnvelope(requestId, koiError));
+  // Path 2: OAuth session token (for interactive MCP clients)
+  const authHeader = req.headers['authorization'];
+  const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+  if (sessionToken) {
+    const userEmail = await validateSessionToken(sessionToken);
+    if (userEmail) {
+      req.userEmail = userEmail;
+      req.isAuthenticated = true;
+      req.authMethod = 'session_token';
+      return next();
+    }
   }
 
-  if (providedKey !== KOI_INTERNAL_API_KEY) {
-    const koiError: KoiError = {
-      code: 'FORBIDDEN',
-      message: 'Invalid internal API key',
-      retryable: false,
-    };
-    return res.status(403).json(createErrorEnvelope(requestId, koiError));
-  }
-
-  next();
+  // Neither auth method succeeded
+  const koiError: KoiError = {
+    code: 'UNAUTHORIZED',
+    message: 'Authentication required. Use regen_koi_authenticate or provide X-Internal-API-Key.',
+    retryable: false,
+  };
+  return res.status(401).json(createErrorEnvelope(requestId, koiError));
 }
 
 const app = express();
@@ -5243,9 +5242,10 @@ app.get('/api/koi/weekly-digest', async (req, res) => {
  * Response (success):
  *   { iri, resolver_url, content_hash, rid, resolved_at, from_cache }
  */
-app.post('/api/koi/metadata/resolve', requireInternalApiKey, async (req, res) => {
+app.post('/api/koi/metadata/resolve', requireInternalOrSessionAuth, async (req, res) => {
   const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
   const startTime = Date.now();
+  console.log(`[Metadata] POST /metadata/resolve auth=${req.authMethod}${req.userEmail ? ` user=${req.userEmail}` : ''}`);
 
   try {
     const { iri, force_refresh = false } = req.body || {};
@@ -5325,9 +5325,10 @@ app.post('/api/koi/metadata/resolve', requireInternalApiKey, async (req, res) =>
  * Response (error with blocked=true):
  *   { blocked: true, code, message } - metric should NOT be reported
  */
-app.post('/api/koi/metadata/hectares', requireInternalApiKey, async (req, res) => {
+app.post('/api/koi/metadata/hectares', requireInternalOrSessionAuth, async (req, res) => {
   const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
   const startTime = Date.now();
+  console.log(`[Metadata] POST /metadata/hectares auth=${req.authMethod}${req.userEmail ? ` user=${req.userEmail}` : ''}`);
 
   try {
     const { iri, force_refresh = false } = req.body || {};
@@ -5413,8 +5414,9 @@ app.post('/api/koi/metadata/hectares', requireInternalApiKey, async (req, res) =
  *
  * INTERNAL ONLY: Requires X-Internal-API-Key header
  */
-app.get('/api/koi/metadata/stats', requireInternalApiKey, async (req, res) => {
+app.get('/api/koi/metadata/stats', requireInternalOrSessionAuth, async (req, res) => {
   const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
+  console.log(`[Metadata] GET /metadata/stats auth=${req.authMethod}${req.userEmail ? ` user=${req.userEmail}` : ''}`);
 
   try {
     const integration = getMetadataIntegration();
@@ -5462,9 +5464,10 @@ const MIN_DIRECT_TEXT_LENGTH = 50;
  *     warnings: ["fallback_used", "partial_results"]
  *   }
  */
-app.get('/api/koi/document/full', requireInternalApiKey, async (req, res) => {
+app.get('/api/koi/document/full', requireInternalOrSessionAuth, async (req, res) => {
   const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
   const startTime = Date.now();
+  console.log(`[Document] GET /document/full auth=${req.authMethod}${req.userEmail ? ` user=${req.userEmail}` : ''}`);
 
   try {
     const rid = req.query.rid as string;
@@ -5480,11 +5483,8 @@ app.get('/api/koi/document/full', requireInternalApiKey, async (req, res) => {
 
     console.log(`[Document] Fetching full document for RID: ${rid}`);
 
-    // Check for bearer token (session auth) for private doc access
-    const authHeader = req.headers['authorization'];
-    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
-    const userEmail = await validateSessionToken(sessionToken);
-    const isAuthenticated = !!userEmail;
+    // Private doc access requires session token auth (internal key alone → public docs only)
+    const isAuthenticated = !!req.isAuthenticated;
 
     // Step 1: Normalize RID - if it's a chunk RID, look up the document RID
     let documentRid = rid;

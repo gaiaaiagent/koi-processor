@@ -497,9 +497,13 @@ RestartSec=5
 WantedBy=default.target
 SYSTEMD_EOF
 
-    systemctl --user daemon-reload
-    systemctl --user enable koi-server.service 2>/dev/null || true
-    log_info "Enabled koi-server systemd user service (auto-start on login)"
+    if systemctl --user daemon-reload 2>/dev/null; then
+        systemctl --user enable koi-server.service 2>/dev/null || true
+        log_info "Enabled koi-server systemd user service (auto-start on login)"
+    else
+        log_warn "Could not configure systemd user service (no user session bus — likely running under sudo)"
+        log_warn "To enable auto-start later: systemctl --user daemon-reload && systemctl --user enable koi-server"
+    fi
 
     # WireGuard auto-start (system service, needs sudo)
     WG_CONF="$STATE_DIR/../wireguard/wg-koi.conf"

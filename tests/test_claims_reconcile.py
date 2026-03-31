@@ -203,8 +203,8 @@ async def test_anchor_prebroadcast_failure_returns_503(client, conn):
 
 
 @pytest.mark.anyio
-async def test_anchor_verify_fail_returns_202(client, conn):
-    """When broadcast succeeds but on-chain verify fails (indexing lag), expect 202."""
+async def test_anchor_verify_fail_still_succeeds(client, conn):
+    """When broadcast succeeds, anchor proceeds even if IRI verify fails (REST doesn't support data module)."""
     rid = await _setup_test_claim(conn, verification="verified")
 
     mock_broadcast = {
@@ -216,17 +216,15 @@ async def test_anchor_verify_fail_returns_202(client, conn):
         "tx_hash": "VERIFY_FAIL_TX",
     }
 
-    with patch("api.ledger_anchor.broadcast_anchor", return_value=mock_broadcast), \
-         patch("api.ledger_anchor.verify_anchor_onchain", return_value=False):
+    with patch("api.ledger_anchor.broadcast_anchor", return_value=mock_broadcast):
         resp = await client.post(f"/claims/{rid}/anchor")
 
-    assert resp.status_code == 202
+    assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "pending"
     assert data["tx_hash"] == "VERIFY_FAIL_TX"
 
     row = await conn.fetchrow("SELECT verification FROM claims WHERE claim_rid = $1", rid)
-    assert row["verification"] == "verified"  # NOT transitioned
+    assert row["verification"] == "ledger_anchored"  # Tx confirmation is sufficient
 
 
 @pytest.mark.anyio
@@ -307,7 +305,7 @@ async def test_reconcile_tx_confirmed_anchor_found(client, conn):
 
 @pytest.mark.anyio
 async def test_reconcile_tx_confirmed_anchor_not_indexed(client, conn):
-    """When tx is confirmed but anchor not queryable, should return pending."""
+    """When tx is confirmed but anchor not queryable via REST, should still finalize (tx confirmation sufficient)."""
     rid = await _setup_test_claim(conn, verification="verified",
                                   tx_hash="CONFIRMED_TX_2", ledger_iri="regen:not-indexed-iri")
 
@@ -319,11 +317,11 @@ async def test_reconcile_tx_confirmed_anchor_not_indexed(client, conn):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "pending"
+    assert data["status"] == "anchored"
     assert data["tx_hash"] == "CONFIRMED_TX_2"
 
     row = await conn.fetchrow("SELECT verification, tx_hash FROM claims WHERE claim_rid = $1", rid)
-    assert row["verification"] == "verified"  # NOT transitioned
+    assert row["verification"] == "ledger_anchored"  # tx confirmation is sufficient
     assert row["tx_hash"] == "CONFIRMED_TX_2"  # preserved
 
 

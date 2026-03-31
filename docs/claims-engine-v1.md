@@ -59,7 +59,7 @@ Three authoritative sources:
 | GET | /claims/{rid}/history | Verification audit log |
 | POST | /claims/extract | AI extraction from document text |
 | POST | /claims/{rid}/prepare-anchor | Compute content hash + predict IRI (non-broadcasting) |
-| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger testnet (returns 200 or 202 pending) |
+| POST | /claims/{rid}/anchor | Anchor verified claim on Regen Ledger (200 on success, 202 if broadcast times out) |
 | POST | /claims/{rid}/reconcile | Check on-chain status of timed-out broadcast |
 
 ## Verification State Machine
@@ -137,17 +137,21 @@ Claims at `verified` state can be anchored on the Regen Ledger `regen-upgrade` t
 | On-chain status | Action | Response |
 |-----------------|--------|----------|
 | Tx confirmed + anchor queryable | Transition to `ledger_anchored` | `status: "anchored"` |
-| Tx confirmed + anchor not indexed | Preserve tx_hash, don't transition | `status: "pending"` |
+| Tx confirmed + anchor not indexed | Finalize (tx confirmation sufficient) | `status: "anchored"` |
 | Tx failed (code != 0) | Clear tx_hash + ledger_iri | `status: "failed"` |
 | Tx not found (not indexed yet) | Preserve tx_hash | `status: "pending"` |
 
-### 202 Pending Response
+### Anchor Response Behavior
 
-`/anchor` now returns `AnchorPendingResponse` (HTTP 202) when:
-- Broadcast succeeded but polling timed out (tx_hash present, no confirmation)
-- Broadcast succeeded and tx confirmed, but REST anchor query fails (indexing lag)
+`/anchor` returns `AnchorResponse` (HTTP 200) when broadcast succeeds. Tx confirmation
+is treated as sufficient — IRI verification via REST is skipped because most public
+endpoints don't support Data Module queries.
 
-Client calls `/reconcile` to finalize.
+`/anchor` returns `AnchorPendingResponse` (HTTP 202) only when broadcast times out
+(tx_hash present but no confirmation). Client calls `/reconcile` to finalize.
+
+`/reconcile` also finalizes on tx confirmation (code=0) regardless of REST IRI
+queryability. The audit log records whether IRI verification succeeded or was skipped.
 
 ### Schema Changes
 

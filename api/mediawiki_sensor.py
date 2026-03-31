@@ -352,10 +352,31 @@ class MediaWikiSensor:
         if not chunk_entries:
             return
 
+        # ── B8: Generate contextual retrieval snippets ──
+        contexts = [""] * len(chunk_entries)
+        try:
+            from api.contextual_retriever import generate_contexts_for_document
+            chunk_dicts = [{"text": ce[0]} for ce in chunk_entries]
+            contexts = await generate_contexts_for_document(
+                document_text=parsed.plain_text or "",
+                chunks=chunk_dicts,
+                document_title=parsed.title,
+                concurrency=5,
+            )
+        except Exception as e:
+            logger.warning(f"B8 context generation failed (non-fatal): {e}")
+
+        # Rebuild embed texts with context prepended
+        contextualized_entries = []
+        for (text, _old_embed, sec_id, sec_title, sec_url), ctx in zip(chunk_entries, contexts):
+            base_embed = f"Page: {parsed.title} | Section: {sec_title}\n\n{text}"
+            embed_text = f"{ctx}\n\n{base_embed}" if ctx else base_embed
+            contextualized_entries.append((text, embed_text, sec_id, sec_title, sec_url, ctx))
+
         # Embed
         embeddings = []
         if self._embedder:
-            embed_texts = [ce[1] for ce in chunk_entries]
+            embed_texts = [ce[1] for ce in contextualized_entries]
             for batch_start in range(0, len(embed_texts), 100):
                 batch = embed_texts[batch_start:batch_start + 100]
                 try:
@@ -398,10 +419,11 @@ class MediaWikiSensor:
                 )
 
                 # Insert new chunks
-                for idx, (text, _embed_text, sec_id, sec_title, sec_url) in enumerate(chunk_entries):
+                for idx, (text, _embed_text, sec_id, sec_title, sec_url, ctx) in enumerate(contextualized_entries):
                     chunk_rid = f"{doc_rid}#section:{sec_id}#chunk{idx}"
                     chunk_content = json.dumps({
                         "text": text,
+                        "context": ctx,
                         "title": parsed.title,
                         "chunk_index": idx,
                         "section_id": sec_id,

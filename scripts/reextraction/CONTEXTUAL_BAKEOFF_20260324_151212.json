@@ -1,0 +1,1723 @@
+{
+  "generated_at": "2026-03-24T21:12:12.015038+00:00",
+  "sample_size": 24,
+  "candidate_models": [
+    "gpt-4o-mini",
+    "gemini-3.1-flash-lite-preview"
+  ],
+  "judge_model": "gemini-2.5-flash-lite",
+  "samples": [
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_buy_direct_test.go",
+      "document_title": "regen-ledger/x/ecocredit/marketplace/keeper/msg/buy/direct/test.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_buy_direct_test.go#chunk1",
+      "chunk_index": 1,
+      "total_chunks": 29,
+      "kind": "go",
+      "total_chars": 22548
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_data_spec_07_client.md",
+      "document_title": "regen-ledger/x/data/spec/07/client.md",
+      "chunk_rid": "regen.github:github_regen-ledger_x_data_spec_07_client.md#chunk7",
+      "chunk_index": 7,
+      "total_chunks": 20,
+      "kind": "md",
+      "total_chars": 15875
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_query.proto",
+      "document_title": "regen-ledger/proto/regen/ecocredit/v1/query.proto",
+      "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_query.proto#chunk27",
+      "chunk_index": 27,
+      "total_chunks": 35,
+      "kind": "proto",
+      "total_chars": 27811
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_orm_model_ormtable_table_test.go",
+      "document_title": "regen-ledger/orm/model/ormtable/table/test.go",
+      "chunk_rid": "regen.github:github_regen-ledger_orm_model_ormtable_table_test.go#chunk2",
+      "chunk_index": 2,
+      "total_chunks": 31,
+      "kind": "go",
+      "total_chars": 24375
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_app_app.go",
+      "document_title": "regen-ledger/app/app.go",
+      "chunk_rid": "regen.github:github_regen-ledger_app_app.go#chunk26",
+      "chunk_index": 26,
+      "total_chunks": 53,
+      "kind": "go",
+      "total_chars": 42309
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_module_module.go",
+      "document_title": "regen-ledger/x/ecocredit/module/module.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_module_module.go#chunk10",
+      "chunk_index": 10,
+      "total_chunks": 12,
+      "kind": "go",
+      "total_chars": 9410
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_data_client_query.go",
+      "document_title": "regen-ledger/x/data/client/query.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_data_client_query.go#chunk1",
+      "chunk_index": 1,
+      "total_chunks": 17,
+      "kind": "go",
+      "total_chars": 13168
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_app_client_cli_genaccounts.go",
+      "document_title": "regen-ledger/app/client/cli/genaccounts.go",
+      "chunk_rid": "regen.github:github_regen-ledger_app_client_cli_genaccounts.go#chunk1",
+      "chunk_index": 1,
+      "total_chunks": 9,
+      "kind": "go",
+      "total_chars": 6477
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1alpha1_types.proto",
+      "document_title": "regen-ledger/proto/regen/ecocredit/v1alpha1/types.proto",
+      "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1alpha1_types.proto#chunk3",
+      "chunk_index": 3,
+      "total_chunks": 6,
+      "kind": "proto",
+      "total_chars": 4385
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_utils.go",
+      "document_title": "regen-ledger/x/ecocredit/marketplace/keeper/utils.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_utils.go#chunk7",
+      "chunk_index": 7,
+      "total_chunks": 14,
+      "kind": "go",
+      "total_chars": 10483
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_specs_rfcs_002-basket-functionality_README.md",
+      "document_title": "regen-ledger/specs/rfcs/002-basket-functionality/README.md",
+      "chunk_rid": "regen.github:github_regen-ledger_specs_rfcs_002-basket-functionality_README.md#chunk6",
+      "chunk_index": 6,
+      "total_chunks": 16,
+      "kind": "md",
+      "total_chars": 12639
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_local-testnet.md",
+      "document_title": "regen-ledger/docs/ledger/get-started/local-testnet.md",
+      "chunk_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_local-testnet.md#chunk4",
+      "chunk_index": 4,
+      "total_chunks": 7,
+      "kind": "md",
+      "total_chars": 5247
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_LICENSE",
+      "document_title": "regen-ledger/LICENSE",
+      "chunk_rid": "regen.github:github_regen-ledger_LICENSE#chunk5",
+      "chunk_index": 5,
+      "total_chunks": 15,
+      "kind": "other",
+      "total_chars": 11392
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_proto_regen_orm_v1_orm.proto",
+      "document_title": "regen-ledger/proto/regen/orm/v1/orm.proto",
+      "chunk_rid": "regen.github:github_regen-ledger_proto_regen_orm_v1_orm.proto#chunk1",
+      "chunk_index": 1,
+      "total_chunks": 6,
+      "kind": "proto",
+      "total_chars": 4430
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_basket_keeper_msg_put_test.go",
+      "document_title": "regen-ledger/x/ecocredit/basket/keeper/msg/put/test.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_basket_keeper_msg_put_test.go#chunk11",
+      "chunk_index": 11,
+      "total_chunks": 22,
+      "kind": "go",
+      "total_chars": 16982
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_CONTRIBUTING.md",
+      "document_title": "regen-ledger/CONTRIBUTING.md",
+      "chunk_rid": "regen.github:github_regen-ledger_CONTRIBUTING.md#chunk8",
+      "chunk_index": 8,
+      "total_chunks": 22,
+      "kind": "md",
+      "total_chars": 17044
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_cancel_sell_order_test.go",
+      "document_title": "regen-ledger/x/ecocredit/marketplace/keeper/msg/cancel/sell/order/test.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_cancel_sell_order_test.go#chunk5",
+      "chunk_index": 5,
+      "total_chunks": 8,
+      "kind": "go",
+      "total_chars": 5786
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_genesis_genesis.go",
+      "document_title": "regen-ledger/x/ecocredit/genesis/genesis.go",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_genesis_genesis.go#chunk4",
+      "chunk_index": 4,
+      "total_chunks": 19,
+      "kind": "go",
+      "total_chars": 15160
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_state.proto",
+      "document_title": "regen-ledger/proto/regen/ecocredit/v1/state.proto",
+      "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_state.proto#chunk4",
+      "chunk_index": 4,
+      "total_chunks": 22,
+      "kind": "proto",
+      "total_chars": 16871
+    },
+    {
+      "parent_rid": "regen.github:github_test-repo_proto_test.proto",
+      "document_title": "test-repo/proto/test.proto",
+      "chunk_rid": "regen.github:github_test-repo_proto_test.proto#chunk5",
+      "chunk_index": 5,
+      "total_chunks": 8,
+      "kind": "proto",
+      "total_chars": 5816
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_tx.proto",
+      "document_title": "regen-ledger/proto/regen/ecocredit/v1/tx.proto",
+      "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_tx.proto#chunk17",
+      "chunk_index": 17,
+      "total_chunks": 47,
+      "kind": "proto",
+      "total_chars": 37556
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_spec_07_client.md",
+      "document_title": "regen-ledger/x/ecocredit/spec/07/client.md",
+      "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_spec_07_client.md#chunk39",
+      "chunk_index": 39,
+      "total_chunks": 60,
+      "kind": "md",
+      "total_chars": 47408
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_README.md",
+      "document_title": "regen-ledger/docs/ledger/get-started/README.md",
+      "chunk_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_README.md#chunk2",
+      "chunk_index": 2,
+      "total_chunks": 6,
+      "kind": "md",
+      "total_chars": 4181
+    },
+    {
+      "parent_rid": "regen.github:github_regen-ledger_SECURITY.md",
+      "document_title": "regen-ledger/SECURITY.md",
+      "chunk_rid": "regen.github:github_regen-ledger_SECURITY.md#chunk1",
+      "chunk_index": 1,
+      "total_chunks": 7,
+      "kind": "md",
+      "total_chars": 5329
+    }
+  ],
+  "generations": {
+    "gpt-4o-mini": [
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of a Go test file for the `buyDirect` functionality in the Regen Ledger's ecocredit marketplace module, defining the `buyDirectSuite` struct that holds test data and state for testing the buying process of ecocredits. It includes necessary imports and the setup for the test case, including addresses, balances, and message structures.",
+        "usage": {
+          "prompt_tokens": 6924,
+          "completion_tokens": 73,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 2.5206826249996084,
+        "cost_usd": 0.0010824,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_buy_direct_test.go#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_buy_direct_test.go",
+        "metrics": {
+          "chars": 354,
+          "sentences": 2,
+          "new_doc_terms": 2,
+          "unsupported_terms": 23
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the section detailing the various gRPC endpoints available for querying the `data` module, specifically focusing on the `ResolversByHash` endpoint, which allows users to retrieve resolvers associated with a specific ContentHash. It includes an example of how to use the endpoint and the expected output format.",
+        "usage": {
+          "prompt_tokens": 5898,
+          "completion_tokens": 63,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 4.371923208000226,
+        "cost_usd": 0.0009224999999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_x_data_spec_07_client.md#chunk7",
+        "parent_rid": "regen.github:github_regen-ledger_x_data_spec_07_client.md",
+        "metrics": {
+          "chars": 332,
+          "sentences": 2,
+          "new_doc_terms": 6,
+          "unsupported_terms": 16
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the Protocol Buffers (proto) definition for the Regen Ecocredit system, specifically detailing the structure of the `ClassInfo` and `ProjectInfo` messages, which include attributes such as admin, metadata, and identifiers for credit classes and projects. It provides essential information for querying and managing ecocredit classes and projects within the system.",
+        "usage": {
+          "prompt_tokens": 6654,
+          "completion_tokens": 73,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.950156082999456,
+        "cost_usd": 0.0010419000000000001,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_query.proto#chunk27",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_query.proto",
+        "metrics": {
+          "chars": 386,
+          "sentences": 2,
+          "new_doc_terms": 6,
+          "unsupported_terms": 19
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of a test function in the Go test file for the `ormtable` package, specifically focusing on debugging and validating the encoding and decoding of entries in a key-value store, as well as ensuring the correctness of pagination functionality in the ORM implementation. It includes the setup for a debug backend and assertions to compare the output against a golden file for consistency.",
+        "usage": {
+          "prompt_tokens": 7800,
+          "completion_tokens": 74,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 2.412492374998692,
+        "cost_usd": 0.0012143999999999998,
+        "chunk_rid": "regen.github:github_regen-ledger_orm_model_ormtable_table_test.go#chunk2",
+        "parent_rid": "regen.github:github_regen-ledger_orm_model_ormtable_table_test.go",
+        "metrics": {
+          "chars": 403,
+          "sentences": 2,
+          "new_doc_terms": 4,
+          "unsupported_terms": 20
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `NewRegenApp` function in the `regen-ledger/app/app.go` file, where it discusses the configuration of the Wasm client keeper and the setup of query plugins for handling specific IBC queries within the Regen application. It also includes the initialization of a virtual machine for the light client functionality.",
+        "usage": {
+          "prompt_tokens": 11676,
+          "completion_tokens": 68,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 3.6882342500030063,
+        "cost_usd": 0.0017921999999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_app_app.go#chunk26",
+        "parent_rid": "regen.github:github_regen-ledger_app_app.go",
+        "metrics": {
+          "chars": 338,
+          "sentences": 3,
+          "new_doc_terms": 8,
+          "unsupported_terms": 13
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the implementation of the `Module` struct in the ecocredit module, detailing methods related to the simulation of the module, including the generation of randomized genesis states and the registration of store decoders, as well as the handling of weighted operations during simulation. It follows the `BeginBlock` method, which manages the state at the beginning of each block.",
+        "usage": {
+          "prompt_tokens": 2679,
+          "completion_tokens": 76,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.781906207997963,
+        "cost_usd": 0.00044745,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_module_module.go#chunk10",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_module_module.go",
+        "metrics": {
+          "chars": 399,
+          "sentences": 2,
+          "new_doc_terms": 3,
+          "unsupported_terms": 25
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the implementation of various query commands for the data module in the Regen Ledger client, specifically detailing the addition of commands for querying attestations and resolvers, as well as converting between IRIs and ContentHashes. It follows the definition of the main command structure and precedes the specific command for querying data anchors by IRI.",
+        "usage": {
+          "prompt_tokens": 4347,
+          "completion_tokens": 69,
+          "cached_tokens": 4224,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.276454458002263,
+        "cost_usd": 0.00037664999999999997,
+        "chunk_rid": "regen.github:github_regen-ledger_x_data_client_query.go#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_x_data_client_query.go",
+        "metrics": {
+          "chars": 381,
+          "sentences": 2,
+          "new_doc_terms": 5,
+          "unsupported_terms": 20
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `AddGenesisAccountCmd` function in the `genaccounts.go` file, which defines a Cobra command for adding a new genesis account to the `genesis.json` file in a Cosmos SDK application, including options for specifying account details and vesting parameters.",
+        "usage": {
+          "prompt_tokens": 2098,
+          "completion_tokens": 58,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.321419625000999,
+        "cost_usd": 0.0003495,
+        "chunk_rid": "regen.github:github_regen-ledger_app_client_cli_genaccounts.go#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_app_client_cli_genaccounts.go",
+        "metrics": {
+          "chars": 279,
+          "sentences": 3,
+          "new_doc_terms": 5,
+          "unsupported_terms": 10
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `Params` message definition within the ecocredit module, detailing the updatable global parameters such as fees for credit class creation, allowed creators, and credit type definitions. It follows the `BatchInfo` message, which provides information about individual credit batches.",
+        "usage": {
+          "prompt_tokens": 1410,
+          "completion_tokens": 57,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.2153945840000233,
+        "cost_usd": 0.0002457,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1alpha1_types.proto#chunk3",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1alpha1_types.proto",
+        "metrics": {
+          "chars": 307,
+          "sentences": 2,
+          "new_doc_terms": 4,
+          "unsupported_terms": 11
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `fillOrder` function within the `keeper` package, detailing the process of updating the batch supply by calculating and setting the retired amount of credits after a purchase, as well as emitting relevant transfer and retire events.",
+        "usage": {
+          "prompt_tokens": 3169,
+          "completion_tokens": 49,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.568041082999116,
+        "cost_usd": 0.00050475,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_utils.go#chunk7",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_utils.go",
+        "metrics": {
+          "chars": 258,
+          "sentences": 1,
+          "new_doc_terms": 3,
+          "unsupported_terms": 12
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the \"Use Case\" section of the RFC-002 document, which discusses the functionality and benefits of basket tokens in the ecocredit system, highlighting their role in enhancing marketability and facilitating transactions for ecocredits.",
+        "usage": {
+          "prompt_tokens": 2924,
+          "completion_tokens": 50,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.1715516250005749,
+        "cost_usd": 0.0004686,
+        "chunk_rid": "regen.github:github_regen-ledger_specs_rfcs_002-basket-functionality_README.md#chunk6",
+        "parent_rid": "regen.github:github_regen-ledger_specs_rfcs_002-basket-functionality_README.md",
+        "metrics": {
+          "chars": 255,
+          "sentences": 1,
+          "new_doc_terms": 5,
+          "unsupported_terms": 8
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the \"Initialize Node\" section of the document, detailing the final steps to prepare the node for operation after updating the `genesis.json` file, including setting the minimum gas price and starting the node to create a new blockchain.",
+        "usage": {
+          "prompt_tokens": 1561,
+          "completion_tokens": 51,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.4060642910008028,
+        "cost_usd": 0.00026475,
+        "chunk_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_local-testnet.md#chunk4",
+        "parent_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_local-testnet.md",
+        "metrics": {
+          "chars": 258,
+          "sentences": 2,
+          "new_doc_terms": 2,
+          "unsupported_terms": 9
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the section detailing the grant of patent licenses to users of the Regen Ledger under the Apache License 2.0, outlining the conditions under which contributors allow the use of their patent claims and the consequences of initiating patent litigation.",
+        "usage": {
+          "prompt_tokens": 2580,
+          "completion_tokens": 49,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.3271915420009464,
+        "cost_usd": 0.0004164,
+        "chunk_rid": "regen.github:github_regen-ledger_LICENSE#chunk5",
+        "parent_rid": "regen.github:github_regen-ledger_LICENSE",
+        "metrics": {
+          "chars": 272,
+          "sentences": 2,
+          "new_doc_terms": 5,
+          "unsupported_terms": 8
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `PrimaryKeyDescriptor` message definition within the `TableDescriptor` message, which outlines the structure and constraints for defining primary keys in ORM tables in the Regen ledger protocol. It follows the description of the unique ID field for tables and singletons, indicating how primary keys are structured and encoded.",
+        "usage": {
+          "prompt_tokens": 1383,
+          "completion_tokens": 64,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.3928330409980845,
+        "cost_usd": 0.00024585,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_orm_v1_orm.proto#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_orm_v1_orm.proto",
+        "metrics": {
+          "chars": 353,
+          "sentences": 2,
+          "new_doc_terms": 5,
+          "unsupported_terms": 14
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `putSuite` test suite in the `keeper` package, specifically within the method `AliceOwnsCreditsFromCreditBatch`, which sets up the necessary database entries for a project and batch associated with a credit class, ensuring that Alice's ownership of credits is properly recorded in the system.",
+        "usage": {
+          "prompt_tokens": 5436,
+          "completion_tokens": 64,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.6388065829996776,
+        "cost_usd": 0.0008537999999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_basket_keeper_msg_put_test.go#chunk11",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_basket_keeper_msg_put_test.go",
+        "metrics": {
+          "chars": 318,
+          "sentences": 1,
+          "new_doc_terms": 5,
+          "unsupported_terms": 19
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the \"General Guidelines\" section in the contributing documentation for the Regen Ledger project, specifically detailing the process for reviewing pull requests and the appropriate keywords reviewers should use in their comments.",
+        "usage": {
+          "prompt_tokens": 4007,
+          "completion_tokens": 40,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.5772923340009584,
+        "cost_usd": 0.00062505,
+        "chunk_rid": "regen.github:github_regen-ledger_CONTRIBUTING.md#chunk8",
+        "parent_rid": "regen.github:github_regen-ledger_CONTRIBUTING.md",
+        "metrics": {
+          "chars": 250,
+          "sentences": 1,
+          "new_doc_terms": 8,
+          "unsupported_terms": 3
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `cancelSellOrder` test suite in the Go file, which focuses on validating the cancellation of sell orders in a marketplace for ecocredits. It includes methods for checking the absence of a sell order after cancellation and verifying event properties related to the cancellation process.",
+        "usage": {
+          "prompt_tokens": 2074,
+          "completion_tokens": 59,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.561504083001637,
+        "cost_usd": 0.00034649999999999997,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_cancel_sell_order_test.go#chunk5",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_cancel_sell_order_test.go",
+        "metrics": {
+          "chars": 311,
+          "sentences": 2,
+          "new_doc_terms": 0,
+          "unsupported_terms": 20
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the `ValidateGenesis` function in the `genesis.go` file, which performs validation checks on the genesis state of the ecocredit module, ensuring that credit types, classes, and projects are correctly referenced and exist in the database. It specifically addresses the mapping of project keys to class keys and the creation of indices for batch IDs and their corresponding precision for further validation processes.",
+        "usage": {
+          "prompt_tokens": 4768,
+          "completion_tokens": 81,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.7877154580019123,
+        "cost_usd": 0.0007637999999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_genesis_genesis.go#chunk4",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_genesis_genesis.go",
+        "metrics": {
+          "chars": 437,
+          "sentences": 3,
+          "new_doc_terms": 8,
+          "unsupported_terms": 18
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the definition for the \"Project\" message within the Regen Ledger's ecocredit protocol, detailing the attributes and identifiers associated with a project, including its unique ID, admin, class linkage, jurisdiction, and metadata. It transitions into the subsequent definition for the \"Batch\" message, which outlines the structure for credit batch information.",
+        "usage": {
+          "prompt_tokens": 4395,
+          "completion_tokens": 70,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.4457360000014887,
+        "cost_usd": 0.0007012499999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_state.proto#chunk4",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_state.proto",
+        "metrics": {
+          "chars": 381,
+          "sentences": 2,
+          "new_doc_terms": 2,
+          "unsupported_terms": 18
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the message definitions within the `regen.data.v1` protocol, specifically detailing the `MsgAttestResponse` and `MsgDefineResolver` message types, which are used for managing attestations and defining resolver URLs in the blockchain service. It outlines the structure and purpose of these messages, including the fields for attestation results and resolver management.",
+        "usage": {
+          "prompt_tokens": 1690,
+          "completion_tokens": 73,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.389566208999895,
+        "cost_usd": 0.00029729999999999996,
+        "chunk_rid": "regen.github:github_test-repo_proto_test.proto#chunk5",
+        "parent_rid": "regen.github:github_test-repo_proto_test.proto",
+        "metrics": {
+          "chars": 390,
+          "sentences": 4,
+          "new_doc_terms": 6,
+          "unsupported_terms": 18
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the message definition for creating a new project within the Regen Ecocredit system, detailing the required fields such as the project administrator, class identifier, metadata, jurisdiction, and reference ID. It is found within the broader context of the protocol's transaction definitions for managing ecocredits.",
+        "usage": {
+          "prompt_tokens": 8895,
+          "completion_tokens": 62,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 2.1004728749976493,
+        "cost_usd": 0.00137145,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_tx.proto#chunk17",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_tx.proto",
+        "metrics": {
+          "chars": 337,
+          "sentences": 2,
+          "new_doc_terms": 7,
+          "unsupported_terms": 14
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk is part of the section detailing the `batches-by-issuer` endpoint in the `ecocredit` module documentation, which provides users with the ability to query credit batches associated with a specific issuer, including example outputs and relevant API calls.",
+        "usage": {
+          "prompt_tokens": 17152,
+          "completion_tokens": 51,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 2.448699292002857,
+        "cost_usd": 0.0026034,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_spec_07_client.md#chunk39",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_spec_07_client.md",
+        "metrics": {
+          "chars": 264,
+          "sentences": 1,
+          "new_doc_terms": 2,
+          "unsupported_terms": 11
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk provides instructions for building and installing the `regen` binary from source, detailing the commands to check the build's success and ensure the installation is correctly set up. It follows the prerequisites and initial setup sections in the document, guiding users through the process of getting the Regen Ledger client up and running.",
+        "usage": {
+          "prompt_tokens": 1431,
+          "completion_tokens": 61,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.435739917000319,
+        "cost_usd": 0.00025124999999999995,
+        "chunk_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_README.md#chunk2",
+        "parent_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_README.md",
+        "metrics": {
+          "chars": 351,
+          "sentences": 2,
+          "new_doc_terms": 6,
+          "unsupported_terms": 18
+        }
+      },
+      {
+        "model": "gpt-4o-mini",
+        "text": "This chunk outlines the significant packages within the Regen Ledger that may be vulnerable to security issues and introduces the disclosure process the Regen Ledger team follows upon receiving a security report. It details the steps taken to verify vulnerabilities and communicate necessary updates to the community.",
+        "usage": {
+          "prompt_tokens": 1491,
+          "completion_tokens": 49,
+          "cached_tokens": 0,
+          "prompt_cache_hit_tokens": 0
+        },
+        "latency_s": 1.1184461670018209,
+        "cost_usd": 0.00025305,
+        "chunk_rid": "regen.github:github_regen-ledger_SECURITY.md#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_SECURITY.md",
+        "metrics": {
+          "chars": 317,
+          "sentences": 2,
+          "new_doc_terms": 4,
+          "unsupported_terms": 15
+        }
+      }
+    ],
+    "gemini-3.1-flash-lite-preview": [
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk defines the `buyDirectSuite` struct and the `TestBuyDirect` function, which initializes the testing environment for the `MsgBuyDirect` message using the Gocuke framework.",
+        "usage": {
+          "prompt_tokens": 8441,
+          "completion_tokens": 39,
+          "cached_tokens": null
+        },
+        "latency_s": 2.13650250000137,
+        "cost_usd": 0.00216875,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_buy_direct_test.go#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_buy_direct_test.go",
+        "metrics": {
+          "chars": 181,
+          "sentences": 1,
+          "new_doc_terms": 1,
+          "unsupported_terms": 8
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk provides examples of gRPC query endpoints for the `data` module, specifically demonstrating how to retrieve resolvers by their associated content hash or URL.",
+        "usage": {
+          "prompt_tokens": 7028,
+          "completion_tokens": 30,
+          "cached_tokens": null
+        },
+        "latency_s": 1.072926875000121,
+        "cost_usd": 0.001802,
+        "chunk_rid": "regen.github:github_regen-ledger_x_data_spec_07_client.md#chunk7",
+        "parent_rid": "regen.github:github_regen-ledger_x_data_spec_07_client.md",
+        "metrics": {
+          "chars": 169,
+          "sentences": 1,
+          "new_doc_terms": 4,
+          "unsupported_terms": 7
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk defines the data structures for `ClassInfo` and `ProjectInfo`, which represent the core entities within the `regen.ecocredit.v1` module.",
+        "usage": {
+          "prompt_tokens": 7895,
+          "completion_tokens": 35,
+          "cached_tokens": null
+        },
+        "latency_s": 1.1580758330019307,
+        "cost_usd": 0.00202625,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_query.proto#chunk27",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_query.proto",
+        "metrics": {
+          "chars": 147,
+          "sentences": 3,
+          "new_doc_terms": 4,
+          "unsupported_terms": 5
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains the conclusion of the `TestScenario` function, which validates ORM storage using golden files, and the beginning of `TestPaginationLimitCountTotal`, which tests pagination functionality.",
+        "usage": {
+          "prompt_tokens": 9726,
+          "completion_tokens": 38,
+          "cached_tokens": null
+        },
+        "latency_s": 1.4296464580002066,
+        "cost_usd": 0.0024885000000000003,
+        "chunk_rid": "regen.github:github_regen-ledger_orm_model_ormtable_table_test.go#chunk2",
+        "parent_rid": "regen.github:github_regen-ledger_orm_model_ormtable_table_test.go",
+        "metrics": {
+          "chars": 206,
+          "sentences": 1,
+          "new_doc_terms": 3,
+          "unsupported_terms": 9
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk details the configuration and initialization of the `WasmClientKeeper` within the `NewRegenApp` function, including the setup of query plugins and the underlying Wasm virtual machine for IBC light clients.",
+        "usage": {
+          "prompt_tokens": 13940,
+          "completion_tokens": 43,
+          "cached_tokens": null
+        },
+        "latency_s": 1.2780553750017134,
+        "cost_usd": 0.0035494999999999997,
+        "chunk_rid": "regen.github:github_regen-ledger_app_app.go#chunk26",
+        "parent_rid": "regen.github:github_regen-ledger_app_app.go",
+        "metrics": {
+          "chars": 216,
+          "sentences": 1,
+          "new_doc_terms": 5,
+          "unsupported_terms": 10
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains the `BeginBlock` implementation and the beginning of the `AppModuleSimulation` interface methods, which define how the ecocredit module handles block initialization and simulation operations.",
+        "usage": {
+          "prompt_tokens": 3303,
+          "completion_tokens": 37,
+          "cached_tokens": null
+        },
+        "latency_s": 1.269501416998537,
+        "cost_usd": 0.00088125,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_module_module.go#chunk10",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_module_module.go",
+        "metrics": {
+          "chars": 211,
+          "sentences": 1,
+          "new_doc_terms": 1,
+          "unsupported_terms": 12
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk concludes the registration of query commands in the `QueryCmd` function and begins the implementation of the `QueryAnchorByIRICmd` command for the `x/data` module.",
+        "usage": {
+          "prompt_tokens": 4992,
+          "completion_tokens": 39,
+          "cached_tokens": null
+        },
+        "latency_s": 0.9341819590008527,
+        "cost_usd": 0.0013065,
+        "chunk_rid": "regen.github:github_regen-ledger_x_data_client_query.go#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_x_data_client_query.go",
+        "metrics": {
+          "chars": 174,
+          "sentences": 1,
+          "new_doc_terms": 4,
+          "unsupported_terms": 4
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains the beginning of the `AddGenesisAccountCmd` function, which defines the CLI command for adding accounts to the genesis file. It includes the command's metadata and the initial logic for parsing the account address or key name from the user input.",
+        "usage": {
+          "prompt_tokens": 2395,
+          "completion_tokens": 52,
+          "cached_tokens": null
+        },
+        "latency_s": 1.3240991669990763,
+        "cost_usd": 0.00067675,
+        "chunk_rid": "regen.github:github_regen-ledger_app_client_cli_genaccounts.go#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_app_client_cli_genaccounts.go",
+        "metrics": {
+          "chars": 266,
+          "sentences": 2,
+          "new_doc_terms": 2,
+          "unsupported_terms": 12
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk concludes the `BatchInfo` message definition and begins the `Params` message, which outlines the global configuration parameters for the ecocredit module.",
+        "usage": {
+          "prompt_tokens": 1608,
+          "completion_tokens": 31,
+          "cached_tokens": null
+        },
+        "latency_s": 1.0529862500006857,
+        "cost_usd": 0.0004485,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1alpha1_types.proto#chunk3",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1alpha1_types.proto",
+        "metrics": {
+          "chars": 165,
+          "sentences": 1,
+          "new_doc_terms": 1,
+          "unsupported_terms": 5
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk is part of the `fillOrder` method in `utils.go`, specifically handling the logic for updating batch supply and emitting events when a sell order is filled with the `autoRetire` option enabled.",
+        "usage": {
+          "prompt_tokens": 3551,
+          "completion_tokens": 44,
+          "cached_tokens": null
+        },
+        "latency_s": 1.2036275829996157,
+        "cost_usd": 0.00095375,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_utils.go#chunk7",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_utils.go",
+        "metrics": {
+          "chars": 203,
+          "sentences": 2,
+          "new_doc_terms": 4,
+          "unsupported_terms": 12
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk explains the function and market benefits of basket tokens, which aggregate heterogeneous ecocredits into a single, fungible asset to improve liquidity and marketability.",
+        "usage": {
+          "prompt_tokens": 3087,
+          "completion_tokens": 33,
+          "cached_tokens": null
+        },
+        "latency_s": 0.911815542000113,
+        "cost_usd": 0.0008212499999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_specs_rfcs_002-basket-functionality_README.md#chunk6",
+        "parent_rid": "regen.github:github_regen-ledger_specs_rfcs_002-basket-functionality_README.md",
+        "metrics": {
+          "chars": 181,
+          "sentences": 1,
+          "new_doc_terms": 2,
+          "unsupported_terms": 6
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This section covers the final steps of configuring the local testnet, including setting the minimum gas price, starting the node, and performing initial test transactions.",
+        "usage": {
+          "prompt_tokens": 1650,
+          "completion_tokens": 30,
+          "cached_tokens": null
+        },
+        "latency_s": 1.1523318339968682,
+        "cost_usd": 0.0004575,
+        "chunk_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_local-testnet.md#chunk4",
+        "parent_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_local-testnet.md",
+        "metrics": {
+          "chars": 171,
+          "sentences": 1,
+          "new_doc_terms": 2,
+          "unsupported_terms": 8
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains Section 3 of the Apache License 2.0, which details the grant of patent rights and the conditions under which those rights terminate, followed by the beginning of Section 4 regarding redistribution.",
+        "usage": {
+          "prompt_tokens": 2643,
+          "completion_tokens": 42,
+          "cached_tokens": null
+        },
+        "latency_s": 1.0704238329999498,
+        "cost_usd": 0.00072375,
+        "chunk_rid": "regen.github:github_regen-ledger_LICENSE#chunk5",
+        "parent_rid": "regen.github:github_regen-ledger_LICENSE",
+        "metrics": {
+          "chars": 217,
+          "sentences": 2,
+          "new_doc_terms": 5,
+          "unsupported_terms": 4
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk covers the conclusion of the `TableDescriptor` message and the beginning of the `PrimaryKeyDescriptor` message, which details field encoding rules for ORM table primary keys.",
+        "usage": {
+          "prompt_tokens": 1515,
+          "completion_tokens": 35,
+          "cached_tokens": null
+        },
+        "latency_s": 1.0301860420004232,
+        "cost_usd": 0.00043125,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_orm_v1_orm.proto#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_orm_v1_orm.proto",
+        "metrics": {
+          "chars": 185,
+          "sentences": 1,
+          "new_doc_terms": 2,
+          "unsupported_terms": 6
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains helper methods within the `putSuite` test suite that set up the state store by assigning specific credit batch balances to Alice's account for testing the `MsgPut` functionality.",
+        "usage": {
+          "prompt_tokens": 6715,
+          "completion_tokens": 39,
+          "cached_tokens": null
+        },
+        "latency_s": 1.139723917000083,
+        "cost_usd": 0.0017372499999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_basket_keeper_msg_put_test.go#chunk11",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_basket_keeper_msg_put_test.go",
+        "metrics": {
+          "chars": 198,
+          "sentences": 1,
+          "new_doc_terms": 4,
+          "unsupported_terms": 15
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This section outlines the standard procedures for reviewing pull requests, including the use of specific acknowledgment keywords, and introduces the guidelines for using GitHub labels within the project.",
+        "usage": {
+          "prompt_tokens": 4226,
+          "completion_tokens": 31,
+          "cached_tokens": null
+        },
+        "latency_s": 1.017931791000592,
+        "cost_usd": 0.001103,
+        "chunk_rid": "regen.github:github_regen-ledger_CONTRIBUTING.md#chunk8",
+        "parent_rid": "regen.github:github_regen-ledger_CONTRIBUTING.md",
+        "metrics": {
+          "chars": 203,
+          "sentences": 1,
+          "new_doc_terms": 3,
+          "unsupported_terms": 5
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains helper methods for verifying the state of sell orders and events, as well as the initial setup logic for populating the test database with credit classes and batches.",
+        "usage": {
+          "prompt_tokens": 2624,
+          "completion_tokens": 34,
+          "cached_tokens": null
+        },
+        "latency_s": 1.030046541000047,
+        "cost_usd": 0.0007070000000000001,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_cancel_sell_order_test.go#chunk5",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_marketplace_keeper_msg_cancel_sell_order_test.go",
+        "metrics": {
+          "chars": 186,
+          "sentences": 1,
+          "new_doc_terms": 0,
+          "unsupported_terms": 17
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk is part of the `ValidateGenesis` function, which iterates through credit classes, projects, and batches to build internal lookup maps for validating credit type precision and supply consistency during genesis state initialization.",
+        "usage": {
+          "prompt_tokens": 5644,
+          "completion_tokens": 40,
+          "cached_tokens": null
+        },
+        "latency_s": 0.9553927080014546,
+        "cost_usd": 0.0014709999999999999,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_genesis_genesis.go#chunk4",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_genesis_genesis.go",
+        "metrics": {
+          "chars": 241,
+          "sentences": 1,
+          "new_doc_terms": 3,
+          "unsupported_terms": 14
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk defines the fields for the `Project` message and initiates the definition of the `Batch` message, which stores high-level on-chain information for credit batches.",
+        "usage": {
+          "prompt_tokens": 5041,
+          "completion_tokens": 35,
+          "cached_tokens": null
+        },
+        "latency_s": 1.1051150829989638,
+        "cost_usd": 0.0013127500000000001,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_state.proto#chunk4",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_state.proto",
+        "metrics": {
+          "chars": 173,
+          "sentences": 1,
+          "new_doc_terms": 2,
+          "unsupported_terms": 4
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk contains the response structure for the `Attest` message and the request definition for the `DefineResolver` service within the `regen.data.v1` Protobuf package.",
+        "usage": {
+          "prompt_tokens": 1828,
+          "completion_tokens": 38,
+          "cached_tokens": null
+        },
+        "latency_s": 1.0804926669989072,
+        "cost_usd": 0.000514,
+        "chunk_rid": "regen.github:github_test-repo_proto_test.proto#chunk5",
+        "parent_rid": "regen.github:github_test-repo_proto_test.proto",
+        "metrics": {
+          "chars": 172,
+          "sentences": 3,
+          "new_doc_terms": 4,
+          "unsupported_terms": 6
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk defines the request parameters for the `MsgCreateProject` message, which is used to register a new project under a specific credit class within the `regen.ecocredit.v1` module.",
+        "usage": {
+          "prompt_tokens": 9796,
+          "completion_tokens": 42,
+          "cached_tokens": null
+        },
+        "latency_s": 1.0468090419999498,
+        "cost_usd": 0.002512,
+        "chunk_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_tx.proto#chunk17",
+        "parent_rid": "regen.github:github_regen-ledger_proto_regen_ecocredit_v1_tx.proto",
+        "metrics": {
+          "chars": 187,
+          "sentences": 3,
+          "new_doc_terms": 8,
+          "unsupported_terms": 3
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk provides documentation and examples for the `batches-by-issuer` REST endpoint, which allows users to query credit batches associated with a specific issuer address.",
+        "usage": {
+          "prompt_tokens": 21174,
+          "completion_tokens": 32,
+          "cached_tokens": null
+        },
+        "latency_s": 1.2358053749994724,
+        "cost_usd": 0.0053415,
+        "chunk_rid": "regen.github:github_regen-ledger_x_ecocredit_spec_07_client.md#chunk39",
+        "parent_rid": "regen.github:github_regen-ledger_x_ecocredit_spec_07_client.md",
+        "metrics": {
+          "chars": 175,
+          "sentences": 1,
+          "new_doc_terms": 4,
+          "unsupported_terms": 3
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This section provides instructions for building the `regen` binary from source, detailing both the local build process and the global installation method.",
+        "usage": {
+          "prompt_tokens": 1537,
+          "completion_tokens": 26,
+          "cached_tokens": null
+        },
+        "latency_s": 0.9525097080004343,
+        "cost_usd": 0.00042325,
+        "chunk_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_README.md#chunk2",
+        "parent_rid": "regen.github:github_regen-ledger_docs_ledger_get-started_README.md",
+        "metrics": {
+          "chars": 154,
+          "sentences": 1,
+          "new_doc_terms": 4,
+          "unsupported_terms": 5
+        }
+      },
+      {
+        "model": "gemini-3.1-flash-lite-preview",
+        "text": "This chunk identifies the primary packages within the Regen Ledger repository that are most susceptible to security vulnerabilities and outlines the initial steps of the project's formal disclosure process.",
+        "usage": {
+          "prompt_tokens": 1577,
+          "completion_tokens": 32,
+          "cached_tokens": null
+        },
+        "latency_s": 1.2460394160007127,
+        "cost_usd": 0.00044225000000000004,
+        "chunk_rid": "regen.github:github_regen-ledger_SECURITY.md#chunk1",
+        "parent_rid": "regen.github:github_regen-ledger_SECURITY.md",
+        "metrics": {
+          "chars": 206,
+          "sentences": 1,
+          "new_doc_terms": 4,
+          "unsupported_terms": 10
+        }
+      }
+    ]
+  },
+  "judge_results": [
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Snippet A provides more context by explaining the purpose of the `buyDirectSuite` struct and its role in testing the ecocredit marketplace's buy functionality, making it more informative for retrieval.",
+      "usage": {
+        "prompt_tokens": 8611,
+        "completion_tokens": 57,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5551155419998395,
+      "cost_usd": 0.0006629250000000001,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A is better because it accurately situates the chunk within the document's structure, specifically mentioning the 'ResolversByHash' endpoint and its purpose, while also including the provided example and output for clarity.",
+      "usage": {
+        "prompt_tokens": 7178,
+        "completion_tokens": 61,
+        "cached_tokens": null
+      },
+      "latency_s": 0.6344706659983785,
+      "cost_usd": 0.00055665,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B provides more context by mentioning the Protocol Buffers definition and the specific attributes within the messages, which is more useful for retrieval than Candidate A's more general description.",
+      "usage": {
+        "prompt_tokens": 8060,
+        "completion_tokens": 53,
+        "cached_tokens": null
+      },
+      "latency_s": 0.8049757499975385,
+      "cost_usd": 0.0006203999999999999,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A provides more specific details about the purpose of the code, including debugging, encoding/decoding validation, and pagination, which is more informative than Candidate B's general description.",
+      "usage": {
+        "prompt_tokens": 9897,
+        "completion_tokens": 55,
+        "cached_tokens": 9139
+      },
+      "latency_s": 0.5585496249987045,
+      "cost_usd": 0.0007587749999999999,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gemini-3.1-flash-lite-preview",
+      "raw_winner": "B",
+      "rationale": "Snippet B is better because it is more concise and directly addresses the core function of the chunk: configuring the WasmClientKeeper and its associated components.",
+      "usage": {
+        "prompt_tokens": 14110,
+        "completion_tokens": 48,
+        "cached_tokens": null
+      },
+      "latency_s": 0.6967931670005783,
+      "cost_usd": 0.0010726499999999999,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gemini-3.1-flash-lite-preview",
+      "raw_winner": "A",
+      "rationale": "Candidate A accurately describes the chunk's content, including the BeginBlock implementation and the start of simulation methods, providing concise and relevant context.",
+      "usage": {
+        "prompt_tokens": 3473,
+        "completion_tokens": 46,
+        "cached_tokens": null
+      },
+      "latency_s": 0.6918572499998845,
+      "cost_usd": 0.000274275,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Snippet A provides better context by listing the specific commands being added and their purpose within the data module's client implementation.",
+      "usage": {
+        "prompt_tokens": 5155,
+        "completion_tokens": 42,
+        "cached_tokens": null
+      },
+      "latency_s": 0.49890654099726817,
+      "cost_usd": 0.00039922499999999996,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Snippet B provides more useful document-level context by mentioning the file name and the overall purpose of the command, including vesting parameters, which aids retrieval.",
+      "usage": {
+        "prompt_tokens": 2562,
+        "completion_tokens": 48,
+        "cached_tokens": null
+      },
+      "latency_s": 0.4993006250006147,
+      "cost_usd": 0.00020655,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B provides more specific details about the content of the Params message, making it more useful for retrieval while still accurately situating the chunk within the document.",
+      "usage": {
+        "prompt_tokens": 1754,
+        "completion_tokens": 49,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5174182500013558,
+      "cost_usd": 0.00014625,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A accurately identifies the function and its purpose, providing better context than Candidate B which incorrectly states the file name.",
+      "usage": {
+        "prompt_tokens": 3701,
+        "completion_tokens": 41,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5527131250019011,
+      "cost_usd": 0.00028987499999999993,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B accurately situates the chunk within the document's 'Use Case' section and provides a concise summary of the chunk's content regarding basket tokens and their benefits.",
+      "usage": {
+        "prompt_tokens": 3229,
+        "completion_tokens": 53,
+        "cached_tokens": null
+      },
+      "latency_s": 0.6028166249998321,
+      "cost_usd": 0.00025807499999999997,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B accurately situates the chunk within the document's structure, referencing the preceding \"Initialize Node\" section and the subsequent \"Set the minimum gas price\" and \"Start Node\" sections. It also provides useful context about the purpose of these steps in preparing the node for operation.",
+      "usage": {
+        "prompt_tokens": 1788,
+        "completion_tokens": 75,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5982420000000275,
+      "cost_usd": 0.0001566,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A provides a more descriptive summary of the chunk's content, explaining the implications of the patent license grant and its termination conditions, which is more useful for retrieval than simply stating the section numbers as in Candidate B.",
+      "usage": {
+        "prompt_tokens": 2791,
+        "completion_tokens": 60,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5449789160011278,
+      "cost_usd": 0.000227325,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A provides a more comprehensive explanation by situating the chunk within both the `TableDescriptor` and `PrimaryKeyDescriptor` messages and explaining their roles in defining ORM table primary keys, offering better contextual retrieval.",
+      "usage": {
+        "prompt_tokens": 1671,
+        "completion_tokens": 60,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5309944590007944,
+      "cost_usd": 0.000143325,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B provides more specific context by naming the method and detailing the setup process for projects and batches, which is more informative for retrieval than Candidate A's general description.",
+      "usage": {
+        "prompt_tokens": 6876,
+        "completion_tokens": 52,
+        "cached_tokens": null
+      },
+      "latency_s": 0.6811160410034063,
+      "cost_usd": 0.0005313,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B accurately situates the chunk within the document's structure and provides specific details about the content, making it more useful for retrieval.",
+      "usage": {
+        "prompt_tokens": 4354,
+        "completion_tokens": 46,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5832375419995515,
+      "cost_usd": 0.00034035,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A accurately describes the chunk's purpose within the test suite, focusing on sell order cancellation validation and event checking, which is more specific and useful for retrieval than Candidate B's broader description of helper methods and setup logic.",
+      "usage": {
+        "prompt_tokens": 2774,
+        "completion_tokens": 64,
+        "cached_tokens": null
+      },
+      "latency_s": 0.666561375001038,
+      "cost_usd": 0.00022725,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B provides more specific details about the validation process and the data structures being built, making it more informative for retrieval.",
+      "usage": {
+        "prompt_tokens": 5822,
+        "completion_tokens": 42,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5621667499981413,
+      "cost_usd": 0.00044924999999999994,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A provides more specific details about the Project message fields and accurately describes the transition to the Batch message, offering better context for retrieval.",
+      "usage": {
+        "prompt_tokens": 5204,
+        "completion_tokens": 45,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5633283750030387,
+      "cost_usd": 0.0004038,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A provides more context by explaining the purpose of the messages and their role in the blockchain service, making it more useful for retrieval than Candidate B's more direct but less descriptive summary.",
+      "usage": {
+        "prompt_tokens": 1998,
+        "completion_tokens": 56,
+        "cached_tokens": null
+      },
+      "latency_s": 0.4823468340000545,
+      "cost_usd": 0.00016665,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gemini-3.1-flash-lite-preview",
+      "raw_winner": "B",
+      "rationale": "Snippet B is more concise and directly identifies the message and its purpose within the specified module.",
+      "usage": {
+        "prompt_tokens": 9958,
+        "completion_tokens": 36,
+        "cached_tokens": null
+      },
+      "latency_s": 0.749880999999732,
+      "cost_usd": 0.00075765,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B is better because it provides more context by mentioning the section and module, while still remaining concise and informative about the endpoint's function and the presence of examples.",
+      "usage": {
+        "prompt_tokens": 21314,
+        "completion_tokens": 52,
+        "cached_tokens": null
+      },
+      "latency_s": 0.7542885830007435,
+      "cost_usd": 0.00161415,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "A",
+      "rationale": "Candidate A is better because it accurately situates the chunk within the document's overall structure and provides more helpful context about the installation process.",
+      "usage": {
+        "prompt_tokens": 1682,
+        "completion_tokens": 46,
+        "cached_tokens": null
+      },
+      "latency_s": 0.5303851660028158,
+      "cost_usd": 0.00013995,
+      "order": [
+        {
+          "label": "A",
+          "model": "gpt-4o-mini"
+        },
+        {
+          "label": "B",
+          "model": "gemini-3.1-flash-lite-preview"
+        }
+      ]
+    },
+    {
+      "judge_model": "gemini-2.5-flash-lite",
+      "winner": "gpt-4o-mini",
+      "raw_winner": "B",
+      "rationale": "Candidate B is better because it more accurately describes the content of the chunk, including the initial steps of the disclosure process and the verification/communication aspects.",
+      "usage": {
+        "prompt_tokens": 1715,
+        "completion_tokens": 48,
+        "cached_tokens": null
+      },
+      "latency_s": 0.43422683399694506,
+      "cost_usd": 0.000143025,
+      "order": [
+        {
+          "label": "A",
+          "model": "gemini-3.1-flash-lite-preview"
+        },
+        {
+          "label": "B",
+          "model": "gpt-4o-mini"
+        }
+      ]
+    }
+  ]
+}

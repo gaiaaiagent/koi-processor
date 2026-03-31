@@ -133,17 +133,25 @@ SELECT payload_jsonb FROM anchored_metadata_records WHERE iri = 'YOUR_IRI';
 - No redirects followed
 - All payloads hashed for integrity verification
 
-## MCP-Only HTTP Endpoints
+## Authenticated HTTP Endpoints
 
-The metadata system is exposed via **internal-only** HTTP endpoints that require the `X-Internal-API-Key` header. These endpoints are NOT publicly accessible.
+The metadata and document endpoints require authentication via **dual-auth**: either an OAuth session token (from `regen_koi_authenticate`) or an `X-Internal-API-Key` header.
+
+### Authentication Methods
+
+1. **OAuth session token** (interactive MCP clients like regen-koi-mcp): Authenticate via `regen_koi_authenticate`, then the session token is sent automatically as `Authorization: Bearer <token>`.
+2. **Internal API key** (headless services like regen-python-mcp): Set `KOI_INTERNAL_API_KEY` in your env and send as `X-Internal-API-Key` header.
+
+Note: For `/document/full`, private document visibility requires a session token specifically. Internal key alone grants access to public documents only.
 
 ### Environment Setup
 
 ```bash
-# In koi-processor/.env (server)
+# In koi-processor/.env (server) — required
 KOI_INTERNAL_API_KEY=your-secret-key-here
 
-# In regen-koi-mcp/.env (MCP client)
+# For headless services only (not needed for OAuth-based MCP clients)
+# In PM2 config or service env:
 KOI_INTERNAL_API_KEY=your-secret-key-here
 ```
 
@@ -154,63 +162,57 @@ KOI_INTERNAL_API_KEY=your-secret-key-here
 | `/api/koi/metadata/resolve` | POST | Resolve and cache a metadata IRI |
 | `/api/koi/metadata/hectares` | POST | Derive hectares with citation (no citation = blocked) |
 | `/api/koi/metadata/stats` | GET | Get metadata cache statistics |
+| `/api/koi/document/full` | GET | Retrieve full document content by RID |
 
-### Calling Internally (with API Key)
+### Calling with Session Token
 
 ```bash
-# Set API key
-export KOI_API=http://localhost:8301/api/koi
-export KOI_INTERNAL_API_KEY=your-secret-key-here
+export KOI_API=https://regen.gaiaai.xyz/api/koi
 
 # Resolve metadata IRI
 curl -X POST "$KOI_API/metadata/resolve" \
   -H "Content-Type: application/json" \
-  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"iri": "regen:13toVfvfM5B7yuJqq8h3iVRHp3PKUJ4ABxHyvn4MeUMwwv1pWQGL295.rdf"}'
 
 # Derive hectares with citation
 curl -X POST "$KOI_API/metadata/hectares" \
   -H "Content-Type: application/json" \
-  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"iri": "regen:13toVfvfM5B7yuJqq8h3iVRHp3PKUJ4ABxHyvn4MeUMwwv1pWQGL295.rdf"}'
 
 # Get stats
 curl -X GET "$KOI_API/metadata/stats" \
+  -H "Authorization: Bearer $SESSION_TOKEN"
+```
+
+### Calling with Internal API Key (headless services)
+
+```bash
+export KOI_API=http://localhost:8301/api/koi
+
+curl -X GET "$KOI_API/metadata/stats" \
   -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY"
 ```
 
-### Public Access (Design Decision)
+### Public Access
 
-**Behavior**: Public URL returns **404 from nginx** (endpoint not routed).
+Unauthenticated requests return 401:
 
 ```bash
-# Public access attempt - returns nginx 404
 curl -s https://regen.gaiaai.xyz/api/koi/metadata/stats
-# Response: 404 Not Found (nginx default page)
+# Response: 401 {"error": {"code": "UNAUTHORIZED", "message": "Authentication required..."}}
 ```
 
-**Rationale**: The metadata endpoints are intentionally NOT exposed via nginx. This provides defense-in-depth:
-1. **404 from nginx** - No information disclosure about endpoint existence
-2. **Internal-only routing** - Only services on the server can reach port 8301 directly
-3. **API key required** - Even internal callers need `X-Internal-API-Key`
+### Auth Error Response
 
-**For internal services** (MCP server, scripts), call the local endpoint:
-```bash
-# Internal access (from server) - works with API key
-curl -X GET "http://127.0.0.1:8301/api/koi/metadata/stats" \
-  -H "X-Internal-API-Key: $KOI_INTERNAL_API_KEY"
-```
-
-### Auth Error Response (Internal Only)
-
-When calling internally without the `X-Internal-API-Key` header:
+When calling without any valid authentication:
 
 ```json
 {
-  "blocked": true,
   "error": {
     "code": "UNAUTHORIZED",
-    "message": "X-Internal-API-Key header required",
+    "message": "Authentication required. Use regen_koi_authenticate or provide X-Internal-API-Key.",
     "retryable": false
   }
 }
@@ -218,19 +220,7 @@ When calling internally without the `X-Internal-API-Key` header:
 
 ### MCP Configuration
 
-The `regen-koi-mcp` server automatically sends the internal API key for metadata endpoints.
-
-**Location**: `regen-koi-mcp/src/index.ts`
-
-```typescript
-// Request interceptor adds internal API key for metadata endpoints
-apiClient.interceptors.request.use((config) => {
-  if (config.url?.includes('/metadata/') && KOI_INTERNAL_API_KEY && config.headers) {
-    config.headers['X-Internal-API-Key'] = KOI_INTERNAL_API_KEY;
-  }
-  return config;
-});
-```
+The `regen-koi-mcp` server automatically sends the OAuth session token (from `regen_koi_authenticate`) on all requests via an axios interceptor. No additional configuration needed for metadata endpoints.
 
 **MCP Tools Available**:
 

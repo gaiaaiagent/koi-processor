@@ -630,3 +630,4 @@ During the Signal call for `connect-peers.sh`:
 | Service won't start (port in use) | Stale process on port 8351 | `kill $(lsof -ti tcp:8351)` then restart |
 | Peer shows in status but files don't sync | Shared folder mismatch | Verify both sides configured same `shared_folder` value |
 | `[FATAL] Key mismatch` during setup | Node identity changed since join request | Re-run `join-request.sh` and have admin re-approve |
+| NUC poller logs `ConnectTimeout` for MacBook | MacBook WireGuard (`wg-koi`) is down — required for NUC to reach `10.100.0.2:8351` | On MacBook: `sudo wg-quick up wg-koi`. For persistence across reboots, install the LaunchDaemon from `~/.config/personal-koi/com.wireguard.wg-koi.plist` |

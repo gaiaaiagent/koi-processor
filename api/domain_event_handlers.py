@@ -30,6 +30,7 @@ async def apply_domain_event(
         "commitment": _apply_commitment,
         "commitment_pool": _apply_commitment_pool,
         "task": _apply_task,
+        "intent": _apply_intent,
     }
     handler = handlers.get(domain)
     if not handler:
@@ -52,6 +53,7 @@ async def _handle_forget(conn, domain: str, rid: str, payload: Dict[str, Any]):
         "commitment": ("commitments", "commitment_rid"),
         "commitment_pool": ("commitment_pools", "pool_rid"),
         "task": ("task_registry", "task_key"),
+        "intent": ("intent_discovery_cache", "intent_rid"),
     }
     table, col = table_rid_map.get(domain, (None, None))
     if not table:
@@ -400,3 +402,37 @@ def _parse_ts(val) -> Optional[datetime]:
         return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+
+
+async def _apply_intent(conn, rid: str, event_type: str, payload: Dict[str, Any], source_node: str):
+    """UPSERT remote intent discovery projection into intent_discovery_cache.
+
+    Only discovery-level fields are stored — no publisher_contact,
+    source_excerpt, priority, tags, or match criteria cross node boundaries.
+    """
+    intent_rid = payload.get("intent_rid", rid)
+
+    await conn.execute("""
+        INSERT INTO intent_discovery_cache (
+            intent_rid, source_node, intent_type, status,
+            landscape_group, visibility, asset_offered, asset_wanted,
+            quantity
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (intent_rid) DO UPDATE SET
+            status = EXCLUDED.status,
+            visibility = EXCLUDED.visibility,
+            asset_offered = EXCLUDED.asset_offered,
+            asset_wanted = EXCLUDED.asset_wanted,
+            quantity = EXCLUDED.quantity,
+            updated_at = NOW()
+    """,
+        intent_rid,
+        source_node or "unknown",
+        payload.get("intent_type", "OFFER"),
+        payload.get("status", "active"),
+        payload.get("landscape_group", "unknown"),
+        payload.get("visibility", "local"),
+        payload.get("asset_offered"),
+        payload.get("asset_wanted"),
+        payload.get("quantity"),
+    )
