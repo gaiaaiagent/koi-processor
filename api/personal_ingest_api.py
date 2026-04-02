@@ -1323,6 +1323,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Task router not mounted: {e}")
 
+            # Knowledge graph router (episodes + temporal facts)
+            try:
+                from api.routers.knowledge_router import create_router as create_knowledge_router
+                app.include_router(create_knowledge_router(db_pool, generate_embedding), prefix="/knowledge")
+                logger.info("Knowledge router mounted (/knowledge)")
+            except Exception as e:
+                logger.warning(f"Knowledge router not mounted: {e}")
+
             # Project briefing router (always on, no capability gate)
             try:
                 from api.routers.project_router import create_router as create_project_router

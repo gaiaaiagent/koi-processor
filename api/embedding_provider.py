@@ -80,7 +80,7 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
                  base_url: str = "http://localhost:11434",
                  dimension: Optional[int] = None):
         import httpx
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=120.0)
         self.model_name = model
         self.dimension = dimension or self._default_dimension(model)
 
@@ -89,6 +89,7 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         defaults = {
             "nomic-embed-text": 768,
             "mxbai-embed-large": 1024,
+            "bge-large": 1024,
             "all-minilm": 384,
         }
         return defaults.get(model, 768)
@@ -100,6 +101,15 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         })
         resp.raise_for_status()
         return resp.json()["embedding"]
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Batch embed using /api/embed endpoint (Ollama 0.4+)."""
+        resp = await self._client.post("/api/embed", json={
+            "model": self.model_name,
+            "input": texts,
+        })
+        resp.raise_for_status()
+        return resp.json()["embeddings"]
 
 
 def create_embedding_provider() -> Optional[EmbeddingProvider]:
