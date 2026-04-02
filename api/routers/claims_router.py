@@ -263,6 +263,27 @@ class AttestationAnchorPendingResponse(BaseModel):
     message: str = ""
 
 
+class AttestOnChainResponse(BaseModel):
+    """Response for MsgAttest-based on-chain attestation (Phase 3)."""
+    attestation_rid: str
+    claim_rid: str
+    graph_iri: str
+    attest_tx_hash: str
+    attest_timestamp: Optional[str] = None
+    attestor_address: Optional[str] = None
+    method: str = "MsgAttest"  # distinguishes from legacy MsgAnchor path
+
+
+class AttestOnChainPendingResponse(BaseModel):
+    attestation_rid: str
+    claim_rid: str
+    graph_iri: str
+    attest_tx_hash: str
+    status: str = "pending"
+    message: str = ""
+    method: str = "MsgAttest"
+
+
 class AttestationReconcileResponse(BaseModel):
     attestation_rid: str
     claim_rid: str
@@ -2863,6 +2884,133 @@ def create_router(pool, caps=None):
         raise HTTPException(
             status_code=503,
             detail=result.get("reason", "Attestation anchoring not available"),
+        )
+
+    # ------------------------------------------------------------------ #
+    # MsgAttest — Phase 3 graph-native attestation signing                #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/{rid}/attestations/{att_rid}/attest-onchain",
+                 response_model=AttestOnChainResponse,
+                 dependencies=[Depends(require_auth)])
+    async def attest_onchain(rid: str, att_rid: str):
+        """Attest to an attestation on-chain via MsgAttest (Phase 3).
+
+        Uses graph-native JSON-LD → URDNA2015 → BLAKE2b-256 → graph IRI path.
+        MsgAttest auto-anchors the graph data if not already anchored.
+
+        Preconditions:
+        - Attestation exists with approved/rejected verdict
+        - Parent claim is ledger_anchored
+        """
+        from api.ledger_anchor import (
+            broadcast_attest, build_attestation_jsonld, generate_graph_iri,
+            get_signing_address,
+        )
+
+        async with pool.acquire() as conn:
+            att = await conn.fetchrow("""
+                SELECT * FROM claim_attestations
+                WHERE claim_rid = $1 AND attestation_rid = $2
+            """, rid, att_rid)
+            if not att:
+                raise HTTPException(status_code=404, detail=f"Attestation not found: {att_rid}")
+
+            claim = await conn.fetchrow(
+                "SELECT verification FROM claims WHERE claim_rid = $1", rid
+            )
+            if not claim or claim["verification"] != "ledger_anchored":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Parent claim must be ledger_anchored "
+                           f"(current: {claim['verification'] if claim else 'not found'})",
+                )
+
+            if att["verdict"] not in ("approved", "rejected"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot attest with verdict '{att['verdict']}'. "
+                           f"Must be 'approved' or 'rejected'.",
+                )
+
+            if att.get("attest_tx_hash"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Attestation already on-chain (tx_hash: {att['attest_tx_hash'][:16]}...)",
+                )
+
+        # Build JSON-LD and generate graph IRI
+        jsonld_doc = build_attestation_jsonld(att)
+        graph_iri = generate_graph_iri(jsonld_doc)
+
+        # Resolve attestor address (same 3-tier fallback as MsgAnchor path)
+        attestor_address = att.get("attestor_address")
+        if not attestor_address:
+            async with pool.acquire() as conn:
+                reviewer_wallet = await conn.fetchval(
+                    "SELECT wallet_address FROM entity_registry WHERE fuseki_uri = $1",
+                    att["reviewer_uri"],
+                )
+            attestor_address = reviewer_wallet
+        if not attestor_address:
+            try:
+                attestor_address = get_signing_address()
+            except Exception:
+                attestor_address = None
+
+        # Broadcast MsgAttest (fall back to service account key name)
+        from api.ledger_anchor import REGEN_KEY_NAME
+        signer = attestor_address or REGEN_KEY_NAME
+        try:
+            result = await broadcast_attest(att_rid, graph_iri, signer=signer)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"MsgAttest broadcast failed: {e}")
+
+        tx_hash = result.get("tx_hash")
+
+        if result.get("ready_to_anchor"):
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claim_attestations
+                    SET attest_tx_hash = $2, ledger_iri = $3, attest_timestamp = NOW(),
+                        attestor_address = $4, updated_at = NOW()
+                    WHERE attestation_rid = $1
+                """, att_rid, tx_hash, graph_iri, attestor_address)
+
+            logger.info(f"attestation.attested att={att_rid} iri={graph_iri} tx={tx_hash} method=MsgAttest")
+            return AttestOnChainResponse(
+                attestation_rid=att_rid,
+                claim_rid=rid,
+                graph_iri=graph_iri,
+                attest_tx_hash=tx_hash,
+                attest_timestamp=result.get("ledger_timestamp"),
+                attestor_address=attestor_address,
+            )
+
+        if tx_hash:
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE claim_attestations
+                    SET attest_tx_hash = $2, ledger_iri = $3, attestor_address = $4, updated_at = NOW()
+                    WHERE attestation_rid = $1
+                """, att_rid, tx_hash, graph_iri, attestor_address)
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                status_code=202,
+                content=AttestOnChainPendingResponse(
+                    attestation_rid=att_rid,
+                    claim_rid=rid,
+                    graph_iri=graph_iri,
+                    attest_tx_hash=tx_hash,
+                    status="pending",
+                    message=result.get("reason", "MsgAttest broadcast but confirmation timed out. "
+                            f"Call POST /claims/{rid}/attestations/{att_rid}/reconcile to finalize."),
+                ).model_dump(),
+            )
+
+        raise HTTPException(
+            status_code=503,
+            detail=result.get("reason", "MsgAttest not available"),
         )
 
     @router.post("/{rid}/attestations/{att_rid}/reconcile", response_model=AttestationReconcileResponse,

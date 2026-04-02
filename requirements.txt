@@ -91,6 +91,11 @@ mypy==1.7.1
 rid-lib==3.2.12
 
 # =============================================================================
+# Claims Engine Phase 3 — Graph IRI generation (URDNA2015 canonicalization)
+# =============================================================================
+pyld>=2.0.4
+
+# =============================================================================
 # TerminusDB Graph Storage (Phase 1) — removed, unused and blocks Python 3.13+
 beautifulsoup4==4.13.5
 # trafilatura>=2.0.0
