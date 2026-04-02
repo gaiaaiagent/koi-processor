@@ -4,140 +4,486 @@
     "category": "entity_lookup",
     "question": "What is eelgrass?",
     "expected_answer": "Eelgrass (Zostera marina) is a marine flowering plant found in the Salish Sea that provides critical habitat for fish, invertebrates, and migratory birds. It is important for carbon sequestration and shoreline stabilization.",
-    "expected_entities": ["Eelgrass"]
+    "expected_entities": ["Eelgrass"],
+    "gold_evidence": ["Eelgrass (Zostera marina) is a marine flowering plant found in the Salish Sea that provides critical habitat for fish, invertebrates, and migratory birds"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
   },
   {
     "id": "entity_lookup_2",
     "category": "entity_lookup",
     "question": "What is the Salish Sea?",
     "expected_answer": "The Salish Sea is a marginal sea of the Pacific Ocean encompassing the inland marine waters of Washington state and British Columbia, including Puget Sound, the Strait of Juan de Fuca, and the Strait of Georgia.",
-    "expected_entities": ["Salish Sea"]
+    "expected_entities": ["Salish Sea"],
+    "gold_evidence": ["The Salish Sea is a marginal sea of the Pacific Ocean encompassing the inland marine waters of Washington state and British Columbia, including Puget Sound, the Strait of Juan de Fuca, and the Strait of Georgia"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
   },
   {
     "id": "entity_lookup_3",
     "category": "entity_lookup",
     "question": "What are Southern Resident Killer Whales?",
     "expected_answer": "Southern Resident Killer Whales (SRKW) are an endangered population of orcas that inhabit the Salish Sea. Their survival is threatened by declining Chinook salmon populations, vessel noise, and pollution.",
-    "expected_entities": ["Southern Resident Killer Whales"]
+    "expected_entities": ["Southern Resident Killer Whales"],
+    "gold_evidence": ["Southern Resident Killer Whales are an endangered population of orcas that inhabit the Salish Sea, threatened by declining Chinook salmon populations, vessel noise, and pollution"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
   },
   {
     "id": "entity_lookup_4",
     "category": "entity_lookup",
     "question": "What is bioregionalism?",
     "expected_answer": "Bioregionalism is a political, cultural, and ecological philosophy that emphasizes organizing human activity around naturally-defined ecological regions (bioregions) rather than arbitrary political boundaries.",
-    "expected_entities": ["Bioregionalism"]
+    "expected_entities": ["Bioregionalism"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
   },
   {
     "id": "entity_lookup_5",
     "category": "entity_lookup",
     "question": "What is Threshold-Based Flow Funding?",
     "expected_answer": "Threshold-Based Flow Funding (TBFF) is a funding mechanism that redistributes resources among participants based on configurable thresholds, ensuring each participant reaches a minimum funding level before excess flows to others.",
-    "expected_entities": ["Threshold-Based Flow Funding"]
+    "expected_entities": ["Threshold-Based Flow Funding"],
+    "difficulty": "easy",
+    "source_domain": "doc"
   },
+
+  {
+    "id": "entity_definition_6",
+    "category": "entity_definition",
+    "question": "What is Regenerate Cascadia?",
+    "expected_answer": "Regenerate Cascadia is an organization focused on ecological restoration and community stewardship in the Cascadia bioregion, working on habitat restoration and coordinating with groups like the Victoria Landscape Hub and Kinship Earth.",
+    "expected_entities": ["Regenerate Cascadia"],
+    "difficulty": "easy",
+    "source_domain": "entity"
+  },
+  {
+    "id": "entity_definition_7",
+    "category": "entity_definition",
+    "question": "What is Kinship Earth?",
+    "expected_answer": "Kinship Earth is an organization involved in bioregional stewardship in the Greater Victoria area, working alongside the Victoria Landscape Hub and Regenerate Cascadia on ecological restoration and community coordination.",
+    "expected_entities": ["Kinship Earth"],
+    "difficulty": "easy",
+    "source_domain": "entity"
+  },
+  {
+    "id": "entity_definition_8",
+    "category": "entity_definition",
+    "question": "What is the Cascadia bioregion?",
+    "expected_answer": "Cascadia is a bioregion spanning the Pacific Northwest from northern California through British Columbia, defined by shared watersheds, ecosystems, and ecological features rather than political boundaries. It includes sub-bioregions like the Salish Sea.",
+    "expected_entities": ["Cascadia"],
+    "gold_evidence": ["Cascadia is a bioregion spanning the Pacific Northwest, defined by shared watersheds and ecosystems rather than political boundaries"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_9",
+    "category": "entity_definition",
+    "question": "What are Chinook salmon?",
+    "expected_answer": "Chinook salmon (Oncorhynchus tshawytscha) are the largest Pacific salmon species and a keystone species in the Salish Sea ecosystem. They are the primary food source for Southern Resident Killer Whales, and their population decline is a major conservation concern.",
+    "expected_entities": ["Chinook Salmon"],
+    "gold_evidence": ["Chinook salmon (Oncorhynchus tshawytscha) are the largest Pacific salmon species and a keystone species in the Salish Sea ecosystem"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_10",
+    "category": "entity_definition",
+    "question": "What is the KOI protocol?",
+    "expected_answer": "KOI (Knowledge Organization Infrastructure) is the technical protocol for organizing, federating, and sharing knowledge across bioregional nodes. It uses signed event envelopes, entity resolution, and federation edges to enable decentralized knowledge exchange.",
+    "expected_entities": ["KOI"],
+    "difficulty": "easy",
+    "source_domain": "doc"
+  },
+  {
+    "id": "entity_definition_11",
+    "category": "entity_definition",
+    "question": "What is Pacific herring?",
+    "expected_answer": "Pacific herring (Clupea pallasii) are a small forage fish species found throughout the Salish Sea. They play a critical role in the marine food web as prey for salmon, seabirds, and marine mammals, and their spawning events are ecologically and culturally significant.",
+    "expected_entities": ["Pacific Herring"],
+    "gold_evidence": ["Pacific herring (Clupea pallasii) are a forage fish species found in the Salish Sea that play a critical role in the marine food web as prey for salmon, seabirds, and marine mammals"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_12",
+    "category": "entity_definition",
+    "question": "What is the Strait of Georgia?",
+    "expected_answer": "The Strait of Georgia is a body of water between Vancouver Island and the mainland of British Columbia. It is part of the Salish Sea and supports diverse marine ecosystems including herring spawning habitat and salmon migration routes.",
+    "expected_entities": ["Strait of Georgia"],
+    "gold_evidence": ["The Strait of Georgia is a major body of water between Vancouver Island and the British Columbia mainland, forming part of the Salish Sea"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_13",
+    "category": "entity_definition",
+    "question": "What is bull kelp?",
+    "expected_answer": "Bull kelp (Nereocystis luetkeana) is a large species of brown seaweed that forms underwater forests along the coastlines of the Salish Sea. Kelp forests provide critical habitat for fish, invertebrates, and other marine species.",
+    "expected_entities": ["Bull Kelp"],
+    "gold_evidence": ["Bull kelp (Nereocystis luetkeana) is a large brown seaweed that forms underwater forests along the Pacific coast, providing critical habitat for marine species"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_14",
+    "category": "entity_definition",
+    "question": "What are Garry oak ecosystems?",
+    "expected_answer": "Garry oak (Quercus garryana) ecosystems are endangered habitats found in the rain shadow areas of southeastern Vancouver Island and the Gulf Islands. They are among the most at-risk ecosystems in Canada and support many species at risk.",
+    "expected_entities": ["Garry Oak"],
+    "gold_evidence": ["Garry oak (Quercus garryana) ecosystems are among the most endangered in Canada, found in the rain shadow areas of southeastern Vancouver Island and the Gulf Islands"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_15",
+    "category": "entity_definition",
+    "question": "What is Puget Sound?",
+    "expected_answer": "Puget Sound is a complex estuarine system of interconnected marine waterways and basins in Washington state. It is the southernmost part of the Salish Sea and provides habitat for salmon, orcas, and numerous other species.",
+    "expected_entities": ["Puget Sound"],
+    "gold_evidence": ["Puget Sound is a complex system of interconnected marine waterways in Washington state, forming the southern portion of the Salish Sea"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_16",
+    "category": "entity_definition",
+    "question": "Who are the Coast Salish peoples?",
+    "expected_answer": "The Coast Salish are a group of ethnically and linguistically related Indigenous peoples inhabiting the Pacific Northwest coast around the Salish Sea. They have managed and stewarded the marine and terrestrial ecosystems of the region for thousands of years.",
+    "expected_entities": ["Coast Salish"],
+    "gold_evidence": ["The Coast Salish are Indigenous peoples of the Pacific Northwest who have inhabited the lands and waters around the Salish Sea for thousands of years"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_17",
+    "category": "entity_definition",
+    "question": "What is traditional ecological knowledge?",
+    "expected_answer": "Traditional ecological knowledge (TEK) is the accumulated knowledge, practices, and beliefs about the relationship of living beings with their environment, developed by Indigenous peoples through generations of direct contact with the environment.",
+    "expected_entities": ["Traditional Ecological Knowledge"],
+    "gold_evidence": ["Traditional ecological knowledge refers to the accumulated knowledge, practices, and beliefs about the relationship of living beings with their environment, held by Indigenous peoples"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_18",
+    "category": "entity_definition",
+    "question": "What is the Fraser River?",
+    "expected_answer": "The Fraser River is the longest river in British Columbia and the largest salmon-bearing river system on the Pacific coast. It flows into the Strait of Georgia and is critical habitat for all five Pacific salmon species.",
+    "expected_entities": ["Fraser River"],
+    "gold_evidence": ["The Fraser River is the longest river in British Columbia and one of the most important salmon rivers in the world, supporting all five species of Pacific salmon"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_19",
+    "category": "entity_definition",
+    "question": "What are marine protected areas in the Salish Sea?",
+    "expected_answer": "Marine protected areas (MPAs) in the Salish Sea are designated zones where human activities are regulated to protect marine ecosystems. They include national marine conservation areas, wildlife management areas, and ecological reserves aimed at preserving biodiversity and habitat.",
+    "expected_entities": ["Marine Protected Areas"],
+    "gold_evidence": ["Marine protected areas in the Salish Sea include designated zones where human activities are managed to protect marine biodiversity and critical habitats"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "entity_definition_20",
+    "category": "entity_definition",
+    "question": "What is the Georgia Basin ecosystem?",
+    "expected_answer": "The Georgia Basin is an ecological region centered on the Strait of Georgia that encompasses marine, freshwater, and terrestrial habitats. It faces ecological pressures from urbanization, agricultural runoff, and climate change, and is subject to coordinated conservation efforts across the Canada-US border.",
+    "expected_entities": ["Georgia Basin"],
+    "gold_evidence": ["The Georgia Basin is an ecological region centered on the Strait of Georgia, encompassing diverse marine and terrestrial habitats under pressure from urbanization and climate change"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
+
   {
     "id": "relationship_1",
     "category": "relationship",
     "question": "Which organizations work on restoration in the Salish Sea?",
     "expected_answer": "Organizations working on restoration in the Salish Sea include Regenerate Cascadia, Victoria Landscape Hub, and other groups focused on ecological stewardship and habitat restoration.",
-    "expected_entities": ["Regenerate Cascadia", "Victoria Landscape Hub", "Salish Sea"]
+    "expected_entities": ["Regenerate Cascadia", "Victoria Landscape Hub", "Salish Sea"],
+    "difficulty": "medium",
+    "source_domain": "entity"
   },
   {
     "id": "relationship_2",
     "category": "relationship",
     "question": "What is the relationship between the Bioregional Knowledge Commons and KOI?",
     "expected_answer": "The Bioregional Knowledge Commons (BKC) uses Knowledge Organization Infrastructure (KOI) as its technical backbone for organizing, federating, and sharing knowledge across bioregional nodes.",
-    "expected_entities": ["Bioregional Knowledge Commons", "KOI"]
+    "expected_entities": ["Bioregional Knowledge Commons", "KOI"],
+    "difficulty": "medium",
+    "source_domain": "doc"
   },
   {
     "id": "relationship_3",
     "category": "relationship",
     "question": "What species are connected to Chinook salmon in the Salish Sea ecosystem?",
     "expected_answer": "Chinook salmon are a keystone species connected to Southern Resident Killer Whales (their primary food source), as well as bears, eagles, and marine ecosystems. Their decline directly threatens orca populations.",
-    "expected_entities": ["Chinook Salmon", "Southern Resident Killer Whales"]
+    "expected_entities": ["Chinook Salmon", "Southern Resident Killer Whales"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
   },
   {
     "id": "relationship_4",
     "category": "relationship",
     "question": "What is Commitment Pooling and how does it relate to flow funding?",
     "expected_answer": "Commitment Pooling is a mechanism for aggregating verified commitments from community members into pools that can then be funded and settled through mechanisms like Threshold-Based Flow Funding (TBFF).",
-    "expected_entities": ["Commitment Pooling", "Flow Funding"]
+    "expected_entities": ["Commitment Pooling", "Flow Funding"],
+    "difficulty": "medium",
+    "source_domain": "commitment"
   },
+  {
+    "id": "relationship_5",
+    "category": "relationship",
+    "question": "Which organizations are part of the Victoria Landscape Hub network?",
+    "expected_answer": "The Victoria Landscape Hub coordinates with organizations including Kinship Earth, Mycopunks, and Regenerate Cascadia for ecological restoration and community stewardship in the Greater Victoria area.",
+    "expected_entities": ["Victoria Landscape Hub", "Kinship Earth", "Mycopunks", "Regenerate Cascadia"],
+    "difficulty": "medium",
+    "source_domain": "entity"
+  },
+  {
+    "id": "relationship_6",
+    "category": "relationship",
+    "question": "What is the relationship between the Salish Sea and Cascadia bioregions?",
+    "expected_answer": "The Salish Sea is a sub-bioregion within the broader Cascadia bioregion. In the BKC ontology, the Salish Sea has a 'broader' relationship to Cascadia, meaning knowledge and commitments can be matched across the hierarchy.",
+    "expected_entities": ["Salish Sea", "Cascadia"],
+    "difficulty": "medium",
+    "source_domain": "entity"
+  },
+  {
+    "id": "relationship_7",
+    "category": "relationship",
+    "question": "What species depend on Pacific herring in the Salish Sea food web?",
+    "expected_answer": "Pacific herring are a keystone forage species in the Salish Sea. They are a critical food source for Chinook and coho salmon, seabirds, harbor seals, Steller sea lions, and humpback whales.",
+    "expected_entities": ["Pacific Herring", "Chinook Salmon"],
+    "gold_evidence": ["Pacific herring serve as a key forage species in the Salish Sea food web, providing food for salmon, marine mammals, and seabirds"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_8",
+    "category": "relationship",
+    "question": "How does the Front Range node relate to the Salish Sea coordinator in the BKC network?",
+    "expected_answer": "The Front Range node is a bioregional node in the BKC network that runs alongside the Octo (Salish Sea) coordinator on the same server. They share the same KOI codebase but have separate databases and identities, with federation edges controlling data flow between them.",
+    "expected_entities": ["Front Range", "Octo"],
+    "gold_evidence": ["The Front Range node runs on the same server as the Octo coordinator, using separate databases and identities while sharing the KOI codebase"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_9",
+    "category": "relationship",
+    "question": "What is the relationship between salmon and watersheds in the Salish Sea?",
+    "expected_answer": "Salmon depend on healthy watersheds throughout their lifecycle. They spawn in freshwater streams and rivers, grow in estuaries, and migrate through the Salish Sea. Watershed degradation from logging, urbanization, and pollution directly impacts salmon habitat and population health.",
+    "expected_entities": ["Salmon", "Salish Sea"],
+    "gold_evidence": ["Salmon depend on healthy freshwater and marine habitats throughout the Salish Sea watershed system for spawning, rearing, and migration"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_10",
+    "category": "relationship",
+    "question": "How does the BKC pattern language relate to the meta-protocol?",
+    "expected_answer": "The pattern language provides the human-readable layer of reusable social and governance patterns, while the meta-protocol provides the minimal machine commitments for interoperability. The pattern language sits above the meta-protocol in the three-layer architecture, with concrete reference profiles like CommonsChange below.",
+    "expected_entities": ["Pattern Language", "Meta-Protocol"],
+    "gold_evidence": ["The BKC uses a three-layer architecture: the pattern language (human layer), the meta-protocol (thin interop layer), and reference profiles (implementation layer)"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "relationship_11",
+    "category": "relationship",
+    "question": "Which bioregional nodes in the BKC network have established federation connections?",
+    "expected_answer": "The BKC network has established federation connections between Octo (Salish Sea coordinator) and Front Range, Octo and Greater Victoria, Octo and Cowichan Valley, and a direct peering between Greater Victoria and Cowichan Valley.",
+    "expected_entities": ["Octo", "Greater Victoria", "Cowichan Valley", "Front Range"],
+    "gold_evidence": ["The BKC network includes federation connections between the Octo coordinator and Front Range, Greater Victoria, and Cowichan Valley nodes, plus direct GV-CV peering"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_12",
+    "category": "relationship",
+    "question": "What species live in eelgrass habitats in the Salish Sea?",
+    "expected_answer": "Eelgrass meadows provide nursery habitat for juvenile salmon, herring, and Dungeness crab. They also support invertebrates, small fish, and migratory waterfowl that feed on eelgrass and associated organisms.",
+    "expected_entities": ["Eelgrass", "Salish Sea"],
+    "gold_evidence": ["Eelgrass meadows provide critical nursery habitat for juvenile salmon, herring, and Dungeness crab in the Salish Sea"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_13",
+    "category": "relationship",
+    "question": "How does Mycopunks connect to other organizations in the Greater Victoria stewardship network?",
+    "expected_answer": "Mycopunks is an organization involved in mycological and ecological restoration in Greater Victoria. It works alongside the Victoria Landscape Hub, Kinship Earth, and Regenerate Cascadia on community stewardship and ecological restoration initiatives.",
+    "expected_entities": ["Mycopunks", "Victoria Landscape Hub"],
+    "gold_evidence": ["Mycopunks works alongside the Victoria Landscape Hub and Kinship Earth on ecological restoration and community stewardship in Greater Victoria"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_14",
+    "category": "relationship",
+    "question": "How do Coast Salish resource management practices relate to modern conservation in the Salish Sea?",
+    "expected_answer": "Coast Salish peoples developed sophisticated resource management practices including reef net fishing, controlled burning, and clam garden cultivation over thousands of years. These traditional ecological knowledge systems inform contemporary conservation approaches to sustainable fisheries and habitat management.",
+    "expected_entities": ["Coast Salish", "Reef Nets"],
+    "gold_evidence": ["Coast Salish peoples developed sustainable resource management practices including reef net fishing and clam gardens that inform modern conservation efforts"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "relationship_15",
+    "category": "relationship",
+    "question": "What is the relationship between the KOI-net federation protocol and the BKC ontology?",
+    "expected_answer": "The KOI-net federation protocol uses the BKC ontology to define what types of entities can be shared between nodes. Federation edges specify which entity types from the 25 types defined in the ontology can flow across them, and the ontology's predicates define the relationships maintained across federation boundaries.",
+    "expected_entities": ["KOI", "BKC Ontology"],
+    "gold_evidence": ["Federation edges control which entity types flow between nodes, using the BKC ontology's 25 entity types and 39 predicates to determine what can be shared across federation boundaries"],
+    "difficulty": "hard",
+    "source_domain": "entity"
+  },
+
   {
     "id": "multi_hop_1",
     "category": "multi_hop",
     "question": "What restoration practices does the Victoria Landscape Hub focus on?",
     "expected_answer": "The Victoria Landscape Hub focuses on ecological restoration practices in the Greater Victoria area, including habitat restoration, community stewardship, and coordinating with organizations like Kinship Earth and Mycopunks.",
-    "expected_entities": ["Victoria Landscape Hub"]
+    "expected_entities": ["Victoria Landscape Hub"],
+    "difficulty": "medium",
+    "source_domain": "entity"
   },
   {
     "id": "multi_hop_2",
     "category": "multi_hop",
     "question": "How does the KOI federation protocol enable knowledge sharing between bioregions?",
     "expected_answer": "KOI-net federation enables knowledge sharing through signed event envelopes exchanged between nodes. Each bioregional node maintains its own database and identity, while federation edges control which entity types flow between nodes.",
-    "expected_entities": ["KOI", "Federation"]
+    "expected_entities": ["KOI", "Federation"],
+    "difficulty": "medium",
+    "source_domain": "doc"
   },
   {
     "id": "multi_hop_3",
     "category": "multi_hop",
     "question": "What is the connection between reef nets, Indigenous knowledge, and the Salish Sea?",
     "expected_answer": "Reef nets are a traditional Indigenous fishing technology used by Coast Salish peoples in the Salish Sea. They represent an example of traditional ecological knowledge that informs contemporary approaches to sustainable fisheries management.",
-    "expected_entities": ["Reef Nets", "Salish Sea"]
+    "expected_entities": ["Reef Nets", "Salish Sea"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
   },
   {
     "id": "multi_hop_4",
     "category": "multi_hop",
     "question": "How does cosmolocalism relate to bioregional knowledge commoning?",
     "expected_answer": "Cosmolocalism is the principle of sharing knowledge globally while producing locally. In bioregional knowledge commoning, this means sharing patterns, protocols, and ecological knowledge across bioregions while keeping governance and stewardship rooted in local communities.",
-    "expected_entities": ["Cosmolocalism"]
+    "expected_entities": ["Cosmolocalism"],
+    "difficulty": "medium",
+    "source_domain": "doc"
   },
   {
-    "id": "thematic_1",
-    "category": "thematic",
-    "question": "What is the overall approach to ecological stewardship in the Cascadia bioregion?",
-    "expected_answer": "The Cascadia bioregion takes a holistic approach to ecological stewardship that combines Indigenous knowledge systems, regenerative practices, community governance, and networked coordination across sub-bioregions like the Salish Sea and Greater Victoria.",
-    "expected_entities": ["Cascadia"]
+    "id": "multi_hop_5",
+    "category": "multi_hop",
+    "question": "How does a community member's verbal commitment become an on-chain attestation?",
+    "expected_answer": "A verbal commitment is transcribed (via Whisper), extracted by an LLM into commitment candidates, created as Commitment entities, verified through attestations, minted as Victoria Commitment Vouchers on Celo, settled via TBFF, and the settlement is anchored on Regen Ledger with an EAS attestation on Celo.",
+    "expected_entities": ["Commitment", "Victoria Commitment Voucher"],
+    "difficulty": "hard",
+    "source_domain": "mixed"
   },
   {
-    "id": "thematic_2",
-    "category": "thematic",
-    "question": "How does the Bioregional Knowledge Commons handle data sovereignty?",
-    "expected_answer": "The BKC addresses data sovereignty through OCAP principles (Ownership, Control, Access, Possession), FPIC (Free Prior and Informed Consent), visibility scoping (public vs node_private), and federation membrane governance that controls what data flows between nodes.",
-    "expected_entities": ["Data Sovereignty", "OCAP", "FPIC"]
+    "id": "multi_hop_6",
+    "category": "multi_hop",
+    "question": "What ecological threats face the Salish Sea and which species are most affected?",
+    "expected_answer": "The Salish Sea faces threats including declining salmon populations, vessel noise, pollution, habitat loss, and ocean acidification. Southern Resident Killer Whales are critically affected due to their dependence on Chinook salmon. Eelgrass habitats, herring populations, and marine invertebrates are also impacted.",
+    "expected_entities": ["Salish Sea", "Southern Resident Killer Whales", "Chinook Salmon", "Eelgrass"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
   },
   {
-    "id": "thematic_3",
-    "category": "thematic",
-    "question": "What role do discourse graphs play in the knowledge commons?",
-    "expected_answer": "Discourse graphs structure knowledge as claims supported or opposed by evidence, enabling communities to track arguments, synthesize positions, and make decisions based on transparent reasoning chains.",
-    "expected_entities": ["Discourse Graphs"]
+    "id": "multi_hop_7",
+    "category": "multi_hop",
+    "question": "How does eelgrass loss in the Salish Sea affect Southern Resident Killer Whale populations?",
+    "expected_answer": "Eelgrass meadows provide nursery habitat for juvenile salmon, including Chinook salmon. Chinook are the primary food source for Southern Resident Killer Whales. When eelgrass habitat declines, it reduces juvenile Chinook survival, which in turn reduces the food supply for the already endangered SRKW population.",
+    "expected_entities": ["Eelgrass", "Southern Resident Killer Whales", "Chinook Salmon"],
+    "gold_evidence": ["Eelgrass meadows provide critical nursery habitat for juvenile salmon in the Salish Sea", "Southern Resident Killer Whales depend primarily on Chinook salmon as their food source"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
   },
   {
-    "id": "thematic_4",
-    "category": "thematic",
-    "question": "What is Two-Eyed Seeing and why is it important for bioregional work?",
-    "expected_answer": "Two-Eyed Seeing (Etuaptmumk) is a guiding principle from Mi'kmaw Elder Albert Marshall that brings together Indigenous and Western knowledge systems. It is important for bioregional work because ecological stewardship benefits from integrating traditional ecological knowledge with scientific approaches.",
-    "expected_entities": ["Two-Eyed Seeing"]
+    "id": "multi_hop_8",
+    "category": "multi_hop",
+    "question": "How does the BKC three-layer architecture translate governance patterns into machine-readable protocols?",
+    "expected_answer": "The BKC uses a three-layer architecture: the pattern language provides reusable social and governance patterns in human-readable form, the meta-protocol defines minimal machine commitments for interoperability (what is shared, who attests, who can use and how), and reference profiles like CommonsChange provide concrete serializations that nodes implement.",
+    "expected_entities": ["Pattern Language", "Meta-Protocol", "CommonsChange"],
+    "gold_evidence": ["The BKC three-layer architecture consists of the pattern language (human layer), the meta-protocol (thin interop layer), and reference profiles (implementation layer) like CommonsChange"],
+    "difficulty": "medium",
+    "source_domain": "doc"
   },
   {
-    "id": "negative_1",
-    "category": "negative",
-    "question": "What is the population of Mars?",
-    "expected_answer": "I don't have information about the population of Mars in my knowledge base. My knowledge focuses on bioregional ecology, stewardship, and community governance in regions like the Salish Sea and Cascadia.",
-    "expected_entities": []
+    "id": "multi_hop_9",
+    "category": "multi_hop",
+    "question": "What restoration work connects the Victoria Landscape Hub to broader Cascadia-wide ecological initiatives?",
+    "expected_answer": "The Victoria Landscape Hub coordinates local ecological restoration in Greater Victoria, working with organizations like Kinship Earth and Mycopunks. Through the BKC federation network, their work connects to the broader Cascadia bioregion via the Octo coordinator node, with a 'broader' relationship linking the Salish Sea to Cascadia.",
+    "expected_entities": ["Victoria Landscape Hub", "Cascadia", "Kinship Earth"],
+    "gold_evidence": ["The Victoria Landscape Hub coordinates ecological restoration in Greater Victoria with organizations like Kinship Earth and Mycopunks", "The Salish Sea has a 'broader' relationship to the Cascadia bioregion in the BKC ontology"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
   },
   {
-    "id": "negative_2",
-    "category": "negative",
-    "question": "What is the stock price of Apple Inc today?",
-    "expected_answer": "I don't have information about stock prices. My knowledge base focuses on bioregional knowledge commoning, ecological stewardship, and community governance.",
-    "expected_entities": []
+    "id": "multi_hop_10",
+    "category": "multi_hop",
+    "question": "How does a TBFF settlement create verifiable on-chain proof of community resource redistribution?",
+    "expected_answer": "A TBFF settlement redistributes resources among pool participants based on configurable thresholds. The settlement generates an Evidence entity linked to a Claim, which is anchored on the Regen Ledger via MsgAnchor with a content hash. The claim is then attested on Celo EAS, creating a dual-chain proof pack with matching content hashes.",
+    "expected_entities": ["TBFF", "Claim"],
+    "gold_evidence": ["TBFF settlements redistribute resources among participants based on thresholds, generating evidence that links to claims for on-chain anchoring and attestation"],
+    "difficulty": "hard",
+    "source_domain": "commitment"
   },
   {
-    "id": "negative_3",
-    "category": "negative",
-    "question": "How do I install TensorFlow on Windows?",
-    "expected_answer": "I don't have information about installing TensorFlow. My focus is on bioregional knowledge, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
-    "expected_entities": []
+    "id": "multi_hop_11",
+    "category": "multi_hop",
+    "question": "How did Coast Salish reef net fishing technology reflect ecological knowledge of salmon migration patterns?",
+    "expected_answer": "Reef nets were a sophisticated Indigenous fishing technology where nets were suspended between canoes or anchored at specific locations where salmon congregated during migration. This required deep knowledge of salmon run timing, tidal patterns, and underwater topography accumulated over generations of observation.",
+    "expected_entities": ["Reef Nets", "Coast Salish"],
+    "gold_evidence": ["Reef nets are a traditional Indigenous fishing technology used by Coast Salish peoples that demonstrates deep ecological knowledge of salmon migration patterns and tidal dynamics"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "multi_hop_12",
+    "category": "multi_hop",
+    "question": "How does the BKC ontology enable knowledge sharing across bioregions with different ecological contexts?",
+    "expected_answer": "The BKC ontology defines 25 entity types and 39 predicates that provide a shared vocabulary for describing ecological knowledge. Federation edges use these types to control what data flows between nodes. SKOS predicates like 'broader' and 'narrower' enable hierarchical bioregion relationships, allowing knowledge to be discovered across nested geographic scales.",
+    "expected_entities": ["BKC Ontology", "Federation"],
+    "gold_evidence": ["The BKC ontology defines 25 entity types and 39 predicates across 7 categories, providing a shared vocabulary for knowledge exchange across bioregional nodes"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "multi_hop_13",
+    "category": "multi_hop",
+    "question": "How does the Fraser River salmon run connect freshwater, estuarine, and marine habitats in the Salish Sea?",
+    "expected_answer": "Fraser River salmon spawn in freshwater tributaries, juveniles rear in the river and its estuary before migrating through the Strait of Georgia into the broader Salish Sea. Returning adults navigate back through these same habitats, connecting the ecological health of inland watersheds, estuaries, and marine waters.",
+    "expected_entities": ["Fraser River", "Salish Sea", "Strait of Georgia"],
+    "gold_evidence": ["The Fraser River is the longest river in British Columbia and supports all five species of Pacific salmon, connecting freshwater spawning habitat to the Salish Sea marine environment"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "multi_hop_14",
+    "category": "multi_hop",
+    "question": "How do Indigenous clam garden practices demonstrate integrated ecosystem management in the Salish Sea?",
+    "expected_answer": "Indigenous clam gardens are modified intertidal terraces built by Coast Salish and other First Nations to increase clam productivity. They demonstrate sophisticated understanding of tidal dynamics, sediment processes, and marine ecology, representing a form of mariculture that enhanced food security while maintaining ecosystem health.",
+    "expected_entities": ["Coast Salish"],
+    "gold_evidence": ["Clam gardens are ancient Indigenous mariculture features built by modifying intertidal areas to enhance clam production, demonstrating sophisticated ecological management by Coast Salish peoples"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "multi_hop_15",
+    "category": "multi_hop",
+    "question": "How do multiple BKC nodes coordinate ecological monitoring across the Salish Sea bioregion?",
+    "expected_answer": "BKC nodes like Octo (Salish Sea coordinator), Greater Victoria, and Cowichan Valley each maintain their own knowledge bases with local ecological data. Through KOI-net federation, they exchange entity types according to configured edge policies, allowing ecological observations from one sub-region to be discovered and referenced by neighboring nodes.",
+    "expected_entities": ["Octo", "Greater Victoria", "Cowichan Valley"],
+    "gold_evidence": ["Each BKC node maintains its own database and identity while exchanging knowledge through KOI-net federation edges that control which entity types flow between nodes"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
   },
 
   {
@@ -146,6 +492,7 @@
     "question": "What is the BKC meta-protocol?",
     "expected_answer": "The BKC meta-protocol defines the minimal machine commitments for interoperability between bioregional nodes: what is shared, who attests, and who can use the data and how. It sits between the human-readable pattern language and concrete implementation profiles like CommonsChange.",
     "expected_entities": ["Meta-Protocol"],
+    "gold_evidence": ["The BKC meta-protocol defines the minimal machine commitments for interoperability between bioregional nodes: what is shared, who attests, and who can use the data and how"],
     "difficulty": "medium",
     "source_domain": "doc"
   },
@@ -191,6 +538,7 @@
     "question": "What is the BKC pattern language?",
     "expected_answer": "The BKC pattern language is a collection of reusable social and governance patterns for bioregional knowledge commoning. It provides the human-readable layer of the three-layer architecture, sitting above the meta-protocol and reference profiles.",
     "expected_entities": ["Pattern Language"],
+    "gold_evidence": ["The BKC pattern language is a collection of reusable social and governance patterns for bioregional knowledge commoning"],
     "difficulty": "easy",
     "source_domain": "doc"
   },
@@ -199,7 +547,7 @@
     "category": "governance",
     "question": "How does the BKC handle visibility scoping for sensitive data?",
     "expected_answer": "The BKC uses visibility scoping with tiers including public and node_private. Node-private entities are only visible within their home node and are excluded from federation, public API responses, and chat retrieval by default.",
-    "expected_entities": [],
+    "expected_entities": ["Visibility Scoping"],
     "difficulty": "hard",
     "source_domain": "doc"
   },
@@ -217,7 +565,7 @@
     "category": "governance",
     "question": "What is a node participation profile in the BKC?",
     "expected_answer": "A node participation profile defines how a bioregional node engages with the broader BKC network, including what entity types it shares, what federation edges it maintains, and what governance rules it follows for data exchange.",
-    "expected_entities": [],
+    "expected_entities": ["Node Participation Profile"],
     "difficulty": "hard",
     "source_domain": "doc"
   },
@@ -226,7 +574,7 @@
     "category": "governance",
     "question": "What is the bioregion onboarding playbook?",
     "expected_answer": "The bioregion onboarding playbook is a guide for new bioregions joining the BKC network. It covers the governance steps (establishing a charter, decision processes, stewardship roles) and technical steps (deploying a KOI node, configuring federation edges).",
-    "expected_entities": [],
+    "expected_entities": ["Onboarding Playbook"],
     "difficulty": "easy",
     "source_domain": "doc"
   },
@@ -277,6 +625,56 @@
     "difficulty": "medium",
     "source_domain": "commitment"
   },
+  {
+    "id": "roadmap_status_6",
+    "category": "roadmap_status",
+    "question": "What is the status of the RAG retrieval pipeline in the BKC knowledge system?",
+    "expected_answer": "RAG Phase 1 is complete, achieving a context relevancy improvement from 0.18 to 0.443. The pipeline uses hybrid BM25 and vector retrieval with RRF fusion, FlashRank cross-encoder reranking, and contextual retrieval with per-chunk context summaries. A query planner with a GPT-4o classifier is deployed and live.",
+    "expected_entities": ["RAG"],
+    "gold_evidence": ["RAG Phase 1 achieved a context relevancy improvement from 0.18 to 0.443 using hybrid BM25+vector retrieval with FlashRank reranking and contextual retrieval"],
+    "difficulty": "medium",
+    "source_domain": "roadmap"
+  },
+  {
+    "id": "roadmap_status_7",
+    "category": "roadmap_status",
+    "question": "What is the status of the steel thread proof system?",
+    "expected_answer": "Steel Thread Phase A and Phase B are both complete. Phase A proved the end-to-end loop from Evidence through claims, attestations, state advance, ledger anchoring, reconciliation, and proof pack generation. Phase B extended this to published artifacts being transformed into Evidence entities. Both have been verified on multiple environments.",
+    "expected_entities": ["Steel Thread"],
+    "gold_evidence": ["Steel Thread Phase A proved the end-to-end claims loop with 22 checks and Phase B extended it to published artifact transformation with 25 checks"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "roadmap_status_8",
+    "category": "roadmap_status",
+    "question": "How many entities are in the Octo knowledge graph?",
+    "expected_answer": "The Octo knowledge graph contains approximately 2,800 entities and 3,600 chunks. The entity count grew from about 70 initial entities to over 1,000 after the Salish Sea wiki import, which created 319 new entities from 50 wiki pages, and expanded further through ongoing entity seeding.",
+    "expected_entities": ["Octo"],
+    "gold_evidence": ["The Octo entity count grew from 70 to approximately 1,005 after the MediaWiki import of 50 Salish Sea wiki pages creating 319 new entities"],
+    "difficulty": "easy",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "roadmap_status_9",
+    "category": "roadmap_status",
+    "question": "What is the status of the MediaWiki import pipeline?",
+    "expected_answer": "MediaWiki Import v1 is complete. It imported 50 pages from the Salish Sea wiki, creating 319 new entities and 565 edges with 13 matched to existing entities. The pipeline includes a parser, dump reader, and bulk importer with three-tier confidence scoring and template-to-BKC type mapping.",
+    "expected_entities": ["MediaWiki"],
+    "gold_evidence": ["MediaWiki Import v1 processed 50 wiki pages creating 319 entities, 13 matched, and 565 edges with three-tier confidence scoring"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "roadmap_status_10",
+    "category": "roadmap_status",
+    "question": "What is the BKC ontology version and how many entity types does it define?",
+    "expected_answer": "The BKC ontology is at version 1.2.0 and defines 25 entity types including Person, Organization, Project, Location, Concept, Bioregion, Protocol, Commitment, CommitmentPool, and CommitmentAction, along with 39 predicates across 7 categories.",
+    "expected_entities": ["BKC Ontology"],
+    "gold_evidence": ["The BKC ontology v1.2.0 defines 25 entity types and 39 predicates across 7 categories"],
+    "difficulty": "easy",
+    "source_domain": "roadmap"
+  },
 
   {
     "id": "commitment_claim_1",
@@ -324,109 +722,242 @@
     "difficulty": "medium",
     "source_domain": "commitment"
   },
+  {
+    "id": "commitment_claim_6",
+    "category": "commitment_claim",
+    "question": "What is a commitment in the BKC system and what forms can it take?",
+    "expected_answer": "A commitment in the BKC system is a pledge by a community member to contribute resources, skills, or effort toward a shared goal. Commitments can be offers (what someone can provide) or needs (what someone requires), and they are tracked through a state machine from PROPOSED through VERIFIED and ACTIVE to REDEEMED.",
+    "expected_entities": ["Commitment"],
+    "gold_evidence": ["Commitments represent pledges from community members that can be categorized as offers or needs, tracked through states: PROPOSED, VERIFIED, ACTIVE, REDEEMED"],
+    "difficulty": "easy",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_7",
+    "category": "commitment_claim",
+    "question": "What is an EAS attestation in the BKC context?",
+    "expected_answer": "An EAS (Ethereum Attestation Service) attestation is an on-chain verification on the Celo blockchain that records a claim's content hash and metadata. The BKC uses EAS attestations as part of its dual-chain proof system alongside Regen Ledger anchoring to provide verifiable proof of community commitments.",
+    "expected_entities": ["EAS"],
+    "gold_evidence": ["EAS attestations on Celo provide on-chain verification of claims, creating dual-chain proof packs alongside Regen Ledger anchoring"],
+    "difficulty": "easy",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_8",
+    "category": "commitment_claim",
+    "question": "How does the commitment extraction pipeline work?",
+    "expected_answer": "The commitment extraction pipeline processes transcripts from mapping workshops or voice recordings. Audio is transcribed via Whisper, then an LLM extracts commitment candidates with categories (offers and needs), confidence scores, and routing suggestions. Extracted commitments are created in the system and can be verified and minted as VCV tokens.",
+    "expected_entities": ["Commitment"],
+    "gold_evidence": ["The commitment extraction pipeline transcribes audio via Whisper, then uses an LLM to extract commitment candidates with categories, confidence scores, and routing suggestions"],
+    "difficulty": "medium",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_9",
+    "category": "commitment_claim",
+    "question": "What are the threshold bands in the claims engine?",
+    "expected_answer": "The claims engine uses threshold bands to determine how claims from settlements are processed: auto (under $500, auto-advances to verified with 2 attestations), semi ($500 to $5,000, auto-advances to peer_reviewed with 1 attestation), and manual (over $5,000, stays self_reported). A manual override can force self_reported regardless of amount.",
+    "expected_entities": ["Claim"],
+    "gold_evidence": ["Threshold bands control claim processing: auto (under $500, auto-verified with 2 attestations), semi ($500-$5k, peer_reviewed with 1 attestation), manual (over $5k, stays self_reported)"],
+    "difficulty": "medium",
+    "source_domain": "commitment"
+  },
+  {
+    "id": "commitment_claim_10",
+    "category": "commitment_claim",
+    "question": "How does the dual-chain proof system work for BKC claims?",
+    "expected_answer": "Claims are first anchored on the Regen Ledger via MsgAnchor, which records a content hash and returns a transaction hash and ledger IRI. The claim is then attested on Celo EAS with a matching content hash. This creates a dual-chain proof pack that can be independently verified on both chains, providing tamper-evident proof of community claims.",
+    "expected_entities": ["Claim", "Regen Ledger"],
+    "gold_evidence": ["Claims are anchored on Regen Ledger via MsgAnchor and attested on Celo EAS with matching content hashes, creating a dual-chain proof pack for independent verification"],
+    "difficulty": "hard",
+    "source_domain": "commitment"
+  },
 
   {
-    "id": "entity_definition_6",
-    "category": "entity_definition",
-    "question": "What is Regenerate Cascadia?",
-    "expected_answer": "Regenerate Cascadia is an organization focused on ecological restoration and community stewardship in the Cascadia bioregion, working on habitat restoration and coordinating with groups like the Victoria Landscape Hub and Kinship Earth.",
-    "expected_entities": ["Regenerate Cascadia"],
-    "difficulty": "easy",
-    "source_domain": "entity"
-  },
-  {
-    "id": "entity_definition_7",
-    "category": "entity_definition",
-    "question": "What is Kinship Earth?",
-    "expected_answer": "Kinship Earth is an organization involved in bioregional stewardship in the Greater Victoria area, working alongside the Victoria Landscape Hub and Regenerate Cascadia on ecological restoration and community coordination.",
-    "expected_entities": ["Kinship Earth"],
-    "difficulty": "easy",
-    "source_domain": "entity"
-  },
-  {
-    "id": "entity_definition_8",
-    "category": "entity_definition",
-    "question": "What is the Cascadia bioregion?",
-    "expected_answer": "Cascadia is a bioregion spanning the Pacific Northwest from northern California through British Columbia, defined by shared watersheds, ecosystems, and ecological features rather than political boundaries. It includes sub-bioregions like the Salish Sea.",
+    "id": "thematic_1",
+    "category": "thematic",
+    "question": "What is the overall approach to ecological stewardship in the Cascadia bioregion?",
+    "expected_answer": "The Cascadia bioregion takes a holistic approach to ecological stewardship that combines Indigenous knowledge systems, regenerative practices, community governance, and networked coordination across sub-bioregions like the Salish Sea and Greater Victoria.",
     "expected_entities": ["Cascadia"],
-    "difficulty": "easy",
+    "difficulty": "medium",
     "source_domain": "wiki"
   },
   {
-    "id": "entity_definition_9",
-    "category": "entity_definition",
-    "question": "What are Chinook salmon?",
-    "expected_answer": "Chinook salmon (Oncorhynchus tshawytscha) are the largest Pacific salmon species and a keystone species in the Salish Sea ecosystem. They are the primary food source for Southern Resident Killer Whales, and their population decline is a major conservation concern.",
-    "expected_entities": ["Chinook Salmon"],
-    "difficulty": "easy",
-    "source_domain": "wiki"
-  },
-  {
-    "id": "entity_definition_10",
-    "category": "entity_definition",
-    "question": "What is the KOI protocol?",
-    "expected_answer": "KOI (Knowledge Organization Infrastructure) is the technical protocol for organizing, federating, and sharing knowledge across bioregional nodes. It uses signed event envelopes, entity resolution, and federation edges to enable decentralized knowledge exchange.",
-    "expected_entities": ["KOI"],
-    "difficulty": "easy",
+    "id": "thematic_2",
+    "category": "thematic",
+    "question": "How does the Bioregional Knowledge Commons handle data sovereignty?",
+    "expected_answer": "The BKC addresses data sovereignty through OCAP principles (Ownership, Control, Access, Possession), FPIC (Free Prior and Informed Consent), visibility scoping (public vs node_private), and federation membrane governance that controls what data flows between nodes.",
+    "expected_entities": ["Data Sovereignty", "OCAP", "FPIC"],
+    "difficulty": "medium",
     "source_domain": "doc"
   },
+  {
+    "id": "thematic_3",
+    "category": "thematic",
+    "question": "What role do discourse graphs play in the knowledge commons?",
+    "expected_answer": "Discourse graphs structure knowledge as claims supported or opposed by evidence, enabling communities to track arguments, synthesize positions, and make decisions based on transparent reasoning chains.",
+    "expected_entities": ["Discourse Graphs"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "thematic_4",
+    "category": "thematic",
+    "question": "What is Two-Eyed Seeing and why is it important for bioregional work?",
+    "expected_answer": "Two-Eyed Seeing (Etuaptmumk) is a guiding principle from Mi'kmaw Elder Albert Marshall that brings together Indigenous and Western knowledge systems. It is important for bioregional work because ecological stewardship benefits from integrating traditional ecological knowledge with scientific approaches.",
+    "expected_entities": ["Two-Eyed Seeing"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "thematic_5",
+    "category": "thematic",
+    "question": "How does Indigenous fire management inform ecological restoration in the Pacific Northwest?",
+    "expected_answer": "Indigenous peoples of the Pacific Northwest used controlled burning to manage landscapes for thousands of years. These practices maintained Garry oak ecosystems, promoted berry production, and created diverse habitat mosaics. Contemporary restoration increasingly recognizes prescribed fire as essential for maintaining these endangered ecosystems.",
+    "expected_entities": ["Garry Oak", "Coast Salish"],
+    "gold_evidence": ["Indigenous peoples used controlled burning practices to maintain Garry oak ecosystems and diverse habitat mosaics in the Pacific Northwest"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "thematic_6",
+    "category": "thematic",
+    "question": "What role do salmon play in Coast Salish cultural identity and ecological stewardship?",
+    "expected_answer": "Salmon are central to Coast Salish cultural identity, featuring in creation stories, ceremonies, and as a primary food source for thousands of years. This deep cultural connection drives Indigenous leadership in salmon conservation, habitat restoration, and opposition to practices that threaten salmon runs, linking cultural survival to ecological health.",
+    "expected_entities": ["Coast Salish", "Salmon"],
+    "gold_evidence": ["Salmon are central to Coast Salish cultural identity and have been a primary food source and cultural touchstone for thousands of years, driving Indigenous leadership in conservation"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "thematic_7",
+    "category": "thematic",
+    "question": "How does bioregional knowledge commoning differ from conventional environmental data platforms?",
+    "expected_answer": "Bioregional knowledge commoning emphasizes community governance, data sovereignty, and federated architecture rather than centralized data aggregation. The BKC uses pattern languages for social coordination, meta-protocols for interoperability, and visibility scoping to protect sensitive knowledge while enabling exchange across bioregional boundaries.",
+    "expected_entities": ["BKC", "Pattern Language"],
+    "gold_evidence": ["Bioregional knowledge commoning uses federated architecture and community governance rather than centralized data aggregation, with protocols for data sovereignty and interoperability"],
+    "difficulty": "medium",
+    "source_domain": "doc"
+  },
+  {
+    "id": "thematic_8",
+    "category": "thematic",
+    "question": "How does the concept of a watershed define bioregional boundaries?",
+    "expected_answer": "Watersheds are fundamental to bioregional thinking. Unlike political boundaries, watershed boundaries follow natural hydrological features and define ecological units where communities share water resources, species, and environmental challenges. The Salish Sea bioregion itself is defined by the interconnected marine waterways and their contributing watersheds.",
+    "expected_entities": ["Watershed", "Bioregionalism"],
+    "gold_evidence": ["Bioregionalism emphasizes organizing human activity around naturally-defined ecological regions, with watersheds serving as a key boundary-defining feature rather than political boundaries"],
+    "difficulty": "medium",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "thematic_9",
+    "category": "thematic",
+    "question": "How do traditional ecological knowledge and Western science complement each other in Salish Sea conservation?",
+    "expected_answer": "Traditional ecological knowledge provides long-term observational data, holistic ecosystem understanding, and place-based management practices developed over millennia. Western science contributes quantitative methods, monitoring technologies, and mechanistic models. The Two-Eyed Seeing framework proposes using both knowledge systems together for stronger conservation outcomes.",
+    "expected_entities": ["Traditional Ecological Knowledge", "Two-Eyed Seeing"],
+    "gold_evidence": ["Two-Eyed Seeing (Etuaptmumk) brings together Indigenous knowledge systems and Western science approaches for more effective ecological stewardship and conservation"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
+  {
+    "id": "thematic_10",
+    "category": "thematic",
+    "question": "How do Salish Sea estuaries connect freshwater and marine ecological systems?",
+    "expected_answer": "Estuaries in the Salish Sea, where freshwater rivers meet saltwater, are among the most productive ecosystems in the region. They serve as critical nursery habitat for juvenile salmon and other fish, filter water, cycle nutrients, and provide habitat for migratory birds and marine mammals, connecting inland watershed health to marine ecosystem vitality.",
+    "expected_entities": ["Estuary", "Salish Sea"],
+    "gold_evidence": ["Estuaries where rivers meet the Salish Sea serve as critical transition zones and nursery habitat for juvenile salmon, connecting freshwater and marine ecosystems"],
+    "difficulty": "hard",
+    "source_domain": "wiki"
+  },
 
   {
-    "id": "relationship_5",
-    "category": "relationship",
-    "question": "Which organizations are part of the Victoria Landscape Hub network?",
-    "expected_answer": "The Victoria Landscape Hub coordinates with organizations including Kinship Earth, Mycopunks, and Regenerate Cascadia for ecological restoration and community stewardship in the Greater Victoria area.",
-    "expected_entities": ["Victoria Landscape Hub", "Kinship Earth", "Mycopunks", "Regenerate Cascadia"],
-    "difficulty": "medium",
-    "source_domain": "entity"
-  },
-  {
-    "id": "relationship_6",
-    "category": "relationship",
-    "question": "What is the relationship between the Salish Sea and Cascadia bioregions?",
-    "expected_answer": "The Salish Sea is a sub-bioregion within the broader Cascadia bioregion. In the BKC ontology, the Salish Sea has a 'broader' relationship to Cascadia, meaning knowledge and commitments can be matched across the hierarchy.",
-    "expected_entities": ["Salish Sea", "Cascadia"],
-    "difficulty": "medium",
-    "source_domain": "entity"
-  },
-  {
-    "id": "multi_hop_5",
-    "category": "multi_hop",
-    "question": "How does a community member's verbal commitment become an on-chain attestation?",
-    "expected_answer": "A verbal commitment is transcribed (via Whisper), extracted by an LLM into commitment candidates, created as Commitment entities, verified through attestations, minted as Victoria Commitment Vouchers on Celo, settled via TBFF, and the settlement is anchored on Regen Ledger with an EAS attestation on Celo.",
-    "expected_entities": ["Commitment", "Victoria Commitment Voucher"],
-    "difficulty": "hard",
+    "id": "negative_1",
+    "category": "negative",
+    "question": "What is the population of Mars?",
+    "expected_answer": "I don't have information about the population of Mars in my knowledge base. My knowledge focuses on bioregional ecology, stewardship, and community governance in regions like the Salish Sea and Cascadia.",
+    "expected_entities": [],
+    "difficulty": "easy",
     "source_domain": "mixed"
   },
   {
-    "id": "multi_hop_6",
-    "category": "multi_hop",
-    "question": "What ecological threats face the Salish Sea and which species are most affected?",
-    "expected_answer": "The Salish Sea faces threats including declining salmon populations, vessel noise, pollution, habitat loss, and ocean acidification. Southern Resident Killer Whales are critically affected due to their dependence on Chinook salmon. Eelgrass habitats, herring populations, and marine invertebrates are also impacted.",
-    "expected_entities": ["Salish Sea", "Southern Resident Killer Whales", "Chinook Salmon", "Eelgrass"],
-    "difficulty": "hard",
-    "source_domain": "wiki"
+    "id": "negative_2",
+    "category": "negative",
+    "question": "What is the stock price of Apple Inc today?",
+    "expected_answer": "I don't have information about stock prices. My knowledge base focuses on bioregional knowledge commoning, ecological stewardship, and community governance.",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
   },
-
+  {
+    "id": "negative_3",
+    "category": "negative",
+    "question": "How do I install TensorFlow on Windows?",
+    "expected_answer": "I don't have information about installing TensorFlow. My focus is on bioregional knowledge, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
+  },
   {
     "id": "negative_4",
     "category": "negative",
     "question": "What is the capital of France?",
     "expected_answer": "I don't have information about world capitals in my knowledge base. My focus is on bioregional ecology, knowledge commoning, and community governance in regions like the Salish Sea and Cascadia.",
-    "expected_entities": []
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
   },
   {
     "id": "negative_5",
     "category": "negative",
     "question": "Can you write me a Python script to scrape Amazon product prices?",
     "expected_answer": "I'm not able to help with web scraping scripts. My knowledge focuses on bioregional knowledge commoning, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
-    "expected_entities": []
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
   },
   {
     "id": "negative_6",
     "category": "negative",
     "question": "What are the lyrics to Bohemian Rhapsody?",
     "expected_answer": "I don't have song lyrics in my knowledge base. My focus is on bioregional ecology, stewardship practices, and community governance in regions like the Salish Sea and Cascadia.",
-    "expected_entities": []
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
+  },
+  {
+    "id": "negative_7",
+    "category": "negative",
+    "question": "What is the best programming language for building mobile apps?",
+    "expected_answer": "I don't have information about mobile app development technologies. My knowledge focuses on bioregional ecology, knowledge commoning, and community governance in regions like the Salish Sea and Cascadia.",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
+  },
+  {
+    "id": "negative_8",
+    "category": "negative",
+    "question": "Who won the 2024 US presidential election?",
+    "expected_answer": "I don't have information about political elections in my knowledge base. My focus is on bioregional ecology, stewardship practices, and community governance in the Salish Sea and Cascadia bioregions.",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
+  },
+  {
+    "id": "negative_9",
+    "category": "negative",
+    "question": "What is the recipe for chocolate chip cookies?",
+    "expected_answer": "I don't have cooking recipes in my knowledge base. My knowledge focuses on bioregional knowledge commoning, ecological stewardship, and community governance in the Salish Sea and Cascadia bioregions.",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
+  },
+  {
+    "id": "negative_10",
+    "category": "negative",
+    "question": "How do I set up a Kubernetes cluster on AWS?",
+    "expected_answer": "I don't have information about cloud infrastructure setup. My knowledge base focuses on bioregional ecology, knowledge commoning, and community governance in the Salish Sea and Cascadia bioregions.",
+    "expected_entities": [],
+    "difficulty": "easy",
+    "source_domain": "mixed"
   }
 ]
