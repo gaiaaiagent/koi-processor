@@ -112,6 +112,30 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         return resp.json()["embeddings"]
 
 
+class SentenceTransformerProvider(EmbeddingProvider):
+    """Local sentence-transformers embeddings (no network calls)."""
+
+    def __init__(self, model: str = "BAAI/bge-large-en-v1.5",
+                 dimension: Optional[int] = None):
+        from sentence_transformers import SentenceTransformer
+        self._model = SentenceTransformer(model)
+        self.model_name = model
+        self.dimension = dimension or self._model.get_sentence_embedding_dimension()
+        logger.info(f"SentenceTransformer loaded: {model} (dim={self.dimension})")
+
+    async def embed(self, text: str) -> List[float]:
+        embedding = await asyncio.to_thread(
+            self._model.encode, text, normalize_embeddings=True
+        )
+        return embedding.tolist()
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        embeddings = await asyncio.to_thread(
+            self._model.encode, texts, normalize_embeddings=True
+        )
+        return [e.tolist() for e in embeddings]
+
+
 def create_embedding_provider() -> Optional[EmbeddingProvider]:
     """
     Factory: read env vars and return a provider (or None if disabled).
@@ -166,6 +190,14 @@ def create_embedding_provider() -> Optional[EmbeddingProvider]:
             dimension=dim,
         )
         logger.info(f"Embedding provider: ollama/{p.model_name} (dim={p.dimension})")
+        return p
+
+    if provider_name == "sentence_transformers":
+        p = SentenceTransformerProvider(
+            model=model or "BAAI/bge-large-en-v1.5",
+            dimension=dim,
+        )
+        logger.info(f"Embedding provider: st/{p.model_name} (dim={p.dimension})")
         return p
 
     logger.error(f"Unknown EMBEDDING_PROVIDER: {provider_name!r}")

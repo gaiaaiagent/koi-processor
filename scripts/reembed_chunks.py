@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""
+Re-embed all koi_memory_chunks using the configured embedding provider.
+
+Used when switching embedding providers (e.g., OpenAI -> Ollama) and the
+vector dimension changes, requiring a full re-embed of all chunks.
+
+Usage:
+    python3 scripts/reembed_chunks.py                    # re-embed all chunks
+    python3 scripts/reembed_chunks.py --dry-run          # count only
+    python3 scripts/reembed_chunks.py --batch-size 50    # smaller batches
+    python3 scripts/reembed_chunks.py --limit 100        # first 100 only
+"""
+
+import argparse
+import asyncio
+import logging
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import asyncpg
+from api.embedding_provider import create_embedding_provider
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+BATCH_SIZE = 50
+
+
+async def main(args):
+    provider = create_embedding_provider()
+    if provider is None:
+        logger.error("No embedding provider configured.")
+        sys.exit(1)
+
+    logger.info(f"Embedding provider: {provider.model_name} (dim={provider.dimension})")
+
+    db_url = os.environ.get("POSTGRES_URL")
+    if not db_url:
+        logger.error("POSTGRES_URL not set")
+        sys.exit(1)
+
+    pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
+    batch_size = args.batch_size or BATCH_SIZE
+
+    # Count chunks
+    async with pool.acquire() as conn:
+        if args.only_null:
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM koi_memory_chunks WHERE embedding IS NULL"
+            )
+        else:
+            total = await conn.fetchval("SELECT COUNT(*) FROM koi_memory_chunks")
+
+    logger.info(f"Chunks to re-embed: {total}")
+
+    if args.dry_run:
+        async with pool.acquire() as conn:
+            by_sensor = await conn.fetch("""
+                SELECT m.source_sensor, COUNT(*) as cnt
+                FROM koi_memory_chunks c
+                JOIN koi_memories m ON m.rid = c.document_rid
+                GROUP BY m.source_sensor ORDER BY cnt DESC
+            """)
+            for r in by_sensor:
+                logger.info(f"  {r['source_sensor']}: {r['cnt']}")
+        await pool.close()
+        return
+
+    # Fetch all chunk IDs and text
+    where = "WHERE c.embedding IS NULL" if args.only_null else ""
+    limit = f"LIMIT {args.limit}" if args.limit else ""
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT c.chunk_rid,
+                   c.content->>'text' AS text,
+                   c.content->>'title' AS title
+            FROM koi_memory_chunks c
+            {where}
+            ORDER BY c.chunk_rid
+            {limit}
+        """)
+
+    logger.info(f"Processing {len(rows)} chunks in batches of {batch_size}")
+
+    embedded = 0
+    failures = 0
+    start_time = time.time()
+
+    for batch_start in range(0, len(rows), batch_size):
+        batch = rows[batch_start:batch_start + batch_size]
+        texts = []
+        rids = []
+
+        for row in batch:
+            title = row["title"] or ""
+            text = row["text"] or ""
+            embed_text = f"Page: {title}\n\n{text}" if title else text
+            texts.append(embed_text[:8000])
+            rids.append(row["chunk_rid"])
+
+        try:
+            embeddings = await provider.embed_batch(texts)
+        except Exception as e:
+            logger.error(f"Batch {batch_start // batch_size + 1} failed: {e}")
+            failures += len(batch)
+            await asyncio.sleep(5)
+            continue
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for rid, emb in zip(rids, embeddings):
+                    emb_str = '[' + ','.join(str(x) for x in emb) + ']'
+                    await conn.execute(
+                        "UPDATE koi_memory_chunks SET embedding = $1::vector WHERE chunk_rid = $2",
+                        emb_str, rid
+                    )
+
+        embedded += len(batch)
+        elapsed = time.time() - start_time
+        rate = embedded / elapsed * 60 if elapsed > 0 else 0
+        logger.info(
+            f"  Batch {batch_start // batch_size + 1}: "
+            f"{embedded}/{len(rows)} done ({rate:.0f}/min), "
+            f"failures: {failures}"
+        )
+
+        await asyncio.sleep(0.2)
+
+    elapsed = time.time() - start_time
+    logger.info(f"\nDone in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+    logger.info(f"  Embedded: {embedded}")
+    logger.info(f"  Failures: {failures}")
+    logger.info(f"  Rate: {embedded / elapsed * 60:.0f}/min")
+
+    async with pool.acquire() as conn:
+        remaining = await conn.fetchval(
+            "SELECT COUNT(*) FROM koi_memory_chunks WHERE embedding IS NULL"
+        )
+    logger.info(f"  Remaining without embedding: {remaining}")
+
+    await pool.close()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Re-embed all koi_memory_chunks")
+    parser.add_argument("--batch-size", type=int, help=f"Batch size (default: {BATCH_SIZE})")
+    parser.add_argument("--limit", type=int, help="Max chunks to process")
+    parser.add_argument("--only-null", action="store_true", help="Only embed chunks with NULL embedding")
+    parser.add_argument("--dry-run", action="store_true", help="Count only, no embedding")
+    args = parser.parse_args()
+    asyncio.run(main(args))
