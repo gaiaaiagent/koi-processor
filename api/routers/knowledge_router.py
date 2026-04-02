@@ -65,6 +65,8 @@ class FactRecord(BaseModel):
 class EpisodeCreateResponse(BaseModel):
     episode_id: str
     facts_created: int
+    facts_skipped: int = 0
+    facts_superseded: int = 0
     entities_resolved: int
     entities_created: int
 
@@ -157,6 +159,8 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
 
             # 2. Process each fact
             facts_created = 0
+            facts_skipped = 0
+            facts_superseded = 0
             for fact in body.facts:
                 # Resolve subject
                 subject_uri, is_new = await _resolve_or_create(
@@ -185,6 +189,50 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
                 if generate_embedding:
                     fact_embedding = await generate_embedding(fact.fact_text)
 
+                # --- Dedup + invalidation ---
+                if fact_embedding:
+                    existing = await conn.fetch("""
+                        SELECT id, fact_text, predicate, object_uri,
+                               1 - (fact_embedding <=> $1::vector) AS similarity
+                        FROM knowledge_facts
+                        WHERE subject_uri = $2 AND valid_to IS NULL
+                          AND fact_embedding IS NOT NULL
+                        ORDER BY fact_embedding <=> $1::vector
+                        LIMIT 5
+                    """, str(fact_embedding), subject_uri)
+
+                    # Check for near-duplicate (similarity > 0.95)
+                    skip = False
+                    for row in existing:
+                        sim = float(row['similarity'])
+                        if sim > 0.95:
+                            logger.info(
+                                f"Skipped duplicate fact: {fact.fact_text} "
+                                f"(similarity: {sim:.3f} with fact {row['id']})")
+                            facts_skipped += 1
+                            skip = True
+                            break
+
+                    if skip:
+                        continue
+
+                    # Invalidation: same subject + same predicate + different object → retire old
+                    predicate_upper = fact.predicate.upper()
+                    for row in existing:
+                        sim = float(row['similarity'])
+                        if (row['predicate'] == predicate_upper
+                                and row['object_uri'] != object_uri
+                                and sim > 0.5):
+                            await conn.execute("""
+                                UPDATE knowledge_facts
+                                SET valid_to = NOW()
+                                WHERE id = $1
+                            """, row['id'])
+                            logger.info(
+                                f"Superseded fact {row['id']}: "
+                                f"{row['fact_text']} → {fact.fact_text}")
+                            facts_superseded += 1
+
                 await conn.execute("""
                     INSERT INTO knowledge_facts
                         (episode_id, subject_uri, predicate, object_uri,
@@ -200,6 +248,8 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
         return EpisodeCreateResponse(
             episode_id=str(episode_id),
             facts_created=facts_created,
+            facts_skipped=facts_skipped,
+            facts_superseded=facts_superseded,
             entities_resolved=entities_resolved,
             entities_created=entities_created,
         )
@@ -399,6 +449,118 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
             entity_name = await _get_entity_name(conn, uri)
             return {"entity_uri": uri, "entity_name": entity_name,
                     "facts": results, "count": len(results)}
+
+    # -------------------------------------------------------------------
+    # GET /unified-search — RRF fusion over entities, facts, sessions
+    # -------------------------------------------------------------------
+    @router.get("/unified-search")
+    async def unified_search(
+        query: str = Query(..., description="Search query"),
+        limit: int = Query(10, ge=1, le=50),
+        include: str = Query(
+            "entities,facts,sessions",
+            description="Comma-separated surfaces to query"),
+    ):
+        if not generate_embedding:
+            raise HTTPException(
+                status_code=503,
+                detail="Embedding provider not configured")
+
+        query_embedding = await generate_embedding(query)
+        if not query_embedding:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate query embedding")
+
+        surfaces = [s.strip() for s in include.split(",")]
+        emb_str = str(query_embedding)
+        k = 60  # RRF constant
+        all_results: list[dict] = []
+
+        async with pool.acquire() as conn:
+            # --- Entities (vector similarity, exclude private) ---
+            if "entities" in surfaces:
+                rows = await conn.fetch("""
+                    SELECT fuseki_uri, entity_text, entity_type,
+                           1 - (embedding <=> $1::vector) AS score
+                    FROM entity_registry
+                    WHERE embedding IS NOT NULL AND NOT node_private
+                    ORDER BY embedding <=> $1::vector
+                    LIMIT 20
+                """, emb_str)
+                for rank, row in enumerate(rows):
+                    all_results.append({
+                        "text": row["entity_text"],
+                        "score": 1.0 / (k + rank + 1),
+                        "source": "entity",
+                        "type": row["entity_type"],
+                        "uri": row["fuseki_uri"],
+                        "metadata": {"vector_score": float(row["score"])},
+                    })
+
+            # --- Facts (vector similarity, joined with episodes) ---
+            if "facts" in surfaces:
+                rows = await conn.fetch("""
+                    SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
+                           f.fact_text, e.name AS episode_name,
+                           1 - (f.fact_embedding <=> $1::vector) AS score
+                    FROM knowledge_facts f
+                    LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
+                    WHERE f.valid_to IS NULL
+                      AND f.fact_embedding IS NOT NULL
+                    ORDER BY f.fact_embedding <=> $1::vector
+                    LIMIT 20
+                """, emb_str)
+                for rank, row in enumerate(rows):
+                    all_results.append({
+                        "text": row["fact_text"],
+                        "score": 1.0 / (k + rank + 1),
+                        "source": "fact",
+                        "episode": row["episode_name"],
+                        "metadata": {
+                            "subject": row["subject_uri"],
+                            "predicate": row["predicate"],
+                            "object": row["object_uri"],
+                            "vector_score": float(row["score"]),
+                        },
+                    })
+
+            # --- Sessions (vector similarity on chunk_text) ---
+            if "sessions" in surfaces:
+                table_exists = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'session_chunks'
+                    )
+                """)
+                if table_exists:
+                    rows = await conn.fetch("""
+                        SELECT sc.id, sc.session_id, sc.chunk_text,
+                               1 - (sc.embedding <=> $1::vector) AS score
+                        FROM session_chunks sc
+                        WHERE sc.embedding IS NOT NULL
+                        ORDER BY sc.embedding <=> $1::vector
+                        LIMIT 20
+                    """, emb_str)
+                    for rank, row in enumerate(rows):
+                        all_results.append({
+                            "text": row["chunk_text"][:500],
+                            "score": 1.0 / (k + rank + 1),
+                            "source": "session",
+                            "session_id": row["session_id"],
+                            "metadata": {"vector_score": float(row["score"])},
+                        })
+
+        # Sort by RRF score descending, take top N
+        all_results.sort(key=lambda x: x["score"], reverse=True)
+        all_results = all_results[:limit]
+
+        return {
+            "results": all_results,
+            "query": query,
+            "surfaces_queried": surfaces,
+            "total_results": len(all_results),
+        }
 
     # -------------------------------------------------------------------
     # Shared helper
