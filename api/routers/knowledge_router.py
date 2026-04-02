@@ -64,6 +64,7 @@ class FactRecord(BaseModel):
 
 class EpisodeCreateResponse(BaseModel):
     episode_id: str
+    episode_reused: bool = False
     facts_created: int
     facts_skipped: int = 0
     facts_superseded: int = 0
@@ -144,18 +145,34 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
         entities_created = 0
         seen_uris: dict = {}  # cache name->uri within this request
 
+        episode_reused = False
+
         async with pool.acquire() as conn:
-            # 1. Create the episode
+            # 1. Check for existing episode by source_document (dedup)
             import json as json_mod
-            episode_id = await conn.fetchval("""
-                INSERT INTO knowledge_episodes
-                    (name, content, source_description, source_document,
-                     group_id, valid_at, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                RETURNING id
-            """, body.name, body.content, body.source_description,
-                body.source_document, body.group_id, valid_at,
-                json_mod.dumps(metadata))
+            episode_id = None
+            if body.source_document:
+                episode_id = await conn.fetchval("""
+                    SELECT id FROM knowledge_episodes
+                    WHERE source_document = $1
+                    LIMIT 1
+                """, body.source_document)
+
+            if episode_id:
+                episode_reused = True
+                logger.info(
+                    f"Reusing existing episode {episode_id} "
+                    f"for source_document: {body.source_document}")
+            else:
+                episode_id = await conn.fetchval("""
+                    INSERT INTO knowledge_episodes
+                        (name, content, source_description, source_document,
+                         group_id, valid_at, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                    RETURNING id
+                """, body.name, body.content, body.source_description,
+                    body.source_document, body.group_id, valid_at,
+                    json_mod.dumps(metadata))
 
             # 2. Process each fact
             facts_created = 0
@@ -247,6 +264,7 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
 
         return EpisodeCreateResponse(
             episode_id=str(episode_id),
+            episode_reused=episode_reused,
             facts_created=facts_created,
             facts_skipped=facts_skipped,
             facts_superseded=facts_superseded,
@@ -376,6 +394,7 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
         source_document: Optional[str] = Query(None),
         query: Optional[str] = Query(None),
         group_id: Optional[str] = Query(None),
+        created_after: Optional[str] = Query(None, description="ISO datetime — only return episodes created after this timestamp"),
         limit: int = Query(20, ge=1, le=100),
     ):
         async with pool.acquire() as conn:
@@ -397,6 +416,13 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
                 conditions.append(f"e.group_id = ${idx}")
                 params.append(group_id)
                 idx += 1
+
+            if created_after:
+                ca_dt = _dt(created_after)
+                if ca_dt:
+                    conditions.append(f"e.created_at > ${idx}")
+                    params.append(ca_dt)
+                    idx += 1
 
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
             params.append(limit)
