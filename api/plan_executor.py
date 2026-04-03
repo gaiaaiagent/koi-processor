@@ -30,6 +30,7 @@ from api.retrieval_executors import (
 from api.schemas.query_plan import (
     EvidenceBundle,
     QueryPlan,
+    QueryTaxonomy,
     RetrievalOp,
     StepTrace,
 )
@@ -82,12 +83,14 @@ async def execute_plan(
 
         try:
             if step.op == RetrievalOp.ENTITY_LOOKUP:
+                # Roadmap queries need WorkItem/Milestone/etc — skip type filter
+                _exclude = None if plan.query_taxonomy == QueryTaxonomy.ROADMAP_STATUS else CHAT_EXCLUDE_TYPES
                 step_evidence = await entity_lookup(
                     plan.original_query,
                     query_embedding,
                     conn,
                     max_results=step.budget.max_results,
-                    exclude_types=CHAT_EXCLUDE_TYPES,
+                    exclude_types=_exclude,
                     quartz_url_fn=quartz_url_fn,
                 )
                 # Collect entity URIs for downstream steps
