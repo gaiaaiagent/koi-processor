@@ -25,6 +25,7 @@ from api.retrieval_executors import (
     graph_query,
     structured_sql,
     peer_query,
+    CHAT_EXCLUDE_TYPES,
 )
 from api.schemas.query_plan import (
     EvidenceBundle,
@@ -86,6 +87,7 @@ async def execute_plan(
                     query_embedding,
                     conn,
                     max_results=step.budget.max_results,
+                    exclude_types=CHAT_EXCLUDE_TYPES,
                     quartz_url_fn=quartz_url_fn,
                 )
                 # Collect entity URIs for downstream steps

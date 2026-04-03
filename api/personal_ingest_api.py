@@ -5501,12 +5501,14 @@ async def chat_endpoint(request: ChatRequest):
           text_search as _text_search,
           web_source_lookup as _web_source_lookup,
           evidence_bundles_to_legacy_format,
+          CHAT_EXCLUDE_TYPES,
       )
       async with db_pool.acquire() as conn:
-        # Step 1: Entity lookup
+        # Step 1: Entity lookup (exclude internal tracking types for /chat)
         entity_bundles = await _entity_lookup(
             request.query, query_embedding, conn,
             max_results=request.max_context_entities,
+            exclude_types=CHAT_EXCLUDE_TYPES,
             quartz_url_fn=quartz_url,
         )
         entity_uris = [b.source_uri for b in entity_bundles]

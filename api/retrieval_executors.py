@@ -21,6 +21,13 @@ from api.schemas.query_plan import EvidenceBundle, RetrievalOp, SourceType
 
 logger = logging.getLogger(__name__)
 
+# Entity types excluded from /chat entity_lookup to reduce noise.
+# These are governance/project-management artifacts that dilute results
+# for knowledge questions about ecology, organizations, and mechanisms.
+CHAT_EXCLUDE_TYPES = [
+    "Claim", "WorkItem", "Milestone", "Metric", "Risk", "Initiative", "Decision",
+]
+
 
 # ---------------------------------------------------------------------------
 # Live executors
@@ -33,6 +40,7 @@ async def entity_lookup(
     *,
     max_results: int = 5,
     include_node_private: bool = False,
+    exclude_types: list[str] | None = None,
     quartz_url_fn: Callable[[str, str], str | None] | None = None,
 ) -> list[EvidenceBundle]:
     """Semantic + keyword search on entity_registry.
@@ -41,26 +49,37 @@ async def entity_lookup(
     Returns EvidenceBundles with source_type=LOCAL_AUTHORITATIVE.
     """
     privacy_filter = "" if include_node_private else "AND NOT node_private"
+
+    # Build type exclusion filter with dynamic param offsets
+    type_filter = ""
+    type_params: list[Any] = []
+    if exclude_types:
+        type_params = list(exclude_types)
+        # Placeholder offsets computed per-path below
     rows: list = []
 
     if query_embedding:
         embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+        # Vector path base params: $1=embedding, $2=max_results
+        if type_params:
+            placeholders = ", ".join(f"${i}" for i in range(3, 3 + len(type_params)))
+            type_filter = f"AND entity_type NOT IN ({placeholders})"
         try:
             rows = await conn.fetch(f"""
                 SELECT fuseki_uri, entity_text, entity_type, metadata,
                        1 - (embedding <=> $1::vector) AS similarity
                 FROM entity_registry
-                WHERE embedding IS NOT NULL {privacy_filter}
+                WHERE embedding IS NOT NULL {privacy_filter} {type_filter}
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
-            """, embedding_str, max_results)
+            """, embedding_str, max_results, *type_params)
         except (asyncpg.exceptions.UndefinedColumnError,
                 asyncpg.exceptions.UndefinedFunctionError,
                 asyncpg.exceptions.DataError) as e:
             logger.warning("entity_registry vector search failed, falling back to text: %s", e)
-            rows = await _keyword_entity_search(query, conn, max_results, privacy_filter)
+            rows = await _keyword_entity_search(query, conn, max_results, privacy_filter, exclude_types)
     else:
-        rows = await _keyword_entity_search(query, conn, max_results, privacy_filter)
+        rows = await _keyword_entity_search(query, conn, max_results, privacy_filter, exclude_types)
 
     bundles: list[EvidenceBundle] = []
     for row in rows:
@@ -92,6 +111,7 @@ async def _keyword_entity_search(
     conn: asyncpg.Connection,
     max_results: int,
     privacy_filter: str,
+    exclude_types: list[str] | None = None,
 ) -> list:
     """Keyword fallback for entity lookup when vector search is unavailable."""
     words = [w for w in query.lower().split() if len(w) >= 3]
@@ -104,11 +124,18 @@ async def _keyword_entity_search(
     )
     params: list[Any] = [f"%{w}%" for w in words]
     params.append(max_results)
+    # Keyword path base params: $1..$N=words, $N+1=max_results
+    type_filter = ""
+    if exclude_types:
+        base_offset = len(words) + 2  # after words ($1..$N) and max_results ($N+1)
+        placeholders = ", ".join(f"${base_offset + i}" for i in range(len(exclude_types)))
+        type_filter = f"AND entity_type NOT IN ({placeholders})"
+        params.extend(exclude_types)
     return await conn.fetch(f"""
         SELECT fuseki_uri, entity_text, entity_type, metadata,
                ({match_score})::float / {len(words)} AS similarity
         FROM entity_registry
-        WHERE ({conditions}) {privacy_filter}
+        WHERE ({conditions}) {privacy_filter} {type_filter}
         ORDER BY ({match_score}) DESC, created_at DESC
         LIMIT ${len(words)+1}
     """, *params)
@@ -320,6 +347,7 @@ async def text_search(
     for cr in sorted_chunks:
         ctx = cr.get('chunk_context') or ""
         doc_chunks.append({
+            "id": cr.get('id'),
             "rid": cr['document_rid'],
             "title": cr.get('title') or cr['document_rid'],
             "text": cr.get('chunk_text') or "",
@@ -333,6 +361,9 @@ async def text_search(
     # B7: Rerank top candidates -> top_k
     if doc_chunks and rerank_fn:
         doc_chunks = rerank_fn(query, doc_chunks, top_k=top_k)
+
+    # Page co-occurrence expansion (wiki only)
+    doc_chunks = await _expand_page_context(doc_chunks, conn)
 
     # Convert to EvidenceBundles
     bundles: list[EvidenceBundle] = []
@@ -352,6 +383,78 @@ async def text_search(
             },
         ))
     return bundles
+
+
+async def _expand_page_context(
+    reranked_chunks: list[dict],
+    conn: asyncpg.Connection,
+    max_expansions: int = 2,
+    max_extra_chunks: int = 3,
+) -> list[dict]:
+    """Promote page co-occurrence: when 2+ chunks from the same wiki page
+    appear in reranked results, fetch adjacent sections for fuller context.
+    Only applies to mediawiki-sensor chunks (identified by wiki_url presence
+    and source_sensor join)."""
+    from collections import Counter
+
+    # Group by document_rid for wiki chunks only
+    page_counts: Counter = Counter(
+        d['rid'] for d in reranked_chunks
+        if d.get('wiki_url')
+    )
+    co_occurring = [(rid, cnt) for rid, cnt in page_counts.items() if cnt >= 2]
+    if not co_occurring:
+        return reranked_chunks
+
+    co_occurring.sort(key=lambda x: -x[1])
+
+    existing_ids = {d.get('id') for d in reranked_chunks if d.get('id') is not None}
+    extra_chunks: list[dict] = []
+
+    for doc_rid, _ in co_occurring[:max_expansions]:
+        # Collect existing chunk IDs for this page to exclude
+        page_existing_ids = [
+            d['id'] for d in reranked_chunks
+            if d.get('rid') == doc_rid and d.get('id') is not None
+        ]
+        rows = await conn.fetch("""
+            SELECT c.id, c.document_rid,
+                   m.content->>'title' AS title,
+                   LEFT(c.content->>'text', 2000) AS chunk_text,
+                   c.content->>'context' AS chunk_context,
+                   c.content->>'section_id' AS section_id,
+                   c.content->>'section_title' AS section_title,
+                   c.content->>'wiki_url' AS wiki_url
+            FROM koi_memory_chunks c
+            JOIN koi_memories m ON m.rid = c.document_rid
+            WHERE c.document_rid = $1
+              AND m.source_sensor LIKE 'mediawiki%'
+              AND c.id != ALL($2::int[])
+            ORDER BY COALESCE((c.content->>'chunk_index')::int, 999999)
+            LIMIT $3
+        """, doc_rid, page_existing_ids, max_extra_chunks)
+
+        for row in rows:
+            if row['id'] in existing_ids:
+                continue
+            existing_ids.add(row['id'])
+            extra_chunks.append({
+                "id": row['id'],
+                "rid": row['document_rid'],
+                "title": row.get('title') or row['document_rid'],
+                "text": row.get('chunk_text') or "",
+                "context": row.get('chunk_context') or "",
+                "score": 0.01,
+                "section_id": row.get('section_id'),
+                "section_title": row.get('section_title'),
+                "wiki_url": row.get('wiki_url'),
+                "_page_expanded": True,
+            })
+
+    if extra_chunks:
+        logger.info(f"Page expansion: {len(extra_chunks)} chunks from {len(co_occurring[:max_expansions])} pages")
+
+    return reranked_chunks + extra_chunks
 
 
 async def web_source_lookup(
