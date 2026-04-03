@@ -40,6 +40,7 @@ class DocNode:
     depends_on: list[str]
     file_path: str
     primary_for: list[str] = field(default_factory=list)
+    research_subkind: str = ""
 
 
 def parse_frontmatter(path: Path, docs_root: Path) -> Optional[dict[str, Any]]:
@@ -98,6 +99,7 @@ def collect_docs(docs_root: Path) -> tuple[dict[str, DocNode], list[str]]:
             depends_on=data.get("depends_on", []),
             file_path=data["_file_path"],
             primary_for=data.get("primary_for", []),
+            research_subkind=data.get("research_subkind", ""),
         )
 
     return nodes, unclassified
@@ -383,6 +385,7 @@ def run_ingest(project_config: dict, nodes: dict[str, DocNode], dry_run: bool, a
                 "depends_on": node.depends_on,
                 "primary_for": node.primary_for,
                 "project_id": project_id,
+                "research_subkind": node.research_subkind,
             }
             if upsert_entity(cur, uri, "SpecDoc", doc_id, metadata):
                 stats["entities_upserted"] += 1
