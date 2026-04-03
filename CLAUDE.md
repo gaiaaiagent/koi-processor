@@ -300,6 +300,16 @@ Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCES
 - `scripts/code_bridge/link_entities_to_code.py` - Entity-level linking
 - `scripts/code_bridge/sync_stubs_to_age.py` - AGE stub sync
 
+### Learning Field Projection (Phase 1)
+- `scripts/project_bridge_notes.py` — Projects bridge notes from Spore and IC repos into KOI as Claims, Concepts, and Questions with argumentative edges (`supports`/`opposes`). Two claim layers: source claims (extracted from notes) and review claims (proposed canon changes). Uses `POST /claims/` API for claims, direct SQL for stance edges and questions. Idempotent; supports claim versioning via `supersedes_rid` on re-projection.
+  - Usage: `python scripts/project_bridge_notes.py --dry-run` or `--apply` (optional `--note <path>` for single note)
+  - Claimant orgs: `org:spore-learning-field`, `org:ic-learning-field`
+  - Provenance: `metadata.source = 'learning_field'`, `metadata.projection_batch`, `metadata.project_uri`
+  - Rollback: delete edges by `source = 'learning_field'`, then claims/entities by `metadata->>'source' = 'learning_field'` (see plan rollback section)
+- `scripts/verify_learning_field.sql` — Phase 1 verification checklist. Run: `psql personal_koi -f scripts/verify_learning_field.sql`
+  - Checks: claim counts by layer, edge counts by source, orphaned review claims, cross-project concept dedup, provenance completeness, governance cluster keys
+  - Baseline (batch `20260403T210752Z`): 49 source, 82 review, 50 concepts, 50 questions, 137 supports, 6 opposes
+
 ---
 
 ## Quality Pipeline

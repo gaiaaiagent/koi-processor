@@ -297,6 +297,24 @@ valid_entities = kg.process_entities_batch(entities)
 
 ---
 
+## Learning Field Graph Projection
+
+Projects bridge notes from [Spore](https://github.com/DarrenZal/spore) and [Intelligence Commons](https://github.com/DarrenZal/intelligence-commons) into the KOI knowledge graph as an argumentative learning layer. Built on top of the Claims Engine.
+
+**Two claim layers:**
+- **Source claims** — extracted from bridge note Claim Registers, linked to Concepts via `about`
+- **Review claims** — proposed canon changes, linked to source claims via `supports`/`opposes`
+
+**Scripts:**
+- `scripts/project_bridge_notes.py` — Projection pipeline (`--dry-run` or `--apply`)
+- `scripts/verify_learning_field.sql` — Verification checklist (`psql personal_koi -f scripts/verify_learning_field.sql`)
+
+**Design:** Idempotent (re-runs produce 0 duplicates). Claim versioning via `supersedes_rid` when bridge notes are edited. Disposition-based stance detection ("no change" → opposes). Cross-project concept dedup via entity resolution. Full provenance (`metadata.source = 'learning_field'`).
+
+See [the shared learning field plan](https://github.com/DarrenZal/spore/blob/main/.claude/plans/shared-learning-field-for-spore-and-ic.md) for architecture details.
+
+---
+
 ## Project Structure
 
 ```
