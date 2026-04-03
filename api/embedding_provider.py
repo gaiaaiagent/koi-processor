@@ -121,15 +121,21 @@ class SentenceTransformerProvider(EmbeddingProvider):
         self._model = SentenceTransformer(model)
         self.model_name = model
         self.dimension = dimension or self._model.get_sentence_embedding_dimension()
-        logger.info(f"SentenceTransformer loaded: {model} (dim={self.dimension})")
+        self._has_query_prompt = "query" in (self._model.prompts or {})
+        logger.info(f"SentenceTransformer loaded: {model} (dim={self.dimension}, query_prompt={self._has_query_prompt})")
 
     async def embed(self, text: str) -> List[float]:
+        """Embed a single text (query-time). Uses prompt_name='query' for instruction-aware models."""
+        kwargs = {"normalize_embeddings": True}
+        if self._has_query_prompt:
+            kwargs["prompt_name"] = "query"
         embedding = await asyncio.to_thread(
-            self._model.encode, text, normalize_embeddings=True
+            self._model.encode, text, **kwargs
         )
         return embedding.tolist()
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple texts (document storage). No instruction prefix."""
         embeddings = await asyncio.to_thread(
             self._model.encode, texts, normalize_embeddings=True
         )
