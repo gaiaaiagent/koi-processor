@@ -424,11 +424,11 @@ class VaultSyncManager:
             self._reject("invalid_type", rid, source_node, event_id, f"unsupported file type: {relative_path}")
             return
 
-        # Source allowlist — must be a configured vault sync peer
-        peer = await self._get_peer_by_source(source_node)
+        # Source allowlist — must be a configured vault sync peer with matching folder
+        peer = await self._get_peer_by_source(source_node, rel_path=relative_path)
         if not peer:
             self._reject("unauthorized_source", rid, source_node, event_id,
-                         f"source {source_node} not a configured vault sync peer")
+                         f"source {source_node} not a configured vault sync peer for path {relative_path}")
             return
 
         # Path traversal check — use THIS peer's shared_folder
@@ -612,8 +612,7 @@ class VaultSyncManager:
             await conn.execute(
                 """INSERT INTO vault_sync_peers (peer_node_rid, shared_folder, enabled)
                    VALUES ($1, $2, $3)
-                   ON CONFLICT (peer_node_rid) DO UPDATE SET
-                       shared_folder = EXCLUDED.shared_folder,
+                   ON CONFLICT (peer_node_rid, shared_folder) DO UPDATE SET
                        enabled = EXCLUDED.enabled""",
                 node_rid, shared_folder, enabled,
             )
@@ -628,8 +627,8 @@ class VaultSyncManager:
                 "enabled": enabled,
             }
 
-    async def unconfigure(self, peer_name: str) -> Dict[str, Any]:
-        """Disable vault sync for a peer. Resolves peer name to node_rid."""
+    async def unconfigure(self, peer_name: str, shared_folder: Optional[str] = None) -> Dict[str, Any]:
+        """Disable vault sync for a peer (optionally for a specific folder only)."""
         async with self.pool.acquire() as conn:
             node_rid = await conn.fetchval(
                 "SELECT node_rid FROM koi_net_peer_aliases WHERE LOWER(alias) = LOWER($1)",
@@ -646,14 +645,20 @@ class VaultSyncManager:
                 else:
                     return {"error": f"Peer '{peer_name}' not found"}
 
-            result = await conn.execute(
-                "UPDATE vault_sync_peers SET enabled=FALSE WHERE peer_node_rid=$1",
-                node_rid,
-            )
+            if shared_folder:
+                result = await conn.execute(
+                    "UPDATE vault_sync_peers SET enabled=FALSE WHERE peer_node_rid=$1 AND shared_folder=$2",
+                    node_rid, shared_folder,
+                )
+            else:
+                result = await conn.execute(
+                    "UPDATE vault_sync_peers SET enabled=FALSE WHERE peer_node_rid=$1",
+                    node_rid,
+                )
             count = int(result.split()[-1])
             if count == 0:
                 return {"error": f"Peer '{peer_name}' not configured for vault sync"}
-            return {"peer_node_rid": node_rid, "enabled": False}
+            return {"peer_node_rid": node_rid, "shared_folder": shared_folder, "enabled": False}
 
     async def trigger_sync(self) -> Dict[str, Any]:
         """Force an immediate sync cycle."""
@@ -675,8 +680,7 @@ class VaultSyncManager:
         peer_rid: optional filter to reconcile for a specific peer only.
         """
         if peer_rid:
-            peer = await self._get_peer_by_source(peer_rid)
-            peers = [peer] if peer else []
+            peers = await self._get_all_peers_by_source(peer_rid)
         else:
             peers = await self._get_all_peers()
         if not peers:
@@ -1105,8 +1109,8 @@ class VaultSyncManager:
             async with self.pool.acquire() as conn:
                 for peer in peer_list:
                     await conn.execute(
-                        "UPDATE vault_sync_peers SET last_full_sync_at=NOW() WHERE peer_node_rid=$1",
-                        peer["peer_node_rid"],
+                        "UPDATE vault_sync_peers SET last_full_sync_at=NOW() WHERE peer_node_rid=$1 AND shared_folder=$2",
+                        peer["peer_node_rid"], peer["shared_folder"],
                     )
 
         # Periodic cleanup
@@ -1418,12 +1422,32 @@ class VaultSyncManager:
             rows = await conn.fetch("SELECT * FROM vault_sync_peers WHERE enabled=TRUE ORDER BY peer_node_rid")
             return [dict(r) for r in rows]
 
-    async def _get_peer_by_source(self, source_node: str) -> Optional[Dict[str, Any]]:
-        """Get peer config for a specific source node."""
+    async def _get_all_peers_by_source(self, source_node: str) -> List[Dict[str, Any]]:
+        """Get all enabled peer configs (all folders) for a specific source node."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
+            rows = await conn.fetch(
                 "SELECT * FROM vault_sync_peers WHERE peer_node_rid=$1 AND enabled=TRUE", source_node)
-            return dict(row) if row else None
+            return [dict(r) for r in rows]
+
+    async def _get_peer_by_source(self, source_node: str, rel_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get peer config for a specific source node.
+
+        If rel_path is provided, returns the peer whose shared_folder matches
+        the path prefix (supports multi-folder per peer). Otherwise returns
+        the first enabled peer for auth-only checks.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM vault_sync_peers WHERE peer_node_rid=$1 AND enabled=TRUE", source_node)
+            if not rows:
+                return None
+            if rel_path:
+                for row in rows:
+                    folder = row["shared_folder"]
+                    if rel_path == folder or rel_path.startswith(folder + "/"):
+                        return dict(row)
+                return None  # no folder matches this path
+            return dict(rows[0])
 
     async def _get_shared_key(self, peer_node_rid: str) -> Optional[bytes]:
         """Get or derive the shared E2EE key for a peer. Returns None if E2EE unavailable."""
