@@ -26,7 +26,14 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────
 
-DEFAULT_API = "https://regen-api.polkachu.com"
+DEFAULT_API = "https://regen-rest.publicnode.com"
+# Fallback REST providers ordered by tx-search depth.
+# PublicNode has the deepest history; EcoStake is decent; Polkachu is shallow.
+FALLBACK_APIS = [
+    "https://regen-rest.publicnode.com",
+    "https://rest-regen.ecostake.com",
+    "https://regen-api.polkachu.com",
+]
 # MBS01 batch denom prefixes (SeaTrees / Seatrees+ Biodiversity Blocks)
 # Only known batch: MBS01-001-20240601-20340531-001
 MBS01_PREFIXES = ("MBS01-",)
@@ -76,8 +83,8 @@ REGION_MAP = {
 # The regen: IRI content-addressable metadata requires a data server that isn't publicly accessible.
 KNOWN_PROJECTS = {
     "MBS01-001": {
-        "name": "Mikoko Pamoja and Vanga Blue Forest",
-        "developer": "COBEC / KMFRI",
+        "name": "Mangrove Forest: Marereni",
+        "developer": "",
     },
 }
 
@@ -331,6 +338,12 @@ def query_retirements(api_url: str, start_date: str, end_date: str, batch_prefix
         if found:
             log.info("  Found %d retirements from %s", len(found), action.split(".")[-1])
         retirements.extend(found)
+        # SeaTrees MBS01 retirements are executed via authz/MsgExec. Once we find
+        # matching retirements there, scanning MsgRetire and MsgBuyDirect mainly
+        # adds duplicate work and pushes the export past proxy/client timeouts.
+        if action == "/cosmos.authz.v1beta1.MsgExec" and found:
+            log.info("  Using MsgExec results for SeaTrees export; skipping slower fallback action scans")
+            break
 
     # Deduplicate across action types (same tx could appear in multiple searches)
     seen = set()
@@ -342,6 +355,27 @@ def query_retirements(api_url: str, start_date: str, end_date: str, batch_prefix
             unique.append(r)
 
     return unique
+
+
+def query_retirements_with_fallback(api_url: str, start_date: str, end_date: str,
+                                     batch_prefixes: tuple, max_pages: int = 50) -> list[dict]:
+    """Try the requested API first, then fall back through FALLBACK_APIS if it returns empty."""
+    # Build ordered list: caller's choice first, then fallbacks (skip duplicates)
+    apis = [api_url]
+    for fb in FALLBACK_APIS:
+        if fb.rstrip("/") != api_url.rstrip("/"):
+            apis.append(fb)
+
+    for api in apis:
+        log.info("Trying %s ...", api)
+        results = query_retirements(api, start_date, end_date, batch_prefixes, max_pages=max_pages)
+        if results:
+            log.info("Got %d retirements from %s", len(results), api)
+            return results
+        log.warning("0 results from %s, trying next provider...", api)
+
+    log.warning("All providers returned 0 results")
+    return []
 
 
 # ── Row builder ──────────────────────────────────────────────────────
@@ -450,10 +484,11 @@ def main():
     print(f"Output: {output}")
     print("=" * 60)
 
-    # Query retirements
+    # Query retirements (with automatic fallback to other providers)
     print("\nQuerying retirement transactions...")
-    retirements = query_retirements(args.api, args.start, args.end, tuple(args.batch_prefixes),
-                                    max_pages=args.max_pages)
+    retirements = query_retirements_with_fallback(args.api, args.start, args.end,
+                                                   tuple(args.batch_prefixes),
+                                                   max_pages=args.max_pages)
     print(f"Found {len(retirements)} retirements in date range")
 
     if not retirements:

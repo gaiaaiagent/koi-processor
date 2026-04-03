@@ -19,7 +19,7 @@ from scripts.seatrees_bloom_export import (
     MBS01_PREFIXES,
     MetadataCache,
     build_bloom_row,
-    query_retirements,
+    query_retirements_with_fallback,
 )
 
 log = logging.getLogger(__name__)
@@ -27,8 +27,8 @@ log = logging.getLogger(__name__)
 
 def _build_export(start: str, end: str, max_pages: int, api_url: str) -> list[dict]:
     """Run the full blocking export pipeline in a worker thread."""
-    retirements = query_retirements(api_url, start, end, tuple(MBS01_PREFIXES),
-                                    max_pages=max_pages)
+    retirements = query_retirements_with_fallback(api_url, start, end, tuple(MBS01_PREFIXES),
+                                                   max_pages=max_pages)
     if not retirements:
         return []
 
