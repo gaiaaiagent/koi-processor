@@ -1,0 +1,816 @@
+#!/usr/bin/env python3
+"""
+Learning Field Graph Projection — Phase 1, Step 7
+
+Projects bridge notes from Spore and IC into the KOI knowledge graph as
+structured Claim, Concept, and Question entities with argumentative edges
+(supports/opposes).
+
+Two claim layers:
+  - Source claims: extracted from bridge note Claim Registers
+  - Review claims: about proposed canon changes (derived from relates_to × concept)
+
+Usage:
+  python scripts/project_bridge_notes.py --dry-run          # preview what would be created
+  python scripts/project_bridge_notes.py --apply            # create entities and edges
+  python scripts/project_bridge_notes.py --apply --note <path>  # single note
+"""
+
+import argparse
+import asyncio
+import hashlib
+import json
+import logging
+import re
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import asyncpg
+import httpx
+import yaml
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger("project_bridge_notes")
+
+KOI_BASE = "http://localhost:8351"
+
+PROJECTS = {
+    "spore": {
+        "project_id": "spore",
+        "claimant_uri": "org:spore-learning-field",
+        "bridge_dir": Path.home() / "projects/spore/docs/research/connections",
+    },
+    "ic": {
+        "project_id": "ic",
+        "claimant_uri": "org:ic-learning-field",
+        "bridge_dir": Path.home() / "projects/intelligence-commons/docs/research",
+    },
+}
+
+DISPOSITION_SLUG = {
+    "clarify existing term": "clarify",
+    "candidate primitive": "propose-primitive",
+    "candidate pattern": "propose-pattern",
+    "implementation hypothesis": "hypothesize",
+    "unresolved tension": "resolve-tension",
+    "no change": "no-change",
+}
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BridgeClaim:
+    c_id: str           # e.g. "C1"
+    confidence: str     # high | medium | low
+    anchor: str         # e.g. "§What Spore Does Not Already Have — linguistic closure risk"
+    statement: str      # claim text
+
+@dataclass
+class OpenQuestion:
+    number: int
+    question: str       # question text (bold part)
+    context: str        # full text including context
+
+@dataclass
+class BridgeNote:
+    path: Path
+    doc_id: str
+    doc_kind: str
+    status: str
+    disposition: str
+    research_subkind: str
+    concepts: list
+    depends_on: list
+    relates_to: list
+    claims: list        # list of BridgeClaim
+    questions: list     # list of OpenQuestion
+    project_key: str    # "spore" or "ic"
+
+
+# ---------------------------------------------------------------------------
+# Parsers
+# ---------------------------------------------------------------------------
+
+def parse_frontmatter(text: str) -> dict:
+    """Extract YAML frontmatter from markdown."""
+    m = re.match(r'^---\s*\n(.*?)\n---', text, re.DOTALL)
+    if not m:
+        raise ValueError("No YAML frontmatter found")
+    return yaml.safe_load(m.group(1))
+
+
+def parse_claims(text: str) -> list[BridgeClaim]:
+    """Parse Claim Register section for C-ID entries."""
+    # Find the Claim Register section (may or may not have number prefix)
+    m = re.search(r'## (?:\d+\.\s+)?Claim Register\s*\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
+    if not m:
+        return []
+
+    section = m.group(1)
+    claims = []
+
+    # Pattern: **C1** [confidence: high] [anchor: §section] Statement text
+    pattern = re.compile(
+        r'\*\*(C\d+)\*\*\s+'
+        r'\[confidence:\s*(high|medium|low)\]\s+'
+        r'\[anchor:\s*(.+?)\]\s*\n'
+        r'(.*?)(?=\n\*\*C\d+\*\*|\Z)',
+        re.DOTALL
+    )
+
+    for match in pattern.finditer(section):
+        statement = match.group(4).strip()
+        # Clean up any trailing whitespace/newlines
+        statement = re.sub(r'\s+', ' ', statement)
+        claims.append(BridgeClaim(
+            c_id=match.group(1),
+            confidence=match.group(2),
+            anchor=match.group(3).strip(),
+            statement=statement,
+        ))
+
+    return claims
+
+
+def parse_questions(text: str) -> list[OpenQuestion]:
+    """Parse Open Questions section (may have numbered header like '## 7. Open Questions')."""
+    m = re.search(r'## (?:\d+\.\s+)?Open Questions\s*\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
+    if not m:
+        return []
+
+    section = m.group(1)
+    questions = []
+
+    # Two formats:
+    #   "1. **Question text?** Context..."
+    #   "1. **Topic:** Context with question?..."
+    # Capture the full numbered entry, then extract bold part + rest
+    pattern = re.compile(
+        r'(\d+)\.\s+\*\*(.+?)\*\*\s*(.*?)(?=\n\d+\.\s+\*\*|\Z)',
+        re.DOTALL
+    )
+
+    for match in pattern.finditer(section):
+        bold_part = match.group(2).strip()
+        rest = match.group(3).strip()
+        rest = re.sub(r'\s+', ' ', rest)
+        # The "question" is the bold part; full text is bold + rest
+        full_text = f"{bold_part} {rest}".strip() if rest else bold_part
+        questions.append(OpenQuestion(
+            number=int(match.group(1)),
+            question=bold_part,
+            context=full_text,
+        ))
+
+    return questions
+
+
+def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
+    """Parse a bridge note file into structured data."""
+    text = path.read_text()
+    fm = parse_frontmatter(text)
+
+    return BridgeNote(
+        path=path,
+        doc_id=fm.get("doc_id", ""),
+        doc_kind=fm.get("doc_kind", "research"),
+        status=fm.get("status", "draft"),
+        disposition=fm.get("disposition", ""),
+        research_subkind=fm.get("research_subkind", ""),
+        concepts=fm.get("concepts") or [],
+        depends_on=fm.get("depends_on") or [],
+        relates_to=fm.get("relates_to") or [],
+        claims=parse_claims(text),
+        questions=parse_questions(text),
+        project_key=project_key,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entity URI generation (mirrors KOI's generate_entity_uri)
+# ---------------------------------------------------------------------------
+
+def normalize_text(text: str) -> str:
+    """Normalize entity text for matching."""
+    return text.lower().strip()
+
+def generate_entity_uri(name: str, entity_type: str) -> str:
+    """Generate a deterministic URI matching KOI's convention."""
+    normalized = normalize_text(name)
+    hash_input = f"{entity_type}:{normalized}"
+    hash_id = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
+    type_prefix = entity_type.lower()
+    safe_name = normalized.replace(' ', '-').replace("'", '')[:50]
+    return f"orn:personal-koi.entity:{type_prefix}-{safe_name}-{hash_id}"
+
+
+# ---------------------------------------------------------------------------
+# KOI interactions
+# ---------------------------------------------------------------------------
+
+async def resolve_project_uri(conn: asyncpg.Connection, project_id: str) -> str:
+    """Resolve project URI from KOI. Fail closed if not exactly 1 row."""
+    rows = await conn.fetch(
+        "SELECT fuseki_uri FROM entity_registry "
+        "WHERE entity_type = 'Project' AND metadata->>'project_id' = $1",
+        project_id,
+    )
+    if len(rows) == 0:
+        raise RuntimeError(f"Project entity not found for project_id='{project_id}'. "
+                           "Run ingest_spec_dag.py first.")
+    if len(rows) > 1:
+        uris = [r["fuseki_uri"] for r in rows]
+        raise RuntimeError(f"Ambiguous project for project_id='{project_id}': {uris}")
+    return rows[0]["fuseki_uri"]
+
+
+async def resolve_or_create_concept(
+    conn: asyncpg.Connection,
+    concept_name: str,
+) -> str:
+    """Resolve a concept name to an entity URI, creating if needed."""
+    # Try exact match first
+    normalized = normalize_text(concept_name)
+    row = await conn.fetchrow(
+        "SELECT fuseki_uri FROM entity_registry "
+        "WHERE normalized_text = $1 AND entity_type = 'Concept' LIMIT 1",
+        normalized,
+    )
+    if row:
+        return row["fuseki_uri"]
+
+    # Also try with hyphens replaced by spaces (concept tags use hyphens)
+    normalized_spaced = normalized.replace("-", " ")
+    if normalized_spaced != normalized:
+        row = await conn.fetchrow(
+            "SELECT fuseki_uri FROM entity_registry "
+            "WHERE normalized_text = $1 AND entity_type = 'Concept' LIMIT 1",
+            normalized_spaced,
+        )
+        if row:
+            return row["fuseki_uri"]
+
+    # Create new concept entity
+    uri = generate_entity_uri(concept_name.replace("-", " "), "Concept")
+    entity_text = concept_name.replace("-", " ").title()
+
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text, metadata) "
+        "VALUES ($1, $2, 'Concept', $3, $4::jsonb) "
+        "ON CONFLICT (fuseki_uri) DO NOTHING",
+        uri, entity_text, normalized_spaced or normalized,
+        json.dumps({"source": "learning_field"}),
+    )
+    log.info(f"  Created Concept: {entity_text} → {uri}")
+    return uri
+
+
+async def find_previous_source_claim(
+    conn: asyncpg.Connection,
+    source_document: str,
+    c_id: str,
+) -> Optional[dict]:
+    """Find the most recent source claim for a (doc, C-ID) pair."""
+    row = await conn.fetchrow(
+        "SELECT claim_rid, statement FROM claims "
+        "WHERE source_document = $1 "
+        "  AND metadata->>'c_id' = $2 "
+        "  AND metadata->>'source' = 'learning_field' "
+        "  AND metadata->>'claim_layer' = 'source' "
+        "ORDER BY created_at DESC LIMIT 1",
+        source_document, c_id,
+    )
+    if row:
+        return {"claim_rid": row["claim_rid"], "statement": row["statement"]}
+    return None
+
+
+async def create_source_claim(
+    client: httpx.AsyncClient,
+    conn: asyncpg.Connection,
+    *,
+    claimant_uri: str,
+    statement: str,
+    about_uri: str,
+    source_document: str,
+    c_id: str,
+    confidence: str,
+    anchor: str,
+    project_uri: str,
+    projection_batch: str,
+) -> dict:
+    """Create a source claim via POST /claims/, with versioning."""
+    # Check for previous version of this claim
+    previous = await find_previous_source_claim(conn, source_document, c_id)
+    supersedes_rid = None
+    if previous and previous["statement"] != statement:
+        supersedes_rid = previous["claim_rid"]
+        log.info(f"  {c_id} supersedes {supersedes_rid} (statement changed)")
+
+    payload = {
+        "claimant_uri": claimant_uri,
+        "statement": statement,
+        "claim_type": "governance",
+        "about_uri": about_uri,
+        "source_document": source_document,
+        "metadata": {
+            "c_id": c_id,
+            "confidence": confidence,
+            "evidence_anchor": anchor,
+            "claim_layer": "source",
+            "extraction_status": "extracted",
+            "project_uri": project_uri,
+            "source": "learning_field",
+        },
+        "created_by": "darren",
+    }
+    if supersedes_rid:
+        payload["supersedes_rid"] = supersedes_rid
+
+    resp = await client.post(f"{KOI_BASE}/claims/", json=payload, timeout=30)
+    if resp.status_code not in (200, 201):
+        log.error(f"  Failed to create source claim {c_id}: {resp.status_code} {resp.text}")
+        return {}
+    data = resp.json()
+    claim_rid = data.get("claim_rid", "?")
+    log.info(f"  Source claim {c_id}: {claim_rid}")
+
+    # Add projection_batch to metadata (post-creation, doesn't affect RID)
+    await conn.execute(
+        "UPDATE claims SET metadata = metadata || $1::jsonb WHERE claim_rid = $2",
+        json.dumps({"projection_batch": projection_batch}),
+        claim_rid,
+    )
+    return data
+
+
+async def create_review_claim(
+    client: httpx.AsyncClient,
+    conn: asyncpg.Connection,
+    *,
+    claimant_uri: str,
+    concept_name: str,
+    about_uri: str,
+    target_spec_doc: str,
+    disposition_slug: str,
+    project_uri: str,
+    projection_batch: str,
+) -> dict:
+    """Create a review claim via POST /claims/. Deterministic from target+concept."""
+    change_slug = f"{disposition_slug}-{concept_name}"
+    target_spec_uri = f"spec:{target_spec_doc}"
+    governance_cluster_key = f"{target_spec_doc}:{concept_name}"
+    statement = (
+        f"Canon review: {disposition_slug.replace('-', ' ')} — "
+        f"{concept_name.replace('-', ' ')} in {target_spec_doc}"
+    )
+
+    payload = {
+        "claimant_uri": claimant_uri,
+        "statement": statement,
+        "claim_type": "governance",
+        "about_uri": about_uri,
+        "metadata": {
+            "claim_layer": "review",
+            "target_spec_doc": target_spec_doc,
+            "target_section": concept_name,
+            "change_slug": change_slug,
+            "target_spec_uri": target_spec_uri,
+            "governance_cluster_key": governance_cluster_key,
+            "project_uri": project_uri,
+            "source": "learning_field",
+        },
+        "created_by": "darren",
+    }
+
+    resp = await client.post(f"{KOI_BASE}/claims/", json=payload, timeout=30)
+    if resp.status_code not in (200, 201):
+        log.error(f"  Failed to create review claim: {resp.status_code} {resp.text}")
+        return {}
+    data = resp.json()
+    claim_rid = data.get("claim_rid", "?")
+    log.info(f"  Review claim ({target_spec_doc} × {concept_name}): {claim_rid}")
+
+    # Add projection_batch to metadata (post-creation, doesn't affect RID)
+    await conn.execute(
+        "UPDATE claims SET metadata = metadata || $1::jsonb WHERE claim_rid = $2",
+        json.dumps({"projection_batch": projection_batch}),
+        claim_rid,
+    )
+    return data
+
+
+async def find_review_claim(
+    conn: asyncpg.Connection,
+    target_spec_doc: str,
+    concept_name: str,
+) -> Optional[str]:
+    """Find an existing review claim by target + concept in metadata."""
+    row = await conn.fetchrow(
+        "SELECT entity_uri FROM claims "
+        "WHERE metadata->>'claim_layer' = 'review' "
+        "  AND metadata->>'source' = 'learning_field' "
+        "  AND metadata->>'target_spec_doc' = $1 "
+        "  AND metadata->>'governance_cluster_key' = $2 "
+        "LIMIT 1",
+        target_spec_doc,
+        f"{target_spec_doc}:{concept_name}",
+    )
+    return row["entity_uri"] if row else None
+
+
+async def insert_edge(
+    conn: asyncpg.Connection,
+    subject_uri: str,
+    predicate: str,
+    object_uri: str,
+    source: str = "learning_field",
+    confidence: float = 1.0,
+    source_rid: Optional[str] = None,
+) -> bool:
+    """Insert an edge into entity_relationships. Returns True if inserted."""
+    try:
+        result = await conn.execute(
+            "INSERT INTO entity_relationships "
+            "(subject_uri, predicate, object_uri, confidence, source, source_rid) "
+            "VALUES ($1, $2, $3, $4, $5, $6) "
+            "ON CONFLICT DO NOTHING",
+            subject_uri, predicate, object_uri, confidence, source, source_rid,
+        )
+        return result == "INSERT 0 1"
+    except Exception as e:
+        log.error(f"  Edge insert failed ({subject_uri} -{predicate}-> {object_uri}): {e}")
+        return False
+
+
+async def create_question_entity(
+    conn: asyncpg.Connection,
+    question: OpenQuestion,
+    doc_id: str,
+    source_rid: str,
+) -> str:
+    """Create a Question entity in entity_registry."""
+    # Stable URI from doc_id + question number
+    uri = generate_entity_uri(f"{doc_id}-Q{question.number}", "Question")
+    entity_text = question.question[:200]
+
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text, metadata) "
+        "VALUES ($1, $2, 'Question', $3, $4::jsonb) "
+        "ON CONFLICT (fuseki_uri) DO NOTHING",
+        uri, entity_text, normalize_text(entity_text),
+        json.dumps({
+            "source": "learning_field",
+            "source_document": doc_id,
+            "question_number": question.number,
+        }),
+    )
+    return uri
+
+
+# ---------------------------------------------------------------------------
+# Projection logic
+# ---------------------------------------------------------------------------
+
+async def project_bridge_note(
+    note: BridgeNote,
+    conn: asyncpg.Connection,
+    client: httpx.AsyncClient,
+    dry_run: bool = False,
+    projection_batch: str = "",
+) -> dict:
+    """Project a single bridge note into the KOI graph."""
+    stats = {
+        "source_claims": 0,
+        "review_claims": 0,
+        "concepts": 0,
+        "questions": 0,
+        "supports_edges": 0,
+        "opposes_edges": 0,
+        "about_edges": 0,
+        "related_to_edges": 0,
+    }
+
+    project_cfg = PROJECTS[note.project_key]
+    claimant_uri = project_cfg["claimant_uri"]
+
+    # Disposition determines stance: "no change" → opposes, everything else → supports
+    proposes_change = note.disposition != "no change"
+    default_stance = "supports" if proposes_change else "opposes"
+
+    log.info(f"\n{'='*60}")
+    log.info(f"Projecting: {note.doc_id} ({len(note.claims)} claims, {len(note.questions)} questions)")
+    log.info(f"  Disposition: {note.disposition} → stance: {default_stance}")
+    log.info(f"  Concepts: {note.concepts}")
+
+    if dry_run:
+        log.info("  [DRY RUN] Would create entities and edges")
+        stats["source_claims"] = len(note.claims)
+        stats["questions"] = len(note.questions)
+        stats["concepts"] = len(note.concepts)
+        return stats
+
+    # 1. Resolve project URI (fail-closed)
+    project_uri = await resolve_project_uri(conn, project_cfg["project_id"])
+    log.info(f"  Project URI: {project_uri}")
+
+    # 2. Resolve/create all concept entities
+    concept_uris = {}
+    for concept_name in note.concepts:
+        uri = await resolve_or_create_concept(conn, concept_name)
+        concept_uris[concept_name] = uri
+        stats["concepts"] += 1
+
+    # 3. Determine disposition slug
+    disp_slug = DISPOSITION_SLUG.get(note.disposition, "unclassified")
+
+    # 4. Determine which canon docs are targets
+    all_refs = list(note.relates_to) + list(note.depends_on)
+    canon_targets = [
+        r for r in all_refs
+        if not r.startswith(note.doc_id)
+        and ".connection." not in r
+        and ".term." not in r
+    ]
+    seen = set()
+    canon_targets = [x for x in canon_targets if not (x in seen or seen.add(x))]
+
+    # 5. Create source claims, then on-demand review claims + stance edges
+    # Review claims are created ONLY when a source claim actually needs one.
+    # Cache to avoid re-creating the same review claim per note.
+    review_claim_cache = {}  # (target, concept) → entity_uri
+
+    for claim in note.claims:
+        # Determine the primary concept for this claim
+        primary_concept = note.concepts[0] if note.concepts else None
+        stmt_normalized = claim.statement.lower().replace("-", " ")
+        for c in note.concepts:
+            c_readable = c.replace("-", " ")
+            if c_readable.lower() in stmt_normalized:
+                primary_concept = c
+                break
+
+        about_uri = concept_uris.get(primary_concept) if primary_concept else None
+        if not about_uri:
+            log.warning(f"  Skipping claim {claim.c_id}: no concept to link")
+            continue
+
+        source_data = await create_source_claim(
+            client, conn,
+            claimant_uri=claimant_uri,
+            statement=claim.statement,
+            about_uri=about_uri,
+            source_document=note.doc_id,
+            c_id=claim.c_id,
+            confidence=claim.confidence,
+            anchor=claim.anchor,
+            project_uri=project_uri,
+            projection_batch=projection_batch,
+        )
+
+        if not source_data or not source_data.get("entity_uri"):
+            continue
+
+        stats["source_claims"] += 1
+        source_entity_uri = source_data["entity_uri"]
+
+        if not canon_targets or not primary_concept:
+            continue
+
+        # For each canon target, get-or-create a review claim for THIS concept only
+        for target in canon_targets:
+            cache_key = (target, primary_concept)
+
+            if cache_key not in review_claim_cache:
+                if proposes_change:
+                    # This note proposes changes → create the review claim
+                    review_data = await create_review_claim(
+                        client, conn,
+                        claimant_uri=claimant_uri,
+                        concept_name=primary_concept,
+                        about_uri=about_uri,
+                        target_spec_doc=target,
+                        disposition_slug=disp_slug,
+                        project_uri=project_uri,
+                        projection_batch=projection_batch,
+                    )
+                    if review_data and review_data.get("entity_uri"):
+                        review_claim_cache[cache_key] = review_data["entity_uri"]
+                        stats["review_claims"] += 1
+                else:
+                    # "no change" → find existing review claims for this concept+target
+                    existing = await find_review_claim(conn, target, primary_concept)
+                    if existing:
+                        review_claim_cache[cache_key] = existing
+
+            review_entity_uri = review_claim_cache.get(cache_key)
+            if review_entity_uri:
+                inserted = await insert_edge(
+                    conn, source_entity_uri, default_stance, review_entity_uri,
+                    source_rid=f"projection:{note.doc_id}",
+                )
+                if inserted:
+                    if default_stance == "supports":
+                        stats["supports_edges"] += 1
+                    else:
+                        stats["opposes_edges"] += 1
+
+    # 7. Create Question entities + about edges
+    for q in note.questions:
+        q_uri = await create_question_entity(conn, q, note.doc_id,
+                                              source_rid=f"projection:{note.doc_id}")
+        stats["questions"] += 1
+
+        # Link question to the most relevant concept
+        # Normalize both sides for matching
+        linked_concept = note.concepts[0] if note.concepts else None
+        q_normalized = q.question.lower().replace("-", " ")
+        for c in note.concepts:
+            c_readable = c.replace("-", " ")
+            if c_readable.lower() in q_normalized:
+                linked_concept = c
+                break
+
+        if linked_concept and linked_concept in concept_uris:
+            inserted = await insert_edge(
+                conn, q_uri, "about", concept_uris[linked_concept],
+                source_rid=f"projection:{note.doc_id}",
+            )
+            if inserted:
+                stats["about_edges"] += 1
+
+    # 8. Create related_to edges between bridge note SpecDocs (lateral links)
+    # The bridge note itself should be a SpecDoc; link to other bridge notes in relates_to
+    note_spec_uri = f"spec:{note.doc_id}"
+    # Check if this SpecDoc exists
+    note_spec_exists = await conn.fetchval(
+        "SELECT 1 FROM entity_registry WHERE fuseki_uri = $1", note_spec_uri,
+    )
+
+    if note_spec_exists:
+        for related_doc_id in note.relates_to:
+            related_uri = f"spec:{related_doc_id}"
+            related_exists = await conn.fetchval(
+                "SELECT 1 FROM entity_registry WHERE fuseki_uri = $1", related_uri,
+            )
+            if related_exists:
+                inserted = await insert_edge(
+                    conn, note_spec_uri, "related_to", related_uri,
+                    source_rid=f"projection:{note.doc_id}",
+                )
+                if inserted:
+                    stats["related_to_edges"] += 1
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+def discover_bridge_notes() -> list[tuple[Path, str]]:
+    """Find all bridge notes across both repos."""
+    notes = []
+
+    for project_key, cfg in PROJECTS.items():
+        bridge_dir = cfg["bridge_dir"]
+        if not bridge_dir.exists():
+            log.warning(f"Bridge dir not found: {bridge_dir}")
+            continue
+
+        for md_path in sorted(bridge_dir.glob("*.md")):
+            if md_path.name == "CLAUDE.md":
+                continue
+            # Quick check: is this a bridge note?
+            try:
+                text = md_path.read_text()
+                if "research_subkind: bridge_note" in text:
+                    notes.append((md_path, project_key))
+            except Exception:
+                continue
+
+    return notes
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+async def main():
+    parser = argparse.ArgumentParser(description="Project bridge notes into KOI graph")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    parser.add_argument("--apply", action="store_true", help="Write to KOI graph")
+    parser.add_argument("--note", type=str, help="Project a single note by path")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args()
+
+    if not args.dry_run and not args.apply:
+        parser.error("Specify --dry-run or --apply")
+
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+
+    # Discover notes
+    if args.note:
+        note_path = Path(args.note).expanduser().resolve()
+        # Determine project key from path
+        if "intelligence-commons" in str(note_path):
+            project_key = "ic"
+        else:
+            project_key = "spore"
+        note_paths = [(note_path, project_key)]
+    else:
+        note_paths = discover_bridge_notes()
+
+    log.info(f"Found {len(note_paths)} bridge notes")
+
+    if not note_paths:
+        log.error("No bridge notes found")
+        sys.exit(1)
+
+    # Connect to KOI
+    conn = await asyncpg.connect("postgresql://localhost:5432/personal_koi")
+
+    # Verify claimant orgs exist
+    for cfg in PROJECTS.values():
+        exists = await conn.fetchval(
+            "SELECT 1 FROM entity_registry WHERE fuseki_uri = $1",
+            cfg["claimant_uri"],
+        )
+        if not exists:
+            log.error(f"Claimant entity missing: {cfg['claimant_uri']}")
+            sys.exit(1)
+
+    # Verify project URIs resolve
+    for cfg in PROJECTS.values():
+        try:
+            uri = await resolve_project_uri(conn, cfg["project_id"])
+            log.info(f"Project {cfg['project_id']} → {uri}")
+        except RuntimeError as e:
+            log.error(str(e))
+            sys.exit(1)
+
+    totals = {
+        "notes": 0,
+        "source_claims": 0,
+        "review_claims": 0,
+        "concepts": 0,
+        "questions": 0,
+        "supports_edges": 0,
+        "opposes_edges": 0,
+        "about_edges": 0,
+        "related_to_edges": 0,
+    }
+
+    # Parse all notes first, then process in two passes:
+    # Pass 1: change-proposing notes (creates review claims + supports edges)
+    # Pass 2: "no change" notes (links to existing review claims with opposes)
+    parsed_notes = []
+    for note_path, project_key in note_paths:
+        try:
+            parsed_notes.append(parse_bridge_note(note_path, project_key))
+        except Exception as e:
+            log.error(f"Failed to parse {note_path}: {e}")
+
+    change_notes = [n for n in parsed_notes if n.disposition != "no change"]
+    nochange_notes = [n for n in parsed_notes if n.disposition == "no change"]
+    log.info(f"  Pass 1: {len(change_notes)} change-proposing notes")
+    log.info(f"  Pass 2: {len(nochange_notes)} no-change notes (opposes)")
+
+    batch_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log.info(f"  Projection batch: {batch_ts}")
+
+    async with httpx.AsyncClient() as client:
+        for note in change_notes + nochange_notes:
+            stats = await project_bridge_note(
+                note, conn, client,
+                dry_run=args.dry_run,
+                projection_batch=batch_ts,
+            )
+            totals["notes"] += 1
+            for k, v in stats.items():
+                totals[k] = totals.get(k, 0) + v
+
+    await conn.close()
+
+    log.info(f"\n{'='*60}")
+    log.info("PROJECTION SUMMARY")
+    log.info(f"  Notes processed: {totals['notes']}")
+    log.info(f"  Source claims:   {totals['source_claims']}")
+    log.info(f"  Review claims:   {totals['review_claims']}")
+    log.info(f"  Concepts:        {totals['concepts']}")
+    log.info(f"  Questions:       {totals['questions']}")
+    log.info(f"  Supports edges:  {totals['supports_edges']}")
+    log.info(f"  Opposes edges:   {totals.get('opposes_edges', 0)}")
+    log.info(f"  About edges:     {totals['about_edges']}")
+    log.info(f"  Related_to edges:{totals['related_to_edges']}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
