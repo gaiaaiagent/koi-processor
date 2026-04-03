@@ -5294,6 +5294,54 @@ Each should rephrase the question using different terminology to find relevant d
         return [query]
 
 
+# ── P3 system prompts ──
+_SYSTEM_PROMPT_DEFAULT = (
+    "You are a knowledgeable assistant for a bioregional knowledge commons "
+    "focused on ecological stewardship, regenerative practices, and community "
+    "governance in bioregions.\n\n"
+    "INSTRUCTIONS:\n"
+    "- Answer the user's question using ONLY the entity, relationship, document, "
+    "and web source context provided below. You may synthesize across multiple "
+    "context items, but do not add facts from outside the provided context.\n"
+    "- Cite specific entities and sources in your answer.\n"
+    "- When referencing wiki sources, cite them as [Page > Section](url).\n"
+    "- If the provided context partially answers the question, answer the supported "
+    "part and clearly state what information is missing.\n"
+    "- If the provided context does not answer the question at all, say: "
+    '"The available context does not contain sufficient information to answer '
+    'this question."\n'
+    "- Be concise and factual."
+)
+
+_SYSTEM_PROMPT_EXPLAINER = (
+    "You are a knowledgeable assistant for a bioregional knowledge commons "
+    "focused on ecological stewardship, regenerative practices, and community "
+    "governance in bioregions.\n\n"
+    "INSTRUCTIONS:\n"
+    "- Answer the user's question using ONLY the entity, relationship, document, "
+    "and web source context provided below. You may synthesize across multiple "
+    "context items, but do not add facts from outside the provided context.\n"
+    "- If the provided context partially answers the question, answer the supported "
+    "part and clearly state what information is missing.\n"
+    "- If the provided context does not answer the question at all, say: "
+    '"The available context does not contain sufficient information to answer '
+    'this question."\n\n'
+    "FORMAT: Structure your answer using these sections:\n\n"
+    "## What It Is\n"
+    "A clear, concise definition or description (2-3 sentences).\n\n"
+    "## How It Works\n"
+    "Key mechanisms, processes, or relationships (3-5 bullet points). "
+    "Cite specific entities and relationships from the context.\n\n"
+    "## Why It Matters\n"
+    "Significance within the bioregional knowledge commons (2-3 sentences). "
+    "Connect to broader ecological or governance themes when supported by context.\n\n"
+    "## Key Sources\n"
+    "List the most relevant sources cited above. "
+    "When referencing wiki sources, cite them as [Page > Section](url).\n\n"
+    "If any section cannot be populated from the provided context, omit that section entirely."
+)
+
+
 class ChatRequest(BaseModel):
     """Request for RAG chat."""
     query: str
@@ -5303,6 +5351,7 @@ class ChatRequest(BaseModel):
     multi_query: bool = Field(default=False, description="Enable multi-query expansion for broader retrieval (B8b)")
     planner: bool = Field(default=False, description="B9a QueryPlan IR path (experimental)")
     debug_prompt: bool = Field(default=False, description="Include assembled prompt in response (requires CHAT_DEBUG_PROMPT env)")
+    answer_mode: Literal["default", "explainer"] = Field(default="default", description="Answer format: 'default' for concise, 'explainer' for structured educational format")
 
 
 @app.post("/chat")
@@ -5520,15 +5569,12 @@ async def chat_endpoint(request: ChatRequest):
         for w in web_sources
     ) if web_sources else ""
 
-    system_prompt = (
-        "You are a knowledgeable assistant for a bioregional knowledge commons "
-        "focused on ecological stewardship, regenerative practices, and community "
-        "governance in bioregions. Answer the user's question using the entity, "
-        "relationship, document, and web source context provided below. "
-        "Cite specific entities and sources in your answer. "
-        "When referencing wiki sources, cite them as [Page > Section](url). "
-        "If the context is insufficient, say so honestly. Be concise."
-    )
+    if request.answer_mode == "explainer":
+        system_prompt = _SYSTEM_PROMPT_EXPLAINER
+        answer_max_tokens = 1536
+    else:
+        system_prompt = _SYSTEM_PROMPT_DEFAULT
+        answer_max_tokens = 1024
 
     prompt_sections = [f"## Relevant Entities\n{entity_block}"]
     prompt_sections.append(f"## Relationships\n{rel_block}")
@@ -5551,7 +5597,7 @@ async def chat_endpoint(request: ChatRequest):
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=1024,
+            max_tokens=answer_max_tokens,
         )
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
@@ -5575,6 +5621,7 @@ async def chat_endpoint(request: ChatRequest):
         "sources": sources,
         "intent": intent,
         "retrieval_mode": request.retrieval_mode,
+        "answer_mode": request.answer_mode,
     }
     # Always emit plan_trace when planner was requested (including fallback)
     if planner_requested and plan_trace is not None:
