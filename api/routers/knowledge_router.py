@@ -121,7 +121,13 @@ def _row_to_dict(row) -> Dict[str, Any]:
 EmbedFn = Callable[[str], Coroutine[Any, Any, Optional[List[float]]]]
 
 
-def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRouter:
+def create_router(
+    pool,
+    generate_embedding: Optional[EmbedFn] = None,
+    *,
+    generate_query_embedding: Optional[EmbedFn] = None,
+    generate_document_embedding: Optional[EmbedFn] = None,
+) -> APIRouter:
     """Return an APIRouter for knowledge graph endpoints.
 
     Parameters
@@ -129,8 +135,15 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
     pool : asyncpg.Pool
         Database connection pool.
     generate_embedding : callable, optional
-        Async function: text -> Optional[List[float]].
+        DEPRECATED fallback: text -> Optional[List[float]].
+    generate_query_embedding : callable, optional
+        QUERY mode embedding (with instruction prefix).
+    generate_document_embedding : callable, optional
+        DOCUMENT mode embedding (no instruction prefix).
     """
+    # Resolve to explicit query/document or fall back to unified
+    _query_embed = generate_query_embedding or generate_embedding
+    _doc_embed = generate_document_embedding or generate_embedding
     router = APIRouter(tags=["knowledge"])
 
     # -------------------------------------------------------------------
@@ -182,7 +195,7 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
                 # Resolve subject
                 subject_uri, is_new = await _resolve_or_create(
                     conn, fact.subject, body.create_entities,
-                    generate_embedding, seen_uris)
+                    _doc_embed, seen_uris)
                 if not subject_uri:
                     logger.warning(f"Could not resolve subject: {fact.subject}")
                     continue
@@ -195,7 +208,7 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
                 if fact.object:
                     object_uri, obj_new = await _resolve_or_create(
                         conn, fact.object, body.create_entities,
-                        generate_embedding, seen_uris)
+                        _doc_embed, seen_uris)
                     if object_uri:
                         entities_resolved += 1
                         if obj_new:
@@ -203,8 +216,8 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
 
                 # Generate fact embedding
                 fact_embedding = None
-                if generate_embedding:
-                    fact_embedding = await generate_embedding(fact.fact_text)
+                if _doc_embed:
+                    fact_embedding = await _doc_embed(fact.fact_text)
 
                 # --- Dedup + invalidation ---
                 if fact_embedding:
@@ -342,12 +355,12 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
         group_id: Optional[str] = Query(None),
         include_expired: bool = Query(False),
     ):
-        if not generate_embedding:
+        if not _query_embed:
             raise HTTPException(
                 status_code=503,
                 detail="Embedding provider not configured")
 
-        query_embedding = await generate_embedding(query)
+        query_embedding = await _query_embed(query)
         if not query_embedding:
             raise HTTPException(
                 status_code=500,
@@ -487,12 +500,12 @@ def create_router(pool, generate_embedding: Optional[EmbedFn] = None) -> APIRout
             "entities,facts,sessions",
             description="Comma-separated surfaces to query"),
     ):
-        if not generate_embedding:
+        if not _query_embed:
             raise HTTPException(
                 status_code=503,
                 detail="Embedding provider not configured")
 
-        query_embedding = await generate_embedding(query)
+        query_embedding = await _query_embed(query)
         if not query_embedding:
             raise HTTPException(
                 status_code=500,

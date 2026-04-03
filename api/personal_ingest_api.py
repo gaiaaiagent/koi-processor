@@ -359,15 +359,38 @@ class ShortestPathResponse(BaseModel):
 
 
 # =============================================================================
-# Embedding Service (provider-agnostic)
+# Embedding Service (provider-agnostic, explicit query/document split)
 # =============================================================================
 
-async def generate_embedding(text: str) -> Optional[List[float]]:
-    """Generate embedding using the configured provider."""
+async def generate_query_embedding(text: str) -> Optional[List[float]]:
+    """Generate QUERY embedding (with instruction prefix for retrieval).
+
+    Use for: /chat retrieval, session search, fact search, entity resolution,
+    semantic classifier, unified search — any read/search path.
+    """
     if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
         return None
     normalized = normalize_entity_text(text)
-    return await embedding_provider.embed_or_none(normalized)
+    return await embedding_provider.embed_or_none(normalized, is_query=True)
+
+
+async def generate_document_embedding(text: str) -> Optional[List[float]]:
+    """Generate DOCUMENT embedding (no instruction prefix for storage).
+
+    Use for: entity creation, fact storage, ingest, chunk re-embedding —
+    any write/persist path.
+    """
+    if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
+        return None
+    normalized = normalize_entity_text(text)
+    return await embedding_provider.embed_or_none(normalized, is_query=False)
+
+
+# Backward-compatible alias — calls QUERY mode (most existing callers are reads).
+# TODO: Remove once all callers are migrated to explicit query/document.
+async def generate_embedding(text: str) -> Optional[List[float]]:
+    """DEPRECATED: Use generate_query_embedding or generate_document_embedding."""
+    return await generate_query_embedding(text)
 
 
 # =============================================================================
@@ -959,7 +982,7 @@ async def resolve_entity(
 
     # Tier 2b: Semantic match (embeddings + pgvector)
     if embedding_provider and ENABLE_SEMANTIC_MATCHING:
-        embedding = await generate_embedding(entity.name)
+        embedding = await generate_query_embedding(entity.name)
         if embedding:
             semantic_threshold = schema.semantic_threshold
 
@@ -1043,7 +1066,7 @@ async def store_new_entity(
     # Generate embedding for new entity (enables future Tier 2 matching)
     embedding = None
     if embedding_provider and ENABLE_SEMANTIC_MATCHING:
-        embedding = await generate_embedding(entity.name)
+        embedding = await generate_document_embedding(entity.name)
         if embedding:
             logger.info(f"Generated embedding for new entity: {entity.name}")
 
@@ -1247,10 +1270,18 @@ async def startup():
         # 1. Init embedding provider (reads env vars only, no API call)
         embedding_provider = create_embedding_provider()
 
-        # 2. Dimension guard: check provider dim matches existing tables
+        # 2. Dimension guard: check provider dim matches ALL runtime vector columns.
+        #    Uses explicit matrix — NOT discovery by column name.
+        #    Excludes koi_embeddings.dim_* (intentionally multi-dimension).
+        RUNTIME_VECTOR_COLUMNS = [
+            ("entity_registry", "embedding"),
+            ("koi_memory_chunks", "embedding"),
+            ("session_chunks", "embedding"),
+            ("knowledge_facts", "fact_embedding"),
+        ]
         if embedding_provider:
             async with db_pool.acquire() as conn:
-                for table in ['entity_registry', 'session_chunks']:
+                for table, column in RUNTIME_VECTOR_COLUMNS:
                     regclass = await conn.fetchval(
                         "SELECT to_regclass($1)", table
                     )
@@ -1259,12 +1290,12 @@ async def startup():
                     existing_dim = await conn.fetchval("""
                         SELECT atttypmod FROM pg_attribute
                         WHERE attrelid = to_regclass($1)
-                        AND attname = 'embedding' AND atttypmod > 0
-                    """, table)
+                        AND attname = $2 AND atttypmod > 0
+                    """, table, column)
                     if existing_dim is not None and existing_dim > 0 and existing_dim != embedding_provider.dimension:
                         logger.fatal(
                             f"DIMENSION MISMATCH: provider outputs {embedding_provider.dimension}-dim "
-                            f"but {table}.embedding is vector({existing_dim}). "
+                            f"but {table}.{column} is vector({existing_dim}). "
                             f"Cannot start. Re-embed data or change EMBEDDING_PROVIDER."
                         )
                         raise SystemExit(1)
@@ -1326,7 +1357,11 @@ async def startup():
             # Knowledge graph router (episodes + temporal facts)
             try:
                 from api.routers.knowledge_router import create_router as create_knowledge_router
-                app.include_router(create_knowledge_router(db_pool, generate_embedding), prefix="/knowledge")
+                app.include_router(create_knowledge_router(
+                    db_pool,
+                    generate_query_embedding=generate_query_embedding,
+                    generate_document_embedding=generate_document_embedding,
+                ), prefix="/knowledge")
                 logger.info("Knowledge router mounted (/knowledge)")
             except Exception as e:
                 logger.warning(f"Knowledge router not mounted: {e}")
@@ -1762,6 +1797,116 @@ async def health_check():
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
         )
+
+
+@app.get("/diagnostics/embedding-preflight")
+async def embedding_preflight():
+    """Diagnostic canary for eval preflight — checks embedding config health.
+
+    Returns dimension inventory, embedding service health, and gold entity canaries.
+    Used by `run_eval.py --preflight` to catch config errors before a full eval run.
+    """
+    RUNTIME_VECTOR_COLUMNS = [
+        ("entity_registry", "embedding"),
+        ("koi_memory_chunks", "embedding"),
+        ("session_chunks", "embedding"),
+        ("knowledge_facts", "fact_embedding"),
+    ]
+
+    results = {
+        "provider": None,
+        "dimension_check": {"pass": True, "details": []},
+        "canary_check": {"pass": True, "details": []},
+    }
+
+    # 1. Provider info
+    if embedding_provider:
+        results["provider"] = {
+            "name": embedding_provider.model_name,
+            "dimension": embedding_provider.dimension,
+            "type": type(embedding_provider).__name__,
+        }
+    else:
+        results["provider"] = None
+        results["dimension_check"]["pass"] = False
+        results["dimension_check"]["details"].append("No embedding provider configured")
+        return results
+
+    # 2. Dimension inventory
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            for table, column in RUNTIME_VECTOR_COLUMNS:
+                regclass = await conn.fetchval("SELECT to_regclass($1)", table)
+                if regclass is None:
+                    results["dimension_check"]["details"].append(
+                        {"table": table, "column": column, "status": "table_missing"}
+                    )
+                    continue
+                dim = await conn.fetchval("""
+                    SELECT atttypmod FROM pg_attribute
+                    WHERE attrelid = to_regclass($1)
+                    AND attname = $2 AND atttypmod > 0
+                """, table, column)
+                match = dim == embedding_provider.dimension if dim else None
+                if dim and not match:
+                    results["dimension_check"]["pass"] = False
+                results["dimension_check"]["details"].append({
+                    "table": table, "column": column,
+                    "db_dimension": dim, "provider_dimension": embedding_provider.dimension,
+                    "match": match,
+                })
+
+    # 3. Gold entity canaries — embed queries and check nearest neighbor
+    canary_queries = [
+        ("What is eelgrass?", "eelgrass"),
+        ("Which organizations restore habitat?", None),
+        ("What is commitment pooling?", "commitment"),
+    ]
+
+    try:
+        async with db_pool.acquire() as conn:
+            for query_text, expected_substr in canary_queries:
+                emb = await generate_query_embedding(query_text)
+                if not emb:
+                    results["canary_check"]["pass"] = False
+                    results["canary_check"]["details"].append({
+                        "query": query_text, "error": "embedding failed"
+                    })
+                    continue
+
+                top5 = await conn.fetch("""
+                    SELECT fuseki_uri, entity_text,
+                           1 - (embedding <=> $1::vector) AS similarity
+                    FROM entity_registry
+                    WHERE embedding IS NOT NULL AND NOT node_private
+                    ORDER BY embedding <=> $1::vector
+                    LIMIT 5
+                """, str(emb))
+
+                names = [r["entity_text"] for r in top5]
+                top_sim = float(top5[0]["similarity"]) if top5 else 0.0
+
+                found = True
+                if expected_substr:
+                    found = any(expected_substr.lower() in n.lower() for n in names)
+
+                if not found:
+                    results["canary_check"]["pass"] = False
+
+                results["canary_check"]["details"].append({
+                    "query": query_text,
+                    "top5": names,
+                    "top_similarity": round(top_sim, 4),
+                    "expected_found": found,
+                })
+    except Exception as e:
+        results["canary_check"]["pass"] = False
+        results["canary_check"]["details"].append({"error": str(e)})
+
+    results["overall_pass"] = (
+        results["dimension_check"]["pass"] and results["canary_check"]["pass"]
+    )
+    return results
 
 
 @app.get("/graph-version")
@@ -3805,7 +3950,7 @@ async def search_sessions(request: SearchSessionsRequest):
 
         if has_embeddings and embedding_provider and ENABLE_SEMANTIC_MATCHING:
             # Semantic search with embeddings
-            query_embedding = await generate_embedding(request.query)
+            query_embedding = await generate_query_embedding(request.query)
 
             if query_embedding:
                 if request.session_id:
@@ -5191,7 +5336,7 @@ async def chat_endpoint(request: ChatRequest):
     # ------------------------------------------------------------------
     # 1. Semantic search over entity embeddings to find relevant entities
     # ------------------------------------------------------------------
-    query_embedding = await generate_embedding(request.query)
+    query_embedding = await generate_query_embedding(request.query)
 
     # ── B9a Planner path (opt-in via planner=true) ──
     planner_requested = request.planner and request.retrieval_mode != "graphrag"
@@ -5244,7 +5389,7 @@ async def chat_endpoint(request: ChatRequest):
             async with db_pool.acquire() as conn:
                 evidence, traces = await _execute_plan(
                     plan, conn, query_embedding,
-                    generate_embedding_fn=generate_embedding,
+                    generate_embedding_fn=generate_query_embedding,
                     expand_queries_fn=_expand_queries,
                     rerank_fn=_rerank_chunks,
                     quartz_url_fn=quartz_url,
@@ -5326,7 +5471,7 @@ async def chat_endpoint(request: ChatRequest):
             multi_query=request.multi_query,
             include_code=request.include_code,
             top_k=8,
-            generate_embedding_fn=generate_embedding,
+            generate_embedding_fn=generate_query_embedding,
             expand_queries_fn=_expand_queries,
             rerank_fn=_rerank_chunks,
         )

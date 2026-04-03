@@ -1,8 +1,12 @@
 """
 Embedding provider abstraction.
 
-Supports OpenAI and Ollama backends with a factory that reads env vars.
-Voyage provider deferred to a future phase.
+Supports OpenAI, Ollama, sentence-transformers, and remote (poly) backends
+with a factory that reads env vars.
+
+Query/document split:
+  - embed() / embed_batch() = DOCUMENT mode (no instruction prefix)
+  - embed_query() = QUERY mode (with instruction prefix for retrieval)
 """
 
 import asyncio
@@ -22,15 +26,24 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     async def embed(self, text: str) -> List[float]:
-        """Generate embedding for a single text. Raises on failure."""
+        """Generate embedding for a single text (DOCUMENT mode). Raises on failure."""
+
+    async def embed_query(self, text: str) -> List[float]:
+        """Generate embedding for a query (QUERY mode — with instruction prefix).
+
+        Default: same as embed(). Subclasses override for instruction-aware models.
+        """
+        return await self.embed(text)
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts. Default: sequential."""
+        """Generate embeddings for multiple texts (DOCUMENT mode). Default: sequential."""
         return [await self.embed(t) for t in texts]
 
-    async def embed_or_none(self, text: str) -> Optional[List[float]]:
+    async def embed_or_none(self, text: str, is_query: bool = False) -> Optional[List[float]]:
         """Generate embedding, returning None on failure instead of raising."""
         try:
+            if is_query:
+                return await self.embed_query(text)
             return await self.embed(text)
         except Exception as e:
             logger.warning(f"Embedding failed ({self.model_name}): {e}")
@@ -125,7 +138,14 @@ class SentenceTransformerProvider(EmbeddingProvider):
         logger.info(f"SentenceTransformer loaded: {model} (dim={self.dimension}, query_prompt={self._has_query_prompt})")
 
     async def embed(self, text: str) -> List[float]:
-        """Embed a single text (query-time). Uses prompt_name='query' for instruction-aware models."""
+        """Embed a single text (DOCUMENT mode). No instruction prefix."""
+        embedding = await asyncio.to_thread(
+            self._model.encode, text, normalize_embeddings=True
+        )
+        return embedding.tolist()
+
+    async def embed_query(self, text: str) -> List[float]:
+        """Embed a query (QUERY mode). Uses prompt_name='query' for instruction-aware models."""
         kwargs = {"normalize_embeddings": True}
         if self._has_query_prompt:
             kwargs["prompt_name"] = "query"
@@ -135,11 +155,56 @@ class SentenceTransformerProvider(EmbeddingProvider):
         return embedding.tolist()
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple texts (document storage). No instruction prefix."""
+        """Embed multiple texts (DOCUMENT mode). No instruction prefix."""
         embeddings = await asyncio.to_thread(
             self._model.encode, texts, normalize_embeddings=True
         )
         return [e.tolist() for e in embeddings]
+
+
+class RemoteEmbeddingProvider(EmbeddingProvider):
+    """Remote embedding service (e.g. poly FastAPI). Query/document split handled server-side."""
+
+    def __init__(self, base_url: str, dimension: int = 1024,
+                 model: str = "Qwen/Qwen3-Embedding-0.6B"):
+        import httpx
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
+        )
+        self.model_name = model
+        self.dimension = dimension
+        self._base_url = base_url
+
+    async def _embed_texts(self, texts: List[str], is_query: bool) -> List[List[float]]:
+        """Call remote /embed endpoint with retry."""
+        payload = {"texts": texts, "is_query": is_query}
+        last_err = None
+        for attempt in range(2):
+            try:
+                resp = await self._client.post("/embed", json=payload)
+                resp.raise_for_status()
+                return resp.json()["embeddings"]
+            except Exception as e:
+                last_err = e
+                if attempt == 0:
+                    logger.warning(f"Remote embed attempt 1 failed ({e}), retrying...")
+                    await asyncio.sleep(0.5)
+        raise RuntimeError(f"Remote embedding failed after 2 attempts: {last_err}")
+
+    async def embed(self, text: str) -> List[float]:
+        """DOCUMENT mode — no instruction prefix."""
+        results = await self._embed_texts([text], is_query=False)
+        return results[0]
+
+    async def embed_query(self, text: str) -> List[float]:
+        """QUERY mode — with instruction prefix."""
+        results = await self._embed_texts([text], is_query=True)
+        return results[0]
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """DOCUMENT mode batch."""
+        return await self._embed_texts(texts, is_query=False)
 
 
 def create_embedding_provider() -> Optional[EmbeddingProvider]:
@@ -204,6 +269,19 @@ def create_embedding_provider() -> Optional[EmbeddingProvider]:
             dimension=dim,
         )
         logger.info(f"Embedding provider: st/{p.model_name} (dim={p.dimension})")
+        return p
+
+    if provider_name == "remote":
+        remote_url = os.getenv("EMBEDDING_REMOTE_URL", "")
+        if not remote_url:
+            logger.error("EMBEDDING_PROVIDER=remote but EMBEDDING_REMOTE_URL is not set")
+            raise SystemExit(1)
+        p = RemoteEmbeddingProvider(
+            base_url=remote_url,
+            dimension=dim or 1024,
+            model=model or "Qwen/Qwen3-Embedding-0.6B",
+        )
+        logger.info(f"Embedding provider: remote/{p.model_name} @ {remote_url} (dim={p.dimension})")
         return p
 
     logger.error(f"Unknown EMBEDDING_PROVIDER: {provider_name!r}")

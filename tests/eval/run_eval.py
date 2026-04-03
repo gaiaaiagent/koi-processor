@@ -1042,6 +1042,88 @@ def rescore_report(
 
 
 # ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+
+def run_preflight(base_url: str) -> bool:
+    """Run embedding preflight checks before a full eval.
+
+    Calls GET /diagnostics/embedding-preflight and validates:
+      1. Service health (provider configured)
+      2. Runtime column dimensions match provider
+      3. Gold entity canaries (ranking sanity)
+
+    Returns True if all checks pass.
+    """
+    print("\n" + "=" * 60)
+    print("EVAL PREFLIGHT CHECK")
+    print("=" * 60)
+
+    # Step 1: Service health
+    print("\n  [1/3] Service health...", end=" ", flush=True)
+    try:
+        resp = requests.get(f"{base_url}/health", timeout=10)
+        resp.raise_for_status()
+        health = resp.json()
+        if health.get("status") != "healthy":
+            print(f"FAIL — status: {health.get('status')}")
+            return False
+        if not health.get("embedding_available"):
+            print("FAIL — no embedding provider configured")
+            return False
+        print(f"OK ({health.get('embedding_model')}, dim={health.get('embedding_dimension')})")
+    except Exception as e:
+        print(f"FAIL — {e}")
+        return False
+
+    # Step 2+3: Diagnostic endpoint (dimensions + canaries)
+    print("  [2/3] Dimension check + [3/3] Canary check...", end=" ", flush=True)
+    try:
+        resp = requests.get(f"{base_url}/diagnostics/embedding-preflight", timeout=30)
+        resp.raise_for_status()
+        diag = resp.json()
+    except Exception as e:
+        print(f"FAIL — {e}")
+        return False
+
+    all_pass = True
+
+    # Dimensions
+    dim_check = diag.get("dimension_check", {})
+    if not dim_check.get("pass"):
+        all_pass = False
+
+    dim_details = dim_check.get("details", [])
+    dim_ok = sum(1 for d in dim_details if isinstance(d, dict) and d.get("match"))
+    dim_total = len([d for d in dim_details if isinstance(d, dict)])
+    print(f"\n    Dimensions: {dim_ok}/{dim_total} match", end="")
+    for d in dim_details:
+        if isinstance(d, dict) and not d.get("match") and d.get("db_dimension"):
+            print(f"\n      MISMATCH: {d['table']}.{d['column']} = {d['db_dimension']}, provider = {d['provider_dimension']}", end="")
+    print()
+
+    # Canaries
+    canary_check = diag.get("canary_check", {})
+    if not canary_check.get("pass"):
+        all_pass = False
+
+    canary_details = canary_check.get("details", [])
+    for c in canary_details:
+        if "error" in c:
+            print(f"    Canary ERROR: {c['error']}")
+        else:
+            status = "OK" if c.get("expected_found") else "MISS"
+            print(f"    Canary [{status}]: \"{c['query']}\" -> top5={c.get('top5', [])[:3]} (sim={c.get('top_similarity', 0):.3f})")
+
+    # Verdict
+    overall = diag.get("overall_pass", False)
+    print(f"\n  PREFLIGHT: {'PASS' if overall else 'FAIL'}")
+    print("=" * 60)
+
+    return overall
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1062,13 +1144,18 @@ if __name__ == "__main__":
                         help="Comma-separated metric names (e.g. --metrics context_relevancy). Default: all three")
     parser.add_argument("--rescore", metavar="REPORT_PATH", default=None,
                         help="Rescore a saved report with a different --eval-model (requires retrieval_context in source)")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Run embedding preflight checks (dimension, canary) and exit. No eval scoring.")
     args = parser.parse_args()
 
     # Parse comma-separated lists
     question_ids = [x.strip() for x in args.ids.split(",")] if args.ids else None
     metric_names = [x.strip() for x in args.metrics.split(",")] if args.metrics else None
 
-    if args.rescore:
+    if args.preflight:
+        ok = run_preflight(args.base_url)
+        sys.exit(0 if ok else 1)
+    elif args.rescore:
         rescore_report(args.rescore, eval_model=args.eval_model,
                        metric_names=metric_names, tag=args.tag)
     elif args.compare:
