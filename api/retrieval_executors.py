@@ -362,9 +362,6 @@ async def text_search(
     if doc_chunks and rerank_fn:
         doc_chunks = rerank_fn(query, doc_chunks, top_k=top_k)
 
-    # Page co-occurrence expansion (wiki only)
-    doc_chunks = await _expand_page_context(doc_chunks, conn)
-
     # Convert to EvidenceBundles
     bundles: list[EvidenceBundle] = []
     for d in doc_chunks:
