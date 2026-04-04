@@ -1414,6 +1414,18 @@ async def startup():
 
             if _caps.github_sensor:
                 try:
+                    from api.github_sensor import GitHubSensor
+                    gh_sensor = GitHubSensor(
+                        pool=db_pool,
+                        event_queue=getattr(app.state, 'event_queue', None),
+                    )
+                    gh_sensor._embed_fn = generate_document_embedding
+                    await gh_sensor.start()
+                    app.state.github_sensor = gh_sensor
+                    logger.info("GitHub sensor started")
+                except Exception as e:
+                    logger.warning(f"GitHub sensor not started: {e}")
+                try:
                     from api.routers.github_router import create_router as create_github_router
                     app.include_router(create_github_router(db_pool, _caps, app=app))
                     logger.info("GitHub router mounted")
@@ -5328,25 +5340,34 @@ _SYSTEM_PROMPT_EXPLAINER = (
     "- The Relevant Documents section is your primary evidence source — it often "
     "contains detailed answers not captured in entity summaries or relationship "
     "lists. Always synthesize from document text before concluding the context "
-    "is insufficient.\n"
-    "- If the provided context partially answers the question, answer the supported "
-    "part and clearly state what information is missing.\n"
-    "- If the provided context does not answer the question at all, say: "
-    '"The available context does not contain sufficient information to answer '
-    'this question."\n\n'
-    "FORMAT: Structure your answer using these sections:\n\n"
-    "## What It Is\n"
-    "A clear, concise definition or description (2-3 sentences).\n\n"
-    "## How It Works\n"
-    "Key mechanisms, processes, or relationships (3-5 bullet points). "
-    "Cite specific entities and relationships from the context.\n\n"
-    "## Why It Matters\n"
-    "Significance within the bioregional knowledge commons (2-3 sentences). "
-    "Connect to broader ecological or governance themes when supported by context.\n\n"
+    "is insufficient.\n\n"
+    "FORMAT: Produce a structured brief. Omit any section that cannot be "
+    "populated from the provided context.\n\n"
+    "## Bottom Line\n"
+    "2-4 sentences summarizing the best-supported answer. If the context "
+    "is insufficient to answer the question, state that here and omit the "
+    "Well-Supported Claims and Partial / Tentative Claims sections.\n\n"
+    "## Well-Supported Claims\n"
+    "List specific claims directly backed by the context. Each claim:\n"
+    "- **Claim:** one short, atomic statement\n"
+    "- **Evidence:** 1-3 cited sources, entities, or document passages\n"
+    "- **Support:** `well-supported`\n\n"
+    "## Partial / Tentative Claims\n"
+    "List claims the context suggests but cannot fully confirm. Each claim:\n"
+    "- **Claim:** tentative statement\n"
+    "- **Evidence:** available sources\n"
+    "- **Support:** `partially supported`\n"
+    "- **Missing:** what would be needed to strengthen this claim\n\n"
+    "## Open Questions\n"
+    "Explicit unknowns, ambiguities, or missing data the brief cannot resolve "
+    "from the current context.\n\n"
     "## Key Sources\n"
-    "List the most relevant sources cited above. "
-    "When referencing wiki sources, cite them as [Page > Section](url).\n\n"
-    "If any section cannot be populated from the provided context, omit that section entirely."
+    "Short list of the most relevant documents and entities cited above. "
+    "When referencing wiki sources, cite as [Page > Section](url).\n\n"
+    "Support label guide: `well-supported` = evidence is sufficient and specific; "
+    "`partially supported` = evidence points in the direction but leaves a gap. "
+    "If a statement has no contextual support, route it to Open Questions instead "
+    "of asserting it as a claim."
 )
 
 

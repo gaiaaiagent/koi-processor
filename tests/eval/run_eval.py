@@ -32,6 +32,7 @@ Usage:
   python3 tests/eval/run_eval.py --compare results/a.json results/b.json  # A/B comparison
   python3 tests/eval/run_eval.py --ids commitment_claim_1,commitment_claim_2 --metrics context_relevancy
   python3 tests/eval/run_eval.py --rescore results/report.json --eval-model gpt-4.1 --metrics context_relevancy
+  python3 tests/eval/run_eval.py --answer-mode explainer --ids relationship_5,multi_hop_1 --tag brief-subset  # structured brief eval
 
 Subset compare workflow (Phase 4/5):
   # Run default + planner with same judge, then compare:
@@ -157,6 +158,7 @@ def query_chat(
     question: str,
     multi_query: bool = False,
     planner: bool = False,
+    answer_mode: str = "default",
 ) -> dict:
     """Hit /chat endpoint and return response."""
     payload = {"query": question}
@@ -164,6 +166,8 @@ def query_chat(
         payload["multi_query"] = True
     if planner:
         payload["planner"] = True
+    if answer_mode != "default":
+        payload["answer_mode"] = answer_mode
     resp = requests.post(
         f"{base_url}/chat",
         json=payload,
@@ -397,12 +401,14 @@ def run_eval(
     eval_model: str = CANONICAL_EVAL_MODEL,
     question_ids: list[str] | None = None,
     metric_names: list[str] | None = None,
+    answer_mode: str = "default",
 ) -> dict:
     """Run evaluation against golden QA pairs with checkpoint/resume.
 
     Args:
         question_ids: If set, only run these question IDs (subset mode).
         metric_names: If set, only score these metrics (e.g. ["context_relevancy"]).
+        answer_mode: If set to 'explainer', passes answer_mode=explainer to /chat.
     """
     with open(GOLDEN_QA_PATH) as f:
         golden_qa = json.load(f)
@@ -505,7 +511,7 @@ def run_eval(
         else:
             try:
                 t0 = time.time()
-                chat_resp = query_chat(base_url, question, multi_query=multi_query, planner=planner)
+                chat_resp = query_chat(base_url, question, multi_query=multi_query, planner=planner, answer_mode=answer_mode)
                 latency = round(time.time() - t0, 2)
             except Exception as e:
                 print(f"ERROR: {e}")
@@ -519,7 +525,7 @@ def run_eval(
                 }
                 results.append(result)
                 # Checkpoint after each question
-                _save_incremental(report_path, results, golden_qa, tag, base_url, planner, multi_query, eval_model)
+                _save_incremental(report_path, results, golden_qa, tag, base_url, planner, multi_query, eval_model, answer_mode)
                 continue
 
         answer = chat_resp.get("answer", "")
@@ -592,7 +598,7 @@ def run_eval(
         print(f"{status} ({', '.join(score_parts)}) [{latency:.1f}s]")
 
         # Checkpoint after each question
-        _save_incremental(report_path, results, golden_qa, tag, base_url, planner, multi_query, eval_model)
+        _save_incremental(report_path, results, golden_qa, tag, base_url, planner, multi_query, eval_model, answer_mode)
 
     # Final aggregation and save
     summary, scored_ids = compute_aggregates(results)
@@ -604,6 +610,7 @@ def run_eval(
         "eval_model": eval_model,
         "planner_enabled": planner,
         "multi_query_enabled": multi_query,
+        "answer_mode": answer_mode,
         "scored_ids": scored_ids,
         "summary": summary,
         "results": results,
@@ -616,7 +623,7 @@ def run_eval(
     return report
 
 
-def _save_incremental(report_path, results, golden_qa, tag, base_url, planner, multi_query, eval_model=None):
+def _save_incremental(report_path, results, golden_qa, tag, base_url, planner, multi_query, eval_model=None, answer_mode="default"):
     """Save checkpoint after each question completion."""
     summary, scored_ids = compute_aggregates(results)
     report = {
@@ -626,6 +633,7 @@ def _save_incremental(report_path, results, golden_qa, tag, base_url, planner, m
         "eval_model": eval_model,
         "planner_enabled": planner,
         "multi_query_enabled": multi_query,
+        "answer_mode": answer_mode,
         "scored_ids": scored_ids,
         "summary": summary,
         "results": results,
@@ -1146,6 +1154,8 @@ if __name__ == "__main__":
                         help="Rescore a saved report with a different --eval-model (requires retrieval_context in source)")
     parser.add_argument("--preflight", action="store_true",
                         help="Run embedding preflight checks (dimension, canary) and exit. No eval scoring.")
+    parser.add_argument("--answer-mode", default="default", choices=["default", "explainer"],
+                        help="Answer mode to send to /chat (default: default; use 'explainer' for structured brief)")
     args = parser.parse_args()
 
     # Parse comma-separated lists
@@ -1164,4 +1174,4 @@ if __name__ == "__main__":
         run_eval(args.base_url, args.tag, multi_query=args.multi_query,
                  planner=args.planner, resume_path=args.resume,
                  eval_model=args.eval_model, question_ids=question_ids,
-                 metric_names=metric_names)
+                 metric_names=metric_names, answer_mode=args.answer_mode)
