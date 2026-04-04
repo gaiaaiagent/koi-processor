@@ -78,6 +78,15 @@ class OpenQuestion:
     context: str        # full text including context
 
 @dataclass
+class ReviewDirective:
+    """Explicit review claim parsed from ## Review Claims section."""
+    r_id: str                  # e.g. "R1"
+    target_doc: str            # primary target doc (first if "or")
+    concept: str               # explicit concept slug
+    statement: str             # claim text
+    supported_by: list         # list of C-IDs (e.g. ["C1", "C2"])
+
+@dataclass
 class BridgeNote:
     path: Path
     doc_id: str
@@ -90,6 +99,7 @@ class BridgeNote:
     relates_to: list
     claims: list        # list of BridgeClaim
     questions: list     # list of OpenQuestion
+    review_directives: list  # list of ReviewDirective (may be empty)
     project_key: str    # "spore" or "ic"
 
 
@@ -171,6 +181,77 @@ def parse_questions(text: str) -> list[OpenQuestion]:
     return questions
 
 
+def parse_review_directives(text: str) -> list[ReviewDirective]:
+    """Parse R-claim directives with explicit target + concept.
+
+    Searches both '## Review Claims' and '## Claim Register' sections,
+    since R-claims may appear alongside C-claims in the Claim Register.
+    """
+    # Try dedicated section first, then Claim Register, then full text
+    section = None
+    for header in [r'Review Claims', r'Claim Register']:
+        m = re.search(rf'## (?:\d+\.\s+)?{header}\s*\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
+        if m:
+            section = m.group(1)
+            # Check if this section actually contains R-claims
+            if re.search(r'\*\*R\d+\*\*\s+\[review claim\]', section):
+                break
+            section = None
+
+    if not section:
+        return []
+    directives = []
+
+    # Pattern: **R1** [review claim] [target: doc.id] [concept: slug]
+    # Statement text
+    # *R1 is supported by C1, C2, C3.*
+    pattern = re.compile(
+        r'\*\*(R\d+)\*\*\s+'
+        r'\[review claim\]\s+'
+        r'\[target:\s*([^\]]+)\]\s+'
+        r'\[concept:\s*([^\]]+)\]\s*\n'
+        r'(.*?)(?=\n\*\*R\d+\*\*|\Z)',
+        re.DOTALL
+    )
+
+    for match in pattern.finditer(section):
+        r_id = match.group(1)
+
+        # Parse target: "a or b" → primary is first, alternatives ignored
+        target_str = match.group(2).strip()
+        targets = [t.strip() for t in re.split(r'\s+or\s+', target_str)]
+        primary_target = targets[0]
+        if len(targets) > 1:
+            log.info(f"  {r_id}: target '{target_str}' → primary: {primary_target}")
+
+        concept = match.group(3).strip()
+
+        body = match.group(4).strip()
+
+        # Extract supported_by from italic line: *R1 is supported by C1, C2, C3.*
+        supported_by = []
+        sup_match = re.search(r'\*R\d+\s+is supported by\s+([^*]+)\*', body)
+        if sup_match:
+            sup_text = sup_match.group(1)
+            # Extract C-IDs, ignoring "Relates to..." suffix
+            sup_text = re.split(r'\.\s*Relates to', sup_text)[0]
+            supported_by = [c.strip().rstrip('.') for c in re.split(r',\s*', sup_text) if c.strip()]
+            # Remove the support line from statement
+            body = re.sub(r'\n?\*R\d+\s+is supported by[^*]*\*', '', body).strip()
+
+        statement = re.sub(r'\s+', ' ', body)
+
+        directives.append(ReviewDirective(
+            r_id=r_id,
+            target_doc=primary_target,
+            concept=concept,
+            statement=statement,
+            supported_by=supported_by,
+        ))
+
+    return directives
+
+
 def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
     """Parse a bridge note file into structured data."""
     text = path.read_text()
@@ -188,6 +269,7 @@ def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
         relates_to=fm.get("relates_to") or [],
         claims=parse_claims(text),
         questions=parse_questions(text),
+        review_directives=parse_review_directives(text),
         project_key=project_key,
     )
 
@@ -504,14 +586,21 @@ async def project_bridge_note(
     proposes_change = note.disposition != "no change"
     default_stance = "supports" if proposes_change else "opposes"
 
+    has_review_directives = len(note.review_directives) > 0
+
     log.info(f"\n{'='*60}")
     log.info(f"Projecting: {note.doc_id} ({len(note.claims)} claims, {len(note.questions)} questions)")
     log.info(f"  Disposition: {note.disposition} → stance: {default_stance}")
     log.info(f"  Concepts: {note.concepts}")
+    if has_review_directives:
+        log.info(f"  Review directives: {len(note.review_directives)} (authoritative)")
+    else:
+        log.info(f"  Review directives: none (using depends_on fallback)")
 
     if dry_run:
         log.info("  [DRY RUN] Would create entities and edges")
         stats["source_claims"] = len(note.claims)
+        stats["review_claims"] = len(note.review_directives) if has_review_directives else 0
         stats["questions"] = len(note.questions)
         stats["concepts"] = len(note.concepts)
         return stats
@@ -520,9 +609,12 @@ async def project_bridge_note(
     project_uri = await resolve_project_uri(conn, project_cfg["project_id"])
     log.info(f"  Project URI: {project_uri}")
 
-    # 2. Resolve/create all concept entities
+    # 2. Resolve/create all concept entities (frontmatter + R-claim concepts)
     concept_uris = {}
-    for concept_name in note.concepts:
+    all_concept_names = set(note.concepts)
+    for rd in note.review_directives:
+        all_concept_names.add(rd.concept)
+    for concept_name in all_concept_names:
         uri = await resolve_or_create_concept(conn, concept_name)
         concept_uris[concept_name] = uri
         stats["concepts"] += 1
@@ -530,22 +622,52 @@ async def project_bridge_note(
     # 3. Determine disposition slug
     disp_slug = DISPOSITION_SLUG.get(note.disposition, "unclassified")
 
-    # 4. Determine which canon docs are targets
-    all_refs = list(note.relates_to) + list(note.depends_on)
-    canon_targets = [
-        r for r in all_refs
+    # 4. Determine canon targets (Fix 3: depends_on only for fallback)
+    # Only used when note has no explicit review directives.
+    fallback_targets = [
+        r for r in note.depends_on
         if not r.startswith(note.doc_id)
         and ".connection." not in r
         and ".term." not in r
     ]
     seen = set()
-    canon_targets = [x for x in canon_targets if not (x in seen or seen.add(x))]
+    fallback_targets = [x for x in fallback_targets if not (x in seen or seen.add(x))]
 
-    # 5. Create source claims, then on-demand review claims + stance edges
-    # Review claims are created ONLY when a source claim actually needs one.
-    # Cache to avoid re-creating the same review claim per note.
+    # 5a. If note has review directives (Fix 1): create review claims from
+    # explicit R-claims only. Each R-claim has a deterministic (target, concept).
+    # Global dedup (Fix 2): always check for existing review claim first.
     review_claim_cache = {}  # (target, concept) → entity_uri
+    source_claim_uris = {}   # c_id → entity_uri (for supported_by linkage)
 
+    if has_review_directives:
+        for rd in note.review_directives:
+            cache_key = (rd.target_doc, rd.concept)
+            if cache_key not in review_claim_cache:
+                about_uri = concept_uris.get(rd.concept)
+                if not about_uri:
+                    log.warning(f"  Skipping {rd.r_id}: concept '{rd.concept}' not resolved")
+                    continue
+                # Fix 2: always check for existing review claim first
+                existing = await find_review_claim(conn, rd.target_doc, rd.concept)
+                if existing:
+                    review_claim_cache[cache_key] = existing
+                    log.info(f"  {rd.r_id}: reusing existing review claim ({rd.target_doc} × {rd.concept})")
+                elif proposes_change:
+                    review_data = await create_review_claim(
+                        client, conn,
+                        claimant_uri=claimant_uri,
+                        concept_name=rd.concept,
+                        about_uri=about_uri,
+                        target_spec_doc=rd.target_doc,
+                        disposition_slug=disp_slug,
+                        project_uri=project_uri,
+                        projection_batch=projection_batch,
+                    )
+                    if review_data and review_data.get("entity_uri"):
+                        review_claim_cache[cache_key] = review_data["entity_uri"]
+                        stats["review_claims"] += 1
+
+    # 5b. Create source claims + link to review claims
     for claim in note.claims:
         # Determine the primary concept for this claim
         primary_concept = note.concepts[0] if note.concepts else None
@@ -579,47 +701,62 @@ async def project_bridge_note(
 
         stats["source_claims"] += 1
         source_entity_uri = source_data["entity_uri"]
+        source_claim_uris[claim.c_id] = source_entity_uri
 
-        if not canon_targets or not primary_concept:
-            continue
+        if has_review_directives:
+            # Link source claims to review claims via supported_by from R-directives
+            for rd in note.review_directives:
+                if claim.c_id in rd.supported_by:
+                    review_uri = review_claim_cache.get((rd.target_doc, rd.concept))
+                    if review_uri:
+                        inserted = await insert_edge(
+                            conn, source_entity_uri, default_stance, review_uri,
+                            source_rid=f"projection:{note.doc_id}",
+                        )
+                        if inserted:
+                            if default_stance == "supports":
+                                stats["supports_edges"] += 1
+                            else:
+                                stats["opposes_edges"] += 1
+        else:
+            # Fallback (Fix 3): use depends_on targets only
+            if not fallback_targets or not primary_concept:
+                continue
 
-        # For each canon target, get-or-create a review claim for THIS concept only
-        for target in canon_targets:
-            cache_key = (target, primary_concept)
+            for target in fallback_targets:
+                cache_key = (target, primary_concept)
 
-            if cache_key not in review_claim_cache:
-                if proposes_change:
-                    # This note proposes changes → create the review claim
-                    review_data = await create_review_claim(
-                        client, conn,
-                        claimant_uri=claimant_uri,
-                        concept_name=primary_concept,
-                        about_uri=about_uri,
-                        target_spec_doc=target,
-                        disposition_slug=disp_slug,
-                        project_uri=project_uri,
-                        projection_batch=projection_batch,
-                    )
-                    if review_data and review_data.get("entity_uri"):
-                        review_claim_cache[cache_key] = review_data["entity_uri"]
-                        stats["review_claims"] += 1
-                else:
-                    # "no change" → find existing review claims for this concept+target
+                if cache_key not in review_claim_cache:
+                    # Fix 2: always check for existing review claim first
                     existing = await find_review_claim(conn, target, primary_concept)
                     if existing:
                         review_claim_cache[cache_key] = existing
+                    elif proposes_change:
+                        review_data = await create_review_claim(
+                            client, conn,
+                            claimant_uri=claimant_uri,
+                            concept_name=primary_concept,
+                            about_uri=about_uri,
+                            target_spec_doc=target,
+                            disposition_slug=disp_slug,
+                            project_uri=project_uri,
+                            projection_batch=projection_batch,
+                        )
+                        if review_data and review_data.get("entity_uri"):
+                            review_claim_cache[cache_key] = review_data["entity_uri"]
+                            stats["review_claims"] += 1
 
-            review_entity_uri = review_claim_cache.get(cache_key)
-            if review_entity_uri:
-                inserted = await insert_edge(
-                    conn, source_entity_uri, default_stance, review_entity_uri,
-                    source_rid=f"projection:{note.doc_id}",
-                )
-                if inserted:
-                    if default_stance == "supports":
-                        stats["supports_edges"] += 1
-                    else:
-                        stats["opposes_edges"] += 1
+                review_entity_uri = review_claim_cache.get(cache_key)
+                if review_entity_uri:
+                    inserted = await insert_edge(
+                        conn, source_entity_uri, default_stance, review_entity_uri,
+                        source_rid=f"projection:{note.doc_id}",
+                    )
+                    if inserted:
+                        if default_stance == "supports":
+                            stats["supports_edges"] += 1
+                        else:
+                            stats["opposes_edges"] += 1
 
     # 7. Create Question entities + about edges
     for q in note.questions:
