@@ -9,6 +9,7 @@ Usage:
   python scripts/convergence_export.py --ready             # synthesis-ready only
   python scripts/convergence_export.py --cluster <key>     # single cluster detail
   python scripts/convergence_export.py --all               # everything
+  python scripts/convergence_export.py --diff <base.json>  # delta vs baseline (--all output)
 """
 
 from __future__ import annotations
@@ -317,6 +318,82 @@ def build_full_export(conn) -> dict:
     return result
 
 
+def compute_diff(baseline: dict, current: dict) -> dict:
+    """Compute deltas between two --all exports."""
+    base_families = {f["concept_slug"]: f for f in baseline.get("field_families", [])}
+    curr_families = {f["concept_slug"]: f for f in current.get("field_families", [])}
+
+    base_slugs = set(base_families)
+    curr_slugs = set(curr_families)
+
+    new_families = sorted(curr_slugs - base_slugs)
+    removed_families = sorted(base_slugs - curr_slugs)
+
+    changed_families = []
+    for slug in sorted(base_slugs & curr_slugs):
+        bf = base_families[slug]
+        cf = curr_families[slug]
+        changes: dict = {}
+
+        if bf["governance_clusters"] != cf["governance_clusters"]:
+            changes["cluster_count"] = {"was": bf["governance_clusters"], "now": cf["governance_clusters"]}
+        if bf["total_supports"] != cf["total_supports"]:
+            changes["total_supports"] = {"was": bf["total_supports"], "now": cf["total_supports"]}
+        if bf["total_opposes"] != cf["total_opposes"]:
+            changes["total_opposes"] = {"was": bf["total_opposes"], "now": cf["total_opposes"]}
+        if bf["synthesis_readiness"] != cf["synthesis_readiness"]:
+            changes["synthesis_readiness"] = {"was": bf["synthesis_readiness"], "now": cf["synthesis_readiness"]}
+
+        # Cluster-level diff
+        base_clusters = {c["cluster_key"]: c for c in bf.get("clusters", [])}
+        curr_clusters = {c["cluster_key"]: c for c in cf.get("clusters", [])}
+        new_clusters = sorted(set(curr_clusters) - set(base_clusters))
+        removed_clusters = sorted(set(base_clusters) - set(curr_clusters))
+
+        cluster_changes = []
+        for ck in sorted(set(base_clusters) & set(curr_clusters)):
+            bc = base_clusters[ck]
+            cc = curr_clusters[ck]
+            cdelta: dict = {}
+            if bc["support_count"] != cc["support_count"]:
+                cdelta["support_count"] = {"was": bc["support_count"], "now": cc["support_count"]}
+            if bc["oppose_count"] != cc["oppose_count"]:
+                cdelta["oppose_count"] = {"was": bc["oppose_count"], "now": cc["oppose_count"]}
+            if cdelta:
+                cluster_changes.append({"cluster_key": ck, **cdelta})
+
+        if new_clusters or removed_clusters or cluster_changes:
+            changes["clusters"] = {}
+            if new_clusters:
+                changes["clusters"]["new"] = new_clusters
+            if removed_clusters:
+                changes["clusters"]["removed"] = removed_clusters
+            if cluster_changes:
+                changes["clusters"]["changed"] = cluster_changes
+
+        if changes:
+            changed_families.append({"concept_slug": slug, **changes})
+
+    base_summary = baseline.get("summary", {})
+    curr_summary = current.get("summary", {})
+    summary_delta = {}
+    for key in ("total_families", "total_clusters", "total_source_claims", "synthesis_ready", "cross_project"):
+        bv = base_summary.get(key, 0)
+        cv = curr_summary.get(key, 0)
+        if bv != cv:
+            summary_delta[key] = {"was": bv, "now": cv}
+
+    return {
+        "diff": {
+            "new_families": new_families,
+            "removed_families": removed_families,
+            "changed_families": changed_families,
+            "summary_delta": summary_delta,
+            "zero_deltas": not (new_families or removed_families or changed_families or summary_delta),
+        }
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export learning field convergence data as JSON.")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -324,8 +401,28 @@ def main() -> int:
     group.add_argument("--ready", action="store_true", help="Synthesis-ready families only")
     group.add_argument("--cluster", type=str, help="Single cluster detail by key")
     group.add_argument("--all", action="store_true", help="Full three-level export")
+    group.add_argument("--diff", type=str, metavar="BASELINE",
+                       help="Compare current state against a baseline JSON (must be from --all)")
 
     args = parser.parse_args()
+
+    if args.diff:
+        # Load and validate baseline
+        baseline_path = Path(args.diff)
+        if not baseline_path.exists():
+            print(json.dumps({"error": f"Baseline file not found: {args.diff}"}), file=sys.stderr)
+            return 1
+        try:
+            baseline = json.loads(baseline_path.read_text())
+        except json.JSONDecodeError as e:
+            print(json.dumps({"error": f"Invalid JSON in baseline: {e}"}), file=sys.stderr)
+            return 1
+        if "field_families" not in baseline or "summary" not in baseline:
+            print(json.dumps({
+                "error": "Baseline must be from --all (requires field_families and summary keys). "
+                         "--families output lacks cluster data needed for cluster-level deltas."
+            }), file=sys.stderr)
+            return 1
 
     try:
         conn = get_connection()
@@ -334,7 +431,10 @@ def main() -> int:
         return 1
 
     try:
-        if args.families:
+        if args.diff:
+            current = build_full_export(conn)
+            data = compute_diff(baseline, current)
+        elif args.families:
             data = {"field_families": query_families(conn)}
         elif args.ready:
             families = query_families(conn)
