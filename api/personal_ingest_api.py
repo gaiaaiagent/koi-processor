@@ -1415,7 +1415,7 @@ async def startup():
             if _caps.github_sensor:
                 try:
                     from api.routers.github_router import create_router as create_github_router
-                    app.include_router(create_github_router(db_pool, _caps))
+                    app.include_router(create_github_router(db_pool, _caps, app=app))
                     logger.info("GitHub router mounted")
                 except Exception as e:
                     logger.warning(f"GitHub router not mounted: {e}")

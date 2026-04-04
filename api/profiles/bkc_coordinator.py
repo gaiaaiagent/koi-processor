@@ -46,12 +46,16 @@ async def on_startup(app, pool, caps):
 
     if caps.github_sensor:
         try:
-            # TODO: Import and start the GitHub sensor background task
-            # from api.github_sensor import GitHubSensor
-            # sensor = GitHubSensor(pool=pool)
-            # await sensor.start()
-            # app.state.github_sensor = sensor
-            logger.info("GitHub sensor started (stub)")
+            from api.github_sensor import GitHubSensor
+            from api.personal_ingest_api import generate_document_embedding
+            sensor = GitHubSensor(
+                pool=pool,
+                event_queue=getattr(app.state, 'event_queue', None),
+            )
+            sensor._embed_fn = generate_document_embedding
+            await sensor.start()
+            app.state.github_sensor = sensor
+            logger.info("GitHub sensor started")
         except Exception:
             logger.exception("Failed to start GitHub sensor")
 

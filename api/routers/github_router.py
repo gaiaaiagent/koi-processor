@@ -78,7 +78,7 @@ class GitHubCodeQueryResponse(BaseModel):
 
 # -- Router factory ----------------------------------------------------------
 
-def create_router(pool, caps):
+def create_router(pool, caps, app=None):
     """Return an APIRouter for GitHub sensor endpoints.
 
     Only included when caps.github_sensor is True.
@@ -89,31 +89,35 @@ def create_router(pool, caps):
         Database connection pool.
     caps : Capabilities
         Runtime capabilities (github_sensor flag).
+    app : FastAPI, optional
+        Application instance for accessing app.state.github_sensor.
     """
     router = APIRouter(prefix="/github", tags=["github"])
 
-    @router.post("/scan", response_model=GitHubScanResponse)
+    def _get_sensor():
+        if app and hasattr(app.state, 'github_sensor'):
+            return app.state.github_sensor
+        return None
+
+    @router.post("/scan")
     async def github_scan(body: GitHubScanRequest):
         """Trigger a scan of monitored GitHub repositories.
 
         If repo_name is provided, only that repo is scanned; otherwise
-        all configured repos are scanned.  Uses github_sensor.trigger_scan().
+        all configured repos are scanned.
         """
-        # TODO: Wire to github_sensor.GitHubSensor.trigger_scan(body.repo_name)
-        # from api.github_sensor import GitHubSensor
-        raise HTTPException(
-            status_code=501,
-            detail="GitHub scan not yet wired to github_sensor module",
-        )
+        sensor = _get_sensor()
+        if not sensor:
+            raise HTTPException(status_code=503, detail="GitHub sensor not running")
+        result = await sensor.trigger_scan(repo_name=body.repo_name)
+        return result
 
-    @router.get("/status", response_model=GitHubStatusResponse)
+    @router.get("/status")
     async def github_status():
-        """Return GitHub sensor health and scan status.
-
-        Shows whether the sensor is active, how many repos are monitored,
-        and the timestamp of the last successful scan.
-        """
-        # TODO: Wire to github_sensor.GitHubSensor.get_status()
+        """Return GitHub sensor health and scan status."""
+        sensor = _get_sensor()
+        if sensor:
+            return await sensor.get_status()
         return GitHubStatusResponse(
             enabled=caps.github_sensor,
             scanning=False,
