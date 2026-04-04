@@ -652,9 +652,9 @@ class GitHubSensor:
                                 if embedding:
                                     embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
                                     await conn.execute("""
-                                        INSERT INTO koi_embeddings (memory_id, dim_1536)
+                                        INSERT INTO koi_embeddings (memory_id, dim_1024)
                                         VALUES ($1, $2::vector)
-                                        ON CONFLICT (memory_id) DO UPDATE SET dim_1536 = EXCLUDED.dim_1536
+                                        ON CONFLICT (memory_id) DO UPDATE SET dim_1024 = EXCLUDED.dim_1024
                                     """, memory_id, embedding_str)
                                     embed_count += 1
 
@@ -729,9 +729,9 @@ class GitHubSensor:
                                 if embedding:
                                     embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
                                     await conn.execute("""
-                                        INSERT INTO koi_embeddings (memory_id, dim_1536)
+                                        INSERT INTO koi_embeddings (memory_id, dim_1024)
                                         VALUES ($1, $2::vector)
-                                        ON CONFLICT (memory_id) DO UPDATE SET dim_1536 = EXCLUDED.dim_1536
+                                        ON CONFLICT (memory_id) DO UPDATE SET dim_1024 = EXCLUDED.dim_1024
                                     """, memory_id, embedding_str)
                                     embed_count += 1
 
@@ -744,9 +744,9 @@ class GitHubSensor:
                             if embedding:
                                 embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
                                 await conn.execute("""
-                                    INSERT INTO koi_embeddings (memory_id, dim_1536)
+                                    INSERT INTO koi_embeddings (memory_id, dim_1024)
                                     VALUES ($1, $2::vector)
-                                    ON CONFLICT (memory_id) DO UPDATE SET dim_1536 = EXCLUDED.dim_1536
+                                    ON CONFLICT (memory_id) DO UPDATE SET dim_1024 = EXCLUDED.dim_1024
                                 """, memory_id, embedding_str)
                                 embed_count += 1
 
@@ -894,7 +894,7 @@ class GitHubSensor:
             embed_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM koi_embeddings ke "
                 "JOIN koi_memories m ON m.id = ke.memory_id "
-                "WHERE m.source_sensor='github-sensor' AND ke.dim_1536 IS NOT NULL"
+                "WHERE m.source_sensor='github-sensor' AND ke.dim_1024 IS NOT NULL"
             )
             repos = await conn.fetch(
                 "SELECT repo_name, last_scan_at, last_commit_sha, file_count, code_entity_count, status "
