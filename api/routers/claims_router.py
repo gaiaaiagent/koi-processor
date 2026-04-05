@@ -19,6 +19,8 @@ Implements the Claims Engine API:
   POST /claims/{rid}/attestations/{att_rid}/reconcile — check on-chain status of attestation anchor
   POST /claims/claim-from-settlement — settlement→evidence→claim with threshold auto-advance
   GET  /claims/settlements — list TBFF settlement receipts with linked claim status
+  POST /claims/review-brief — build review packet from explainer brief_payload (Phase 2 — review v1)
+  POST /claims/promote-candidate — handle single candidate decision, optionally submit claim (Phase 2 — review v1)
 
 All verification transitions are recorded in claim_state_log (insert-only).
 Claims are first-class KOI entities with graph edges (makes_claim, about, evidences_claim).
@@ -267,6 +269,65 @@ class AttestationReconcileResponse(BaseModel):
     ledger_iri: Optional[str] = None
     attest_timestamp: Optional[str] = None
     message: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Brief → Claim Candidate Review models (Phase 2 — review workflow v1)
+# ---------------------------------------------------------------------------
+
+class BriefReviewRequest(BaseModel):
+    brief_payload: Dict[str, Any] = Field(
+        ..., description="brief_payload dict as returned by POST /chat with answer_mode=explainer"
+    )
+    reviewer_uri: str = Field(..., description="entity_registry.fuseki_uri of the reviewing steward")
+    source_query: Optional[str] = Field(None, description="Original user question for provenance (optional)")
+
+
+class ReviewCandidateItem(BaseModel):
+    candidate_id: str
+    statement: str
+    support: str  # "well-supported" | "partially supported"
+    evidence: List[Dict[str, Any]]
+    evidence_source_count: int
+    evidence_unresolved_count: int
+    missing: Optional[str]
+    claim_create_request_draft: Dict[str, Any]
+    required_before_submit: List[str]
+
+
+class BriefReviewResponse(BaseModel):
+    review_id: str
+    reviewer_uri: str
+    source_query: Optional[str]
+    bottom_line: str
+    open_questions: List[str]
+    parse_warnings: List[str]
+    candidates: List[ReviewCandidateItem]
+    candidate_count: int
+    well_supported_count: int
+
+
+class PromoteCandidateRequest(BaseModel):
+    brief_payload: Dict[str, Any] = Field(..., description="brief_payload dict from /chat response")
+    candidate_id: str = Field(..., description="e.g. 'C1' — matches brief_payload.claims[].id")
+    decision: str = Field(..., description="promote | reject | needs_more_info")
+    reviewer_uri: str = Field(..., description="entity_registry.fuseki_uri of the reviewer")
+    claimant_uri: Optional[str] = Field(None, description="Required when decision=promote and submit_now=True")
+    claim_type: str = Field("ecological", description="ecological | social | financial | governance | biocultural")
+    about_uri: Optional[str] = Field(None, description="Entity URI the claim is about")
+    notes: Optional[str] = Field(None, description="Reviewer notes stored in claim metadata")
+    submit_now: bool = Field(False, description="If True, immediately POST to /claims/ with reviewer-confirmed fields")
+
+
+class PromoteCandidateResponse(BaseModel):
+    candidate_id: str
+    decision: str
+    reviewer_uri: str
+    claim_create_request_draft: Optional[Dict[str, Any]] = None
+    evidence_to_attach: List[Dict[str, Any]] = Field(default_factory=list)
+    submitted: bool = False
+    claim_rid: Optional[str] = None
+    next_steps: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1569,6 +1630,227 @@ def create_router(pool, caps=None):
             receipt_persisted=receipt_persisted,
             is_new=is_new,
             settlement_summary=settlement_summary,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Brief → Claim Candidate Review (Phase 2 — review workflow v1)       #
+    # ------------------------------------------------------------------ #
+
+    @router.post("/review-brief", response_model=BriefReviewResponse)
+    async def review_brief(body: BriefReviewRequest):
+        """Build a structured review packet from an explainer brief_payload.
+
+        Accepts the brief_payload dict returned by POST /chat?answer_mode=explainer.
+        Returns a review packet with candidate claims, support labels, resolved
+        evidence, and pre-filled claim_create_request_draft for each candidate.
+
+        Required human inputs (claimant_uri, optionally about_uri) are listed in
+        required_before_submit for each candidate.
+
+        No persistence — pure transformation, safe to call repeatedly.
+        """
+        import uuid
+
+        payload = body.brief_payload
+        if "claims" not in payload:
+            raise HTTPException(
+                status_code=422,
+                detail="brief_payload must contain a 'claims' key. Was this produced by answer_mode=explainer?",
+            )
+
+        review_id = (
+            f"rev-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+            f"-{uuid.uuid4().hex[:8]}"
+        )
+
+        candidates: list = []
+        for claim in payload.get("claims", []):
+            evidence = claim.get("evidence", [])
+            source_count = sum(1 for e in evidence if e.get("uri"))
+            unresolved_count = sum(1 for e in evidence if not e.get("uri"))
+
+            draft: dict = {
+                "statement": claim.get("statement", ""),
+                "claim_type": "ecological",
+                "metadata": {
+                    "source": "brief_payload_v1",
+                    "brief_claim_id": claim.get("id", ""),
+                    "support": claim.get("support", ""),
+                    "review_id": review_id,
+                    "reviewer_uri": body.reviewer_uri,
+                },
+            }
+            if body.source_query:
+                draft["metadata"]["source_query"] = body.source_query
+
+            required = ["claimant_uri"]
+            if not claim.get("statement", "").strip():
+                required.append("statement (empty in brief — must be supplied manually)")
+
+            candidates.append(ReviewCandidateItem(
+                candidate_id=claim.get("id", "C?"),
+                statement=claim.get("statement", ""),
+                support=claim.get("support", "unknown"),
+                evidence=evidence,
+                evidence_source_count=source_count,
+                evidence_unresolved_count=unresolved_count,
+                missing=claim.get("missing"),
+                claim_create_request_draft=draft,
+                required_before_submit=required,
+            ))
+
+        well_supported = sum(1 for c in candidates if c.support == "well-supported")
+
+        return BriefReviewResponse(
+            review_id=review_id,
+            reviewer_uri=body.reviewer_uri,
+            source_query=body.source_query,
+            bottom_line=payload.get("bottom_line", ""),
+            open_questions=payload.get("open_questions", []),
+            parse_warnings=payload.get("parse_warnings", []),
+            candidates=candidates,
+            candidate_count=len(candidates),
+            well_supported_count=well_supported,
+        )
+
+    @router.post("/promote-candidate", response_model=PromoteCandidateResponse)
+    async def promote_candidate(body: PromoteCandidateRequest):
+        """Handle a single candidate review decision from a brief_payload.
+
+        Decisions:
+          - promote: builds a claim_create_request_draft with reviewer-supplied fields.
+            If submit_now=True, immediately calls POST /claims/ and returns claim_rid.
+            claimant_uri is required for promote (mandatory when submit_now=True).
+          - reject / needs_more_info: returns minimal response, no draft created.
+
+        Source-backed evidence items (uri resolved) are returned in evidence_to_attach
+        for follow-up via POST /claims/{rid}/evidence.
+
+        No silent submission — submit_now must be explicitly True.
+        """
+        _VALID_DECISIONS = {"promote", "reject", "needs_more_info"}
+        if body.decision not in _VALID_DECISIONS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"decision must be one of: {sorted(_VALID_DECISIONS)}",
+            )
+
+        claims = body.brief_payload.get("claims", [])
+        candidate = next((c for c in claims if c.get("id") == body.candidate_id), None)
+        if candidate is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Candidate '{body.candidate_id}' not found in brief_payload.claims",
+            )
+
+        if body.decision != "promote":
+            return PromoteCandidateResponse(
+                candidate_id=body.candidate_id,
+                decision=body.decision,
+                reviewer_uri=body.reviewer_uri,
+                claim_create_request_draft=None,
+                evidence_to_attach=[],
+                submitted=False,
+                claim_rid=None,
+                next_steps=[
+                    f"Candidate {body.candidate_id} marked '{body.decision}'. No claim created."
+                ],
+            )
+
+        # --- promote path ---
+        statement = candidate.get("statement", "").strip()
+        if not statement:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Candidate '{body.candidate_id}' has an empty statement — cannot promote",
+            )
+
+        if body.submit_now and not body.claimant_uri:
+            raise HTTPException(
+                status_code=422,
+                detail="claimant_uri is required when submit_now=True",
+            )
+
+        claim_type = body.claim_type.lower().strip()
+        if claim_type not in _VALID_CLAIM_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"claim_type must be one of: {sorted(_VALID_CLAIM_TYPES)}",
+            )
+
+        metadata: dict = {
+            "source": "brief_payload_v1",
+            "brief_claim_id": body.candidate_id,
+            "support": candidate.get("support", ""),
+            "reviewer_uri": body.reviewer_uri,
+        }
+        if body.notes:
+            metadata["reviewer_notes"] = body.notes
+
+        draft: dict = {
+            "statement": statement,
+            "claim_type": claim_type,
+            "metadata": metadata,
+        }
+        if body.claimant_uri:
+            draft["claimant_uri"] = body.claimant_uri
+        if body.about_uri:
+            draft["about_uri"] = body.about_uri
+
+        # Collect source-backed evidence with real URIs for follow-up linking
+        evidence_to_attach = [
+            e for e in candidate.get("evidence", [])
+            if e.get("uri") and e.get("kind") == "source"
+        ]
+
+        claim_rid = None
+        submitted = False
+        next_steps: list = []
+
+        if body.submit_now:
+            create_body = ClaimCreateRequest(
+                claimant_uri=body.claimant_uri,
+                statement=statement,
+                claim_type=claim_type,
+                about_uri=body.about_uri,
+                metadata=metadata,
+            )
+            try:
+                result = await create_claim(create_body)
+                claim_rid = result.claim_rid
+                submitted = True
+                if evidence_to_attach:
+                    next_steps.append(
+                        f"Claim {claim_rid} created. Attach {len(evidence_to_attach)} source-backed "
+                        f"evidence item(s) via POST /claims/{claim_rid}/evidence."
+                    )
+                else:
+                    next_steps.append(
+                        f"Claim {claim_rid} created. No source-backed evidence items to attach."
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"claim creation failed: {exc}") from exc
+        else:
+            next_steps.append(
+                "Review claim_create_request_draft, then POST /claims/ to create the claim."
+            )
+            if evidence_to_attach:
+                next_steps.append(
+                    f"After creating the claim, attach {len(evidence_to_attach)} source-backed "
+                    "evidence item(s) via POST /claims/{rid}/evidence."
+                )
+
+        return PromoteCandidateResponse(
+            candidate_id=body.candidate_id,
+            decision=body.decision,
+            reviewer_uri=body.reviewer_uri,
+            claim_create_request_draft=draft,
+            evidence_to_attach=evidence_to_attach,
+            submitted=submitted,
+            claim_rid=claim_rid,
+            next_steps=next_steps,
         )
 
     # ------------------------------------------------------------------ #
