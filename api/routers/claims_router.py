@@ -1726,8 +1726,10 @@ def create_router(pool, caps=None):
             claimant_uri is required for promote (mandatory when submit_now=True).
           - reject / needs_more_info: returns minimal response, no draft created.
 
-        Source-backed evidence items (uri resolved) are returned in evidence_to_attach
-        for follow-up via POST /claims/{rid}/evidence.
+        evidence_to_attach contains only real Evidence entities (entity_type=Evidence).
+        Document refs from brief evidence are not directly attachable — they appear in
+        next_steps with guidance to register an Evidence entity first, then link via
+        POST /claims/{rid}/evidence.
 
         No silent submission — submit_now must be explicitly True.
 
