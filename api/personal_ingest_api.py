@@ -5340,7 +5340,11 @@ _SYSTEM_PROMPT_EXPLAINER = (
     "- The Relevant Documents section is your primary evidence source — it often "
     "contains detailed answers not captured in entity summaries or relationship "
     "lists. Always synthesize from document text before concluding the context "
-    "is insufficient.\n\n"
+    "is insufficient.\n"
+    "- Context items are labeled with reference IDs: [S1], [S2], … for entities, "
+    "documents, and web sources; [R1], [R2], … for relationships; "
+    "[G1], [G2], … for graph-query results. "
+    "Use these IDs when citing evidence in claim blocks and Key Sources.\n\n"
     "FORMAT: Produce a structured brief. Omit any section that cannot be "
     "populated from the provided context.\n\n"
     "## Bottom Line\n"
@@ -5350,19 +5354,20 @@ _SYSTEM_PROMPT_EXPLAINER = (
     "## Well-Supported Claims\n"
     "List specific claims directly backed by the context. Each claim:\n"
     "- **Claim:** one short, atomic statement\n"
-    "- **Evidence:** 1-3 cited sources, entities, or document passages\n"
+    "- **Evidence:** cite reference IDs, e.g. `S1, S3` or `R2`\n"
     "- **Support:** `well-supported`\n\n"
     "## Partial / Tentative Claims\n"
     "List claims the context suggests but cannot fully confirm. Each claim:\n"
     "- **Claim:** tentative statement\n"
-    "- **Evidence:** available sources\n"
+    "- **Evidence:** cite reference IDs\n"
     "- **Support:** `partially supported`\n"
     "- **Missing:** what would be needed to strengthen this claim\n\n"
     "## Open Questions\n"
     "Explicit unknowns, ambiguities, or missing data the brief cannot resolve "
     "from the current context.\n\n"
     "## Key Sources\n"
-    "Short list of the most relevant documents and entities cited above. "
+    "List the most relevant sources using their reference IDs "
+    "(e.g. `- S1: [Page > Section](url)` or `- S2: EntityName`). "
     "When referencing wiki sources, cite as [Page > Section](url).\n\n"
     "Support label guide: `well-supported` = evidence is sufficient and specific; "
     "`partially supported` = evidence points in the direction but leaves a gap. "
@@ -5380,7 +5385,7 @@ class ChatRequest(BaseModel):
     multi_query: bool = Field(default=False, description="Enable multi-query expansion for broader retrieval (B8b)")
     planner: bool = Field(default=False, description="B9a QueryPlan IR path (experimental)")
     debug_prompt: bool = Field(default=False, description="Include assembled prompt in response (requires CHAT_DEBUG_PROMPT env)")
-    answer_mode: Literal["default", "explainer"] = Field(default="default", description="Answer format: 'default' for concise, 'explainer' for structured educational format")
+    answer_mode: Literal["default", "explainer"] = Field(default="default", description="Answer format: 'default' for concise, 'explainer' for structured brief format")
 
 
 @app.post("/chat")
@@ -5577,33 +5582,46 @@ async def chat_endpoint(request: ChatRequest):
     # ------------------------------------------------------------------
     # 3. Build LLM prompt with entity context
     # ------------------------------------------------------------------
-    entity_block = "\n".join(
-        f"- {s['label']} ({s['entity_type']})"
-        + (f": {s['description']}" if s.get('description') else "")
-        for s in sources
-        if s['entity_type'] not in ('Document', 'WebSource')
-    ) or "(no matching entities found)"
-
-    rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
-
-    doc_block = "\n".join(
-        f"- **{d['title']}**"
-        + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
-        + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
-        + (f" Context: {d['context']}." if d.get('context') else "")
-        + f": {d['text'][:1500]}"
-        for d in doc_chunks
-    ) if doc_chunks else ""
-
-    web_block = "\n".join(
-        f"- [{w['title']}]({w['url']}): {w['summary'][:500]}"
-        for w in web_sources
-    ) if web_sources else ""
+    ref_to_source: dict = {}
 
     if request.answer_mode == "explainer":
+        from api.brief_payload import (
+            assign_source_refs as _assign_source_refs,
+            assign_and_render_graph_query_refs as _assign_gq_refs,
+            render_entity_block as _render_entity_block,
+            render_doc_block as _render_doc_block,
+            render_web_block as _render_web_block,
+            render_rel_block as _render_rel_block,
+        )
+        ref_to_source = _assign_source_refs(sources, doc_chunks, web_sources, relationships_ctx)
+        entity_block = _render_entity_block(sources)
+        rel_block = _render_rel_block(relationships_ctx, ref_to_source)
+        doc_block = _render_doc_block(doc_chunks)
+        web_block = _render_web_block(web_sources)
+        if graph_query_block:
+            graph_query_block = _assign_gq_refs(graph_query_block, ref_to_source)
         system_prompt = _SYSTEM_PROMPT_EXPLAINER
         answer_max_tokens = 1536
     else:
+        entity_block = "\n".join(
+            f"- {s['label']} ({s['entity_type']})"
+            + (f": {s['description']}" if s.get('description') else "")
+            for s in sources
+            if s['entity_type'] not in ('Document', 'WebSource')
+        ) or "(no matching entities found)"
+        rel_block = "\n".join(f"- {r}" for r in relationships_ctx) or "(none)"
+        doc_block = "\n".join(
+            f"- **{d['title']}**"
+            + (f" (Section: {d['section_title']})" if d.get('section_title') else "")
+            + (f" [source]({d['wiki_url']})" if d.get('wiki_url') else "")
+            + (f" Context: {d['context']}." if d.get('context') else "")
+            + f": {d['text'][:1500]}"
+            for d in doc_chunks
+        ) if doc_chunks else ""
+        web_block = "\n".join(
+            f"- [{w['title']}]({w['url']}): {w['summary'][:500]}"
+            for w in web_sources
+        ) if web_sources else ""
         system_prompt = _SYSTEM_PROMPT_DEFAULT
         answer_max_tokens = 1024
 
@@ -5657,6 +5675,22 @@ async def chat_endpoint(request: ChatRequest):
     # Always emit plan_trace when planner was requested (including fallback)
     if planner_requested and plan_trace is not None:
         response["plan_trace"] = plan_trace
+    # Brief payload for explainer mode (additive — does not affect default mode)
+    if request.answer_mode == "explainer":
+        from api.brief_payload import parse_brief as _parse_brief
+        try:
+            brief_payload = _parse_brief(answer, ref_to_source)
+        except Exception as e:
+            logger.warning(f"Brief payload parsing failed: {e}")
+            brief_payload = {
+                "bottom_line": "",
+                "claims": [],
+                "open_questions": [],
+                "key_sources": [],
+                "parse_warnings": [f"Parser exception: {e}"],
+            }
+        response["brief_payload_version"] = "v1"
+        response["brief_payload"] = brief_payload
     # Debug prompt capture (double-gated: request flag + server env var)
     if request.debug_prompt and os.getenv("CHAT_DEBUG_PROMPT"):
         response["_debug_prompt"] = {

@@ -564,19 +564,35 @@ def run_eval(
             if k in active_metrics
         )
 
+        # Persist all sources for explainer mode (needed to validate S# ref resolution);
+        # cap at 20 for default mode to keep report sizes manageable.
+        _sources_to_persist = sources if answer_mode == "explainer" else sources[:20]
+        _chat_response = {
+            "answer": answer,
+            "sources_count": len(sources),
+            "sources": [
+                {
+                    "label": s.get("label", ""),
+                    "uri": s.get("uri", ""),
+                    "entity_type": s.get("entity_type", s.get("type", "")),
+                    "ref": s.get("ref"),
+                }
+                for s in _sources_to_persist
+            ],
+            "intent": chat_resp.get("intent"),
+            "retrieval_mode": chat_resp.get("retrieval_mode"),
+        }
+        if answer_mode == "explainer":
+            _chat_response["brief_payload_version"] = chat_resp.get("brief_payload_version")
+            _chat_response["brief_payload"] = chat_resp.get("brief_payload")
+
         result = {
             "id": qid,
             "category": raw_category,
             "normalized_category": norm_category,
             "question": question,
             "answer": answer[:500],
-            "chat_response": {
-                "answer": answer,
-                "sources_count": len(sources),
-                "sources": [{"label": s.get("label", ""), "uri": s.get("uri", ""), "type": s.get("type", "")} for s in sources[:20]],
-                "intent": chat_resp.get("intent"),
-                "retrieval_mode": chat_resp.get("retrieval_mode"),
-            },
+            "chat_response": _chat_response,
             "sources_count": len(sources),
             "retrieval_context_count": len(retrieval_context),
             "retrieval_context": retrieval_context,
