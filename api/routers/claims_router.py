@@ -1648,6 +1648,9 @@ def create_router(pool, caps=None):
         required_before_submit for each candidate.
 
         No persistence — pure transformation, safe to call repeatedly.
+
+        Security: this endpoint is KOI-local admin use only. Do not expose on a public
+        surface without capability gate checks.
         """
         import uuid
 
@@ -1727,6 +1730,12 @@ def create_router(pool, caps=None):
         for follow-up via POST /claims/{rid}/evidence.
 
         No silent submission — submit_now must be explicitly True.
+
+        When submit_now=True, reviewer_uri is validated against entity_registry and
+        threaded through as operator_uri + created_by on the created claim.
+
+        Security: this endpoint is KOI-local admin use only. Do not expose on a public
+        surface without capability gate checks.
         """
         _VALID_DECISIONS = {"promote", "reject", "needs_more_info"}
         if body.decision not in _VALID_DECISIONS:
@@ -1808,12 +1817,28 @@ def create_router(pool, caps=None):
         next_steps: list = []
 
         if body.submit_now:
+            # Validate reviewer_uri exists in entity_registry before writing anything
+            async with pool.acquire() as _conn:
+                reviewer_row = await _conn.fetchrow(
+                    "SELECT fuseki_uri FROM entity_registry WHERE fuseki_uri = $1",
+                    body.reviewer_uri,
+                )
+            if reviewer_row is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"reviewer_uri '{body.reviewer_uri}' not found in entity_registry. "
+                        "Resolve or register the reviewer entity before submitting."
+                    ),
+                )
             create_body = ClaimCreateRequest(
                 claimant_uri=body.claimant_uri,
                 statement=statement,
                 claim_type=claim_type,
                 about_uri=body.about_uri,
                 metadata=metadata,
+                operator_uri=body.reviewer_uri,
+                created_by=body.reviewer_uri,
             )
             try:
                 result = await create_claim(create_body)
