@@ -1806,10 +1806,18 @@ def create_router(pool, caps=None):
         if body.about_uri:
             draft["about_uri"] = body.about_uri
 
-        # Collect source-backed evidence with real URIs for follow-up linking
-        evidence_to_attach = [
+        # Collect evidence items, split by whether they are already Evidence entities.
+        # POST /claims/{rid}/evidence requires entity_type=Evidence — Document refs will be
+        # rejected with 422. entity_type is available from brief_payload without a DB lookup.
+        all_source_evidence = [
             e for e in candidate.get("evidence", [])
             if e.get("uri") and e.get("kind") == "source"
+        ]
+        evidence_to_attach = [
+            e for e in all_source_evidence if e.get("entity_type") == "Evidence"
+        ]
+        document_refs = [
+            e for e in all_source_evidence if e.get("entity_type") != "Evidence"
         ]
 
         claim_rid = None
@@ -1846,12 +1854,19 @@ def create_router(pool, caps=None):
                 submitted = True
                 if evidence_to_attach:
                     next_steps.append(
-                        f"Claim {claim_rid} created. Attach {len(evidence_to_attach)} source-backed "
-                        f"evidence item(s) via POST /claims/{claim_rid}/evidence."
+                        f"Claim {claim_rid} created. Attach {len(evidence_to_attach)} Evidence "
+                        f"entity URI(s) via POST /claims/{claim_rid}/evidence."
                     )
                 else:
                     next_steps.append(
-                        f"Claim {claim_rid} created. No source-backed evidence items to attach."
+                        f"Claim {claim_rid} created. No Evidence entities to attach."
+                    )
+                if document_refs:
+                    next_steps.append(
+                        f"{len(document_refs)} document reference(s) found in brief evidence "
+                        f"(entity_type=Document) — these cannot be attached directly. Register "
+                        f"an Evidence entity first via POST /claims/evidence-from-artifacts or "
+                        f"POST /register-entity, then link via POST /claims/{claim_rid}/evidence."
                     )
             except HTTPException:
                 raise
@@ -1863,8 +1878,15 @@ def create_router(pool, caps=None):
             )
             if evidence_to_attach:
                 next_steps.append(
-                    f"After creating the claim, attach {len(evidence_to_attach)} source-backed "
-                    "evidence item(s) via POST /claims/{rid}/evidence."
+                    f"After creating the claim, attach {len(evidence_to_attach)} Evidence "
+                    "entity URI(s) via POST /claims/{rid}/evidence."
+                )
+            if document_refs:
+                next_steps.append(
+                    f"{len(document_refs)} document reference(s) found in brief evidence "
+                    f"(entity_type=Document) — these cannot be attached directly. Register "
+                    "an Evidence entity first via POST /claims/evidence-from-artifacts or "
+                    "POST /register-entity, then link via POST /claims/{rid}/evidence."
                 )
 
         return PromoteCandidateResponse(
