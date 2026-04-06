@@ -43,6 +43,7 @@ Aligned with B9a QueryTaxonomy for direct router evaluation.
   "gold_evidence": [
     "Pacific herring (Clupea pallasii) are a forage fish species..."
   ],
+  "known_limit": false,
   "difficulty": "easy",
   "source_domain": "wiki",
   "notes": "Entity exists in Octo entity_registry. Wiki page imported."
@@ -59,6 +60,8 @@ Aligned with B9a QueryTaxonomy for direct router evaluation.
 | `expected_answer` | Yes | string | Gold standard answer, 1-3 sentences |
 | `expected_entities` | Yes | string[] | Entity names that MUST appear in retrieval context |
 | `gold_evidence` | No* | string[] | 1-3 verbatim/near-verbatim text snippets from chunks/entities |
+| `known_limit` | No | bool | If true, question still runs and appears in reports, but is excluded from canonical gate math |
+| `known_limit_reason` | No | string | Short explanation of why the question is currently outside normal corpus/gating scope |
 | `difficulty` | No* | string | `easy` \| `medium` \| `hard` |
 | `source_domain` | No* | string | `wiki` \| `doc` \| `entity` \| `commitment` \| `roadmap` \| `mixed` |
 | `notes` | No | string | Labeling context |
@@ -82,6 +85,7 @@ Aligned with B9a QueryTaxonomy for direct router evaluation.
 5. Questions should be phrased as a user would ask Octo, not as a test author.
 6. Avoid questions that test LLM general knowledge rather than retrieval quality.
 7. For `commitment_claim` and `roadmap_status`: questions should target data that actually exists in the backend, not aspirational features.
+8. Use `known_limit: true` only for explicit scope-policy or source-family limits that BKC has not chosen to include yet. These questions remain visible in reports but do not count toward canonical pass/fail gates.
 
 ## 6. Evidence Recall Metric
 
@@ -134,3 +138,15 @@ Old questions get `gold_evidence`, `difficulty`, `source_domain` backfilled incr
 5. **Difficulty distribution**: ~40% easy, ~40% medium, ~20% hard (± 5%).
 6. **Source domain distribution**: Matches corpus composition.
 7. **Eval runner updated**: `run_eval.py` supports category-level reporting, taxonomy_map, and evidence recall scoring.
+
+## 9. Known-Limit Questions
+
+Some questions may represent a real and interesting domain gap without being a fair canonical retrieval gate under the current corpus policy.
+
+When `known_limit: true` is present:
+
+- the question still runs
+- the result still appears in saved report JSON and printed output
+- the result is excluded from canonical gate math and matched A/B comparison sets
+
+Use this sparingly. It is for explicit scope/policy limits, not for ordinary hard questions.
