@@ -554,7 +554,7 @@ def create_router(
                                 "source": "entity",
                                 "type": row["entity_type"],
                                 "uri": row["fuseki_uri"],
-                                "metadata": {"text_match": True},
+                                "metadata": {"match_mode": "text"},
                             })
 
                     # Facts: ILIKE on fact_text (offset to rank below entities)
@@ -584,7 +584,7 @@ def create_router(
                                     "subject": row["subject_uri"],
                                     "predicate": row["predicate"],
                                     "object": row["object_uri"],
-                                    "text_match": True,
+                                    "match_mode": "text",
                                 },
                             })
 
@@ -614,7 +614,7 @@ def create_router(
                                     "score": 1.0 / (k + 40 + rank + 1),
                                     "source": "session",
                                     "session_id": row["session_id"],
-                                    "metadata": {"text_match": True},
+                                    "metadata": {"match_mode": "text"},
                                 })
 
             else:
@@ -703,6 +703,7 @@ def create_router(
             "query": query,
             "surfaces_queried": surfaces,
             "total_results": len(all_results),
+            "embedding_available": not degraded,
         }
         if degraded:
             response["degraded"] = True
