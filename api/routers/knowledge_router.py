@@ -500,106 +500,214 @@ def create_router(
             "entities,facts,sessions",
             description="Comma-separated surfaces to query"),
     ):
-        if not _query_embed:
-            raise HTTPException(
-                status_code=503,
-                detail="Embedding provider not configured")
-
-        query_embedding = await _query_embed(query)
-        if not query_embedding:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to generate query embedding")
-
         surfaces = [s.strip() for s in include.split(",")]
-        emb_str = str(query_embedding)
         k = 60  # RRF constant
+
+        # ── Attempt embedding; degrade gracefully on any failure ──────
+        degraded = False
+        degraded_reason: Optional[str] = None
+        query_embedding: Optional[List[float]] = None
+
+        if not _query_embed:
+            degraded = True
+            degraded_reason = "embedding_unavailable"
+            logger.warning(
+                "unified-search degraded: no embedding provider configured")
+        else:
+            try:
+                query_embedding = await _query_embed(query)
+                if not query_embedding:
+                    degraded = True
+                    degraded_reason = "embedding_failed"
+                    logger.warning(
+                        "unified-search degraded: embedding returned None")
+            except Exception as exc:
+                degraded = True
+                degraded_reason = "embedding_failed"
+                logger.warning(
+                    "unified-search degraded: embedding raised %s", exc)
+
         all_results: list[dict] = []
 
         async with pool.acquire() as conn:
-            # --- Entities (vector similarity, exclude private) ---
-            if "entities" in surfaces:
-                rows = await conn.fetch("""
-                    SELECT fuseki_uri, entity_text, entity_type,
-                           1 - (embedding <=> $1::vector) AS score
-                    FROM entity_registry
-                    WHERE embedding IS NOT NULL AND NOT node_private
-                    ORDER BY embedding <=> $1::vector
-                    LIMIT 20
-                """, emb_str)
-                for rank, row in enumerate(rows):
-                    all_results.append({
-                        "text": row["entity_text"],
-                        "score": 1.0 / (k + rank + 1),
-                        "source": "entity",
-                        "type": row["entity_type"],
-                        "uri": row["fuseki_uri"],
-                        "metadata": {"vector_score": float(row["score"])},
-                    })
+            if degraded:
+                # ── Text-first fallback (no vectors) ─────────────────
+                words = [w for w in query.lower().split() if len(w) >= 3]
+                if words:
+                    # Entities: ILIKE on normalized_text (prefer shorter names)
+                    if "entities" in surfaces:
+                        conditions = " OR ".join(
+                            f"normalized_text ILIKE ${i + 1}"
+                            for i in range(len(words)))
+                        e_params: list = [f"%{w}%" for w in words] + [20]
+                        rows = await conn.fetch(f"""
+                            SELECT fuseki_uri, entity_text, entity_type
+                            FROM entity_registry
+                            WHERE ({conditions}) AND NOT node_private
+                            ORDER BY LENGTH(entity_text)
+                            LIMIT ${len(words) + 1}
+                        """, *e_params)
+                        for rank, row in enumerate(rows):
+                            all_results.append({
+                                "text": row["entity_text"],
+                                "score": 1.0 / (k + rank + 1),
+                                "source": "entity",
+                                "type": row["entity_type"],
+                                "uri": row["fuseki_uri"],
+                                "metadata": {"text_match": True},
+                            })
 
-            # --- Facts (vector similarity, joined with episodes) ---
-            if "facts" in surfaces:
-                rows = await conn.fetch("""
-                    SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
-                           f.fact_text, e.name AS episode_name,
-                           1 - (f.fact_embedding <=> $1::vector) AS score
-                    FROM knowledge_facts f
-                    LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
-                    WHERE f.valid_to IS NULL
-                      AND f.fact_embedding IS NOT NULL
-                    ORDER BY f.fact_embedding <=> $1::vector
-                    LIMIT 20
-                """, emb_str)
-                for rank, row in enumerate(rows):
-                    all_results.append({
-                        "text": row["fact_text"],
-                        "score": 1.0 / (k + rank + 1),
-                        "source": "fact",
-                        "episode": row["episode_name"],
-                        "metadata": {
-                            "subject": row["subject_uri"],
-                            "predicate": row["predicate"],
-                            "object": row["object_uri"],
-                            "vector_score": float(row["score"]),
-                        },
-                    })
+                    # Facts: ILIKE on fact_text (offset to rank below entities)
+                    if "facts" in surfaces:
+                        conditions = " OR ".join(
+                            f"fact_text ILIKE ${i + 1}"
+                            for i in range(len(words)))
+                        f_params: list = [f"%{w}%" for w in words] + [20]
+                        rows = await conn.fetch(f"""
+                            SELECT f.id, f.subject_uri, f.predicate,
+                                   f.object_uri, f.fact_text,
+                                   e.name AS episode_name
+                            FROM knowledge_facts f
+                            LEFT JOIN knowledge_episodes e
+                                   ON f.episode_id = e.id
+                            WHERE ({conditions}) AND f.valid_to IS NULL
+                            ORDER BY f.created_at DESC
+                            LIMIT ${len(words) + 1}
+                        """, *f_params)
+                        for rank, row in enumerate(rows):
+                            all_results.append({
+                                "text": row["fact_text"],
+                                "score": 1.0 / (k + 20 + rank + 1),
+                                "source": "fact",
+                                "episode": row["episode_name"],
+                                "metadata": {
+                                    "subject": row["subject_uri"],
+                                    "predicate": row["predicate"],
+                                    "object": row["object_uri"],
+                                    "text_match": True,
+                                },
+                            })
 
-            # --- Sessions (vector similarity on chunk_text) ---
-            if "sessions" in surfaces:
-                table_exists = await conn.fetchval("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables
-                        WHERE table_name = 'session_chunks'
-                    )
-                """)
-                if table_exists:
+                    # Sessions: ILIKE on chunk_text (lowest priority)
+                    if "sessions" in surfaces:
+                        table_exists = await conn.fetchval("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_name = 'session_chunks'
+                            )
+                        """)
+                        if table_exists:
+                            conditions = " OR ".join(
+                                f"chunk_text ILIKE ${i + 1}"
+                                for i in range(len(words)))
+                            s_params: list = [f"%{w}%" for w in words] + [20]
+                            rows = await conn.fetch(f"""
+                                SELECT sc.id, sc.session_id, sc.chunk_text
+                                FROM session_chunks sc
+                                WHERE ({conditions})
+                                ORDER BY sc.created_at DESC
+                                LIMIT ${len(words) + 1}
+                            """, *s_params)
+                            for rank, row in enumerate(rows):
+                                all_results.append({
+                                    "text": row["chunk_text"][:500],
+                                    "score": 1.0 / (k + 40 + rank + 1),
+                                    "source": "session",
+                                    "session_id": row["session_id"],
+                                    "metadata": {"text_match": True},
+                                })
+
+            else:
+                # ── Normal semantic RRF mode ──────────────────────────
+                emb_str = str(query_embedding)
+
+                # Entities (vector similarity, exclude private)
+                if "entities" in surfaces:
                     rows = await conn.fetch("""
-                        SELECT sc.id, sc.session_id, sc.chunk_text,
-                               1 - (sc.embedding <=> $1::vector) AS score
-                        FROM session_chunks sc
-                        WHERE sc.embedding IS NOT NULL
-                        ORDER BY sc.embedding <=> $1::vector
+                        SELECT fuseki_uri, entity_text, entity_type,
+                               1 - (embedding <=> $1::vector) AS score
+                        FROM entity_registry
+                        WHERE embedding IS NOT NULL AND NOT node_private
+                        ORDER BY embedding <=> $1::vector
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):
                         all_results.append({
-                            "text": row["chunk_text"][:500],
+                            "text": row["entity_text"],
                             "score": 1.0 / (k + rank + 1),
-                            "source": "session",
-                            "session_id": row["session_id"],
+                            "source": "entity",
+                            "type": row["entity_type"],
+                            "uri": row["fuseki_uri"],
                             "metadata": {"vector_score": float(row["score"])},
                         })
+
+                # Facts (vector similarity, joined with episodes)
+                if "facts" in surfaces:
+                    rows = await conn.fetch("""
+                        SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
+                               f.fact_text, e.name AS episode_name,
+                               1 - (f.fact_embedding <=> $1::vector) AS score
+                        FROM knowledge_facts f
+                        LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
+                        WHERE f.valid_to IS NULL
+                          AND f.fact_embedding IS NOT NULL
+                        ORDER BY f.fact_embedding <=> $1::vector
+                        LIMIT 20
+                    """, emb_str)
+                    for rank, row in enumerate(rows):
+                        all_results.append({
+                            "text": row["fact_text"],
+                            "score": 1.0 / (k + rank + 1),
+                            "source": "fact",
+                            "episode": row["episode_name"],
+                            "metadata": {
+                                "subject": row["subject_uri"],
+                                "predicate": row["predicate"],
+                                "object": row["object_uri"],
+                                "vector_score": float(row["score"]),
+                            },
+                        })
+
+                # Sessions (vector similarity on chunk_text)
+                if "sessions" in surfaces:
+                    table_exists = await conn.fetchval("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = 'session_chunks'
+                        )
+                    """)
+                    if table_exists:
+                        rows = await conn.fetch("""
+                            SELECT sc.id, sc.session_id, sc.chunk_text,
+                                   1 - (sc.embedding <=> $1::vector) AS score
+                            FROM session_chunks sc
+                            WHERE sc.embedding IS NOT NULL
+                            ORDER BY sc.embedding <=> $1::vector
+                            LIMIT 20
+                        """, emb_str)
+                        for rank, row in enumerate(rows):
+                            all_results.append({
+                                "text": row["chunk_text"][:500],
+                                "score": 1.0 / (k + rank + 1),
+                                "source": "session",
+                                "session_id": row["session_id"],
+                                "metadata": {"vector_score": float(row["score"])},
+                            })
 
         # Sort by RRF score descending, take top N
         all_results.sort(key=lambda x: x["score"], reverse=True)
         all_results = all_results[:limit]
 
-        return {
+        response: dict = {
             "results": all_results,
             "query": query,
             "surfaces_queried": surfaces,
             "total_results": len(all_results),
         }
+        if degraded:
+            response["degraded"] = True
+            response["degraded_reason"] = degraded_reason
+        return response
 
     # -------------------------------------------------------------------
     # Shared helper
