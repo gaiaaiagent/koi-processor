@@ -245,9 +245,18 @@ def check_resume_model_integrity(checkpoint: dict, eval_model: str) -> str | Non
 # ---------------------------------------------------------------------------
 
 def compute_aggregates(results: list[dict], golden_qa: list[dict] | None = None) -> dict:
-    """Compute summary aggregates from a list of result dicts."""
+    """Compute summary aggregates from a list of result dicts.
+
+    known_limit questions are still included in results (for visibility) but
+    are excluded from all canonical gate calculations (totals, categories,
+    pass/fail, planner telemetry).
+    """
     def avg(lst):
         return round(sum(lst) / len(lst), 4) if lst else None
+
+    # Partition: known-limit questions run + appear in reports but don't affect gate math.
+    known_limit_results = [r for r in results if r.get("known_limit")]
+    canonical_results = [r for r in results if not r.get("known_limit")]
 
     totals = {"faithfulness": [], "answer_relevancy": [], "context_relevancy": []}
     evidence_recalls = []
@@ -255,7 +264,7 @@ def compute_aggregates(results: list[dict], golden_qa: list[dict] | None = None)
                                        "context_relevancy": [], "passed": 0, "total": 0})
     planner_traces = []
 
-    for r in results:
+    for r in canonical_results:
         norm_category = r.get("normalized_category", "unknown")
         scores = r.get("scores", {})
         cat_totals[norm_category]["total"] += 1
@@ -277,7 +286,7 @@ def compute_aggregates(results: list[dict], golden_qa: list[dict] | None = None)
         if pt is not None:
             planner_traces.append(pt)
 
-    scored_ids = [r["id"] for r in results if r.get("scores", {}).get("context_relevancy") is not None]
+    scored_ids = [r["id"] for r in canonical_results if r.get("scores", {}).get("context_relevancy") is not None]
 
     categories = {}
     for cat, data in sorted(cat_totals.items()):
@@ -320,12 +329,12 @@ def compute_aggregates(results: list[dict], golden_qa: list[dict] | None = None)
             "ood_abstention_accuracy": round(ood_abstained / ood_total, 4) if ood_total else None,
         }
 
-    total_questions = len(results)
+    total_questions = len(canonical_results)
     summary = {
         "total": total_questions,
-        "passed": sum(1 for r in results if r.get("passed")),
-        "failed": sum(1 for r in results if not r.get("passed")),
-        "errors": sum(1 for r in results if r.get("error")),
+        "passed": sum(1 for r in canonical_results if r.get("passed")),
+        "failed": sum(1 for r in canonical_results if not r.get("passed")),
+        "errors": sum(1 for r in canonical_results if r.get("error")),
         "scored_count": len(scored_ids),
         "avg_scores": {k: avg(v) for k, v in totals.items()},
         "avg_evidence_recall": avg(evidence_recalls) if evidence_recalls else None,
@@ -335,6 +344,9 @@ def compute_aggregates(results: list[dict], golden_qa: list[dict] | None = None)
     }
     if planner_summary:
         summary["planner"] = planner_summary
+    if known_limit_results:
+        summary["known_limit_total"] = len(known_limit_results)
+        summary["known_limit_ids"] = [r["id"] for r in known_limit_results]
 
     return summary, scored_ids
 
@@ -353,6 +365,9 @@ def print_summary(summary: dict, tag: str = "", report_path: Path | None = None)
     print(f"  Passed:  {summary['passed']}")
     print(f"  Failed:  {summary['failed']}")
     print(f"  Errors:  {summary['errors']}")
+    if summary.get("known_limit_total", 0) > 0:
+        kl_ids = ", ".join(summary.get("known_limit_ids", []))
+        print(f"  Known-limit (excluded from gate): {summary['known_limit_total']} ({kl_ids})")
     print(f"  Avg faithfulness:       {summary['avg_scores']['faithfulness']}")
     print(f"  Avg answer_relevancy:   {summary['avg_scores']['answer_relevancy']}")
     print(f"  Avg context_relevancy:  {summary['avg_scores']['context_relevancy']}")
@@ -522,6 +537,7 @@ def run_eval(
                     "question": question,
                     "error": str(e),
                     "passed": False,
+                    "known_limit": qa.get("known_limit", False),
                 }
                 results.append(result)
                 # Checkpoint after each question
@@ -599,6 +615,7 @@ def run_eval(
             "latency_s": latency,
             "scores": scores,
             "passed": passed,
+            "known_limit": qa.get("known_limit", False),
         }
 
         if plan_trace is not None:
@@ -723,10 +740,22 @@ def compare_reports(path_a: str, path_b: str):
     baseline_label = ori["baseline_label"]
     candidate_label = ori["candidate_label"]
 
-    # Find intersection of scored questions (both have CR scores)
-    scored_base = {rid for rid, r in baseline_results.items() if r.get("scores", {}).get("context_relevancy") is not None}
-    scored_cand = {rid for rid, r in candidate_results.items() if r.get("scores", {}).get("context_relevancy") is not None}
+    # Find intersection of scored questions (both have CR scores).
+    # known_limit questions are excluded from the gate intersection — they still
+    # appear in each report's results list but don't affect gate pass/fail.
+    scored_base = {rid for rid, r in baseline_results.items()
+                   if r.get("scores", {}).get("context_relevancy") is not None
+                   and not r.get("known_limit")}
+    scored_cand = {rid for rid, r in candidate_results.items()
+                   if r.get("scores", {}).get("context_relevancy") is not None
+                   and not r.get("known_limit")}
     matched_ids = sorted(scored_base & scored_cand)
+
+    # Report known-limit exclusions for transparency
+    known_limit_ids = sorted({rid for rid, r in baseline_results.items() if r.get("known_limit")}
+                              | {rid for rid, r in candidate_results.items() if r.get("known_limit")})
+    if known_limit_ids:
+        print(f"  Known-limit (excluded from gate): {known_limit_ids}")
 
     print("\n" + "=" * 80)
     print(f"A/B COMPARISON: {baseline_label} vs {candidate_label}")

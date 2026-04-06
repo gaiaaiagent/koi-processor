@@ -366,7 +366,9 @@
     "expected_answer": "Reef nets are a traditional Indigenous fishing technology used by Coast Salish peoples in the Salish Sea. They represent an example of traditional ecological knowledge that informs contemporary approaches to sustainable fisheries management.",
     "expected_entities": ["Reef Nets", "Salish Sea"],
     "difficulty": "hard",
-    "source_domain": "wiki"
+    "source_domain": "wiki",
+    "known_limit": true,
+    "known_limit_reason": "requires source family not currently included in BKC corpus policy"
   },
   {
     "id": "multi_hop_4",
@@ -443,7 +445,9 @@
     "expected_entities": ["Reef Nets", "Coast Salish"],
     "gold_evidence": ["Reef nets are a traditional Indigenous fishing technology used by Coast Salish peoples that demonstrates deep ecological knowledge of salmon migration patterns and tidal dynamics"],
     "difficulty": "hard",
-    "source_domain": "wiki"
+    "source_domain": "wiki",
+    "known_limit": true,
+    "known_limit_reason": "requires source family not currently included in BKC corpus policy"
   },
   {
     "id": "multi_hop_12",
@@ -473,7 +477,9 @@
     "expected_entities": ["Coast Salish"],
     "gold_evidence": ["Clam gardens are ancient Indigenous mariculture features built by modifying intertidal areas to enhance clam production, demonstrating sophisticated ecological management by Coast Salish peoples"],
     "difficulty": "medium",
-    "source_domain": "wiki"
+    "source_domain": "wiki",
+    "known_limit": true,
+    "known_limit_reason": "requires source family not currently included in BKC corpus policy"
   },
   {
     "id": "multi_hop_15",
