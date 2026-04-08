@@ -92,6 +92,11 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
 
         # 2a. Stale facts (valid_to IS NULL, created > stale_days ago, no recent episode)
         stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
+        stale_total = await conn.fetchval("""
+            SELECT COUNT(*) FROM knowledge_facts
+            WHERE valid_to IS NULL AND created_at < $1
+        """, stale_cutoff)
+        results["stale_facts_count"] = stale_total or 0
         stale_rows = await conn.fetch("""
             SELECT f.id, f.fact_text, f.created_at, e.name AS episode_name
             FROM knowledge_facts f
@@ -102,7 +107,6 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
             LIMIT 20
         """, stale_cutoff)
         results["stale_facts"] = [dict(r) for r in stale_rows]
-        results["stale_facts_count"] = len(stale_rows)
 
         # Get total fact count for context
         total_facts = await conn.fetchval(
@@ -150,8 +154,8 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
             WHERE m.source_sensor = 'doc-scanner'
         """ + (" AND m.metadata->>'repo' = $1" if repo_filter else ""),
         *([repo_filter] if repo_filter else []))
-        results["total_chunks"] = chunk_stats["total_chunks"] if chunk_stats else 0
-        results["missing_embeddings"] = chunk_stats["missing_embeddings"] if chunk_stats else 0
+        results["total_chunks"] = (chunk_stats["total_chunks"] or 0) if chunk_stats else 0
+        results["missing_embeddings"] = (chunk_stats["missing_embeddings"] or 0) if chunk_stats else 0
 
         # 3b. Docs indexed (for comparing to known doc count)
         repos_scanned = await conn.fetch("""
@@ -205,8 +209,11 @@ def render_report(results: dict, stale_days: int) -> str:
 
     # Repos scanned
     lines += ["## Repos Scanned", ""]
-    for r in results["repos_scanned"]:
-        lines.append(f"- **{r['repo']}**: {r['doc_count']} governed docs indexed")
+    if results["repos_scanned"]:
+        for r in results["repos_scanned"]:
+            lines.append(f"- **{r['repo']}**: {r['doc_count']} governed docs indexed")
+    else:
+        lines.append("_No repos indexed yet. Run doc_scanner.py to index governed docs._")
     lines.append("")
 
     # Missing depends_on

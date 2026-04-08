@@ -65,9 +65,9 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
         return {}, content
 
     try:
-        end = content.index("\n---", 3)
+        end = content.index("\n---\n", 3)
         raw_yaml = content[3:end].strip()
-        body = content[end + 4:].strip()
+        body = content[end + 5:].strip()
         data = yaml.safe_load(raw_yaml) or {}
         if not isinstance(data, dict):
             return {}, content
@@ -122,8 +122,9 @@ async def upsert_doc(
     }
     # Capture governed doc fields
     for field in ("doc_id", "doc_kind", "status", "visibility"):
-        if field in frontmatter:
-            doc_metadata[field] = frontmatter[field]
+        val = frontmatter.get(field)
+        if val:  # skip empty strings and None
+            doc_metadata[field] = val
     if "depends_on" in frontmatter:
         deps = frontmatter["depends_on"]
         doc_metadata["depends_on"] = deps if isinstance(deps, list) else [deps]
