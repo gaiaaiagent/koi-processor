@@ -8,6 +8,7 @@ Routes are prefix-relative — prefix "/knowledge" is applied at mount
 in personal_ingest_api.py.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
@@ -119,6 +120,21 @@ def _row_to_dict(row) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 EmbedFn = Callable[[str], Coroutine[Any, Any, Optional[List[float]]]]
+
+
+def _parse_jsonb(value) -> Dict:
+    """Safely parse a JSONB column value — handles both dict and string returns from asyncpg."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
 
 
 def create_router(
@@ -490,7 +506,7 @@ def create_router(
                     "facts": results, "count": len(results)}
 
     # -------------------------------------------------------------------
-    # GET /unified-search — RRF fusion over entities, facts, sessions
+    # GET /unified-search — RRF fusion over entities, facts, sessions, docs
     # -------------------------------------------------------------------
     @router.get("/unified-search")
     async def unified_search(
@@ -498,7 +514,11 @@ def create_router(
         limit: int = Query(10, ge=1, le=50),
         include: str = Query(
             "entities,facts,sessions",
-            description="Comma-separated surfaces to query"),
+            description="Comma-separated surfaces to query: entities,facts,sessions,docs"),
+        doc_kind: Optional[str] = Query(None, description="Filter docs by doc_kind (e.g. architecture, spec, operations)"),
+        status: Optional[str] = Query(None, description="Filter docs by status (e.g. active, draft)"),
+        is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
+        repo: Optional[str] = Query(None, description="Filter docs by repo name (e.g. darren-workflow)"),
     ):
         surfaces = [s.strip() for s in include.split(",")]
         k = 60  # RRF constant
@@ -617,6 +637,49 @@ def create_router(
                                     "metadata": {"match_mode": "text"},
                                 })
 
+                    # Docs: ILIKE on chunk text from doc-scanner (lowest priority after sessions)
+                    if "docs" in surfaces:
+                        conditions = " OR ".join(
+                            f"(mc.content->>'text') ILIKE ${i + 1}"
+                            for i in range(len(words)))
+                        d_filter = ""
+                        d_params: list = [f"%{w}%" for w in words]
+                        if doc_kind:
+                            d_params.append(doc_kind)
+                            d_filter += f" AND mc.metadata->>'doc_kind' = ${len(d_params)}"
+                        if status:
+                            d_params.append(status)
+                            d_filter += f" AND mc.metadata->>'status' = ${len(d_params)}"
+                        if is_governed is not None:
+                            d_params.append(str(is_governed).lower())
+                            d_filter += f" AND mc.metadata->>'is_governed' = ${len(d_params)}"
+                        if repo:
+                            d_params.append(repo)
+                            d_filter += f" AND mc.metadata->>'repo' = ${len(d_params)}"
+                        d_params.append(20)
+                        rows = await conn.fetch(f"""
+                            SELECT mc.chunk_rid, mc.content->>'text' AS chunk_text,
+                                   mc.metadata
+                            FROM koi_memory_chunks mc
+                            WHERE ({conditions})
+                              AND mc.metadata->>'repo' IS NOT NULL
+                              {d_filter}
+                            ORDER BY mc.created_at DESC
+                            LIMIT ${len(d_params)}
+                        """, *d_params)
+                        for rank, row in enumerate(rows):
+                            meta = _parse_jsonb(row["metadata"])
+                            meta["match_mode"] = "text"
+                            all_results.append({
+                                "text": row["chunk_text"][:500],
+                                "score": 1.0 / (k + 60 + rank + 1),
+                                "source": "doc",
+                                "doc_id": meta.get("doc_id"),
+                                "doc_kind": meta.get("doc_kind"),
+                                "repo": meta.get("repo"),
+                                "metadata": meta,
+                            })
+
             else:
                 # ── Normal semantic RRF mode ──────────────────────────
                 emb_str = str(query_embedding)
@@ -693,6 +756,47 @@ def create_router(
                                 "session_id": row["session_id"],
                                 "metadata": {"vector_score": float(row["score"])},
                             })
+
+                # Docs (vector similarity on koi_memory_chunks from doc-scanner)
+                if "docs" in surfaces:
+                    d_filter = ""
+                    d_params_vec: list = [emb_str]
+                    if doc_kind:
+                        d_params_vec.append(doc_kind)
+                        d_filter += f" AND mc.metadata->>'doc_kind' = ${len(d_params_vec)}"
+                    if status:
+                        d_params_vec.append(status)
+                        d_filter += f" AND mc.metadata->>'status' = ${len(d_params_vec)}"
+                    if is_governed is not None:
+                        d_params_vec.append(str(is_governed).lower())
+                        d_filter += f" AND mc.metadata->>'is_governed' = ${len(d_params_vec)}"
+                    if repo:
+                        d_params_vec.append(repo)
+                        d_filter += f" AND mc.metadata->>'repo' = ${len(d_params_vec)}"
+                    rows = await conn.fetch(f"""
+                        SELECT mc.chunk_rid,
+                               mc.content->>'text' AS chunk_text,
+                               mc.metadata,
+                               1 - (mc.embedding <=> $1::vector) AS score
+                        FROM koi_memory_chunks mc
+                        WHERE mc.embedding IS NOT NULL
+                          AND mc.metadata->>'repo' IS NOT NULL
+                          {d_filter}
+                        ORDER BY mc.embedding <=> $1::vector
+                        LIMIT 20
+                    """, *d_params_vec)
+                    for rank, row in enumerate(rows):
+                        meta = _parse_jsonb(row["metadata"])
+                        meta["vector_score"] = float(row["score"])
+                        all_results.append({
+                            "text": row["chunk_text"][:500],
+                            "score": 1.0 / (k + rank + 1),
+                            "source": "doc",
+                            "doc_id": meta.get("doc_id"),
+                            "doc_kind": meta.get("doc_kind"),
+                            "repo": meta.get("repo"),
+                            "metadata": meta,
+                        })
 
         # Sort by RRF score descending, take top N
         all_results.sort(key=lambda x: x["score"], reverse=True)

@@ -63,9 +63,11 @@ class TextChunker:
                 })
                 chunk_index += 1
 
-            start = end - self.chunk_overlap
-            if start <= (chunks[-1]['start_token'] if chunks else 0):
-                start = end
+            next_start = end - self.chunk_overlap
+            if next_start <= start:
+                # Didn't advance — force forward to avoid infinite loop
+                next_start = end
+            start = next_start
 
         for chunk in chunks:
             chunk['total_chunks'] = len(chunks)
