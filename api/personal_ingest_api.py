@@ -2028,62 +2028,69 @@ async def ingest_extraction(request: IngestRequest):
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             for entity in request.entities:
+                # Wrap each entity in a nested transaction (savepoint) so any DB
+                # failure rolls back only this one entity instead of poisoning
+                # the outer transaction — which would cause every subsequent
+                # entity + relationship to fail with InFailedSQLTransactionError
+                # and bubble out as a 500 with no JSON body.
                 try:
-                    logger.info(f"Processing entity: {entity.name} ({entity.type})")
+                    async with conn.transaction():
+                        logger.info(f"Processing entity: {entity.name} ({entity.type})")
 
-                    # Build context for this entity, merging global + per-entity (with deduplication)
-                    global_people = request.context.associated_people if request.context else []
-                    entity_people = entity.associated_people or []
-                    global_orgs = request.context.organizations if request.context else []
-                    entity_orgs = entity.associated_organizations or []
+                        # Build context for this entity, merging global + per-entity (with deduplication)
+                        global_people = request.context.associated_people if request.context else []
+                        entity_people = entity.associated_people or []
+                        global_orgs = request.context.organizations if request.context else []
+                        entity_orgs = entity.associated_organizations or []
 
-                    context_for_entity = ResolutionContext(
-                        associated_people=list(set((global_people or []) + entity_people)),
-                        organizations=list(set((global_orgs or []) + entity_orgs)),
-                        project=request.context.project if request.context else None,
-                        topics=request.context.topics if request.context else []
-                    ) if (global_people or entity_people or global_orgs or entity_orgs or
-                          (request.context and request.context.project)) else request.context
+                        context_for_entity = ResolutionContext(
+                            associated_people=list(set((global_people or []) + entity_people)),
+                            organizations=list(set((global_orgs or []) + entity_orgs)),
+                            project=request.context.project if request.context else None,
+                            topics=request.context.topics if request.context else []
+                        ) if (global_people or entity_people or global_orgs or entity_orgs or
+                              (request.context and request.context.project)) else request.context
 
-                    canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
-                    logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
-                    canonical_entities.append(canonical)
-                    entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
+                        canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
+                        logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
+                        canonical_entities.append(canonical)
+                        entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
 
-                    if is_new:
-                        new_count += 1
-                        await store_new_entity(conn, entity, canonical, request.document_rid, source=request.source)
-                        logger.info(f"Stored new entity: {canonical.uri}")
-                    else:
-                        resolved_count += 1
-                        logger.info(f"Resolved to existing: {canonical.uri}")
+                        if is_new:
+                            new_count += 1
+                            await store_new_entity(conn, entity, canonical, request.document_rid, source=request.source)
+                            logger.info(f"Stored new entity: {canonical.uri}")
+                        else:
+                            resolved_count += 1
+                            logger.info(f"Resolved to existing: {canonical.uri}")
 
-                    # Emit federation event for entity replication
-                    from api.federation_events import emit_domain_event
-                    await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
-                        "fuseki_uri": canonical.uri,
-                        "entity_text": canonical.name,
-                        "entity_type": entity.type,
-                        "normalized_text": canonical.name.lower().strip(),
-                        "aliases": [],
-                        "metadata": {},
-                    })
+                        # Emit federation event for entity replication
+                        from api.federation_events import emit_domain_event
+                        await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
+                            "fuseki_uri": canonical.uri,
+                            "entity_text": canonical.name,
+                            "entity_type": entity.type,
+                            "normalized_text": canonical.name.lower().strip(),
+                            "aliases": [],
+                            "metadata": {},
+                        })
 
-                    # Link entity to document
-                    await conn.execute("""
-                        INSERT INTO document_entity_links (document_rid, entity_uri, context)
-                        VALUES ($1, $2, $3)
-                        ON CONFLICT (document_rid, entity_uri)
-                        DO UPDATE SET mention_count = document_entity_links.mention_count + 1
-                    """, request.document_rid, canonical.uri, entity.context)
-                    logger.info(f"Linked entity to document")
+                        # Link entity to document
+                        await conn.execute("""
+                            INSERT INTO document_entity_links (document_rid, entity_uri, context)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (document_rid, entity_uri)
+                            DO UPDATE SET mention_count = document_entity_links.mention_count + 1
+                        """, request.document_rid, canonical.uri, entity.context)
+                        logger.info(f"Linked entity to document")
 
                 except Exception as e:
                     import traceback
                     logger.error(f"Error processing entity {entity.name}: {e}")
                     logger.error(traceback.format_exc())
                     failed_entities.append({"name": entity.name, "error": str(e)})
-                    # Continue with other entities
+                    # Continue with other entities — nested transaction already
+                    # rolled back so the outer txn is still healthy.
 
             # --- Process relationships (still inside conn.transaction()) ---
             rel_count = 0
@@ -2131,15 +2138,20 @@ async def ingest_extraction(request: IngestRequest):
                             f"Skipping self-referential relationship: {rel.subject} → {rel.predicate} → {rel.object}")
                         continue
 
+                    # Use a nested transaction (savepoint) so FK/check violations
+                    # only roll back this one INSERT instead of poisoning the outer
+                    # transaction (which would cause every subsequent statement to
+                    # fail with InFailedSQLTransactionError → 500).
                     try:
-                        await conn.execute("""
-                            INSERT INTO entity_relationships
-                                (subject_uri, predicate, object_uri, source, source_rid)
-                            VALUES ($1, $2, $3, $4, $5)
-                            ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
-                        """, subj_uri, rel.predicate, obj_uri,
-                            request.source, request.document_rid)
-                        rel_count += 1
+                        async with conn.transaction():
+                            await conn.execute("""
+                                INSERT INTO entity_relationships
+                                    (subject_uri, predicate, object_uri, source, source_rid)
+                                VALUES ($1, $2, $3, $4, $5)
+                                ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+                            """, subj_uri, rel.predicate, obj_uri,
+                                request.source, request.document_rid)
+                            rel_count += 1
                     except asyncpg.exceptions.ForeignKeyViolationError as e:
                         logger.warning(f"Skipping relationship (FK violation): {e}")
                     except asyncpg.exceptions.CheckViolationError as e:
