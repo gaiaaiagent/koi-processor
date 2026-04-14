@@ -560,9 +560,14 @@ Once configured, users authenticate at:
 1. **Clone and setup**:
 ```bash
 cd /opt/projects/koi-processor
-git pull origin regen-prod
+git pull origin stable
 bash scripts/setup.sh
 ```
+
+> **Note:** RegenAI production (`darren@202.61.196.119`) deploys from the `stable` branch,
+> not `regen-prod`. Promotion from `regen-prod` → `stable` is an explicit act (cherry-pick or
+> fast-forward merge) — see `docs/promotion-workflow.md`. `regen-prod` remains the development
+> tip for laptop personal KOI and for NUC (via Dobby's deploy.sh rsync from local working tree).
 
 2. **Configure environment**:
 ```bash
