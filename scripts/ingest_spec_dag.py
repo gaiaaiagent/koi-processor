@@ -38,6 +38,7 @@ class DocNode:
     doc_kind: str
     status: str
     depends_on: list[str]
+    relates_to: list[str]
     file_path: str
     primary_for: list[str] = field(default_factory=list)
     research_subkind: str = ""
@@ -97,6 +98,7 @@ def collect_docs(docs_root: Path) -> tuple[dict[str, DocNode], list[str]]:
             doc_kind=data.get("doc_kind", ""),
             status=data.get("status", "draft"),
             depends_on=data.get("depends_on", []),
+            relates_to=data.get("relates_to", []),
             file_path=data["_file_path"],
             primary_for=data.get("primary_for", []),
             research_subkind=data.get("research_subkind", ""),
@@ -358,6 +360,11 @@ def run_ingest(project_config: dict, nodes: dict[str, DocNode], dry_run: bool, a
                 log.info(f"  [DRY RUN] Would create: {spec_uri(doc_id)} --depends_on--> {spec_uri(dep)}")
                 stats["rels_created"] += 1
 
+        for doc_id, node in sorted(nodes.items()):
+            for rel in node.relates_to:
+                log.info(f"  [DRY RUN] Would create: {spec_uri(doc_id)} --related_to--> {spec_uri(rel)}")
+                stats["rels_created"] += 1
+
         if vision_root_id:
             log.info(f"  [DRY RUN] Would create: {spec_uri(vision_root_id)} --governs--> {project_config['project_uri']}")
             stats["rels_created"] += 1
@@ -398,6 +405,22 @@ def run_ingest(project_config: dict, nodes: dict[str, DocNode], dry_run: bool, a
             for dep in node.depends_on:
                 if create_relationship(cur, spec_uri(doc_id), "depends_on", spec_uri(dep)):
                     stats["rels_created"] += 1
+                else:
+                    stats["rels_failed"] += 1
+
+        # Create related_to relationships from relates_to: frontmatter
+        for doc_id, node in sorted(nodes.items()):
+            for rel in node.relates_to:
+                target_uri = spec_uri(rel)
+                cur.execute(
+                    "SELECT 1 FROM entity_registry WHERE fuseki_uri = %s", (target_uri,)
+                )
+                if not cur.fetchone():
+                    log.warning(f"  relates_to target '{rel}' not found in KOI, skipping edge")
+                    continue
+                if create_relationship(cur, spec_uri(doc_id), "related_to", target_uri):
+                    stats["rels_created"] += 1
+                    log.info(f"  Created related_to: {spec_uri(doc_id)} --> {target_uri}")
                 else:
                     stats["rels_failed"] += 1
 
