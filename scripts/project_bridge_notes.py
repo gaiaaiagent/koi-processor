@@ -48,6 +48,11 @@ PROJECTS = {
         "claimant_uri": "org:ic-learning-field",
         "bridge_dir": Path.home() / "projects/intelligence-commons/docs/research",
     },
+    "fc": {
+        "project_id": "fc",
+        "claimant_uri": "org:flow-coding-learning-field",
+        "bridge_dir": Path.home() / "projects/flowcoding/docs/research/connections",
+    },
 }
 
 DISPOSITION_SLUG = {
@@ -859,6 +864,8 @@ async def main():
         # Determine project key from path
         if "intelligence-commons" in str(note_path):
             project_key = "ic"
+        elif "flowcoding" in str(note_path):
+            project_key = "fc"
         else:
             project_key = "spore"
         note_paths = [(note_path, project_key)]
