@@ -7,33 +7,163 @@ Writes a report to the Obsidian vault at Inbox/YYYY-MM-DD Knowledge Health.md
 
 Usage:
     cd /path/to/koi-processor
-    POSTGRES_URL=... /path/to/venv/python3 scripts/knowledge_health.py [--repo REPO] [--dry-run]
+    POSTGRES_URL=... /path/to/venv/python3 scripts/knowledge_health.py [--repo REPO] [--repo-path PATH] [--dry-run]
 
 Options:
     --repo REPO    Restrict to a specific repo (default: all scanned repos)
+    --repo-path    Repo root path for disk-vs-KOI completeness checks
     --dry-run      Print report to stdout instead of writing to vault
     --days DAYS    Days threshold for stale facts (default: 90)
 """
 
 import argparse
 import asyncio
+import json as jsonlib
 import json
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Dict, Tuple
 
 import asyncpg
+import yaml
 
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
 VAULT_PATH = Path(os.getenv("OBSIDIAN_VAULT_PATH", os.path.expanduser("~/Documents/Notes")))
 
 STALE_DAYS_DEFAULT = 90
+EXCLUDE_DIRS = {"node_modules", "venv", ".venv", "__pycache__", ".git", "dist", "build", "archive"}
 
 
-async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_days: int) -> dict:
+def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
+    """Extract YAML frontmatter from markdown content."""
+    if not content.startswith("---"):
+        return {}, content
+
+    try:
+        end = content.index("\n---\n", 3)
+        raw_yaml = content[3:end].strip()
+        body = content[end + 5:].strip()
+        data = yaml.safe_load(raw_yaml) or {}
+        if not isinstance(data, dict):
+            return {}, content
+        return data, body
+    except (ValueError, yaml.YAMLError):
+        return {}, content
+
+
+def resolve_repo_path(repo_filter: str | None, repo_path_arg: str | None) -> Path | None:
+    """Resolve a repo path for disk-vs-KOI completeness checks."""
+    if repo_path_arg:
+        path = Path(repo_path_arg).expanduser().resolve()
+        return path if path.is_dir() else None
+
+    if not repo_filter:
+        return None
+
+    repo_name = repo_filter.split("/")[-1]
+    candidates = [
+        Path.home() / "projects" / repo_name,
+        Path.home() / "projects" / "RegenAI" / repo_name,
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    return None
+
+
+def discover_known_projects(projects_root: Path | None = None) -> Dict[str, Dict[str, str]]:
+    """Return known local projects keyed by project_id."""
+    root = (projects_root or (Path.home() / "projects")).expanduser()
+    if not root.is_dir():
+        return {}
+
+    known: Dict[str, Dict[str, str]] = {}
+    for project_json in root.rglob("project.json"):
+        if project_json.parts[-3:] != ("docs", "_meta", "project.json"):
+            continue
+        try:
+            payload = jsonlib.loads(project_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        project_id = payload.get("project_id")
+        if not project_id:
+            continue
+        known[project_id] = {
+            "project_id": project_id,
+            "project_name": payload.get("project_name", project_id),
+            "repo_root": str(project_json.parents[2]),
+        }
+    return known
+
+
+def load_project_config(repo_path: Path | None) -> Dict[str, Any]:
+    """Load docs/_meta/project.json for a repo if it exists."""
+    if not repo_path:
+        return {}
+    config_path = repo_path / "docs" / "_meta" / "project.json"
+    if not config_path.is_file():
+        return {}
+    try:
+        payload = jsonlib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def scan_governed_docs_on_disk(repo_path: Path) -> Dict[str, Dict[str, str]]:
+    """Return governed docs on disk keyed by doc_id."""
+    docs: Dict[str, Dict[str, str]] = {}
+    for path in sorted(repo_path.rglob("*.md")):
+        if any(part in EXCLUDE_DIRS for part in path.parts):
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        frontmatter, _ = parse_frontmatter(raw)
+        doc_id = frontmatter.get("doc_id")
+        if not doc_id:
+            continue
+        docs[doc_id] = {
+            "doc_id": doc_id,
+            "doc_kind": frontmatter.get("doc_kind", ""),
+            "rel_path": str(path.relative_to(repo_path)),
+        }
+    return docs
+
+
+def scan_known_projects_on_disk(known_projects: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    """Return governed docs on disk for every known local project keyed by project_id."""
+    repo_docs: Dict[str, Dict[str, Any]] = {}
+    for project_id, info in sorted(known_projects.items()):
+        repo_root = Path(info["repo_root"])
+        if not repo_root.is_dir():
+            continue
+        docs = scan_governed_docs_on_disk(repo_root)
+        repo_docs[project_id] = {
+            "project_id": project_id,
+            "project_name": info.get("project_name", project_id),
+            "repo_root": str(repo_root),
+            "docs": docs,
+        }
+    return repo_docs
+
+
+async def run_health_checks(
+    pool: asyncpg.Pool,
+    repo_filter: str | None,
+    stale_days: int,
+    repo_path_arg: str | None,
+) -> dict:
     """Run all health checks and return results dict."""
     results: dict = {}
+    repo_path = resolve_repo_path(repo_filter, repo_path_arg)
+    results["repo_path"] = str(repo_path) if repo_path else None
+    project_config = load_project_config(repo_path)
+    known_projects = discover_known_projects()
+    results["known_projects"] = known_projects
+    results["current_project_id"] = project_config.get("project_id")
 
     async with pool.acquire() as conn:
 
@@ -54,9 +184,49 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
         *([repo_filter] if repo_filter else []))
 
         indexed_docs = {r["doc_id"]: dict(r) for r in rows}
+        all_doc_id_rows = await conn.fetch("""
+            SELECT DISTINCT metadata->>'doc_id' AS doc_id
+            FROM koi_memories
+            WHERE source_sensor = 'doc-scanner'
+              AND metadata->>'doc_id' IS NOT NULL
+        """)
+        all_indexed_doc_ids = {r["doc_id"] for r in all_doc_id_rows}
 
         results["indexed_count"] = len(indexed_docs)
         results["indexed_docs"] = indexed_docs
+
+        # 1a.1 Docs present on disk but missing from KOI (repo-local completeness)
+        if repo_path:
+            disk_docs = scan_governed_docs_on_disk(repo_path)
+            missing_from_koi = [
+                doc for doc_id, doc in disk_docs.items() if doc_id not in indexed_docs
+            ]
+            results["governed_docs_on_disk_count"] = len(disk_docs)
+            results["missing_from_koi"] = missing_from_koi
+            results["missing_from_koi_by_repo"] = None
+        else:
+            known_repo_docs = scan_known_projects_on_disk(known_projects)
+            missing_from_koi_by_repo: Dict[str, Dict[str, Any]] = {}
+            total_docs = 0
+            total_missing = 0
+            for project_id, repo_info in known_repo_docs.items():
+                docs = repo_info["docs"]
+                total_docs += len(docs)
+                missing_docs = [
+                    doc for doc_id, doc in docs.items()
+                    if doc_id not in all_indexed_doc_ids
+                ]
+                total_missing += len(missing_docs)
+                missing_from_koi_by_repo[project_id] = {
+                    "project_name": repo_info["project_name"],
+                    "repo_root": repo_info["repo_root"],
+                    "total_docs": len(docs),
+                    "missing_docs": missing_docs,
+                }
+            results["governed_docs_on_disk_count"] = total_docs
+            results["missing_from_koi"] = []
+            results["missing_from_koi_by_repo"] = missing_from_koi_by_repo
+            results["missing_from_koi_total"] = total_missing
 
         # 1b. Docs with missing depends_on (non-root docs)
         # Root docs: depends_on is empty/null AND doc_kind in (vision, project)
@@ -74,23 +244,33 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
                 })
         results["missing_depends_on"] = missing_depends_on
 
-        # 1c. Broken depends_on references (points to doc_id not in KOI)
+        # 1c. Missing depends_on references (classified by local-vs-external scope)
         broken_deps = []
+        external_deps = []
         for doc_id, doc in indexed_docs.items():
             depends_raw = doc.get("depends_on")
             deps = json.loads(depends_raw) if depends_raw else []
             for dep in deps:
-                if dep not in indexed_docs:
-                    broken_deps.append({
+                if not dep or not isinstance(dep, str):
+                    continue
+                if dep not in all_indexed_doc_ids:
+                    dep_prefix = dep.split(".", 1)[0] if "." in dep else ""
+                    dep_info = {
                         "doc_id": doc_id,
                         "missing_dep": dep,
+                        "missing_dep_prefix": dep_prefix,
                         "repo": doc.get("repo"),
-                    })
+                    }
+                    if dep_prefix and dep_prefix in known_projects:
+                        broken_deps.append(dep_info)
+                    else:
+                        external_deps.append(dep_info)
         results["broken_deps"] = broken_deps
+        results["external_deps"] = external_deps
 
         # ── 2. Coherence ────────────────────────────────────────────────────
 
-        # 2a. Stale facts (valid_to IS NULL, created > stale_days ago, no recent episode)
+        # 2a. Stale facts (active facts older than stale_days)
         stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
         stale_total = await conn.fetchval("""
             SELECT COUNT(*) FROM knowledge_facts
@@ -114,6 +294,13 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
         results["total_facts"] = total_facts
 
         # 2b. Orphaned entities (zero document_entity_links)
+        orphan_total = await conn.fetchval("""
+            SELECT COUNT(*)
+            FROM entity_registry e
+            LEFT JOIN document_entity_links d ON d.entity_uri = e.fuseki_uri
+            WHERE d.entity_uri IS NULL
+              AND NOT e.node_private
+        """)
         orphan_rows = await conn.fetch("""
             SELECT e.fuseki_uri, e.entity_text, e.entity_type
             FROM entity_registry e
@@ -123,7 +310,7 @@ async def run_health_checks(pool: asyncpg.Pool, repo_filter: str | None, stale_d
             LIMIT 20
         """)
         results["orphaned_entities"] = [dict(r) for r in orphan_rows]
-        results["orphaned_entity_count"] = len(orphan_rows)
+        results["orphaned_entity_count"] = orphan_total or 0
 
         total_entities = await conn.fetchval(
             "SELECT COUNT(*) FROM entity_registry WHERE NOT node_private")
@@ -184,8 +371,16 @@ def render_report(results: dict, stale_days: int) -> str:
     ]
 
     indexed = results["indexed_count"]
+    missing_from_koi = results["missing_from_koi"]
+    missing_from_koi_by_repo = results.get("missing_from_koi_by_repo")
+    missing_from_koi_total = (
+        results.get("missing_from_koi_total")
+        if missing_from_koi_by_repo is not None
+        else (len(missing_from_koi) if missing_from_koi is not None else None)
+    )
     missing_deps = len(results["missing_depends_on"])
     broken = len(results["broken_deps"])
+    external = len(results["external_deps"])
     stale_facts = results["stale_facts_count"]
     total_facts = results["total_facts"]
     orphans = results["orphaned_entity_count"]
@@ -198,8 +393,10 @@ def render_report(results: dict, stale_days: int) -> str:
         f"| Metric | Value |",
         f"|--------|-------|",
         f"| Governed docs indexed | {indexed} |",
+        f"| Missing from KOI | {missing_from_koi_total if missing_from_koi_total is not None else 'n/a'} |",
         f"| Missing depends_on | {missing_deps} |",
-        f"| Broken depends_on refs | {broken} |",
+        f"| Broken local depends_on refs | {broken} |",
+        f"| External depends_on refs | {external} |",
         f"| Stale facts (>{stale_days}d) | {stale_facts} / {total_facts} total |",
         f"| Orphaned entities | {orphans} / {total_entities} total |",
         f"| Missing embeddings | {missing_emb} / {total_chunks} chunks |",
@@ -215,6 +412,39 @@ def render_report(results: dict, stale_days: int) -> str:
     else:
         lines.append("_No repos indexed yet. Run doc_scanner.py to index governed docs._")
     lines.append("")
+
+    # Missing from KOI
+    lines += ["## Missing from KOI", ""]
+    if missing_from_koi_by_repo is not None:
+        repo_items = list(missing_from_koi_by_repo.items())
+        repo_missing_total = sum(len(item["missing_docs"]) for _, item in repo_items)
+        if repo_missing_total:
+            lines.append(f"Governed docs present on disk but not indexed in KOI — {repo_missing_total} found:")
+            lines.append("")
+            for project_id, item in repo_items:
+                missing_docs = item["missing_docs"]
+                if missing_docs:
+                    lines.append(
+                        f"- **{project_id}** ({item['project_name']}): {len(missing_docs)} missing / {item['total_docs']} on disk"
+                    )
+                    for doc in missing_docs[:10]:
+                        lines.append(f"  - `{doc['doc_id']}` ({doc['doc_kind']}) at `{doc['rel_path']}`")
+            lines.append("")
+        else:
+            lines.append("_None — all governed docs across known local projects are indexed in KOI._")
+            lines.append("")
+    elif missing_from_koi is None:
+        lines.append("_Disk-vs-KOI completeness check skipped — pass `--repo-path` or use a resolvable repo name._")
+        lines.append("")
+    elif missing_from_koi:
+        lines.append(f"Governed docs present on disk but not indexed in KOI — {len(missing_from_koi)} found (first {min(20, len(missing_from_koi))} shown):")
+        lines.append("")
+        for item in missing_from_koi[:20]:
+            lines.append(f"- `{item['doc_id']}` ({item['doc_kind']}) at `{item['rel_path']}`")
+        lines.append("")
+    else:
+        lines.append("_None — all governed docs on disk are indexed in KOI._")
+        lines.append("")
 
     # Missing depends_on
     if missing_deps:
@@ -233,16 +463,37 @@ def render_report(results: dict, stale_days: int) -> str:
     # Broken deps
     if broken:
         lines += [
-            "## Broken depends_on References",
+            "## Broken Local depends_on References",
             "",
-            f"References to doc_ids not yet in KOI — {broken} found:",
+            f"References to doc_ids in known local projects that are not yet in KOI — {broken} found:",
             "",
         ]
         for item in results["broken_deps"]:
             lines.append(f"- `{item['doc_id']}` → `{item['missing_dep']}` (not indexed)")
         lines.append("")
     else:
-        lines += ["## Broken depends_on References", "", "_None — all referenced doc_ids are indexed._", ""]
+        lines += ["## Broken Local depends_on References", "", "_None — all local project dependencies are indexed._", ""]
+
+    # External deps
+    if external:
+        lines += [
+            "## External depends_on References",
+            "",
+            (
+                "References to doc_ids whose project prefix is not currently registered as a local project "
+                f"or indexed in KOI — {external} found:"
+            ),
+            "",
+        ]
+        for item in results["external_deps"]:
+            prefix = item["missing_dep_prefix"] or "unknown-prefix"
+            lines.append(
+                f"- `{item['doc_id']}` → `{item['missing_dep']}` "
+                f"(external/unregistered prefix `{prefix}`)"
+            )
+        lines.append("")
+    else:
+        lines += ["## External depends_on References", "", "_None — no unresolved external dependencies._", ""]
 
     # Authority collisions
     if collisions:
@@ -258,7 +509,7 @@ def render_report(results: dict, stale_days: int) -> str:
         lines += [
             "## Stale Facts",
             "",
-            f"Facts older than {stale_days} days with no expiry — {stale_facts} shown (of {total_facts} total active):",
+            f"Active facts older than {stale_days} days — {stale_facts} total (first {min(10, len(results['stale_facts']))} shown, of {total_facts} active):",
             "",
         ]
         for f in results["stale_facts"][:10]:
@@ -275,7 +526,7 @@ def render_report(results: dict, stale_days: int) -> str:
         lines += [
             "## Orphaned Entities",
             "",
-            f"Entities with zero document_entity_links — {orphans} of {total_entities} shown:",
+            f"Entities with zero document_entity_links — {orphans} total (first {min(10, len(results['orphaned_entities']))} shown, of {total_entities} entities):",
             "",
         ]
         for e in results["orphaned_entities"][:10]:
@@ -298,12 +549,21 @@ def render_report(results: dict, stale_days: int) -> str:
     # Suggested actions
     lines += ["## Suggested Actions", ""]
     actions = []
+    if missing_from_koi_by_repo is not None:
+        if missing_from_koi_total:
+            actions.append(f"- Index {missing_from_koi_total} governed doc(s) missing from KOI across local projects")
+    elif missing_from_koi:
+        actions.append(f"- Index {len(missing_from_koi)} governed doc(s) missing from KOI")
     if broken:
         actions.append(f"- Index {broken} missing doc(s) referenced by depends_on")
+    if external:
+        actions.append(
+            f"- Review {external} external depends_on reference(s) — either register/index the source project or explicitly accept them as external"
+        )
     if missing_deps:
         actions.append(f"- Add depends_on to {missing_deps} non-root docs")
     if missing_emb:
-        actions.append(f"- Re-run `doc_scanner.py --force` to fix {missing_emb} unchunked docs")
+        actions.append(f"- Re-run `doc_scanner.py --force` to fix {missing_emb} chunk(s) without embeddings")
     if stale_facts > 10:
         actions.append(f"- Review {stale_facts} stale facts — consider adding a knowledge episode to refresh context")
     if not actions:
@@ -314,10 +574,10 @@ def render_report(results: dict, stale_days: int) -> str:
     return "\n".join(lines)
 
 
-async def main(repo_filter: str | None, dry_run: bool, stale_days: int):
+async def main(repo_filter: str | None, dry_run: bool, stale_days: int, repo_path: str | None):
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
     try:
-        results = await run_health_checks(pool, repo_filter, stale_days)
+        results = await run_health_checks(pool, repo_filter, stale_days, repo_path)
         report = render_report(results, stale_days)
     finally:
         await pool.close()
@@ -340,9 +600,10 @@ async def main(repo_filter: str | None, dry_run: bool, stale_days: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", help="Restrict to a specific repo")
+    parser.add_argument("--repo-path", help="Path to repo root for disk-vs-KOI completeness checks")
     parser.add_argument("--dry-run", action="store_true", help="Print to stdout only")
     parser.add_argument("--days", type=int, default=STALE_DAYS_DEFAULT,
                         help="Days threshold for stale facts")
     args = parser.parse_args()
 
-    asyncio.run(main(args.repo, args.dry_run, args.days))
+    asyncio.run(main(args.repo, args.dry_run, args.days, args.repo_path))

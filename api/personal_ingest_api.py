@@ -1870,7 +1870,7 @@ async def embedding_preflight():
 
     # 3. Gold entity canaries — embed queries and check nearest neighbor
     canary_queries = [
-        ("What is eelgrass?", "eelgrass"),
+        ("What is herring?", "herring"),
         ("Which organizations restore habitat?", None),
         ("What is commitment pooling?", "commitment"),
     ]
