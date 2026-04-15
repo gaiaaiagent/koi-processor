@@ -35,6 +35,11 @@ ALLOWED_TABLES = frozenset({
     "commitment_pools",
     # External
     "email_metadata",
+    # MediaWiki (p2pfoundation wiki live-sync + any future wikis)
+    "mediawiki_wikis",
+    "mediawiki_page_state",
+    "mediawiki_page_links",
+    "mediawiki_import_runs",
 })
 
 # Dangerous SQL keywords (word-boundary matched, case-insensitive)
