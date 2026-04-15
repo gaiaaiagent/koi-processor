@@ -18,7 +18,7 @@ import {
   logQuery,
   shouldTriggerExtraction,
   selectDocumentsForExtraction
-} from "./bge-mcp-ts/adaptive-features.ts";
+} from "./adaptive-features.ts";
 
 // Import canonical response envelope types (Session D1)
 import {
