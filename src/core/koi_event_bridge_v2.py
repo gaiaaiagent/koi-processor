@@ -616,6 +616,90 @@ async def trigger_kg_extraction(memory_rid: str, content: str, metadata: dict) -
         logger.error(f"Error during KG extraction for {memory_rid}: {e}", exc_info=True)
         return None
 
+
+async def link_entities_to_chunks(conn, document_rid: str) -> int:
+    """Populate koi_entity_chunk_links from koi_kg_extractions for a document.
+
+    The pass-A extractor stores entities per-document in koi_kg_extractions.
+    The search API (koi-query-api.ts) queries koi_entity_chunk_links for entity
+    lookups. This bridges the two: for each chunk of the document, insert one
+    row per extracted entity so entity-term searches can find the document.
+
+    Coarse-grained — every entity gets linked to every chunk, not to specific
+    chunks where the entity actually appears. Acceptable for ranking; precise
+    per-chunk attribution would require chunk-level re-extraction.
+    """
+    extraction = await conn.fetchrow(
+        """
+        SELECT entities
+        FROM koi_kg_extractions
+        WHERE memory_rid = $1 AND extraction_type = 'passA'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        document_rid,
+    )
+    if not extraction or not extraction["entities"]:
+        return 0
+
+    entities = extraction["entities"]
+    if isinstance(entities, str):
+        entities = json.loads(entities)
+    if not entities:
+        return 0
+
+    chunks = await conn.fetch(
+        """
+        SELECT id, rid
+        FROM koi_memories
+        WHERE rid LIKE $1 AND superseded_at IS NULL
+        """,
+        f"{document_rid}#chunk%",
+    )
+    if not chunks:
+        return 0
+
+    link_rows = []
+    for chunk in chunks:
+        chunk_uuid = str(chunk["id"])
+        chunk_rid = chunk["rid"]
+        chunk_idx = None
+        if "#chunk" in chunk_rid:
+            try:
+                chunk_idx = int(chunk_rid.split("#chunk")[1])
+            except (IndexError, ValueError):
+                pass
+
+        for ent in entities:
+            name = (ent.get("name") or "").strip()
+            if not name:
+                continue
+            link_rows.append((
+                name,
+                name.lower(),
+                ent.get("type", "Unknown"),
+                ent.get("rid"),
+                chunk_uuid,
+                chunk_idx,
+                chunk_rid,
+                float(ent.get("confidence", 0.8)),
+            ))
+
+    if not link_rows:
+        return 0
+
+    await conn.executemany(
+        """
+        INSERT INTO koi_entity_chunk_links
+            (entity_name, entity_name_lower, entity_type, entity_uri,
+             chunk_rid, chunk_index, document_rid, confidence)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """,
+        link_rows,
+    )
+    return len(link_rows)
+
+
 async def process_koi_event(event: KOIEvent) -> ProcessingResult:
     """Process a KOI event with deduplication and versioning"""
     start_time = time.time()
@@ -920,6 +1004,15 @@ async def process_koi_event(event: KOIEvent) -> ProcessingResult:
                     content=text_content,
                     metadata=kg_metadata
                 )
+
+                # Mirror extracted entities into koi_entity_chunk_links so the
+                # search API's entity lookup path can find this document.
+                try:
+                    n_links = await link_entities_to_chunks(conn, event.bundle.rid)
+                    if n_links:
+                        logger.info(f"Linked {n_links} entity mentions across chunks for {event.bundle.rid}")
+                except Exception as e:
+                    logger.error(f"Error linking entities to chunks for {event.bundle.rid}: {e}", exc_info=True)
 
             # Get version info for response
             version = None
