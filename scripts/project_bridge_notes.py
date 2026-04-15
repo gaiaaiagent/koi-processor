@@ -53,6 +53,11 @@ PROJECTS = {
         "claimant_uri": "org:flow-coding-learning-field",
         "bridge_dir": Path.home() / "projects/flowcoding/docs/research/connections",
     },
+    "pm": {
+        "project_id": "pm",
+        "claimant_uri": "org:poietic-match-learning-field",
+        "bridge_dir": Path.home() / "projects/poietic-match/docs/research/connections",
+    },
 }
 
 DISPOSITION_SLUG = {
@@ -866,6 +871,8 @@ async def main():
             project_key = "ic"
         elif "flowcoding" in str(note_path):
             project_key = "fc"
+        elif "poietic-match" in str(note_path):
+            project_key = "pm"
         else:
             project_key = "spore"
         note_paths = [(note_path, project_key)]
