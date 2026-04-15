@@ -843,13 +843,20 @@ def discover_bridge_notes() -> list[tuple[Path, str]]:
         for md_path in sorted(bridge_dir.glob("*.md")):
             if md_path.name == "CLAUDE.md":
                 continue
-            # Quick check: is this a bridge note?
+            # Parse frontmatter rather than substring-match the body —
+            # schema docs in YAML code fences can otherwise trigger false positives.
             try:
                 text = md_path.read_text()
-                if "research_subkind: bridge_note" in text:
-                    notes.append((md_path, project_key))
             except Exception:
                 continue
+            try:
+                fm = parse_frontmatter(text)
+            except ValueError:
+                continue  # no frontmatter — not a bridge note
+            except Exception:
+                continue
+            if isinstance(fm, dict) and fm.get("research_subkind") == "bridge_note":
+                notes.append((md_path, project_key))
 
     return notes
 
