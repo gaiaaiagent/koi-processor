@@ -176,6 +176,16 @@ def quartz_url(entity_type: str, name: str) -> Optional[str]:
 # Global connection pool
 db_pool: Optional[asyncpg.Pool] = None
 
+# Fixed mapping for knowledge_search source filter — prevents SQL injection.
+# Unknown values are rejected with HTTP 400 before any SQL is constructed.
+SOURCE_TO_FILTER = {
+    'email': (
+        "AND m.source_sensor IN ('email-sensor', 'ics-event')"
+        " AND (m.metadata->>'status' IS NULL OR m.metadata->>'status' != 'cancelled')"
+    ),
+    'vault': "AND m.source_sensor = 'obsidian-sensor'",
+}
+
 from api.embedding_provider import EmbeddingProvider, create_embedding_provider
 embedding_provider: Optional[EmbeddingProvider] = None
 
@@ -1381,6 +1391,18 @@ async def startup():
                 logger.info("Claims router mounted (/claims/)")
             except Exception as e:
                 logger.warning(f"Claims router not mounted: {e}")
+
+            # Calendar router — ICS-event date-range lookups (personal only)
+            try:
+                from api.routers.calendar_router import (
+                    create_router as create_calendar_router,
+                    ensure_try_ts,
+                )
+                await ensure_try_ts(db_pool)
+                app.include_router(create_calendar_router(db_pool))
+                logger.info("Calendar router mounted (/calendar/)")
+            except Exception as e:
+                logger.warning(f"Calendar router not mounted: {e}")
 
             # Intent registry router (always on, no capability gate)
             # Privacy note: router is local-only (localhost:8351 / WireGuard).
@@ -4349,15 +4371,13 @@ async def search_knowledge_base(request: SearchRequest):
             search_type = "semantic"
             embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
 
-            # Build query with optional source filter
-            if request.source == 'email':
-                source_filter = "AND m.source_sensor = 'email-sensor'"
-            elif request.source == 'vault':
-                source_filter = "AND m.source_sensor = 'obsidian-sensor'"
-            elif request.source:
-                source_filter = f"AND m.source_sensor = '{request.source}'"
-            else:
-                source_filter = ""
+            # Build query with optional source filter (fail-closed on unknown)
+            if request.source and request.source not in SOURCE_TO_FILTER:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown source: {request.source!r}. Valid values: {list(SOURCE_TO_FILTER.keys())}",
+                )
+            source_filter = SOURCE_TO_FILTER.get(request.source or '', "")
 
             # Search doc-level embeddings
             query = f"""
@@ -4397,8 +4417,11 @@ async def search_knowledge_base(request: SearchRequest):
                     "metadata": metadata,
                 }
 
+                # ics-event rows: no email_metadata lookup (base schema only)
+                if row['source_sensor'] == 'ics-event':
+                    pass
                 # Add email-specific metadata if available
-                if row['source_sensor'] == 'email-sensor':
+                elif row['source_sensor'] == 'email-sensor':
                     email_meta = await conn.fetchrow("""
                         SELECT subject, from_name, from_address, date_sent
                         FROM email_metadata
@@ -4459,12 +4482,12 @@ async def search_knowledge_base(request: SearchRequest):
             search_type = "text"
             search_pattern = f"%{request.query}%"
 
-            if request.source == 'email':
-                source_filter = "AND m.source_sensor = 'email-sensor'"
-            elif request.source:
-                source_filter = f"AND m.source_sensor = '{request.source}'"
-            else:
-                source_filter = ""
+            if request.source and request.source not in SOURCE_TO_FILTER:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown source: {request.source!r}. Valid values: {list(SOURCE_TO_FILTER.keys())}",
+                )
+            source_filter = SOURCE_TO_FILTER.get(request.source or '', "")
 
             query = f"""
                 SELECT
