@@ -454,7 +454,21 @@ async def create_review_claim(
     project_uri: str,
     projection_batch: str,
 ) -> dict:
-    """Create a review claim via POST /claims/. Deterministic from target+concept."""
+    """Create a review claim via POST /claims/. Deterministic from target+concept.
+
+    Note: review claims intentionally leave the top-level ``source_document``
+    column empty. They are governance-layer recommendations keyed by
+    (target_spec_doc, concept, disposition) so that multiple bridge notes
+    converge on the same claim RID rather than each spawning a duplicate.
+    Provenance back to the authoring bridge note is preserved via the
+    supporting source (C-) claims, which do carry source_document and are
+    linked to the review claim by ``supports`` edges in entity_relationships.
+
+    Consumers filtering by ``source_document = '<bridge-note-doc-id>'`` will
+    therefore only see source claims; to enumerate the review claims induced
+    by a bridge note, traverse ``supports`` edges from its source claims
+    (or filter on ``metadata->>'projection_batch'`` for batch-level audits).
+    """
     change_slug = f"{disposition_slug}-{concept_name}"
     target_spec_uri = f"spec:{target_spec_doc}"
     governance_cluster_key = f"{target_spec_doc}:{concept_name}"
