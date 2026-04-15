@@ -513,8 +513,8 @@ def create_router(
         query: str = Query(..., description="Search query"),
         limit: int = Query(10, ge=1, le=50),
         include: str = Query(
-            "entities,facts,sessions",
-            description="Comma-separated surfaces to query: entities,facts,sessions,docs"),
+            "entities,facts,sessions,wiki",
+            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki"),
         doc_kind: Optional[str] = Query(None, description="Filter docs by doc_kind (e.g. architecture, spec, operations)"),
         status: Optional[str] = Query(None, description="Filter docs by status (e.g. active, draft)"),
         is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
@@ -796,6 +796,35 @@ def create_router(
                             "doc_kind": meta.get("doc_kind"),
                             "repo": meta.get("repo"),
                             "metadata": meta,
+                        })
+
+                # Wiki (vector similarity on koi_memory_chunks from mediawiki-sensor)
+                if "wiki" in surfaces:
+                    rows = await conn.fetch("""
+                        SELECT mc.chunk_rid,
+                               mc.document_rid,
+                               mc.content->>'text' AS chunk_text,
+                               mc.content->>'title' AS title,
+                               mc.content->>'wiki_url' AS wiki_url,
+                               mc.content->>'section_title' AS section_title,
+                               1 - (mc.embedding <=> $1::vector) AS score
+                        FROM koi_memory_chunks mc
+                        WHERE mc.embedding IS NOT NULL
+                          AND mc.document_rid LIKE 'mediawiki:%'
+                        ORDER BY mc.embedding <=> $1::vector
+                        LIMIT 20
+                    """, emb_str)
+                    for rank, row in enumerate(rows):
+                        all_results.append({
+                            "text": (row["chunk_text"] or "")[:500],
+                            "score": 1.0 / (k + rank + 1),
+                            "source": "wiki",
+                            "title": row["title"],
+                            "section_title": row["section_title"],
+                            "wiki_url": row["wiki_url"],
+                            "document_rid": row["document_rid"],
+                            "chunk_rid": row["chunk_rid"],
+                            "metadata": {"vector_score": float(row["score"])},
                         })
 
         # Sort by RRF score descending, take top N

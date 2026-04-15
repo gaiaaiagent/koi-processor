@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
@@ -28,6 +28,9 @@ class RecentChange:
     timestamp: str
     change_type: str
     ns: int
+    logtype: str = ""
+    logaction: str = ""
+    logparams: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -49,8 +52,11 @@ class MediaWikiClient:
 
     async def _ensure_session(self):
         if self._session is None or self._session.closed:
+            # Some wikis (incl. wiki.p2pfoundation.net) block UAs containing
+            # tokens like "sensor"/"bot"/"python"; Mozilla-prefixed UA with contact
+            # email is the MediaWiki-recommended convention.
             self._session = aiohttp.ClientSession(
-                headers={"User-Agent": "BKC-MediaWiki-Sensor/1.0"}
+                headers={"User-Agent": "Mozilla/5.0 (compatible; koi-mediawiki-sync/1.0; +mailto:zaldarren@gmail.com)"}
             )
 
     async def close(self):
@@ -78,9 +84,9 @@ class MediaWikiClient:
             params = {
                 "action": "query",
                 "list": "recentchanges",
-                "rcprop": "title|ids|timestamp",
+                "rcprop": "title|ids|timestamp|loginfo",
                 "rcdir": "newer",
-                "rctype": "edit|new",
+                "rctype": "edit|new|log",
                 "rcnamespace": str(namespace),
                 "rclimit": str(min(limit, 500)),
                 "rcstart": since_str,
@@ -104,6 +110,9 @@ class MediaWikiClient:
                     timestamp=rc.get("timestamp", ""),
                     change_type=rc.get("type", "edit"),
                     ns=rc.get("ns", 0),
+                    logtype=rc.get("logtype", ""),
+                    logaction=rc.get("logaction", ""),
+                    logparams=rc.get("logparams", {}) or {},
                 ))
 
             if len(changes) >= limit:

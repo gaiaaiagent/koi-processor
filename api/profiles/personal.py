@@ -45,3 +45,24 @@ async def on_startup(app, pool, caps):
             logger.info("TerminusDB adapter initialized")
         except Exception:
             logger.exception("Failed to initialize TerminusDB adapter")
+
+    if caps.mediawiki_sensor:
+        try:
+            from api.mediawiki_sensor import MediaWikiSensor
+            sensor = MediaWikiSensor(
+                pool=pool,
+                event_queue=getattr(app.state, "event_queue", None),
+            )
+            await sensor.start()
+            app.state.mediawiki_sensor = sensor
+
+            # Register graceful shutdown — app-level shutdown only closes the DB pool.
+            @app.on_event("shutdown")
+            async def _stop_mediawiki_sensor():
+                s = getattr(app.state, "mediawiki_sensor", None)
+                if s:
+                    await s.stop()
+
+            logger.info("MediaWiki sensor started")
+        except Exception:
+            logger.exception("Failed to start MediaWiki sensor")

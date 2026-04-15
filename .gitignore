@@ -29,6 +29,10 @@ Thumbs.db
 logs/*.log
 logs/*.bak
 
+# Proprietary / edge-case bootstrap tooling (kept local)
+scripts/telus_exec.py
+scripts/import_mediawiki_embeddings.py
+
 # Testing
 .pytest_cache/
 .coverage
