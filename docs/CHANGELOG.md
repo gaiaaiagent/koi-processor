@@ -277,7 +277,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Batch processing (5K rows) to avoid locks
   - CONCURRENTLY index creation
   - Verification queries
-- **Unit Tests** - `bge-mcp-ts/tests/adaptive-features.test.ts`
+- **Unit Tests** - `tests/adaptive-features.test.ts`
   - RID normalization tests
   - Fusion merge tests
 - **Integration Tests** - `tests/test_keyword_search_fts.py`

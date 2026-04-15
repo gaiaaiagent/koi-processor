@@ -214,8 +214,8 @@ Set `DEBUG_GRAPH_EXPANSION=true` in `ecosystem.hybrid.config.js`
 ## Files Reference
 
 - koi-query-api.ts - Main API with entity search, keyword search, content dedup, graph expansion
-- bge-mcp-ts/adaptive-features.ts - Fusion algorithms, RID normalization
-- bge-mcp-ts/tests/adaptive-features.test.ts - Unit tests for fusion
+- adaptive-features.ts - Fusion algorithms, RID normalization
+- tests/adaptive-features.test.ts - Unit tests for fusion
 - src/core/koi_event_bridge_v2.py - Storage-level dedup
 - scripts/archive/entity_chunk_linker.py - Batch entity linking
 - scripts/backfill_entity_registry.py - Registry population

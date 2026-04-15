@@ -12,10 +12,12 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import asyncpg
@@ -32,6 +34,20 @@ from api.mediawiki_ingest import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = int(os.getenv("MEDIAWIKI_POLL_INTERVAL", "300"))
+
+
+def _mirror_path(local_path: str, title: str) -> Path:
+    """MediaWiki title → local filesystem path, matching Jeff's wiki/ convention.
+
+    Jeff's archive uses literal titles with spaces preserved. The only POSIX-unsafe
+    char in MediaWiki titles is '/' (subpage separator); we map it to U+2215 DIVISION
+    SLASH (visually similar, reversible, filesystem-safe). Titles already containing
+    U+2215 are rejected (collision guard — astronomically rare).
+    """
+    if "\u2215" in title:
+        raise ValueError(f"title contains U+2215 DIVISION SLASH — ambiguous: {title!r}")
+    safe = title.replace("/", "\u2215")
+    return Path(local_path) / "wiki" / f"{safe}.mediawiki"
 
 # Backoff constants (same as KOIPoller)
 _BACKOFF_BASE = 30
@@ -157,10 +173,12 @@ class MediaWikiSensor:
         base_url = wiki["base_url"]
         wiki_domain = base_url.rstrip("/").split("//")[-1]
 
-        # Determine "since" timestamp
+        # Determine "since" timestamp (1-second overlap guards against same-second
+        # edits at the watermark boundary — MediaWiki rcstart is inclusive, so this
+        # produces at most harmless duplicates handled by idempotent upserts).
         last_scan = wiki.get("last_scan_at")
         if last_scan:
-            since = last_scan
+            since = last_scan - timedelta(seconds=1)
         else:
             since = datetime.now(timezone.utc) - timedelta(hours=24)
 
@@ -179,6 +197,13 @@ class MediaWikiSensor:
                     wiki_id,
                 )
             return {"changes_found": 0, "pages_processed": 0}
+
+        # Process log events (deletes, moves) BEFORE the edit-dedupe loop and remove
+        # them from `changes` so they don't flow into `latest_by_page`. Deletes have no
+        # fetchable content; moves carry their target_title in logparams.
+        log_events = [rc for rc in changes if rc.change_type == "log"]
+        changes = [rc for rc in changes if rc.change_type != "log"]
+        await self._process_log_events(wiki, log_events)
 
         # Deduplicate by pageid (take latest revid per page)
         latest_by_page: Dict[int, RecentChange] = {}
@@ -214,6 +239,11 @@ class MediaWikiSensor:
                     wiki_id, wiki_domain, pc, change_type, run_id
                 )
                 pages_processed += 1
+                # Filesystem mirror: best-effort; never fails the sync
+                try:
+                    await self._write_local_mirror(wiki, pc.title, pc.wikitext, change_type)
+                except Exception as fs_err:
+                    logger.warning(f"Mirror write failed for '{pc.title}': {fs_err}")
             except Exception as e:
                 logger.warning(
                     f"Error processing changed page '{rc.title}' (pageid={pageid}): {e}"
@@ -313,6 +343,105 @@ class MediaWikiSensor:
                 )
             except Exception as e:
                 logger.warning(f"Event emit failed for {rid}: {e}")
+
+    async def _write_local_mirror(self, wiki: dict, title: str, wikitext: Optional[str], change_type: str):
+        """Mirror a page to the filesystem clone. Best-effort; errors logged but not raised."""
+        cfg = wiki.get("config") or {}
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        if not cfg.get("write_filesystem"):
+            return
+        local_path = cfg.get("local_path")
+        if not local_path:
+            return
+
+        # Branch safety: only write when the clone is on the expected branch.
+        # Prevents accidentally dirtying `main` if someone checks it out.
+        expected_branch = cfg.get("git_branch", "live-sync")
+        try:
+            head = subprocess.check_output(
+                ["git", "-C", local_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                stderr=subprocess.DEVNULL, timeout=2,
+            ).decode().strip()
+            if head != expected_branch:
+                logger.warning(
+                    f"Clone on branch {head!r}, expected {expected_branch!r} — skipping filesystem write for {title!r}"
+                )
+                return
+        except Exception as e:
+            logger.warning(f"Branch check failed ({e}) — skipping filesystem write for {title!r}")
+            return
+
+        try:
+            path = _mirror_path(local_path, title)
+        except ValueError as e:
+            logger.warning(f"Skipping mirror write: {e}")
+            return
+
+        if change_type == "delete":
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError as e:
+                    logger.warning(f"Mirror delete failed for {path}: {e}")
+            return
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(wikitext or "", encoding="utf-8")
+        except OSError as e:
+            logger.warning(f"Mirror write failed for {path}: {e}")
+
+    async def _process_log_events(self, wiki: dict, log_events: List[RecentChange]):
+        """Handle delete and move log events (filesystem + DB tombstone/title update)."""
+        wiki_id = wiki["id"]
+        cfg = wiki.get("config") or {}
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+
+        for rc in log_events:
+            if rc.logtype == "delete" and rc.logaction == "delete":
+                await self._write_local_mirror(wiki, rc.title, None, change_type="delete")
+                async with self.pool.acquire() as conn:
+                    if rc.pageid:
+                        await conn.execute(
+                            "UPDATE mediawiki_page_state SET status='deleted' WHERE wiki_id=$1 AND page_id=$2",
+                            wiki_id, rc.pageid,
+                        )
+                    else:
+                        await conn.execute(
+                            "UPDATE mediawiki_page_state SET status='deleted' WHERE wiki_id=$1 AND title=$2",
+                            wiki_id, rc.title,
+                        )
+
+            elif rc.logtype == "move" and rc.logaction in ("move", "move_redir", "move_noredir"):
+                lp = rc.logparams or {}
+                target = lp.get("target_title") or lp.get("target") or lp.get("4::target")
+                if not target:
+                    logger.warning(f"move event without target_title: {rc.title} (pageid={rc.pageid})")
+                    continue
+
+                # Filesystem rename (best-effort)
+                if cfg.get("write_filesystem") and cfg.get("local_path"):
+                    try:
+                        old_path = _mirror_path(cfg["local_path"], rc.title)
+                        new_path = _mirror_path(cfg["local_path"], target)
+                        if old_path.exists():
+                            new_path.parent.mkdir(parents=True, exist_ok=True)
+                            old_path.rename(new_path)
+                    except ValueError as e:
+                        logger.warning(f"Skipping filesystem rename: {e}")
+                    except OSError as e:
+                        logger.warning(f"Filesystem rename failed: {e}")
+
+                # DB title update always runs on successful move event.
+                # source_rid is page-id-based (mediawiki:{domain}:{page_id}, stable across renames).
+                if rc.pageid:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE mediawiki_page_state SET title=$1 WHERE wiki_id=$2 AND page_id=$3",
+                            target, wiki_id, rc.pageid,
+                        )
 
     async def _rechunk_and_embed(self, wiki_domain: str, parsed: WikiPageParse):
         """Delete existing chunks, re-chunk sections, embed, store."""

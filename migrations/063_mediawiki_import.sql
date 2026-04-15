@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS mediawiki_page_links (
     source_revision_id INT,
     resolution_status TEXT DEFAULT 'unresolved',
     resolved_target_uri TEXT,
-    target_match_confidence FLOAT,
+    target_match_confidence FLOAT
 );
 
 -- Unique index with COALESCE for nullable columns
