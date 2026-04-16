@@ -71,6 +71,39 @@ logger = logging.getLogger("mediawiki_review")
 
 
 # ---------------------------------------------------------------------------
+# Startup guard — verify migration 083 is applied
+# ---------------------------------------------------------------------------
+
+async def _check_resolver_present(conn: asyncpg.Connection) -> None:
+    fn = await conn.fetchval(
+        "SELECT 1 FROM pg_proc WHERE proname = 'mediawiki_resolve_redirect'")
+    vw = await conn.fetchval(
+        "SELECT 1 FROM pg_views WHERE viewname = 'v_mediawiki_page_resolved'")
+    if not (fn and vw):
+        print("ERROR: scripts/mediawiki_review.py requires migration "
+              "083_mediawiki_redirect_resolver.sql to be applied.\n"
+              "Run: psql -v ON_ERROR_STOP=1 -d personal_koi -f "
+              "migrations/083_mediawiki_redirect_resolver.sql",
+              file=sys.stderr)
+        sys.exit(2)
+
+
+# ---------------------------------------------------------------------------
+# Wiki-id resolution — auto-detect for single-wiki installs
+# ---------------------------------------------------------------------------
+
+async def _resolve_wiki_id(conn: asyncpg.Connection, explicit_wiki_id: Optional[int]) -> int:
+    if explicit_wiki_id is not None:
+        return explicit_wiki_id
+    rows = await conn.fetch("SELECT id FROM mediawiki_wikis LIMIT 2")
+    if len(rows) == 1:
+        return rows[0]["id"]
+    print(f"ERROR: --wiki-id is required (found {len(rows)} wikis)",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # list subcommand
 # ---------------------------------------------------------------------------
 
@@ -211,26 +244,52 @@ async def cmd_inspect(args: argparse.Namespace) -> None:
     if aliases:
         print(f"\nAliases: {', '.join(aliases)}")
 
-    # DB state (if connected)
+    # DB state (if connected) — resolver-aware
     try:
         conn = await get_db_connection(args)
         try:
-            row = await conn.fetchrow("""
-                SELECT status, review_status, entity_uri, last_run_id, ingested_at
-                FROM mediawiki_page_state
-                WHERE title = $1
-            """, args.title)
-            if row:
-                print(f"\n--- DB State ---")
-                print(f"Status:           {row['status']}")
-                print(f"Review status:    {row['review_status']}")
-                print(f"Entity URI:       {row['entity_uri'] or '(none)'}")
-                print(f"Last run:         {row['last_run_id'] or '(none)'}")
-                print(f"Ingested at:      {row['ingested_at'] or '(never)'}")
-            else:
+            wiki_id = await _resolve_wiki_id(conn, getattr(args, 'wiki_id', None))
+
+            resolved = await conn.fetchrow("""
+                SELECT id, title, is_redirect, redirect_target,
+                       canonical_id, canonical_title, hops, resolution_status
+                FROM v_mediawiki_page_resolved
+                WHERE title = $1 AND wiki_id = $2
+                ORDER BY id DESC LIMIT 1
+            """, args.title, wiki_id)
+
+            if not resolved:
                 print(f"\n(No DB state found for this title)")
+            else:
+                # Print redirect resolution info
+                if resolved["is_redirect"]:
+                    if resolved["canonical_id"] is not None:
+                        hop_s = "hop" if resolved["hops"] == 1 else "hops"
+                        print(f"\nResolved '{args.title}' → '{resolved['canonical_title']}' "
+                              f"({resolved['hops']} {hop_s})")
+                    else:
+                        print(f"\nWarning: redirect target '{resolved['redirect_target']}' "
+                              f"not found ({resolved['resolution_status']}) "
+                              f"— showing redirect row only")
+
+                # Fetch full detail from the canonical row (or self if non-redirect)
+                detail_id = resolved["canonical_id"] if resolved["canonical_id"] else resolved["id"]
+                row = await conn.fetchrow("""
+                    SELECT status, review_status, entity_uri, last_run_id, ingested_at
+                    FROM mediawiki_page_state
+                    WHERE id = $1
+                """, detail_id)
+                if row:
+                    print(f"\n--- DB State ---")
+                    print(f"Status:           {row['status']}")
+                    print(f"Review status:    {row['review_status']}")
+                    print(f"Entity URI:       {row['entity_uri'] or '(none)'}")
+                    print(f"Last run:         {row['last_run_id'] or '(none)'}")
+                    print(f"Ingested at:      {row['ingested_at'] or '(never)'}")
         finally:
             await conn.close()
+    except SystemExit:
+        raise
     except Exception:
         print(f"\n(Could not connect to DB for state lookup)")
 
@@ -252,16 +311,28 @@ async def cmd_promote(args: argparse.Namespace) -> None:
 
     conn = await get_db_connection(args)
     try:
-        # Get wiki_id
-        wiki_row = await conn.fetchrow("SELECT id FROM mediawiki_wikis LIMIT 1")
-        if not wiki_row:
-            print("No wiki registered in mediawiki_wikis. Run a bulk import first.")
-            sys.exit(1)
-        wiki_id = wiki_row["id"]
+        wiki_id = await _resolve_wiki_id(conn, getattr(args, 'wiki_id', None))
 
-        # Get or create page_state
+        # Resolve through redirects — promote always targets the canonical page
+        resolved = await conn.fetchrow("""
+            SELECT canonical_id, resolution_status
+            FROM v_mediawiki_page_resolved
+            WHERE title = $1 AND wiki_id = $2
+            ORDER BY id DESC LIMIT 1
+        """, args.title, wiki_id)
+
+        if not resolved:
+            print(f"Page '{args.title}' not found in mediawiki_page_state.")
+            sys.exit(1)
+
+        if resolved["canonical_id"] is None:
+            print(f"Cannot promote '{args.title}' — resolution_status="
+                  f"{resolved['resolution_status']}", file=sys.stderr)
+            sys.exit(1)
+
+        # Get or create page_state using the canonical id
         ps_row = await conn.fetchrow(
-            "SELECT id FROM mediawiki_page_state WHERE title = $1", args.title
+            "SELECT id FROM mediawiki_page_state WHERE id = $1", resolved["canonical_id"]
         )
         if ps_row:
             page_state_id = ps_row["id"]
@@ -469,6 +540,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument("--title", required=True, help="Page title")
     p_inspect.add_argument("--parsed-dir", required=True,
                            help="Directory with per-page JSON files")
+    p_inspect.add_argument("--wiki-id", type=int, default=None,
+                           help="Wiki ID (auto-detected if only one wiki exists)")
 
     # --- promote ---
     p_promote = subparsers.add_parser("promote", help="Promote a single page to entity")
@@ -481,6 +554,8 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Import run identifier")
     p_promote.add_argument("--log-dir", default="data",
                            help="Directory for review log JSONL (default: data/)")
+    p_promote.add_argument("--wiki-id", type=int, default=None,
+                           help="Wiki ID (auto-detected if only one wiki exists)")
 
     # --- bulk-promote ---
     p_bulk = subparsers.add_parser("bulk-promote",
@@ -515,6 +590,16 @@ async def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
     )
+
+    # Startup guard — verify migration 083 before any command runs.
+    # Commands that use the resolver (inspect, promote) need this;
+    # run it for all commands so the error is caught early.
+    if args.command in ("inspect", "promote"):
+        conn = await get_db_connection(args)
+        try:
+            await _check_resolver_present(conn)
+        finally:
+            await conn.close()
 
     dispatch = {
         "list": cmd_list,
