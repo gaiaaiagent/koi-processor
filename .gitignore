@@ -102,6 +102,10 @@ data/mediawiki_*
 data/salish_sea_wiki*
 data/mediawiki_parsed/
 
+# Session re-embed working directories (chunks + results, large generated files)
+reembed_data/
+reembed_results/
+
 # Claude Code auto-generated context files (keep root CLAUDE.md only)
 **/CLAUDE.md
 !/CLAUDE.md
