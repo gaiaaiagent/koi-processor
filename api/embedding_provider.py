@@ -170,7 +170,10 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
         import httpx
         self._client = httpx.AsyncClient(
             base_url=base_url,
-            timeout=httpx.Timeout(connect=5.0, read=120.0, write=5.0, pool=5.0),
+            # read=25s stays under MCP's 30s client budget so callers hit the
+            # degrade-to-ILIKE fallback in unified-search rather than a raw
+            # timeout. Healthy /embed latency is <1s; 25s is ~25× headroom.
+            timeout=httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0),
         )
         self.model_name = model
         self.dimension = dimension
