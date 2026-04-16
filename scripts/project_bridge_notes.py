@@ -370,7 +370,11 @@ async def find_previous_source_claim(
 ) -> Optional[dict]:
     """Find the most recent source claim for a (doc, C-ID) pair."""
     row = await conn.fetchrow(
-        "SELECT claim_rid, statement FROM claims "
+        "SELECT claim_rid, entity_uri, statement, "
+        "       metadata->>'evidence_anchor' AS evidence_anchor, "
+        "       metadata->>'confidence' AS confidence, "
+        "       metadata->>'project_uri' AS project_uri "
+        "FROM claims "
         "WHERE source_document = $1 "
         "  AND metadata->>'c_id' = $2 "
         "  AND metadata->>'source' = 'learning_field' "
@@ -379,7 +383,14 @@ async def find_previous_source_claim(
         source_document, c_id,
     )
     if row:
-        return {"claim_rid": row["claim_rid"], "statement": row["statement"]}
+        return {
+            "claim_rid": row["claim_rid"],
+            "entity_uri": row["entity_uri"],
+            "statement": row["statement"],
+            "evidence_anchor": row["evidence_anchor"],
+            "confidence": row["confidence"],
+            "project_uri": row["project_uri"],
+        }
     return None
 
 
@@ -401,9 +412,31 @@ async def create_source_claim(
     # Check for previous version of this claim
     previous = await find_previous_source_claim(conn, source_document, c_id)
     supersedes_rid = None
-    if previous and previous["statement"] != statement:
-        supersedes_rid = previous["claim_rid"]
-        log.info(f"  {c_id} supersedes {supersedes_rid} (statement changed)")
+    if previous:
+        business_key_unchanged = (
+            previous["statement"] == statement
+            and previous["evidence_anchor"] == anchor
+            and previous["confidence"] == confidence
+            and previous["project_uri"] == project_uri
+        )
+        if business_key_unchanged:
+            # True no-op: server-side claim_rid would be identical, but skip the
+            # round-trip so the projection summary reflects zero new claims.
+            log.info(f"  Source claim {c_id}: unchanged, skipping (dedup early-return)")
+            # Refresh projection_batch so the audit trail records this run.
+            await conn.execute(
+                "UPDATE claims SET metadata = metadata || $1::jsonb WHERE claim_rid = $2",
+                json.dumps({"projection_batch": projection_batch}),
+                previous["claim_rid"],
+            )
+            return {
+                "claim_rid": previous["claim_rid"],
+                "entity_uri": previous["entity_uri"],
+                "_dedup_skipped": True,
+            }
+        if previous["statement"] != statement:
+            supersedes_rid = previous["claim_rid"]
+            log.info(f"  {c_id} supersedes {supersedes_rid} (statement changed)")
 
     payload = {
         "claimant_uri": claimant_uri,
@@ -594,6 +627,7 @@ async def project_bridge_note(
     """Project a single bridge note into the KOI graph."""
     stats = {
         "source_claims": 0,
+        "source_claims_skipped": 0,
         "review_claims": 0,
         "concepts": 0,
         "questions": 0,
@@ -723,7 +757,10 @@ async def project_bridge_note(
         if not source_data or not source_data.get("entity_uri"):
             continue
 
-        stats["source_claims"] += 1
+        if source_data.get("_dedup_skipped"):
+            stats["source_claims_skipped"] += 1
+        else:
+            stats["source_claims"] += 1
         source_entity_uri = source_data["entity_uri"]
         source_claim_uris[claim.c_id] = source_entity_uri
 
@@ -931,6 +968,7 @@ async def main():
     totals = {
         "notes": 0,
         "source_claims": 0,
+        "source_claims_skipped": 0,
         "review_claims": 0,
         "concepts": 0,
         "questions": 0,
@@ -974,7 +1012,8 @@ async def main():
     log.info(f"\n{'='*60}")
     log.info("PROJECTION SUMMARY")
     log.info(f"  Notes processed: {totals['notes']}")
-    log.info(f"  Source claims:   {totals['source_claims']}")
+    log.info(f"  Source claims:   {totals['source_claims']} new"
+             f"{' (+' + str(totals.get('source_claims_skipped', 0)) + ' unchanged, dedup-skipped)' if totals.get('source_claims_skipped', 0) else ''}")
     log.info(f"  Review claims:   {totals['review_claims']}")
     log.info(f"  Concepts:        {totals['concepts']}")
     log.info(f"  Questions:       {totals['questions']}")
