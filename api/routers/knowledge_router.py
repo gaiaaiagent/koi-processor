@@ -684,6 +684,13 @@ def create_router(
                 # ── Normal semantic RRF mode ──────────────────────────
                 emb_str = str(query_embedding)
 
+                # Raise ivfflat.probes so recently-inserted chunks in
+                # non-nearest centroids are still considered. Default probes=1
+                # misses new rows until the index is rebuilt. Session-level
+                # SET persists on the pooled connection, which is fine — we
+                # always want higher recall on retrieval paths.
+                await conn.execute("SET ivfflat.probes = 10")
+
                 # Entities (vector similarity, exclude private)
                 if "entities" in surfaces:
                     rows = await conn.fetch("""
