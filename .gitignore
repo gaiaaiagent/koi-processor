@@ -106,7 +106,7 @@ data/mediawiki_*
 data/salish_sea_wiki*
 data/mediawiki_parsed/
 
-# Re-embedding pipeline artifacts (JSONL dumps, regenerated on demand)
+# Re-embedding pipeline artifacts (session chunks + JSONL dumps, regenerated on demand)
 reembed_data/
 reembed_results/
 
