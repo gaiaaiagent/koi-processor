@@ -40,6 +40,8 @@ ALLOWED_TABLES = frozenset({
     "mediawiki_page_state",
     "mediawiki_page_links",
     "mediawiki_import_runs",
+    # MediaWiki views
+    "v_mediawiki_page_resolved",
 })
 
 # Dangerous SQL keywords (word-boundary matched, case-insensitive)
