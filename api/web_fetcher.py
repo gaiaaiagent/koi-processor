@@ -412,6 +412,8 @@ async def fetch_html_with_scrapling(url: str) -> Optional[str]:
             "headless": True,
             "network_idle": True,
             "block_images": True,
+            "solve_cloudflare": True,
+            "timeout": SCRAPLING_TIMEOUT * 1000,  # ms
         }
         if _PROXY_URL:
             kwargs["proxy"] = _PROXY_URL

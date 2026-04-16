@@ -20,6 +20,7 @@ Entity Resolution Tiers:
 """
 
 import json as json_module_global
+import importlib.util
 import os
 import re
 import asyncio
@@ -1809,6 +1810,18 @@ async def health_check():
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
         )
+
+
+@app.get("/diagnostics/config")
+async def diagnostics_config():
+    """Non-sensitive configuration status for operational checks."""
+    return {
+        "scraping_proxy_url_set": bool(os.environ.get("SCRAPING_PROXY_URL", "")),
+        "playwright_available": bool(importlib.util.find_spec("playwright")),
+        "scrapling_available": bool(importlib.util.find_spec("scrapling")),
+        "trafilatura_available": bool(importlib.util.find_spec("trafilatura")),
+        "embedding_provider": embedding_provider.model_name if embedding_provider else None,
+    }
 
 
 @app.get("/diagnostics/embedding-preflight")
