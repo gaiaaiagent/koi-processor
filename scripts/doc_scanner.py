@@ -284,7 +284,7 @@ async def scan_repo(
         chash = content_hash(raw)
         rid = f"doc-scanner:{repo_name}:{rel_path}"
 
-        if not force and existing.get(rel_path) == chash:
+        if not force and existing_hashes.get(rel_path) == chash:
             logger.debug("Unchanged %s", rel_path)
             stats["skipped"] += 1
             continue
