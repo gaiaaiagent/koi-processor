@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 MAX_HTML_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_TEXT_CHARS = 100_000           # 100 KB extracted text
 FETCH_TIMEOUT = 30                 # seconds
-USER_AGENT = "Octo/1.0 (Salish Sea Knowledge Agent; bioregional knowledge commons)"
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # Content extraction escalation
 MIN_WORD_COUNT = int(os.environ.get("MIN_WORD_COUNT", "100"))  # aiohttp->Playwright threshold
@@ -160,7 +160,7 @@ class WebPreview:
     metadata: PageMetadata
     matching_entities: List[MatchingEntity] = field(default_factory=list)
     fetch_error: Optional[str] = None
-    rendered_with: str = "aiohttp"  # "aiohttp", "playwright", or "scrapling"
+    rendered_with: str = "aiohttp"  # "substack_api", "aiohttp", "requests", "playwright", "scrapling"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -387,6 +387,107 @@ def _is_cloudflare_challenge(html: str, status_code: int = 200) -> bool:
     if "<title>Just a moment...</title>" in html and any(s in html for s in cf_signals):
         return True
     return False
+
+
+# =============================================================================
+# Substack unified-URL resolver (Tier 0 — direct API, no scraping needed)
+# =============================================================================
+#
+# substack.com/@handle/p-ID is a React SPA shell. The publication's own
+# api/v1/posts endpoint returns full body_html for the same content.
+
+_SUBSTACK_UNIFIED_RE = re.compile(
+    r"https?://substack\.com/@([a-zA-Z0-9_-]+)/p-(\d+)", re.I
+)
+
+
+def _resolve_substack_unified_sync(url: str) -> Optional[str]:
+    """Resolve a substack.com/@handle/p-ID URL to full article HTML via the
+    publication's JSON API. Returns an HTML string or None on failure.
+
+    The unified URL is a React SPA — server HTML contains only nav/shell.
+    The publication subdomain API returns full body_html (typically 3–8K words).
+    """
+    m = _SUBSTACK_UNIFIED_RE.match(url)
+    if not m:
+        return None
+    handle, post_id_str = m.group(1).lower(), m.group(2)
+    post_id = int(post_id_str)
+    pub_base = f"https://{handle}.substack.com"
+
+    try:
+        import requests as _req
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        }
+
+        # Paginate post list to find slug (posts are newest-first; usually 1-2 pages)
+        slug = None
+        for offset in range(0, 120, 12):
+            r = _req.get(
+                f"{pub_base}/api/v1/posts?limit=12&offset={offset}",
+                headers=headers, timeout=15,
+            )
+            if r.status_code != 200:
+                break
+            posts = r.json()
+            if not posts:
+                break
+            for p in posts:
+                if p.get("id") == post_id:
+                    slug = p.get("slug")
+                    break
+            if slug:
+                break
+
+        if not slug:
+            logger.warning(f"Substack resolver: could not find slug for post {post_id} on {handle}")
+            return None
+
+        # Fetch full article from detail API
+        r = _req.get(f"{pub_base}/api/v1/posts/{slug}", headers=headers, timeout=15)
+        if r.status_code != 200:
+            logger.warning(f"Substack resolver: detail API returned {r.status_code} for {slug}")
+            return None
+
+        data = r.json()
+        body_html = data.get("body_html") or data.get("body") or ""
+        if not body_html:
+            logger.warning(f"Substack resolver: empty body_html for {slug}")
+            return None
+
+        title = data.get("title", "")
+        subtitle = data.get("subtitle", "")
+        author = (data.get("publishedBylines") or [{}])[0].get("name", "")
+        pub_date = (data.get("post_date") or "")[:10]
+
+        logger.info(
+            f"Substack resolver: fetched '{title}' ({len(body_html.split())} words) "
+            f"via {pub_base}/api/v1/posts/{slug}"
+        )
+
+        return (
+            f"<!DOCTYPE html><html><head>"
+            f"<title>{title}</title>"
+            f'<meta name="description" content="{subtitle}">'
+            f'<meta name="author" content="{author}">'
+            f'<meta name="date" content="{pub_date}">'
+            f"</head><body>"
+            f"<h1>{title}</h1>"
+            f"<article>{body_html}</article>"
+            f"</body></html>"
+        )
+    except Exception as e:
+        logger.warning(f"Substack resolver failed for {url}: {e}")
+        return None
+
+
+async def _resolve_substack_unified(url: str) -> Optional[str]:
+    """Async wrapper — runs the sync resolver in a thread pool."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, _resolve_substack_unified_sync, url
+    )
 
 
 # =============================================================================
@@ -657,14 +758,54 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
 # Main Fetch + Preview
 # =============================================================================
 
+def _fetch_html_requests_sync(url: str) -> tuple[Optional[str], int]:
+    """Sync fallback using requests library. Better TLS fingerprint than aiohttp.
+
+    Used as Tier 1.5 when aiohttp is blocked by Cloudflare or bot-detection that
+    aiohttp's TLS handshake triggers. Runs in a thread pool executor.
+    """
+    try:
+        import requests as _requests
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-Dest": "document",
+        }
+        resp = _requests.get(url, headers=headers, timeout=FETCH_TIMEOUT, allow_redirects=True)
+        if not any(ct in resp.headers.get("Content-Type", "") for ct in ("text/html", "application/xhtml")):
+            return None, resp.status_code
+        html = resp.content[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
+        return html, resp.status_code
+    except Exception as e:
+        logger.warning(f"requests fallback failed for {url}: {e}")
+        return None, 0
+
+
 async def _fetch_html_aiohttp(url: str) -> tuple[Optional[str], int]:
     """Fetch raw HTML with aiohttp. Returns (HTML string or None, HTTP status code)."""
     try:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT)
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-Dest": "document",
+        }
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
                 url,
-                headers={"User-Agent": USER_AGENT},
+                headers=headers,
                 max_redirects=5,
                 allow_redirects=True,
             ) as response:
@@ -714,6 +855,24 @@ async def fetch_and_preview(
             fetch_error=msg,
         )
 
+    # Tier 0: Platform-specific resolvers (bypass scraping entirely)
+    if _SUBSTACK_UNIFIED_RE.match(url):
+        substack_html = await _resolve_substack_unified(url)
+        if substack_html:
+            soup = BeautifulSoup(substack_html, "html.parser")
+            metadata = extract_page_metadata(soup)
+            content_text = extract_best_content(substack_html, soup, url)
+            word_count = len(content_text.split())
+            content_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
+            return WebPreview(
+                url=url, rid=rid, domain=domain,
+                title=metadata.title, description=metadata.description,
+                content_text=content_text, content_hash=content_hash,
+                word_count=word_count, metadata=metadata,
+                rendered_with="substack_api",
+            )
+        logger.info(f"Substack API resolver failed for {url}, falling through to scraping")
+
     # Step 1: Try aiohttp (fast, lightweight)
     html, status = await _fetch_html_aiohttp(url)
     rendered_with = "aiohttp"
@@ -725,9 +884,23 @@ async def fetch_and_preview(
         html = None  # Force escalation
 
     if html is None or status != 200:
-        # aiohttp failed or Cloudflare — try Playwright (unless CF detected)
+        # Tier 1.5: requests fallback — better TLS fingerprint than aiohttp, handles
+        # sites that block aiohttp's TLS handshake (Substack, some Cloudflare configs).
+        logger.info(f"aiohttp {'blocked by CF' if cloudflare_detected else f'failed (status={status})'} for {url}, trying requests fallback")
+        req_html, req_status = await asyncio.get_event_loop().run_in_executor(
+            None, _fetch_html_requests_sync, url
+        )
+        if req_html and req_status == 200 and not _is_cloudflare_challenge(req_html, 200):
+            html = req_html
+            status = req_status
+            rendered_with = "requests"
+            cloudflare_detected = False
+            logger.info(f"requests fallback succeeded for {url}")
+
+    if html is None or status != 200:
+        # Tier 2: Playwright — JS rendering for dynamic content (unless CF detected)
         if not cloudflare_detected and PLAYWRIGHT_AVAILABLE:
-            logger.info(f"aiohttp failed for {url} (status={status}), trying Playwright")
+            logger.info(f"requests fallback failed for {url} (status={status}), trying Playwright")
             html = await fetch_html_with_playwright(url)
             rendered_with = "playwright"
 
@@ -746,8 +919,11 @@ async def fetch_and_preview(
             html = await fetch_html_with_scrapling(url)
             rendered_with = "scrapling"
 
-            # Check if Scrapling also returned a Cloudflare challenge page
-            if html and _is_cloudflare_challenge(html, 403):
+            # Check if Scrapling also returned a Cloudflare challenge page.
+            # Use status=200 (strict mode) — requires <title>Just a moment...</title>
+            # AND a CF signal. The loose 403-mode false-triggers on CDN URLs
+            # (e.g. cdn-cgi/challenge-platform) present in normal pages.
+            if html and _is_cloudflare_challenge(html, 200):
                 cloudflare_detected = True
                 logger.info(f"Scrapling also returned Cloudflare challenge for {url}")
                 html = None
@@ -767,7 +943,7 @@ async def fetch_and_preview(
     word_count = len(content_text.split())
 
     # Step 2: If content is sparse, retry with better rendering
-    if word_count < MIN_WORD_COUNT and rendered_with == "aiohttp":
+    if word_count < MIN_WORD_COUNT and rendered_with in ("aiohttp", "requests"):
         if PLAYWRIGHT_AVAILABLE:
             logger.info(
                 f"Sparse content ({word_count} words) from aiohttp, "
