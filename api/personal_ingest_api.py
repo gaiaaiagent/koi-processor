@@ -1917,12 +1917,28 @@ async def health_check():
 @app.get("/diagnostics/config")
 async def diagnostics_config():
     """Non-sensitive configuration status for operational checks."""
+    agentic_crawl_available = False
+    try:
+        from api import crawl_auth, ontology_registry
+
+        feature_enabled = crawl_auth.is_feature_enabled()
+        tokens_ok = crawl_auth.any_tokens_configured()
+        ontology_ok = bool(ontology_registry.ALLOWED_ENTITY_TYPES) and bool(ontology_registry.ALLOWED_PREDICATES)
+        db_ok = False
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                has_jobs = await conn.fetchval("SELECT to_regclass('web_crawl_jobs') IS NOT NULL")
+                db_ok = bool(has_jobs)
+        agentic_crawl_available = bool(feature_enabled and tokens_ok and ontology_ok and db_ok)
+    except Exception:
+        agentic_crawl_available = False
     return {
         "scraping_proxy_url_set": bool(os.environ.get("SCRAPING_PROXY_URL", "")),
         "playwright_available": bool(importlib.util.find_spec("playwright")),
         "scrapling_available": bool(importlib.util.find_spec("scrapling")),
         "trafilatura_available": bool(importlib.util.find_spec("trafilatura")),
         "embedding_provider": embedding_provider.model_name if embedding_provider else None,
+        "agentic_crawl_available": agentic_crawl_available,
     }
 
 

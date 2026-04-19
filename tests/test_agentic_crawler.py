@@ -367,6 +367,7 @@ def test_missing_token_401_via_router_auth():
     os.environ["AGENTIC_CRAWL_ENABLED"] = "true"
     os.environ["CRAWL_TOKEN__ops__test"] = "tok-ops"
     try:
+        crawl_auth.reload_identity_config()
         with pytest.raises(crawl_auth.CrawlAuthError) as exc_info:
             crawl_auth.authenticate_request(
                 authorization_header=None,
@@ -383,6 +384,96 @@ def test_missing_token_401_via_router_auth():
             os.environ.pop("CRAWL_TOKEN__ops__test", None)
         else:
             os.environ["CRAWL_TOKEN__ops__test"] = old_token
+        crawl_auth.reload_identity_config()
+
+
+def test_bound_token_snapshot_requires_reload():
+    import os
+
+    from api import crawl_auth
+
+    old_enabled = os.environ.get("AGENTIC_CRAWL_ENABLED")
+    old_token = os.environ.get("CRAWL_TOKEN__ops__test")
+    os.environ["AGENTIC_CRAWL_ENABLED"] = "true"
+    os.environ["CRAWL_TOKEN__ops__test"] = "tok-ops-reload"
+    try:
+        crawl_auth.reload_identity_config()
+        auth = crawl_auth.authenticate_request(
+            authorization_header="Bearer tok-ops-reload",
+            identity_claim_header=None,
+            body_submitted_by=None,
+        )
+        assert auth.submitted_by == "ops:test"
+
+        os.environ["CRAWL_TOKEN__ops__test"] = "tok-ops-new"
+        with pytest.raises(crawl_auth.CrawlAuthError) as exc_info:
+            crawl_auth.authenticate_request(
+                authorization_header="Bearer tok-ops-new",
+                identity_claim_header=None,
+                body_submitted_by=None,
+            )
+        assert exc_info.value.status_code == 401
+
+        crawl_auth.reload_identity_config()
+        auth = crawl_auth.authenticate_request(
+            authorization_header="Bearer tok-ops-new",
+            identity_claim_header=None,
+            body_submitted_by=None,
+        )
+        assert auth.submitted_by == "ops:test"
+    finally:
+        if old_enabled is None:
+            os.environ.pop("AGENTIC_CRAWL_ENABLED", None)
+        else:
+            os.environ["AGENTIC_CRAWL_ENABLED"] = old_enabled
+        if old_token is None:
+            os.environ.pop("CRAWL_TOKEN__ops__test", None)
+        else:
+            os.environ["CRAWL_TOKEN__ops__test"] = old_token
+        crawl_auth.reload_identity_config()
+
+
+def test_no_tokens_configured_503():
+    import os
+
+    from api import crawl_auth
+
+    old_enabled = os.environ.get("AGENTIC_CRAWL_ENABLED")
+    old_token = os.environ.get("CRAWL_TOKEN__ops__test")
+    old_tg_token = os.environ.get("CRAWL_TOKEN_TELEGRAM")
+    old_tg_secret = os.environ.get("CRAWL_SECRET_TELEGRAM")
+    os.environ["AGENTIC_CRAWL_ENABLED"] = "true"
+    os.environ.pop("CRAWL_TOKEN__ops__test", None)
+    os.environ.pop("CRAWL_TOKEN_TELEGRAM", None)
+    os.environ.pop("CRAWL_SECRET_TELEGRAM", None)
+    try:
+        crawl_auth.reload_identity_config()
+        with pytest.raises(crawl_auth.CrawlAuthError) as exc_info:
+            crawl_auth.authenticate_request(
+                authorization_header="Bearer missing",
+                identity_claim_header=None,
+                body_submitted_by=None,
+            )
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.message == "per-surface tokens not configured"
+    finally:
+        if old_enabled is None:
+            os.environ.pop("AGENTIC_CRAWL_ENABLED", None)
+        else:
+            os.environ["AGENTIC_CRAWL_ENABLED"] = old_enabled
+        if old_token is None:
+            os.environ.pop("CRAWL_TOKEN__ops__test", None)
+        else:
+            os.environ["CRAWL_TOKEN__ops__test"] = old_token
+        if old_tg_token is None:
+            os.environ.pop("CRAWL_TOKEN_TELEGRAM", None)
+        else:
+            os.environ["CRAWL_TOKEN_TELEGRAM"] = old_tg_token
+        if old_tg_secret is None:
+            os.environ.pop("CRAWL_SECRET_TELEGRAM", None)
+        else:
+            os.environ["CRAWL_SECRET_TELEGRAM"] = old_tg_secret
+        crawl_auth.reload_identity_config()
 
 
 # ---------------------------------------------------------------------------

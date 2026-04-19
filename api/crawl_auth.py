@@ -70,11 +70,31 @@ class AuthResult:
     namespace: str
 
 
+@dataclass(frozen=True)
+class IdentityConfig:
+    bound_tokens: dict[str, str]
+    telegram_token: Optional[str]
+    telegram_secret: Optional[str]
+
+    @property
+    def any_configured(self) -> bool:
+        if self.telegram_token and self.telegram_secret:
+            return True
+        return bool(self.bound_tokens)
+
+
+_IDENTITY_CONFIG = IdentityConfig(
+    bound_tokens={},
+    telegram_token=None,
+    telegram_secret=None,
+)
+
+
 def is_feature_enabled() -> bool:
     return os.environ.get("AGENTIC_CRAWL_ENABLED", "").lower() == "true"
 
 
-def _load_bound_tokens() -> dict[str, str]:
+def _load_bound_tokens_from_env() -> dict[str, str]:
     """Return ``{token_value -> submitted_by}`` for bound-token namespaces.
 
     Reads env vars of the form ``CRAWL_TOKEN__<namespace>__<identifier>``.
@@ -95,19 +115,34 @@ def _load_bound_tokens() -> dict[str, str]:
     return mapping
 
 
-def _telegram_shared_token() -> Optional[str]:
-    return os.environ.get("CRAWL_TOKEN_TELEGRAM") or None
+def _load_identity_config_from_env() -> IdentityConfig:
+    return IdentityConfig(
+        bound_tokens=_load_bound_tokens_from_env(),
+        telegram_token=os.environ.get("CRAWL_TOKEN_TELEGRAM") or None,
+        telegram_secret=os.environ.get("CRAWL_SECRET_TELEGRAM") or None,
+    )
 
 
-def _telegram_shared_secret() -> Optional[str]:
-    return os.environ.get("CRAWL_SECRET_TELEGRAM") or None
+def reload_identity_config() -> IdentityConfig:
+    """Rebuild the in-memory identity config snapshot from process env."""
+    global _IDENTITY_CONFIG
+    _IDENTITY_CONFIG = _load_identity_config_from_env()
+    logger.info(
+        "crawl_auth: identity config loaded bound_tokens=%d telegram=%s any=%s",
+        len(_IDENTITY_CONFIG.bound_tokens),
+        bool(_IDENTITY_CONFIG.telegram_token and _IDENTITY_CONFIG.telegram_secret),
+        _IDENTITY_CONFIG.any_configured,
+    )
+    return _IDENTITY_CONFIG
+
+
+def get_identity_config() -> IdentityConfig:
+    return _IDENTITY_CONFIG
 
 
 def any_tokens_configured() -> bool:
     """True iff at least one bound token OR the telegram pair is configured."""
-    if _telegram_shared_token() and _telegram_shared_secret():
-        return True
-    return bool(_load_bound_tokens())
+    return _IDENTITY_CONFIG.any_configured
 
 
 def canonicalize_submitted_by(raw: str) -> str:
@@ -187,8 +222,8 @@ def authenticate_request(
         raise CrawlAuthError("empty bearer token")
 
     # Telegram HMAC path
-    tg_token = _telegram_shared_token()
-    tg_secret = _telegram_shared_secret()
+    tg_token = _IDENTITY_CONFIG.telegram_token
+    tg_secret = _IDENTITY_CONFIG.telegram_secret
     if tg_token and tg_secret and hmac.compare_digest(token, tg_token):
         if not identity_claim_header:
             raise CrawlAuthError("X-Identity-Claim required for telegram namespace")
@@ -198,7 +233,7 @@ def authenticate_request(
         return AuthResult(submitted_by=sb, namespace="telegram")
 
     # Bound-token path
-    bound = _load_bound_tokens()
+    bound = _IDENTITY_CONFIG.bound_tokens
     if token in bound:
         derived = bound[token]
         if body_submitted_by is not None:
@@ -211,3 +246,8 @@ def authenticate_request(
         return AuthResult(submitted_by=derived, namespace=namespace)
 
     raise CrawlAuthError("unknown bearer token")
+
+
+# Load a snapshot on import so requests fail closed even before the app's
+# startup path explicitly reloads after env is finalized.
+reload_identity_config()

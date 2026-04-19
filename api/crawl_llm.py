@@ -471,5 +471,82 @@ def _parse_orgs_payload(content: str) -> list[dict]:
 
 
 async def parse_relate_clause(*_args, **_kwargs):
-    """Stubbed — implemented in Phase 4 (api/tools/parse_relate_clause.py)."""
-    raise NotImplementedError("parse_relate_clause lands in Phase 4")
+    instruction = (_kwargs.get("instruction") if _kwargs else None) or (_args[0] if _args else "")
+    model = _kwargs.get("model", DEFAULT_MODEL) if _kwargs else DEFAULT_MODEL
+    system_prompt = (
+        "Extract only explicit 'relate/connect/include/partner with/about' targets "
+        "from the user's instruction. Return JSON with shape "
+        "{\"targets\": [{\"label\": str, \"predicate_hint\": str|null, \"type_hint\": str|null}]}.\n"
+        "Rules:\n"
+        "- If there are no explicit relate/connect clauses, return {\"targets\": []}.\n"
+        "- Keep labels exactly as written where practical.\n"
+        "- predicate_hint should be a BKC-style predicate string when explicit, else null.\n"
+        "- type_hint should be Organization, Project, Concept, Person, or null only when strongly implied.\n"
+        "- No prose."
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": instruction or ""},
+    ]
+    content, usage = await _chat_completion(messages, model=model, max_tokens=512)
+    try:
+        data = json.loads(content)
+        targets = data.get("targets", [])
+        if not isinstance(targets, list):
+            raise ValueError("targets must be a list")
+        normalized: list[dict[str, Any]] = []
+        for item in targets[:10]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            if not label:
+                continue
+            predicate_hint = item.get("predicate_hint")
+            type_hint = item.get("type_hint")
+            normalized.append(
+                {
+                    "label": label,
+                    "predicate_hint": (str(predicate_hint).strip() or None) if predicate_hint is not None else None,
+                    "type_hint": (str(type_hint).strip() or None) if type_hint is not None else None,
+                }
+            )
+        return normalized, usage
+    except Exception as exc:
+        logger.warning("parse_relate_clause retry: %s", exc)
+        retry_messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"Instruction:\n{instruction or ''}\n\n"
+                    f"Previous output was invalid: {content}\n"
+                    "Return only valid JSON with a top-level 'targets' array."
+                ),
+            },
+        ]
+        retry_content, retry_usage = await _chat_completion(retry_messages, model=model, max_tokens=512)
+        combined = {
+            "prompt_tokens": usage["prompt_tokens"] + retry_usage["prompt_tokens"],
+            "completion_tokens": usage["completion_tokens"] + retry_usage["completion_tokens"],
+        }
+        data = json.loads(retry_content)
+        targets = data.get("targets", [])
+        if not isinstance(targets, list):
+            raise CrawlLLMError("parse_relate_clause returned invalid targets payload")
+        normalized = []
+        for item in targets[:10]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            if not label:
+                continue
+            predicate_hint = item.get("predicate_hint")
+            type_hint = item.get("type_hint")
+            normalized.append(
+                {
+                    "label": label,
+                    "predicate_hint": (str(predicate_hint).strip() or None) if predicate_hint is not None else None,
+                    "type_hint": (str(type_hint).strip() or None) if type_hint is not None else None,
+                }
+            )
+        return normalized, combined
