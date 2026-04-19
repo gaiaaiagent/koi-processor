@@ -580,3 +580,17 @@ async def test_parse_relate_clause_endpoint_rate_limited(app_and_pool, monkeypat
     assert codes.count(200) == 60
     assert codes.count(429) == 1
     web_router_module._PARSE_RELATE_CALLS.clear()
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_config_reports_agentic_crawl_available(app_and_pool):
+    app, _ = app_and_pool
+    from api import personal_ingest_api as pia
+
+    old_pool = pia.db_pool
+    pia.db_pool = app.state.db_pool
+    try:
+        data = await pia.diagnostics_config()
+        assert data['agentic_crawl_available'] is True
+    finally:
+        pia.db_pool = old_pool
