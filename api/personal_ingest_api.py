@@ -298,6 +298,7 @@ class RegisterEntityResponse(BaseModel):
     vault_rid: str
     merged_with: Optional[str] = None
     collision_warning: Optional[str] = None
+    cross_type_warning: Optional[str] = None
     koi_rid: Optional[str] = None
 
 
@@ -3105,24 +3106,45 @@ async def register_vault_entity(request: RegisterEntityRequest):
 
             # Check for URI collision with different vault file
             collision_warning = None
+            suppress_types = {'Meeting', 'Task'}
+            suppress_paths = {'Tests/'}
+            is_suppressed = (
+                request.entity_type in suppress_types
+                or any(request.vault_path.startswith(p) for p in suppress_paths)
+            )
             if not is_new:
                 existing_mapping = await conn.fetchrow("""
                     SELECT vault_path, name FROM entity_rid_mappings
                     WHERE canonical_uri = $1 AND vault_path != $2
                 """, canonical.uri, request.vault_path)
 
-                suppress_types = {'Meeting', 'Task'}
-                suppress_paths = {'Tests/'}
-                is_suppressed = (
-                    request.entity_type in suppress_types
-                    or any(request.vault_path.startswith(p) for p in suppress_paths)
-                )
                 if existing_mapping and not is_suppressed:
                     collision_warning = (
                         f"URI collision: '{request.name}' ({request.vault_path}) "
                         f"shares URI with '{existing_mapping['name']}' ({existing_mapping['vault_path']})"
                     )
                     logger.warning(collision_warning)
+
+            # Check for same name registered under a different entity type
+            cross_type_warning = None
+            if not is_suppressed:
+                normalized_name = normalize_entity_text(request.name)
+                cross_type_rows = await conn.fetch("""
+                    SELECT er.entity_type, erm.vault_path
+                    FROM entity_registry er
+                    LEFT JOIN entity_rid_mappings erm ON erm.canonical_uri = er.fuseki_uri
+                    WHERE er.normalized_text = $1 AND er.entity_type != $2
+                    LIMIT 3
+                """, normalized_name, request.entity_type)
+                if cross_type_rows:
+                    alts = ", ".join(
+                        f"{r['entity_type']} ({r['vault_path']})" for r in cross_type_rows
+                    )
+                    cross_type_warning = (
+                        f"'{request.name}' also exists as: {alts} — "
+                        f"possible duplicate; consider merging or cross-linking"
+                    )
+                    logger.warning(cross_type_warning)
 
             if is_new:
                 # Store new entity
@@ -3256,6 +3278,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 vault_rid=request.vault_rid,
                 merged_with=canonical.merged_with,
                 collision_warning=collision_warning,
+                cross_type_warning=cross_type_warning,
                 koi_rid=final_koi_rid if request.publication_scope == "federated" else None
             )
 

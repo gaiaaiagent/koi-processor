@@ -63,6 +63,10 @@ FIELD_TO_PREDICATE: Dict[str, Tuple[str, str, Optional[str]]] = {
     # Organization → Project
     'projects': ('has_project', 'outgoing', 'Project'),
 
+    # Organization/Project → Program/Hub membership
+    'hub': ('participates_in', 'outgoing', 'Project'),
+    'program': ('participates_in', 'outgoing', 'Project'),
+
     # Meeting → Person (attendees)
     'attendees': ('attended', 'incoming', 'Person'),  # Person attended Meeting
 
