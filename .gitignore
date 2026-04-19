@@ -81,7 +81,7 @@ config/client_secret_*.json
 !migrations/*.sql
 
 # Working documents (not part of public codebase)
-prompts/
+/prompts/
 docs/planning/
 
 

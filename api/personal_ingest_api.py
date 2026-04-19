@@ -793,6 +793,70 @@ async def check_fallback_relevance(
     return 0.0
 
 
+async def lookup_entity(
+    conn: asyncpg.Connection,
+    name: str,
+    entity_type: Optional[str] = None,
+) -> Optional[str]:
+    """Read-only entity lookup. Returns the canonical URI (fuseki_uri) if the
+    (name, type) pair matches an existing entity via exact or alias match; None
+    otherwise.
+
+    Used by the agentic crawler to populate ``proposal.entities[].existing_rid``
+    at crawl time so the curator sees what will be matched vs. created. No rows
+    are written — this is strictly a SELECT.
+    """
+    normalized = normalize_entity_text(name)
+
+    if entity_type:
+        exact = await conn.fetchrow(
+            """
+            SELECT fuseki_uri
+            FROM entity_registry
+            WHERE normalized_text = $1 AND entity_type = $2
+            LIMIT 1
+            """,
+            normalized,
+            entity_type,
+        )
+    else:
+        exact = await conn.fetchrow(
+            """
+            SELECT fuseki_uri
+            FROM entity_registry
+            WHERE normalized_text = $1
+            LIMIT 1
+            """,
+            normalized,
+        )
+    if exact:
+        return exact["fuseki_uri"]
+
+    normalized_alias = normalize_alias(name)
+    if entity_type:
+        alias = await conn.fetchrow(
+            """
+            SELECT fuseki_uri
+            FROM entity_registry
+            WHERE entity_type = $1 AND $2 = ANY(aliases)
+            LIMIT 1
+            """,
+            entity_type,
+            normalized_alias,
+        )
+    else:
+        alias = await conn.fetchrow(
+            """
+            SELECT fuseki_uri
+            FROM entity_registry
+            WHERE $1 = ANY(aliases)
+            LIMIT 1
+            """,
+            normalized_alias,
+        )
+    return alias["fuseki_uri"] if alias else None
+
+
 async def resolve_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,

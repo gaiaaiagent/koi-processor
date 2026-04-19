@@ -10,7 +10,7 @@ import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.llm_enricher import LLM_BACKEND
@@ -114,6 +114,33 @@ class WebMonitorAddRequest(BaseModel):
 
 class WebMonitorRemoveRequest(BaseModel):
     url: str
+
+
+# -- Agentic crawl (Phase 1: synchronous, inert by default) ------------------
+
+class CrawlBudgetIn(BaseModel):
+    max_pages: Optional[int] = None
+    max_vision_calls: Optional[int] = None
+    max_seconds: Optional[int] = None
+    max_usd: Optional[float] = None
+
+
+class CrawlAgenticRequest(BaseModel):
+    url: str
+    goal: Optional[str] = None
+    budget: Optional[CrawlBudgetIn] = None
+    # Explicitly not accepted: submitted_by (server-derived from auth token).
+
+
+class CrawlAgenticResponse(BaseModel):
+    proposal_version: str
+    ontology_version: str
+    start_url: str
+    root_entity_index: int
+    entities: List[Dict[str, Any]]
+    relationships: List[Dict[str, Any]]
+    recommended_next_crawls: List[str]
+    stats: Dict[str, Any]
 
 
 # -- Vault note creation for web ingest --------------------------------------
@@ -930,6 +957,104 @@ def create_router(pool, caps):
                 for r in receipts
             ],
         }
+
+    @router.post("/crawl-agentic", response_model=CrawlAgenticResponse)
+    async def web_crawl_agentic(
+        body: CrawlAgenticRequest,
+        request: Request,
+    ):
+        """Synchronous Phase-1 agentic crawl.
+
+        Ships INERT: returns 503 unless ``AGENTIC_CRAWL_ENABLED=true`` and at
+        least one ``CRAWL_TOKEN_*`` is configured. Capped at
+        ``PHASE1_SYNC_PAGE_CAP`` pages for the sync v1; Phase 3 adds the
+        background-job flow for real crawls.
+        """
+        from api import crawl_auth
+        from api.agentic_crawler import (
+            CrawlBudget,
+            CrawlBudgetExceeded,
+            PHASE1_SYNC_PAGE_CAP,
+            agentic_crawl,
+        )
+        from api.web_fetcher import URLValidationError, URLValidator, fetch_and_preview
+
+        try:
+            auth = crawl_auth.authenticate_request(
+                authorization_header=request.headers.get("authorization"),
+                identity_claim_header=request.headers.get("x-identity-claim"),
+                body_submitted_by=None,  # Phase 1 request model excludes this field
+            )
+        except crawl_auth.CrawlAuthError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"error": exc.message})
+
+        # SSRF gate on the start URL before any network IO.
+        try:
+            start_url = URLValidator().validate(body.url)
+        except URLValidationError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+        # Build the per-request budget. Phase 1 caps at PHASE1_SYNC_PAGE_CAP
+        # even if the caller asks for more; system ceilings still enforced.
+        budget = CrawlBudget()
+        if body.budget:
+            if body.budget.max_pages is not None:
+                budget.max_pages = body.budget.max_pages
+            if body.budget.max_vision_calls is not None:
+                budget.max_vision_calls = body.budget.max_vision_calls
+            if body.budget.max_seconds is not None:
+                budget.max_seconds = body.budget.max_seconds
+            if body.budget.max_usd is not None:
+                budget.max_usd = body.budget.max_usd
+        try:
+            budget.clamp_to_system_ceilings()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"budget exceeds system ceiling: {exc}"},
+            )
+        if budget.max_pages > PHASE1_SYNC_PAGE_CAP:
+            budget.max_pages = PHASE1_SYNC_PAGE_CAP
+
+        async def _fetch(url: str):
+            return await fetch_and_preview(url, db_pool=pool, _internal_call=True)
+
+        async def _lookup(name: str, entity_type: str):
+            from api.personal_ingest_api import lookup_entity
+
+            async with pool.acquire() as conn:
+                return await lookup_entity(conn, name, entity_type)
+
+        try:
+            proposal = await agentic_crawl(
+                start_url=start_url,
+                goal=body.goal or "",
+                budget=budget,
+                fetch_fn=_fetch,
+                lookup_fn=_lookup,
+            )
+        except CrawlBudgetExceeded as exc:
+            raise HTTPException(status_code=422, detail={"error": str(exc)})
+
+        logger.info(
+            "web.crawl-agentic url=%s submitted_by=%s pages=%d entities=%d cost=%.4f",
+            start_url,
+            auth.submitted_by,
+            proposal.stats.get("pages_visited", 0),
+            len(proposal.entities),
+            proposal.stats.get("cost_usd", 0.0),
+        )
+
+        return CrawlAgenticResponse(
+            proposal_version=proposal.proposal_version,
+            ontology_version=proposal.ontology_version,
+            start_url=proposal.start_url,
+            root_entity_index=proposal.root_entity_index,
+            entities=proposal.entities,
+            relationships=proposal.relationships,
+            recommended_next_crawls=proposal.recommended_next_crawls,
+            stats=proposal.stats,
+        )
 
     return router
 
