@@ -1621,6 +1621,8 @@ def create_router(pool, caps):
                         obj_uri = current_entity_rids.get(rel.object_index)
                         if not subj_uri or not obj_uri:
                             continue
+                        savepoint_name = f"rel_{rel_idx}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
                         try:
                             await conn.execute(
                                 """
@@ -1635,10 +1637,12 @@ def create_router(pool, caps):
                                 "web-crawl",
                                 proposal.start_url,
                             )
+                            await conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
                         except Exception as exc:
+                            await conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
                             error_results.append({"name": f"relationship:{rel_idx}", "error": str(exc)})
 
-                    for extra in body.extra_relationships:
+                    for extra_idx, extra in enumerate(body.extra_relationships):
                         if extra.predicate not in ontology_registry.ALLOWED_PREDICATES:
                             raise HTTPException(
                                 status_code=422,
@@ -1676,20 +1680,32 @@ def create_router(pool, caps):
                             continue
                         if not from_uri or not to_uri:
                             continue
-                        await conn.execute(
-                            """
-                            INSERT INTO entity_relationships
-                                (subject_uri, predicate, object_uri, source, source_rid)
-                            VALUES ($1, $2, $3, $4, $5)
-                            ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
-                            """,
-                            from_uri,
-                            extra.predicate,
-                            to_uri,
-                            "web-crawl-extra",
-                            proposal.start_url,
-                        )
-                        extra_relationships_created += 1
+                        savepoint_name = f"extra_rel_{extra_idx}"
+                        await conn.execute(f"SAVEPOINT {savepoint_name}")
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO entity_relationships
+                                    (subject_uri, predicate, object_uri, source, source_rid)
+                                VALUES ($1, $2, $3, $4, $5)
+                                ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+                                """,
+                                from_uri,
+                                extra.predicate,
+                                to_uri,
+                                "web-crawl-extra",
+                                proposal.start_url,
+                            )
+                            await conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                            extra_relationships_created += 1
+                        except Exception as exc:
+                            await conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                            error_results.append(
+                                {
+                                    "name": f"extra_relationship:{extra_idx}",
+                                    "error": str(exc),
+                                }
+                            )
 
                     await conn.execute("RELEASE SAVEPOINT inner_tx")
 

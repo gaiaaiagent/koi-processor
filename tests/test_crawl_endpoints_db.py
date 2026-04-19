@@ -519,6 +519,56 @@ async def test_commit_endpoint_creates_extra_relationship_to_existing_label(app_
 
 
 @pytest.mark.asyncio
+async def test_commit_endpoint_captures_relationship_insert_errors_without_aborting(app_and_pool):
+    app, pool = app_and_pool
+    job_id = await _seed_done_job(pool, _sample_proposal())
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION fail_web_crawl_relationship_insert()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NEW.source = 'web-crawl' THEN
+                    RAISE EXCEPTION 'synthetic relationship failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER fail_web_crawl_relationship_insert
+            BEFORE INSERT ON entity_relationships
+            FOR EACH ROW
+            EXECUTE FUNCTION fail_web_crawl_relationship_insert()
+            """
+        )
+
+    try:
+        async with _aclient(app) as c:
+            r = await _commit(c, job_id)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "committed"
+        assert any(err["name"] == "relationship:0" for err in body["errors"])
+
+        async with pool.acquire() as conn:
+            status = await conn.fetchval("SELECT status FROM web_crawl_jobs WHERE id=$1", job_id)
+            rel_count = await conn.fetchval("SELECT COUNT(*) FROM entity_relationships")
+            history = await conn.fetchval("SELECT commit_history FROM web_crawl_jobs WHERE id=$1", job_id)
+        assert status == "committed"
+        assert rel_count == 0
+        history = json.loads(history) if isinstance(history, str) else history
+        assert any(err["name"] == "relationship:0" for err in history[0]["errors"])
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DROP TRIGGER IF EXISTS fail_web_crawl_relationship_insert ON entity_relationships")
+            await conn.execute("DROP FUNCTION IF EXISTS fail_web_crawl_relationship_insert()")
+
+
+@pytest.mark.asyncio
 async def test_parse_relate_clause_endpoint_requires_auth(app_and_pool, monkeypatch):
     app, _ = app_and_pool
     monkeypatch.setattr(
