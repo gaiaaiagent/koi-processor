@@ -1555,6 +1555,16 @@ async def startup():
             except Exception as e:
                 logger.warning(f"KOI-net federation failed to initialize: {e}")
 
+        # Expose the DB pool for routers/workers that read app.state.
+        app.state.db_pool = db_pool
+
+        # Agentic crawl background worker (Octo-only via table pre-flight).
+        try:
+            from api.crawl_worker import start_crawl_worker
+            await start_crawl_worker(app)
+        except Exception as e:
+            logger.warning(f"crawl_worker start failed (non-fatal): {e}")
+
         # Initialize TerminusDB adapter (if enabled)
         if TERMINUSDB_ENABLED:
             global terminusdb_adapter
@@ -1586,6 +1596,11 @@ async def shutdown():
     """Stop background tasks and close database connection pool"""
     from api.koi_net_router import shutdown_koi_net
     await shutdown_koi_net()
+    try:
+        from api.crawl_worker import stop_crawl_worker
+        await stop_crawl_worker(app)
+    except Exception:
+        pass
     global db_pool
     if db_pool:
         await db_pool.close()
