@@ -630,13 +630,16 @@ async def check_rate_limit(
 # Playwright Rendering (fallback for JS-heavy pages)
 # =============================================================================
 
-async def fetch_html_with_playwright(url: str) -> Optional[str]:
+async def fetch_html_with_playwright(url: str, proxy: Optional[str] = None) -> Optional[str]:
     """Fetch a page using Playwright for JavaScript rendering.
 
     Launches a headless Chromium browser, navigates to the URL,
     waits for network idle, then extracts rendered HTML.
     Handles shadow DOM by flattening shadow roots into the document.
     Returns None if Playwright is not available or fails.
+
+    If proxy is provided (HTTP URL), routes the browser through it — used as a
+    residential-IP fallback for sites that block datacenter IPs at the WAF.
     """
     if not PLAYWRIGHT_AVAILABLE:
         logger.warning("Playwright not installed, cannot render JS pages")
@@ -646,10 +649,13 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
     browser = None
     try:
         pw = await async_playwright().start()
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
-        )
+        launch_kwargs = {
+            "headless": True,
+            "args": ["--no-sandbox", "--disable-setuid-sandbox"],
+        }
+        if proxy:
+            launch_kwargs["proxy"] = {"server": proxy}
+        browser = await pw.chromium.launch(**launch_kwargs)
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
         )
@@ -909,6 +915,21 @@ async def fetch_and_preview(
                 cloudflare_detected = True
                 logger.info(f"Playwright also hit Cloudflare challenge for {url}")
                 html = None
+
+            # Detect non-CF block (WAF "Access Denied", thin server-403 pages).
+            # Retry via residential proxy if configured — many small-host WAFs
+            # blocklist datacenter IPs but accept residential traffic.
+            elif html and len(html) < 500 and _PROXY_URL:
+                logger.info(
+                    f"Playwright returned thin content ({len(html)} chars) for {url}; "
+                    f"retrying via residential proxy"
+                )
+                prox_html = await fetch_html_with_playwright(url, proxy=_PROXY_URL)
+                if prox_html and len(prox_html) > len(html):
+                    html = prox_html
+                    rendered_with = "playwright+proxy"
+                else:
+                    html = None  # Force escalation
 
         # If still no content (or Cloudflare detected), try Scrapling
         if html is None and SCRAPLING_AVAILABLE:
