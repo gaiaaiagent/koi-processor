@@ -132,15 +132,27 @@ class CrawlAgenticRequest(BaseModel):
     # Explicitly not accepted: submitted_by (server-derived from auth token).
 
 
-class CrawlAgenticResponse(BaseModel):
-    proposal_version: str
-    ontology_version: str
+class CrawlAgenticEnqueuedResponse(BaseModel):
+    job_id: int
+    deduped: bool = False
+
+
+class CrawlJobStatusResponse(BaseModel):
+    job_id: int
+    status: str
     start_url: str
-    root_entity_index: int
-    entities: List[Dict[str, Any]]
-    relationships: List[Dict[str, Any]]
-    recommended_next_crawls: List[str]
-    stats: Dict[str, Any]
+    submitted_by: str
+    progress: Dict[str, Any] = Field(default_factory=dict)
+    cost_usd: float = 0.0
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+PER_USER_CONCURRENT_CAP = 2
+PER_USER_DAILY_CAP = 10
 
 
 # -- Vault note creation for web ingest --------------------------------------
@@ -958,44 +970,47 @@ def create_router(pool, caps):
             ],
         }
 
-    @router.post("/crawl-agentic", response_model=CrawlAgenticResponse)
+    @router.post("/crawl-agentic", response_model=CrawlAgenticEnqueuedResponse)
     async def web_crawl_agentic(
         body: CrawlAgenticRequest,
         request: Request,
     ):
-        """Synchronous Phase-1 agentic crawl.
+        """Enqueue an agentic crawl; background worker drives it.
 
         Ships INERT: returns 503 unless ``AGENTIC_CRAWL_ENABLED=true`` and at
-        least one ``CRAWL_TOKEN_*`` is configured. Capped at
-        ``PHASE1_SYNC_PAGE_CAP`` pages for the sync v1; Phase 3 adds the
-        background-job flow for real crawls.
+        least one ``CRAWL_TOKEN_*`` is configured. All cap checks and the
+        INSERT run inside a single transaction holding
+        ``pg_advisory_xact_lock(hashtext(submitted_by))``. The partial unique
+        index ``uniq_inflight_per_user_url`` is the belt-and-suspenders
+        second line — on ``unique_violation`` we return the existing
+        in-flight ``job_id`` with ``deduped=true``.
         """
         from api import crawl_auth
-        from api.agentic_crawler import (
-            CrawlBudget,
-            CrawlBudgetExceeded,
-            PHASE1_SYNC_PAGE_CAP,
-            agentic_crawl,
-        )
-        from api.web_fetcher import URLValidationError, URLValidator, fetch_and_preview
+        from api.agentic_crawler import CrawlBudget
+        from api.crawl_canonicalize import StartUrlError, canonicalize_start_url
+        from api.web_fetcher import URLValidationError, URLValidator
 
         try:
             auth = crawl_auth.authenticate_request(
                 authorization_header=request.headers.get("authorization"),
                 identity_claim_header=request.headers.get("x-identity-claim"),
-                body_submitted_by=None,  # Phase 1 request model excludes this field
+                body_submitted_by=None,
             )
         except crawl_auth.CrawlAuthError as exc:
             raise HTTPException(status_code=exc.status_code, detail={"error": exc.message})
 
-        # SSRF gate on the start URL before any network IO.
+        # 1. Canonicalize start_url (strict, local; no DNS). SSRF gate is
+        # separate (below) and uses URLValidator which blocks private ranges.
         try:
-            start_url = URLValidator().validate(body.url)
+            canonical_url = canonicalize_start_url(body.url)
+        except StartUrlError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+        try:
+            canonical_url = URLValidator().validate(canonical_url)
         except URLValidationError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
 
-        # Build the per-request budget. Phase 1 caps at PHASE1_SYNC_PAGE_CAP
-        # even if the caller asks for more; system ceilings still enforced.
+        # 2. Validate budget against system ceilings; build snapshot.
         budget = CrawlBudget()
         if body.budget:
             if body.budget.max_pages is not None:
@@ -1013,55 +1028,162 @@ def create_router(pool, caps):
                 status_code=400,
                 detail={"error": f"budget exceeds system ceiling: {exc}"},
             )
-        if budget.max_pages > PHASE1_SYNC_PAGE_CAP:
-            budget.max_pages = PHASE1_SYNC_PAGE_CAP
+        budget_snapshot = budget.as_snapshot()
 
-        async def _fetch(url: str):
-            return await fetch_and_preview(url, db_pool=pool, _internal_call=True)
-
-        async def _lookup(name: str, entity_type: str):
-            from api.personal_ingest_api import lookup_entity
-
-            async with pool.acquire() as conn:
-                return await lookup_entity(conn, name, entity_type)
-
-        from api.vision_ocr import vision_extract_orgs
-
-        async def _vision(image_url: str, role: str, context: str):
-            return await vision_extract_orgs(
-                image_url=image_url, role=role, context=context
-            )
+        # 3. Atomic enqueue: cap checks + dedup + INSERT serialized by
+        # pg_advisory_xact_lock on submitted_by. Unique-violation on
+        # uniq_inflight_per_user_url collapses races past the lock.
+        import asyncpg
+        from api import ontology_registry
 
         try:
-            proposal = await agentic_crawl(
-                start_url=start_url,
-                goal=body.goal or "",
-                budget=budget,
-                fetch_fn=_fetch,
-                lookup_fn=_lookup,
-                vision_fn=_vision,
-            )
-        except CrawlBudgetExceeded as exc:
-            raise HTTPException(status_code=422, detail={"error": str(exc)})
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext($1))",
+                        auth.submitted_by,
+                    )
+                    # URL dedup (per-user): return existing in-flight job.
+                    existing = await conn.fetchval(
+                        """
+                        SELECT id FROM web_crawl_jobs
+                         WHERE submitted_by=$1 AND start_url=$2
+                           AND status IN ('queued','running')
+                         LIMIT 1
+                        """,
+                        auth.submitted_by,
+                        canonical_url,
+                    )
+                    if existing is not None:
+                        return CrawlAgenticEnqueuedResponse(job_id=int(existing), deduped=True)
+                    # Per-user concurrency cap.
+                    concurrent = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM web_crawl_jobs
+                         WHERE submitted_by=$1 AND status IN ('queued','running')
+                        """,
+                        auth.submitted_by,
+                    )
+                    if concurrent >= PER_USER_CONCURRENT_CAP:
+                        raise HTTPException(
+                            status_code=429,
+                            detail={
+                                "error": f"concurrent crawl limit ({PER_USER_CONCURRENT_CAP}) reached"
+                            },
+                        )
+                    # Per-day cap (counts terminal-state rows too).
+                    daily = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM web_crawl_jobs
+                         WHERE submitted_by=$1 AND created_at > now() - interval '24 hours'
+                        """,
+                        auth.submitted_by,
+                    )
+                    if daily >= PER_USER_DAILY_CAP:
+                        raise HTTPException(
+                            status_code=429,
+                            detail={
+                                "error": f"daily crawl limit ({PER_USER_DAILY_CAP}) reached"
+                            },
+                        )
+                    # Insert.
+                    try:
+                        row = await conn.fetchrow(
+                            """
+                            INSERT INTO web_crawl_jobs
+                                (start_url, goal, submitted_by, status,
+                                 proposal_version, ontology_version, budget_json)
+                            VALUES ($1, $2, $3, 'queued', 'v1', $4, $5::jsonb)
+                            RETURNING id
+                            """,
+                            canonical_url,
+                            body.goal,
+                            auth.submitted_by,
+                            ontology_registry.ONTOLOGY_VERSION,
+                            _json_dumps(budget_snapshot),
+                        )
+                    except asyncpg.exceptions.UniqueViolationError:
+                        # Race past the advisory lock — return the in-flight one.
+                        existing = await conn.fetchval(
+                            """
+                            SELECT id FROM web_crawl_jobs
+                             WHERE submitted_by=$1 AND start_url=$2
+                               AND status IN ('queued','running')
+                             LIMIT 1
+                            """,
+                            auth.submitted_by,
+                            canonical_url,
+                        )
+                        if existing is None:
+                            raise HTTPException(
+                                status_code=500,
+                                detail={"error": "unique violation with no in-flight row"},
+                            )
+                        return CrawlAgenticEnqueuedResponse(job_id=int(existing), deduped=True)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("enqueue failed: %s", exc)
+            raise HTTPException(status_code=500, detail={"error": f"enqueue failed: {exc}"})
 
         logger.info(
-            "web.crawl-agentic url=%s submitted_by=%s pages=%d entities=%d cost=%.4f",
-            start_url,
-            auth.submitted_by,
-            proposal.stats.get("pages_visited", 0),
-            len(proposal.entities),
-            proposal.stats.get("cost_usd", 0.0),
+            "web.crawl-agentic enqueued job_id=%d url=%s submitted_by=%s",
+            row["id"], canonical_url, auth.submitted_by,
         )
+        return CrawlAgenticEnqueuedResponse(job_id=int(row["id"]), deduped=False)
 
-        return CrawlAgenticResponse(
-            proposal_version=proposal.proposal_version,
-            ontology_version=proposal.ontology_version,
-            start_url=proposal.start_url,
-            root_entity_index=proposal.root_entity_index,
-            entities=proposal.entities,
-            relationships=proposal.relationships,
-            recommended_next_crawls=proposal.recommended_next_crawls,
-            stats=proposal.stats,
+    @router.get("/crawl-jobs/{job_id}", response_model=CrawlJobStatusResponse)
+    async def web_crawl_job_status(job_id: int, request: Request):
+        """Poll status of a crawl job. Ownership-checked."""
+        from api import crawl_auth
+
+        try:
+            auth = crawl_auth.authenticate_request(
+                authorization_header=request.headers.get("authorization"),
+                identity_claim_header=request.headers.get("x-identity-claim"),
+                body_submitted_by=None,
+            )
+        except crawl_auth.CrawlAuthError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"error": exc.message})
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, start_url, submitted_by, status,
+                       progress_json, result_json, cost_usd, error,
+                       started_at, heartbeat_at, finished_at
+                  FROM web_crawl_jobs WHERE id=$1
+                """,
+                job_id,
+            )
+        if row is None:
+            raise HTTPException(status_code=404, detail={"error": "job not found"})
+        if row["submitted_by"] != auth.submitted_by:
+            raise HTTPException(status_code=403, detail={"error": "ownership mismatch"})
+
+        def _parse_json(raw: Any) -> Any:
+            if raw is None:
+                return None
+            if isinstance(raw, (dict, list)):
+                return raw
+            try:
+                import json
+                return json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+
+        return CrawlJobStatusResponse(
+            job_id=int(row["id"]),
+            status=row["status"],
+            start_url=row["start_url"],
+            submitted_by=row["submitted_by"],
+            progress=_parse_json(row["progress_json"]) or {},
+            cost_usd=float(row["cost_usd"] or 0.0),
+            result=_parse_json(row["result_json"]),
+            error=row["error"],
+            started_at=row["started_at"].isoformat() if row["started_at"] else None,
+            heartbeat_at=row["heartbeat_at"].isoformat() if row["heartbeat_at"] else None,
+            finished_at=row["finished_at"].isoformat() if row["finished_at"] else None,
         )
 
     return router

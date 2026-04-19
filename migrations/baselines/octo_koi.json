@@ -200,6 +200,11 @@
       "id": "bkc:072_credit_class_id",
       "file": "072_credit_class_id.sql",
       "checksum": "13094bf1023850dee598f3bdb305f0ae78b00ca80bc45d6de529798d19dde954"
+    },
+    {
+      "id": "bkc:087_web_crawl_jobs",
+      "file": "087_web_crawl_jobs.sql",
+      "checksum": "0d37bb1b8bae06f14cd0302e299d076e142808f2eed807a5e2abb29b8b018b46"
     }
   ]
 }
