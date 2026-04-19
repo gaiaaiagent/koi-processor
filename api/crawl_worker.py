@@ -472,13 +472,13 @@ async def start_crawl_worker(app: FastAPI, *, dsn: Optional[str] = None) -> Opti
     if pool is None:
         logger.info("crawl_worker: db_pool not available on app.state — worker not started")
         return None
-    if not crawl_auth.is_feature_enabled():
-        logger.info("crawl_worker: feature flag disabled — worker not started")
-        return None
     if not await _table_exists(pool, "web_crawl_jobs"):
         logger.info(
             "crawl_worker: web_crawl_jobs table absent — worker not started"
         )
+        return None
+    if not crawl_auth.is_feature_enabled():
+        logger.info("crawl_worker: feature flag disabled — worker not started")
         return None
     resolved_dsn = dsn or os.getenv("POSTGRES_URL")
     if not resolved_dsn:
