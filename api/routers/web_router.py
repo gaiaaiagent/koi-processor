@@ -291,6 +291,9 @@ _web_sensor_instances: Dict[int, Any] = {}  # keyed by pool id to allow lazy ini
 
 def create_router(pool, caps):
     """Return an APIRouter for web sensor endpoints."""
+    from api import crawl_auth
+
+    crawl_auth.reload_identity_config()
     router = APIRouter(prefix="/web", tags=["web"])
 
     @router.post("/preview", response_model=WebPreviewResponse)
