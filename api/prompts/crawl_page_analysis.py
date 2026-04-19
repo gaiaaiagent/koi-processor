@@ -86,7 +86,13 @@ Rules:
 - Common mapping: recurring named programs on an org site → type "Project" with metadata.kind="program" linked from the Organization via has_project. Specific project instances also use type "Project" with metadata.kind="instance". Reusable methods → type "Practice".
 - Do not re-propose entities already in the world-model summary unless you have new metadata or a new relationship for them.
 - For next_links: only suggest URLs that appear in the page's link list; prefer same-domain URLs that look like they reveal new structure (programs, partners, team, projects). Give each a priority 0.0–1.0.
-- For worth_ocr_images: only flag images whose surrounding heading or alt-text suggests they carry entity information (partner/sponsor/funder grids, team photos, named infographics). Skip decorative imagery. Tag each with a role from the allowed enum. At most 8 per page.
+- For worth_ocr_images: only flag images whose surrounding heading or alt-text suggests they carry entity information. Skip decorative imagery and icons. At most 8 images per page (hard cap — flag only the highest-value ones). Tag each with one of these roles; vision cost is meaningful so the role dictates downstream handling:
+  - "partner_grid" — a grid or strip of partner organization logos (e.g., under headings like "Partners", "Our Partners", "Collaborators"). Downstream adds Organization entities with collaborates_with.
+  - "sponsor_list" / "funder_list" — logos under headings like "Sponsors", "Funders", "Supported by". Downstream adds Organization entities with collaborates_with + affiliated_with.
+  - "team_photo" — a photo with captioned Person names (e.g., a Team page grid). Downstream adds Person entities with affiliated_with to the root Org.
+  - "infographic" — an image with named nodes/labels carrying Concept meaning. Downstream adds Concept entities with about.
+  - "generic_decoration" / "unknown" — DO NOT flag these. If you're unsure and the image is probably decorative, omit it entirely.
+  The LLM call on each image costs real dollars. Err on the side of flagging fewer, higher-confidence images.
 - judgment="sufficient" means: no more pages on this site will materially improve the graph. Use sparingly.
 
 Respond with JSON matching this schema exactly, no prose:

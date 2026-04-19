@@ -1025,6 +1025,13 @@ def create_router(pool, caps):
             async with pool.acquire() as conn:
                 return await lookup_entity(conn, name, entity_type)
 
+        from api.vision_ocr import vision_extract_orgs
+
+        async def _vision(image_url: str, role: str, context: str):
+            return await vision_extract_orgs(
+                image_url=image_url, role=role, context=context
+            )
+
         try:
             proposal = await agentic_crawl(
                 start_url=start_url,
@@ -1032,6 +1039,7 @@ def create_router(pool, caps):
                 budget=budget,
                 fetch_fn=_fetch,
                 lookup_fn=_lookup,
+                vision_fn=_vision,
             )
         except CrawlBudgetExceeded as exc:
             raise HTTPException(status_code=422, detail={"error": str(exc)})

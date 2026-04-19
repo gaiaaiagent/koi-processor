@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urljoin
 
 from pydantic import ValidationError
@@ -358,9 +358,116 @@ def _validate_analysis(
     return analysis
 
 
-async def extract_orgs_from_image(*_args, **_kwargs):
-    """Stubbed — implemented in Phase 2 (vision_ocr.py calls this)."""
-    raise NotImplementedError("extract_orgs_from_image lands in Phase 2")
+_IMAGE_SYSTEM_PROMPT = (
+    "You are looking at a single image from a web page. Extract any "
+    "organization, company, sponsor, funder, or partner names that appear as "
+    "recognizable text or logos. Also extract Person names if the image is a "
+    "team photo with captions, or Concept names if the image is an "
+    "infographic with labeled nodes.\n\n"
+    "Return JSON with this exact shape (no prose):\n"
+    "{\"orgs\": [{\"name\": str, \"confidence\": float 0..1}]}\n\n"
+    "Rules:\n"
+    "- Confidence = your certainty that the text/logo corresponds to a real, "
+    "stable named entity. Stylized logos you can read confidently → high. "
+    "Blurry or partially-obscured logos → low. Decorative icons or stock "
+    "imagery with no identifying text → drop entirely (return empty list).\n"
+    "- Do NOT invent names you cannot see. If you are not sure, omit the entry.\n"
+    "- Return up to 20 entries max. If more are present, return the most "
+    "prominent 20."
+)
+
+
+async def extract_orgs_from_image(
+    *,
+    image_bytes: bytes,
+    content_type: str,
+    context: str = "",
+    role: str = "unknown",
+    model: str = DEFAULT_MODEL,
+) -> tuple[list[dict], dict[str, int]]:
+    """Run gpt-4o-mini vision on a single image. Return (orgs, usage).
+
+    One retry on malformed JSON / bad shape. On second failure: returns
+    ``([], usage)`` and logs a warning — vision failures never terminate the
+    crawl (the caller still gets the cost for both attempts).
+    """
+    import base64
+
+    if not content_type.startswith("image/"):
+        raise ValueError(f"extract_orgs_from_image: non-image content_type '{content_type}'")
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{content_type};base64,{b64}"
+
+    user_text = (
+        f"Image role (LLM-assigned from page context): {role}\n"
+        f"Surrounding context: {context or '(none)'}\n\n"
+        "Extract named entities visible in this image as specified."
+    )
+    messages = [
+        {"role": "system", "content": _IMAGE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_text},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    content, usage = await _chat_completion(messages, model=model, max_tokens=1024)
+    first_error: Optional[Exception] = None
+    try:
+        return _parse_orgs_payload(content), usage
+    except (ValueError, json.JSONDecodeError) as exc:
+        first_error = exc
+        logger.warning("extract_orgs_from_image retry: %s", exc)
+
+    retry_messages = list(messages)
+    retry_messages.append({"role": "assistant", "content": content[:2000]})
+    retry_messages.append(
+        {
+            "role": "user",
+            "content": (
+                "Your previous reply did not match the required JSON shape:\n"
+                f"{first_error}\n\n"
+                "Re-emit a valid JSON object with the `orgs` key only."
+            ),
+        }
+    )
+    retry_content, retry_usage = await _chat_completion(
+        retry_messages, model=model, max_tokens=1024
+    )
+    combined = {
+        "prompt_tokens": usage["prompt_tokens"] + retry_usage["prompt_tokens"],
+        "completion_tokens": usage["completion_tokens"] + retry_usage["completion_tokens"],
+    }
+    try:
+        return _parse_orgs_payload(retry_content), combined
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning("extract_orgs_from_image dropped after retry: %s", exc)
+        return [], combined
+
+
+def _parse_orgs_payload(content: str) -> list[dict]:
+    data = json.loads(content)
+    orgs = data.get("orgs")
+    if not isinstance(orgs, list):
+        raise ValueError("response missing 'orgs' list")
+    cleaned: list[dict] = []
+    for entry in orgs[:20]:
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            confidence = float(entry.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            continue
+        confidence = max(0.0, min(1.0, confidence))
+        cleaned.append({"name": name, "confidence": confidence})
+    return cleaned
 
 
 async def parse_relate_clause(*_args, **_kwargs):
