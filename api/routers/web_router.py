@@ -7,11 +7,12 @@ web content curation.  Only included when caps.web_sensor is True.
 import logging
 import os
 import time
+from collections import defaultdict, deque
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.llm_enricher import LLM_BACKEND
 from api import ontology_registry
@@ -153,42 +154,45 @@ class CrawlJobStatusResponse(BaseModel):
 
 
 class EntityEditFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
-    class Config:
-        extra = "forbid"
-
 
 class ProposalOverrides(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     dropped_entity_indices: List[int] = Field(default_factory=list)
     entity_edits: Dict[int, EntityEditFields] = Field(default_factory=dict)
     dropped_relationship_indices: List[int] = Field(default_factory=list)
 
-    class Config:
-        extra = "forbid"
-
 
 class ExtraRelationshipIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
     from_: Union[int, str] = Field(..., alias="from")
     predicate: str = "related_to"
     to: Union[int, str]
 
-    class Config:
-        extra = "forbid"
-        allow_population_by_field_name = True
-
 
 class CrawlCommitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     proposal_overrides: ProposalOverrides = Field(default_factory=ProposalOverrides)
     extra_relationships: List[ExtraRelationshipIn] = Field(default_factory=list)
 
-    class Config:
-        extra = "forbid"
+
+class ParseRelateClauseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str
 
 
 class StoredProposalEntity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     index: int
     name: str
     type: str
@@ -200,20 +204,18 @@ class StoredProposalEntity(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     existing_rid: Optional[str] = None
 
-    class Config:
-        extra = "forbid"
-
 
 class StoredProposalRelationship(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     subject_index: int
     predicate: str
     object_index: int
 
-    class Config:
-        extra = "forbid"
-
 
 class StoredCrawlProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     proposal_version: str
     ontology_version: str
     start_url: str
@@ -223,13 +225,11 @@ class StoredCrawlProposal(BaseModel):
     recommended_next_crawls: List[str] = Field(default_factory=list)
     stats: Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        extra = "forbid"
-
 
 PER_PARSE_RELATE_HOURLY_CAP = 60
 PER_USER_CONCURRENT_CAP = 2
 PER_USER_DAILY_CAP = 10
+_PARSE_RELATE_CALLS: dict[str, deque[float]] = defaultdict(deque)
 
 
 # -- Vault note creation for web ingest --------------------------------------
@@ -414,8 +414,8 @@ def _load_stored_proposal(raw: Any) -> StoredCrawlProposal:
 
 def _copy_entity_with_edits(entity: StoredProposalEntity, edits: Optional[EntityEditFields]) -> StoredProposalEntity:
     if edits is None:
-        return entity.copy(deep=True)
-    data = entity.dict()
+        return entity.model_copy(deep=True)
+    data = entity.model_dump()
     if edits.name is not None:
         data["name"] = edits.name
     if edits.description is not None:
@@ -524,12 +524,28 @@ async def _resolve_extra_endpoint_ref(
     return None, {"label": ref_str, "candidates": candidates}, None
 
 
+def _check_parse_relate_rate_limit(identity: str) -> None:
+    now = time.time()
+    window = _PARSE_RELATE_CALLS[identity]
+    cutoff = now - 3600
+    while window and window[0] <= cutoff:
+        window.popleft()
+    if len(window) >= PER_PARSE_RELATE_HOURLY_CAP:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": f"parse_relate rate limit ({PER_PARSE_RELATE_HOURLY_CAP}/hour) exceeded"},
+        )
+    window.append(now)
+
+
 def create_router(pool, caps):
     """Return an APIRouter for web sensor endpoints."""
     from api import crawl_auth
 
     crawl_auth.reload_identity_config()
+    api_router = APIRouter()
     router = APIRouter(prefix="/web", tags=["web"])
+    tools_router = APIRouter(prefix="/tools", tags=["tools"])
 
     @router.post("/preview", response_model=WebPreviewResponse)
     async def web_preview(body: WebPreviewRequest):
@@ -1722,7 +1738,34 @@ def create_router(pool, caps):
             "status": final_status,
         }
 
-    return router
+    @tools_router.post("/parse-relate-clause")
+    async def parse_relate_clause_endpoint(body: ParseRelateClauseRequest, request: Request):
+        from api import crawl_auth
+        from api.tools.parse_relate_clause import parse_relate_clause
+
+        raw_body = await request.body()
+        if len(raw_body) > 2048:
+            raise HTTPException(status_code=413, detail={"error": "request body exceeds 2KB"})
+        try:
+            auth = crawl_auth.authenticate_request(
+                authorization_header=request.headers.get("authorization"),
+                identity_claim_header=request.headers.get("x-identity-claim"),
+                body_submitted_by=None,
+            )
+        except crawl_auth.CrawlAuthError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"error": exc.message})
+
+        _check_parse_relate_rate_limit(auth.submitted_by)
+        try:
+            parsed = await parse_relate_clause(body.instruction)
+        except Exception as exc:
+            logger.exception("parse-relate-clause failed: %s", exc)
+            raise HTTPException(status_code=500, detail={"error": f"parse relate failed: {exc}"})
+        return {"targets": parsed["targets"]}
+
+    api_router.include_router(router)
+    api_router.include_router(tools_router)
+    return api_router
 
 
 # -- Helpers -----------------------------------------------------------------

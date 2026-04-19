@@ -164,6 +164,14 @@ async def _commit(client, job_id: int, body: dict[str, Any] | None = None, token
     )
 
 
+async def _parse_relate(client, instruction: str, token: str = "ops-test-token"):
+    return await client.post(
+        "/tools/parse-relate-clause",
+        json={"instruction": instruction},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
 async def _seed_done_job(pool, proposal: dict[str, Any], submitted_by: str = "ops:test") -> int:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -508,3 +516,67 @@ async def test_commit_endpoint_creates_extra_relationship_to_existing_label(app_
             """
         )
     assert predicate == "related_to"
+
+
+@pytest.mark.asyncio
+async def test_parse_relate_clause_endpoint_requires_auth(app_and_pool, monkeypatch):
+    app, _ = app_and_pool
+    monkeypatch.setattr(
+        "api.tools.parse_relate_clause.parse_relate_clause",
+        lambda instruction: asyncio.sleep(0, result={"targets": [{"label": "Victoria Landscape Hub", "predicate_hint": "related_to", "type_hint": "Organization"}], "usage": {}, "usd": 0.0}),
+    )
+    async with _aclient(app) as c:
+        r = await c.post("/tools/parse-relate-clause", json={"instruction": "relate to Victoria Landscape Hub"})
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_parse_relate_clause_endpoint_returns_targets_without_touching_job_cost(app_and_pool, monkeypatch):
+    app, pool = app_and_pool
+    job_id = await _seed_done_job(pool, _sample_proposal())
+
+    async def _fake_parse(instruction: str):
+        return {
+            "targets": [{"label": "Victoria Landscape Hub", "predicate_hint": "related_to", "type_hint": "Organization"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            "usd": 0.0001,
+        }
+
+    monkeypatch.setattr("api.tools.parse_relate_clause.parse_relate_clause", _fake_parse)
+    async with pool.acquire() as conn:
+        before = await conn.fetchval("SELECT cost_usd FROM web_crawl_jobs WHERE id=$1", job_id)
+    async with _aclient(app) as c:
+        r = await _parse_relate(c, "ingest https://example.org and relate to Victoria Landscape Hub")
+    assert r.status_code == 200, r.text
+    assert r.json()["targets"][0]["label"] == "Victoria Landscape Hub"
+    async with pool.acquire() as conn:
+        after = await conn.fetchval("SELECT cost_usd FROM web_crawl_jobs WHERE id=$1", job_id)
+    assert before == after
+
+
+@pytest.mark.asyncio
+async def test_parse_relate_clause_endpoint_rejects_oversize_body(app_and_pool):
+    app, _ = app_and_pool
+    async with _aclient(app) as c:
+        r = await _parse_relate(c, "x" * 5000)
+    assert r.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_parse_relate_clause_endpoint_rate_limited(app_and_pool, monkeypatch):
+    app, _ = app_and_pool
+    from api.routers import web_router as web_router_module
+
+    async def _fake_parse(instruction: str):
+        return {"targets": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}, "usd": 0.0}
+
+    web_router_module._PARSE_RELATE_CALLS.clear()
+    monkeypatch.setattr("api.tools.parse_relate_clause.parse_relate_clause", _fake_parse)
+    async with _aclient(app) as c:
+        codes = []
+        for _ in range(61):
+            r = await _parse_relate(c, "relate to test")
+            codes.append(r.status_code)
+    assert codes.count(200) == 60
+    assert codes.count(429) == 1
+    web_router_module._PARSE_RELATE_CALLS.clear()
