@@ -8,8 +8,11 @@ Routes are prefix-relative — prefix "/knowledge" is applied at mount
 in personal_ingest_api.py.
 """
 
+import asyncio
 import json
 import logging
+import os
+import subprocess
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from uuid import UUID
@@ -513,8 +516,8 @@ def create_router(
         query: str = Query(..., description="Search query"),
         limit: int = Query(10, ge=1, le=50),
         include: str = Query(
-            "entities,facts,sessions,wiki",
-            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki"),
+            "entities,facts,sessions,wiki,vault",
+            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki,vault"),
         doc_kind: Optional[str] = Query(None, description="Filter docs by doc_kind (e.g. architecture, spec, operations)"),
         status: Optional[str] = Query(None, description="Filter docs by status (e.g. active, draft)"),
         is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
@@ -833,6 +836,39 @@ def create_router(
                             "chunk_rid": row["chunk_rid"],
                             "metadata": {"vector_score": float(row["score"])},
                         })
+
+        # Vault BM25 (pageindex — Mac only, graceful skip if venv not present)
+        if "vault" in surfaces:
+            _venv_py = os.path.expanduser(
+                "~/.claude/local/darren-workflow/pageindex/venv/bin/python3")
+            _script = os.path.expanduser(
+                "~/projects/darren-workflow/scripts/pageindex.py")
+            if os.path.exists(_venv_py) and os.path.exists(_script):
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        _venv_py, _script, "query", query,
+                        "--json", "--limit", "10",
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    )
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+                    if stdout:
+                        pi_data = json.loads(stdout)
+                        k_vault = 60
+                        for rank, hit in enumerate(pi_data.get("results", [])):
+                            all_results.append({
+                                "text": hit.get("snippet") or hit.get("title", ""),
+                                "score": 1.0 / (k_vault + rank + 1),
+                                "source": "vault",
+                                "title": hit.get("title"),
+                                "path": hit.get("path"),
+                                "folder": hit.get("folder"),
+                                "metadata": {
+                                    "bm25_score": hit.get("score"),
+                                    "match_mode": "bm25",
+                                },
+                            })
+                except Exception as _e:
+                    logger.warning("unified-search vault surface failed: %s", _e)
 
         # Sort by RRF score descending, take top N
         all_results.sort(key=lambda x: x["score"], reverse=True)
