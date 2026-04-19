@@ -8,12 +8,13 @@ import logging
 import os
 import time
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.llm_enricher import LLM_BACKEND
+from api import ontology_registry
 from api.entity_schema import type_to_folder
 from api.vault_parser import FIELD_TO_PREDICATE
 from api.vault_note_utils import sanitize_filename, vault_slug, build_frontmatter, vault_note_path
@@ -151,6 +152,82 @@ class CrawlJobStatusResponse(BaseModel):
     finished_at: Optional[str] = None
 
 
+class EntityEditFields(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class ProposalOverrides(BaseModel):
+    dropped_entity_indices: List[int] = Field(default_factory=list)
+    entity_edits: Dict[int, EntityEditFields] = Field(default_factory=dict)
+    dropped_relationship_indices: List[int] = Field(default_factory=list)
+
+    class Config:
+        extra = "forbid"
+
+
+class ExtraRelationshipIn(BaseModel):
+    from_: Union[int, str] = Field(..., alias="from")
+    predicate: str = "related_to"
+    to: Union[int, str]
+
+    class Config:
+        extra = "forbid"
+        allow_population_by_field_name = True
+
+
+class CrawlCommitRequest(BaseModel):
+    proposal_overrides: ProposalOverrides = Field(default_factory=ProposalOverrides)
+    extra_relationships: List[ExtraRelationshipIn] = Field(default_factory=list)
+
+    class Config:
+        extra = "forbid"
+
+
+class StoredProposalEntity(BaseModel):
+    index: int
+    name: str
+    type: str
+    description: Optional[str] = None
+    source_url: Optional[str] = None
+    source_image: Optional[str] = None
+    confidence: float = 1.0
+    requires_review: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    existing_rid: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class StoredProposalRelationship(BaseModel):
+    subject_index: int
+    predicate: str
+    object_index: int
+
+    class Config:
+        extra = "forbid"
+
+
+class StoredCrawlProposal(BaseModel):
+    proposal_version: str
+    ontology_version: str
+    start_url: str
+    root_entity_index: int = 0
+    entities: List[StoredProposalEntity] = Field(default_factory=list)
+    relationships: List[StoredProposalRelationship] = Field(default_factory=list)
+    recommended_next_crawls: List[str] = Field(default_factory=list)
+    stats: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        extra = "forbid"
+
+
+PER_PARSE_RELATE_HOURLY_CAP = 60
 PER_USER_CONCURRENT_CAP = 2
 PER_USER_DAILY_CAP = 10
 
@@ -287,6 +364,164 @@ def write_vault_note(
 # -- Router factory ----------------------------------------------------------
 
 _web_sensor_instances: Dict[int, Any] = {}  # keyed by pool id to allow lazy init
+
+
+def _parse_json_maybe(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        import json
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _load_stored_proposal(raw: Any) -> StoredCrawlProposal:
+    data = _parse_json_maybe(raw)
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=409, detail={"error": "crawl job has no stored proposal"})
+    try:
+        proposal = StoredCrawlProposal(**data)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail={"error": f"stored proposal invalid: {exc}"})
+    if proposal.proposal_version != "v1":
+        raise HTTPException(
+            status_code=422,
+            detail={"error": f"unknown proposal version '{proposal.proposal_version}'"},
+        )
+    if proposal.root_entity_index < 0 or proposal.root_entity_index >= len(proposal.entities):
+        raise HTTPException(status_code=422, detail={"error": "stored proposal has invalid root_entity_index"})
+    for entity in proposal.entities:
+        if entity.type not in ontology_registry.ALLOWED_ENTITY_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": f"Unknown entity type '{entity.type}'. Valid types: {sorted(ontology_registry.ALLOWED_ENTITY_TYPES)}"
+                },
+            )
+    for rel in proposal.relationships:
+        if rel.predicate not in ontology_registry.ALLOWED_PREDICATES:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": f"Unknown predicate '{rel.predicate}'. Valid predicates: {sorted(ontology_registry.ALLOWED_PREDICATES)}"
+                },
+            )
+    return proposal
+
+
+def _copy_entity_with_edits(entity: StoredProposalEntity, edits: Optional[EntityEditFields]) -> StoredProposalEntity:
+    if edits is None:
+        return entity.copy(deep=True)
+    data = entity.dict()
+    if edits.name is not None:
+        data["name"] = edits.name
+    if edits.description is not None:
+        data["description"] = edits.description
+    if edits.metadata is not None:
+        data["metadata"] = edits.metadata
+    return StoredProposalEntity(**data)
+
+
+async def _resolve_extra_label_candidates(
+    conn,
+    label: str,
+    type_hint: Optional[str] = None,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    from api.personal_ingest_api import normalize_alias, normalize_entity_text, quartz_url
+
+    normalized = normalize_entity_text(label)
+    normalized_alias = normalize_alias(label)
+    if type_hint:
+        rows = await conn.fetch(
+            """
+            SELECT fuseki_uri, entity_text, entity_type, aliases, created_at,
+                   CASE WHEN normalized_text = $1 THEN 1.0
+                        WHEN $2 = ANY(aliases) THEN 0.98
+                        WHEN normalized_text ILIKE $3 THEN 0.90
+                        ELSE 0.70 END AS similarity
+            FROM entity_registry
+            WHERE entity_type = $4
+              AND NOT COALESCE(node_private, false)
+              AND (
+                    normalized_text = $1 OR
+                    $2 = ANY(aliases) OR
+                    normalized_text ILIKE $3
+              )
+            ORDER BY similarity DESC, created_at DESC NULLS LAST
+            LIMIT $5
+            """,
+            normalized,
+            normalized_alias,
+            f"%{normalized}%",
+            type_hint,
+            limit,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            SELECT fuseki_uri, entity_text, entity_type, aliases, created_at,
+                   CASE WHEN normalized_text = $1 THEN 1.0
+                        WHEN $2 = ANY(aliases) THEN 0.98
+                        WHEN normalized_text ILIKE $3 THEN 0.90
+                        ELSE 0.70 END AS similarity
+            FROM entity_registry
+            WHERE NOT COALESCE(node_private, false)
+              AND (
+                    normalized_text = $1 OR
+                    $2 = ANY(aliases) OR
+                    normalized_text ILIKE $3
+              )
+            ORDER BY similarity DESC, created_at DESC NULLS LAST
+            LIMIT $4
+            """,
+            normalized,
+            normalized_alias,
+            f"%{normalized}%",
+            limit,
+        )
+    return [
+        {
+            "uri": row["fuseki_uri"],
+            "name": row["entity_text"],
+            "type": row["entity_type"],
+            "confidence": float(row["similarity"] or 0.0),
+            "quartz_url": quartz_url(row["entity_type"], row["entity_text"]),
+        }
+        for row in rows
+    ]
+
+
+async def _resolve_extra_endpoint_ref(
+    conn,
+    ref: Union[int, str],
+    proposal: StoredCrawlProposal,
+    committed_index_to_rid: Dict[int, str],
+    dropped_indices: set[int],
+    errored_indices: set[int],
+) -> tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
+    if isinstance(ref, int):
+        if ref < 0 or ref >= len(proposal.entities):
+            raise HTTPException(status_code=422, detail={"error": f"entity index {ref} out of range"})
+        if ref in dropped_indices:
+            return None, None, "entity dropped in this attempt"
+        if ref in errored_indices:
+            return None, None, "entity failed earlier in this attempt"
+        rid = committed_index_to_rid.get(ref)
+        if rid:
+            return rid, None, None
+        return None, None, "entity not committed in this attempt"
+
+    ref_str = ref.strip()
+    if ref_str.startswith("orn:"):
+        return ref_str, None, None
+    candidates = await _resolve_extra_label_candidates(conn, ref_str)
+    if len(candidates) == 1 and candidates[0]["confidence"] >= 0.9:
+        return candidates[0]["uri"], None, None
+    return None, {"label": ref_str, "candidates": candidates}, None
 
 
 def create_router(pool, caps):
@@ -1188,6 +1423,304 @@ def create_router(pool, caps):
             heartbeat_at=row["heartbeat_at"].isoformat() if row["heartbeat_at"] else None,
             finished_at=row["finished_at"].isoformat() if row["finished_at"] else None,
         )
+
+    @router.post("/crawl-jobs/{job_id}/commit")
+    async def web_crawl_job_commit(job_id: int, body: CrawlCommitRequest, request: Request):
+        from api import crawl_auth
+        from api.personal_ingest_api import ExtractedEntity, resolve_entity, store_new_entity
+
+        try:
+            auth = crawl_auth.authenticate_request(
+                authorization_header=request.headers.get("authorization"),
+                identity_claim_header=request.headers.get("x-identity-claim"),
+                body_submitted_by=None,
+            )
+        except crawl_auth.CrawlAuthError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"error": exc.message})
+
+        t0 = time.monotonic()
+        overrides = body.proposal_overrides or ProposalOverrides()
+        dropped_entity_indices = set(overrides.dropped_entity_indices or [])
+        dropped_relationship_indices = set(overrides.dropped_relationship_indices or [])
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, start_url, submitted_by, status, result_json, commit_history
+                      FROM web_crawl_jobs
+                     WHERE id=$1
+                     FOR UPDATE
+                    """,
+                    job_id,
+                )
+                if row is None:
+                    raise HTTPException(status_code=404, detail={"error": "job not found"})
+                if row["submitted_by"] != auth.submitted_by:
+                    raise HTTPException(status_code=403, detail={"error": "ownership mismatch"})
+                if row["status"] == "committed":
+                    raise HTTPException(status_code=409, detail={"error": "job already committed"})
+                if row["status"] not in ("done", "partially_committed"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"error": f"job status '{row['status']}' cannot be committed"},
+                    )
+
+                proposal = _load_stored_proposal(row["result_json"])
+                entity_count = len(proposal.entities)
+                for idx in dropped_entity_indices:
+                    if idx < 0 or idx >= entity_count:
+                        raise HTTPException(status_code=422, detail={"error": f"dropped_entity_indices contains out-of-range index {idx}"})
+                for idx in dropped_relationship_indices:
+                    if idx < 0 or idx >= len(proposal.relationships):
+                        raise HTTPException(status_code=422, detail={"error": f"dropped_relationship_indices contains out-of-range index {idx}"})
+                for idx in overrides.entity_edits.keys():
+                    if idx < 0 or idx >= entity_count:
+                        raise HTTPException(status_code=422, detail={"error": f"entity_edits contains out-of-range index {idx}"})
+
+                raw_history = _parse_json_maybe(row["commit_history"]) or []
+                if not isinstance(raw_history, list):
+                    raw_history = []
+                prior_committed_map: Dict[int, str] = {}
+                for entry in raw_history:
+                    committed_map = (entry or {}).get("committed_index_to_rid") or {}
+                    if isinstance(committed_map, dict):
+                        for key, value in committed_map.items():
+                            try:
+                                prior_committed_map[int(key)] = value
+                            except (TypeError, ValueError):
+                                continue
+
+                committed_results: List[Dict[str, Any]] = []
+                skipped_results: List[Dict[str, Any]] = []
+                error_results: List[Dict[str, Any]] = []
+                unresolved_extra_relationships: List[Dict[str, Any]] = []
+                attempt_committed_map: Dict[int, str] = {}
+                current_entity_rids: Dict[int, str] = dict(prior_committed_map)
+                errored_indices: set[int] = set()
+                extra_relationships_created = 0
+
+                entities_by_index = {
+                    entity.index: _copy_entity_with_edits(entity, overrides.entity_edits.get(entity.index))
+                    for entity in proposal.entities
+                }
+                root_index = proposal.root_entity_index
+
+                await conn.execute("SAVEPOINT inner_tx")
+                root_failed = False
+
+                ordered_indices = [root_index] + [i for i in range(entity_count) if i != root_index]
+                for idx in ordered_indices:
+                    entity = entities_by_index[idx]
+                    if idx in prior_committed_map:
+                        skipped_results.append({"name": entity.name, "reason": "already committed"})
+                        continue
+                    if idx in dropped_entity_indices:
+                        skipped_results.append({"name": entity.name, "reason": "dropped by override"})
+                        continue
+
+                    await conn.execute(f"SAVEPOINT ent_{idx}")
+                    try:
+                        if entity.existing_rid:
+                            canonical_uri = entity.existing_rid
+                            was_new = False
+                        else:
+                            extracted = ExtractedEntity(
+                                name=entity.name,
+                                type=entity.type,
+                                confidence=entity.confidence,
+                                context=entity.description,
+                            )
+                            canonical, is_new = await resolve_entity(conn, extracted, context=None)
+                            canonical_uri = canonical.uri
+                            was_new = bool(is_new)
+                            if is_new:
+                                await store_new_entity(
+                                    conn,
+                                    extracted,
+                                    canonical,
+                                    document_rid=entity.source_url or proposal.start_url,
+                                    source="web-crawl",
+                                )
+
+                        await conn.execute(
+                            """
+                            UPDATE entity_registry
+                               SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+                                   updated_at = now()
+                             WHERE fuseki_uri = $1
+                            """,
+                            canonical_uri,
+                            _json_dumps(
+                                {
+                                    "crawl_job_id": job_id,
+                                    "crawl_start_url": proposal.start_url,
+                                    "source_url": entity.source_url,
+                                    "source_image": entity.source_image,
+                                    "confidence": entity.confidence,
+                                }
+                            ),
+                        )
+
+                        await conn.execute(f"RELEASE SAVEPOINT ent_{idx}")
+                        attempt_committed_map[idx] = canonical_uri
+                        current_entity_rids[idx] = canonical_uri
+                        committed_results.append(
+                            {
+                                "rid": canonical_uri,
+                                "name": entity.name,
+                                "type": entity.type,
+                                "was_new": was_new,
+                            }
+                        )
+                    except Exception as exc:
+                        await conn.execute(f"ROLLBACK TO SAVEPOINT ent_{idx}")
+                        errored_indices.add(idx)
+                        error_results.append({"index": idx, "name": entity.name, "error": str(exc)})
+                        if idx == root_index:
+                            await conn.execute("ROLLBACK TO SAVEPOINT inner_tx")
+                            attempt_committed_map = {}
+                            current_entity_rids = dict(prior_committed_map)
+                            committed_results = []
+                            skipped_results = [
+                                {"name": entities_by_index[i].name, "reason": "root entity failed"}
+                                for i in range(entity_count)
+                                if i != root_index and i not in prior_committed_map
+                            ]
+                            root_failed = True
+                            break
+
+                if not root_failed:
+                    for rel_idx, rel in enumerate(proposal.relationships):
+                        if rel_idx in dropped_relationship_indices:
+                            continue
+                        if rel.predicate not in ontology_registry.ALLOWED_PREDICATES:
+                            error_results.append({"name": f"relationship:{rel_idx}", "error": f"predicate '{rel.predicate}' retired or invalid"})
+                            continue
+                        if rel.subject_index in dropped_entity_indices or rel.object_index in dropped_entity_indices:
+                            continue
+                        if rel.subject_index in errored_indices or rel.object_index in errored_indices:
+                            continue
+                        subj_uri = current_entity_rids.get(rel.subject_index)
+                        obj_uri = current_entity_rids.get(rel.object_index)
+                        if not subj_uri or not obj_uri:
+                            continue
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO entity_relationships
+                                    (subject_uri, predicate, object_uri, source, source_rid)
+                                VALUES ($1, $2, $3, $4, $5)
+                                ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+                                """,
+                                subj_uri,
+                                rel.predicate,
+                                obj_uri,
+                                "web-crawl",
+                                proposal.start_url,
+                            )
+                        except Exception as exc:
+                            error_results.append({"name": f"relationship:{rel_idx}", "error": str(exc)})
+
+                    for extra in body.extra_relationships:
+                        if extra.predicate not in ontology_registry.ALLOWED_PREDICATES:
+                            raise HTTPException(
+                                status_code=422,
+                                detail={"error": f"predicate '{extra.predicate}' is not allowed"},
+                            )
+                        from_uri, from_unresolved, from_skip = await _resolve_extra_endpoint_ref(
+                            conn,
+                            extra.from_,
+                            proposal,
+                            current_entity_rids,
+                            dropped_entity_indices,
+                            errored_indices,
+                        )
+                        to_uri, to_unresolved, to_skip = await _resolve_extra_endpoint_ref(
+                            conn,
+                            extra.to,
+                            proposal,
+                            current_entity_rids,
+                            dropped_entity_indices,
+                            errored_indices,
+                        )
+                        if from_unresolved:
+                            unresolved_extra_relationships.append(from_unresolved)
+                            continue
+                        if to_unresolved:
+                            unresolved_extra_relationships.append(to_unresolved)
+                            continue
+                        if from_skip or to_skip:
+                            skipped_results.append(
+                                {
+                                    "name": f"extra:{extra.predicate}",
+                                    "reason": from_skip or to_skip,
+                                }
+                            )
+                            continue
+                        if not from_uri or not to_uri:
+                            continue
+                        await conn.execute(
+                            """
+                            INSERT INTO entity_relationships
+                                (subject_uri, predicate, object_uri, source, source_rid)
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT (subject_uri, predicate, object_uri) DO NOTHING
+                            """,
+                            from_uri,
+                            extra.predicate,
+                            to_uri,
+                            "web-crawl-extra",
+                            proposal.start_url,
+                        )
+                        extra_relationships_created += 1
+
+                    await conn.execute("RELEASE SAVEPOINT inner_tx")
+
+                merged_committed = dict(prior_committed_map)
+                merged_committed.update(attempt_committed_map)
+                all_indices = set(range(entity_count))
+                final_status = (
+                    "committed"
+                    if set(merged_committed.keys()).union(dropped_entity_indices) >= all_indices
+                    else "partially_committed"
+                )
+
+                history_entry = {
+                    "attempted_at": datetime.utcnow().isoformat() + "Z",
+                    "committed_index_to_rid": {str(k): v for k, v in sorted(attempt_committed_map.items())},
+                    "dropped_entity_indices": sorted(dropped_entity_indices),
+                    "dropped_relationship_indices": sorted(dropped_relationship_indices),
+                    "committed": committed_results,
+                    "skipped": skipped_results,
+                    "errors": error_results,
+                    "unresolved_extra_relationships": unresolved_extra_relationships,
+                    "extra_relationships_created": extra_relationships_created,
+                }
+
+                new_history = list(raw_history)
+                new_history.append(history_entry)
+                await conn.execute(
+                    """
+                    UPDATE web_crawl_jobs
+                       SET status=$2,
+                           commit_history=$3::jsonb
+                     WHERE id=$1
+                    """,
+                    job_id,
+                    final_status,
+                    _json_dumps(new_history),
+                )
+
+        return {
+            "committed": committed_results,
+            "skipped": skipped_results,
+            "errors": error_results,
+            "unresolved_extra_relationships": unresolved_extra_relationships,
+            "extra_relationships_created": extra_relationships_created,
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+            "status": final_status,
+        }
 
     return router
 
