@@ -601,9 +601,19 @@ async def scan_for_known_entities(
 # =============================================================================
 
 async def check_rate_limit(
-    db_pool, submitted_by: Optional[str] = None
+    db_pool,
+    submitted_by: Optional[str] = None,
+    *,
+    _internal_call: bool = False,
 ) -> Optional[str]:
-    """Check rate limits. Returns error message if exceeded, None if OK."""
+    """Check rate limits. Returns error message if exceeded, None if OK.
+
+    _internal_call=True bypasses both the global and per-user caps — used by
+    multi-page internal jobs (the agentic crawler) that issue many fetches on
+    behalf of a single user request.
+    """
+    if _internal_call:
+        return None
     async with db_pool.acquire() as conn:
         # Global rate limit
         global_count = await conn.fetchval("""
@@ -660,6 +670,22 @@ async def fetch_html_with_playwright(url: str, proxy: Optional[str] = None) -> O
             viewport={"width": 1920, "height": 1080},
         )
         page = await context.new_page()
+
+        # SSRF gate: validate every URL the browser is about to request BEFORE
+        # the browser opens a socket. URLValidator blocks loopback, RFC1918,
+        # metadata, and link-local hosts; a blocked hop is aborted, not fetched.
+        async def _ssrf_route_gate(route, request):
+            try:
+                URLValidator().validate(request.url)
+            except URLValidationError as exc:
+                logger.warning(
+                    f"playwright_route_blocked: {request.url} ({exc})"
+                )
+                await route.abort()
+                return
+            await route.continue_()
+
+        await page.route("**", _ssrf_route_gate)
 
         await page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_TIMEOUT)
         await asyncio.sleep(PLAYWRIGHT_WAIT)
@@ -764,11 +790,33 @@ async def fetch_html_with_playwright(url: str, proxy: Optional[str] = None) -> O
 # Main Fetch + Preview
 # =============================================================================
 
+MAX_REDIRECT_HOPS = 5
+
+
+def _absolute_redirect_target(current_url: str, location: str) -> str:
+    """Resolve a Location header to an absolute URL."""
+    from urllib.parse import urljoin
+    return urljoin(current_url, location)
+
+
+def _validate_hop(next_url: str) -> Optional[str]:
+    """Validate a redirect hop. Returns normalized URL or None on SSRF block."""
+    try:
+        return URLValidator().validate(next_url)
+    except URLValidationError as exc:
+        logger.warning(f"redirect_blocked: hop URL failed validation: {next_url} ({exc})")
+        return None
+
+
 def _fetch_html_requests_sync(url: str) -> tuple[Optional[str], int]:
     """Sync fallback using requests library. Better TLS fingerprint than aiohttp.
 
     Used as Tier 1.5 when aiohttp is blocked by Cloudflare or bot-detection that
     aiohttp's TLS handshake triggers. Runs in a thread pool executor.
+
+    Redirects are NOT followed automatically. We read each 3xx Location, validate
+    it via URLValidator before issuing the next request, and bail on any failed
+    hop — so a redirector cannot coerce us into connecting to a private IP.
     """
     try:
         import requests as _requests
@@ -783,18 +831,39 @@ def _fetch_html_requests_sync(url: str) -> tuple[Optional[str], int]:
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-Dest": "document",
         }
-        resp = _requests.get(url, headers=headers, timeout=FETCH_TIMEOUT, allow_redirects=True)
-        if not any(ct in resp.headers.get("Content-Type", "") for ct in ("text/html", "application/xhtml")):
-            return None, resp.status_code
-        html = resp.content[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
-        return html, resp.status_code
+        current = url
+        for _ in range(MAX_REDIRECT_HOPS + 1):
+            resp = _requests.get(
+                current, headers=headers, timeout=FETCH_TIMEOUT, allow_redirects=False
+            )
+            if 300 <= resp.status_code < 400:
+                loc = resp.headers.get("Location")
+                if not loc:
+                    return None, resp.status_code
+                next_url = _absolute_redirect_target(current, loc)
+                validated = _validate_hop(next_url)
+                if validated is None:
+                    return None, resp.status_code
+                current = validated
+                continue
+            if not any(ct in resp.headers.get("Content-Type", "") for ct in ("text/html", "application/xhtml")):
+                return None, resp.status_code
+            html = resp.content[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
+            return html, resp.status_code
+        logger.warning(f"requests fallback: too many redirects for {url}")
+        return None, 0
     except Exception as e:
         logger.warning(f"requests fallback failed for {url}: {e}")
         return None, 0
 
 
 async def _fetch_html_aiohttp(url: str) -> tuple[Optional[str], int]:
-    """Fetch raw HTML with aiohttp. Returns (HTML string or None, HTTP status code)."""
+    """Fetch raw HTML with aiohttp. Returns (HTML string or None, HTTP status code).
+
+    Redirects are NOT auto-followed. We read each 3xx Location, run it through
+    URLValidator, then manually issue the follow-up — so a 302 to a private IP
+    can never be silently fetched before we see it.
+    """
     try:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT)
         headers = {
@@ -809,23 +878,37 @@ async def _fetch_html_aiohttp(url: str) -> tuple[Optional[str], int]:
             "Sec-Fetch-Dest": "document",
         }
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                url,
-                headers=headers,
-                max_redirects=5,
-                allow_redirects=True,
-            ) as response:
-                content_type = response.headers.get("Content-Type", "")
-                if not any(ct in content_type for ct in ("text/html", "application/xhtml")):
-                    return None, response.status
+            current = url
+            for _ in range(MAX_REDIRECT_HOPS + 1):
+                async with session.get(
+                    current,
+                    headers=headers,
+                    allow_redirects=False,
+                ) as response:
+                    if 300 <= response.status < 400:
+                        loc = response.headers.get("Location")
+                        if not loc:
+                            return None, response.status
+                        next_url = _absolute_redirect_target(current, loc)
+                        validated = _validate_hop(next_url)
+                        if validated is None:
+                            return None, response.status
+                        current = validated
+                        continue
 
-                html_bytes = await response.content.read(MAX_HTML_BYTES)
-                html = html_bytes.decode("utf-8", errors="replace")
+                    content_type = response.headers.get("Content-Type", "")
+                    if not any(ct in content_type for ct in ("text/html", "application/xhtml")):
+                        return None, response.status
 
-                if response.status != 200:
-                    return html, response.status  # Return HTML for CF detection
+                    html_bytes = await response.content.read(MAX_HTML_BYTES)
+                    html = html_bytes.decode("utf-8", errors="replace")
 
-                return html, response.status
+                    if response.status != 200:
+                        return html, response.status  # Return HTML for CF detection
+
+                    return html, response.status
+            logger.warning(f"aiohttp fetch: too many redirects for {url}")
+            return None, 0
 
     except Exception as e:
         logger.warning(f"aiohttp fetch failed for {url}: {e}")
@@ -833,7 +916,7 @@ async def _fetch_html_aiohttp(url: str) -> tuple[Optional[str], int]:
 
 
 async def fetch_and_preview(
-    url: str, db_pool=None
+    url: str, db_pool=None, *, _internal_call: bool = False
 ) -> WebPreview:
     """Fetch a URL and return a structured preview.
 
@@ -844,7 +927,13 @@ async def fetch_and_preview(
     5. If content is sparse (< 50 words), retry with Playwright
     6. Scan for known entities (if db_pool provided)
     7. Return WebPreview
+
+    _internal_call=True marks this fetch as part of a multi-page internal job
+    (the agentic crawler). The flag is forwarded to helpers that need it (e.g.,
+    rate-limit checks in the caller). Redirect validation and URL validation
+    always run — _internal_call never relaxes SSRF protection.
     """
+    _ = _internal_call  # reserved for future internal-path branches
     validator = URLValidator()
     url = validator.validate(url)
 
