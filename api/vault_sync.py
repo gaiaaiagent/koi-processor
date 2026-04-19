@@ -221,6 +221,8 @@ class VaultSyncManager:
         self._metrics = SyncMetrics()
         self._metrics_scans_since_persist = 0
         self._metrics_last_persist_at: Optional[datetime] = None
+        # Callables fired after each completed scan cycle; async or sync, no args.
+        self.post_cycle_hooks: list = []
         # Concurrency lock
         self._write_lock = asyncio.Lock()
         # Watcher
@@ -376,6 +378,14 @@ class VaultSyncManager:
                 self._metrics.last_scan_duration_ms = int((scan_end - scan_start).total_seconds() * 1000)
                 self._metrics.scans_completed += 1
                 await self._maybe_persist_metrics()
+                for hook in self.post_cycle_hooks:
+                    try:
+                        import asyncio as _asyncio
+                        result = hook()
+                        if _asyncio.iscoroutine(result):
+                            _asyncio.create_task(result)
+                    except Exception as _e:
+                        logger.warning("vault_sync post_cycle_hook error: %s", _e)
 
         # Reconcile cycle
         should_reconcile = (

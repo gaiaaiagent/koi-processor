@@ -12,8 +12,10 @@ Endpoints:
     POST /resume     — Resume the sync polling loop
 """
 
+import asyncio
 import logging
 import os
+import subprocess
 from typing import Optional
 
 from fastapi import APIRouter, Request
@@ -43,6 +45,26 @@ def _bool_env_raw(name: str, default: bool = False) -> bool:
 
 def _unavailable(msg: str = "Vault sync is not enabled") -> JSONResponse:
     return JSONResponse(status_code=400, content={"error": msg})
+
+
+async def _rebuild_pageindex_bg():
+    """Rebuild BM25 vault pageindex after sync so newly-synced files are searchable."""
+    venv_python = os.path.expanduser(
+        "~/.claude/local/darren-workflow/pageindex/venv/bin/python3"
+    )
+    script = os.path.expanduser("~/projects/darren-workflow/scripts/pageindex.py")
+    vault_path = os.path.expanduser("~/Documents/Notes")
+    if not os.path.exists(venv_python) or not os.path.exists(script):
+        return
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            venv_python, script, "index", "--vault", vault_path,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        await proc.wait()
+        logger.info("vault_sync: pageindex rebuilt")
+    except Exception as e:
+        logger.warning("vault_sync: pageindex rebuild failed: %s", e)
 
 
 def create_router(pool, caps):
@@ -77,6 +99,8 @@ def create_router(pool, caps):
             return _unavailable()
 
         result = await _vault_sync_manager.trigger_sync()
+        # Rebuild BM25 pageindex in background so newly synced files are searchable
+        asyncio.create_task(_rebuild_pageindex_bg())
         return JSONResponse(content=result)
 
     @router.post("/configure")

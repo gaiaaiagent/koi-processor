@@ -238,6 +238,14 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
         _poller.vault_sync = _vault_sync
         await _vault_sync.load_metrics()
         _vault_sync.start_watcher()
+        # Wire the trigger endpoint to this manager (was wired via personal.py before,
+        # but that path is broken — VaultSyncManager constructor requires node_rid etc.)
+        try:
+            from api.routers.vault_sync_router import set_vault_sync_manager, _rebuild_pageindex_bg
+            set_vault_sync_manager(_vault_sync)
+            _vault_sync.post_cycle_hooks.append(_rebuild_pageindex_bg)
+        except Exception:
+            logger.warning("vault_sync: could not wire trigger endpoint or pageindex hook")
         logger.info(f"Vault sync enabled (vault={vault_path}, e2ee={'yes' if _encryption_private_key else 'no'})")
 
     policy = _security_policy()

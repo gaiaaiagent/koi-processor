@@ -32,6 +32,11 @@ async def on_startup(app, pool, caps):
             await manager.start()
             app.state.vault_sync_manager = manager
             set_vault_sync_manager(manager)
+
+            # After each sync cycle, rebuild the vault BM25 pageindex so
+            # newly-synced files appear in unified_search's vault surface.
+            from api.routers.vault_sync_router import _rebuild_pageindex_bg
+            manager.post_cycle_hooks.append(_rebuild_pageindex_bg)
             logger.info("Vault sync manager started")
         except Exception:
             logger.exception("Failed to start vault sync manager")
