@@ -28,7 +28,7 @@ import heapq
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Tuple
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -339,6 +339,23 @@ def same_domain(candidate_url: str, start_url: str) -> bool:
 
 ProgressCallback = Callable[[dict], Awaitable[None]]
 LookupFn = Callable[[str, str], Awaitable[Optional[str]]]
+# VisionFn(image_url, role, context) -> (orgs_list, usage, fetched_url)
+VisionFn = Callable[[str, str, str], Awaitable[Tuple[list[dict], dict[str, int], Optional[str]]]]
+
+
+# Vision confidence policy — single source of truth (plan Assumptions).
+VISION_INCLUDE_THRESHOLD = 0.8
+VISION_REVIEW_FLOOR = 0.7
+
+# Role -> (entity_type, [(predicate, direction)]). Direction "out" = root_subject→extracted_object;
+# "in" = extracted_subject→root_object. Roles not in this map are skipped.
+_ROLE_POLICY: dict[str, tuple[str, list[tuple[str, str]]]] = {
+    "partner_grid": ("Organization", [("collaborates_with", "out")]),
+    "sponsor_list": ("Organization", [("collaborates_with", "out"), ("affiliated_with", "in")]),
+    "funder_list": ("Organization", [("collaborates_with", "out"), ("affiliated_with", "in")]),
+    "team_photo": ("Person", [("affiliated_with", "in")]),
+    "infographic": ("Concept", [("about", "in")]),
+}
 
 
 async def agentic_crawl(
@@ -348,6 +365,7 @@ async def agentic_crawl(
     budget: Optional[CrawlBudget] = None,
     fetch_fn: Callable[[str], Awaitable[Any]],
     lookup_fn: Optional[LookupFn] = None,
+    vision_fn: Optional[VisionFn] = None,
     progress_callback: Optional[ProgressCallback] = None,
     cost_tracker: Optional[CostTracker] = None,
     cancel_check: Optional[Callable[[], Awaitable[bool]]] = None,
@@ -476,6 +494,38 @@ async def agentic_crawl(
         cost_tracker.record(usage, crawl_llm.DEFAULT_MODEL)
         world.merge_page_analysis(analysis, source_url=url)
 
+        # Vision step: run OCR on LLM-flagged images up to budget.
+        if vision_fn is not None and analysis.worth_ocr_images:
+            await _emit_progress("vision", url, analysis.judgment)
+            for img_region in analysis.worth_ocr_images[:8]:  # prompt cap 8
+                if world.vision_calls >= budget.max_vision_calls:
+                    break
+                if cost_tracker.usd > budget.max_usd:
+                    break
+                if img_region.role not in _ROLE_POLICY:
+                    continue
+                try:
+                    orgs, v_usage, fetched_url = await vision_fn(
+                        img_region.image_url,
+                        img_region.role,
+                        img_region.context or "",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "vision_fn raised on %s: %s", img_region.image_url, exc
+                    )
+                    continue
+                world.register_vision_call()
+                if v_usage:
+                    cost_tracker.record(v_usage, crawl_llm.DEFAULT_MODEL)
+                _apply_vision_orgs(
+                    world,
+                    orgs=orgs,
+                    role=img_region.role,
+                    source_url=url,
+                    source_image=fetched_url or img_region.image_url,
+                )
+
         for link in analysis.next_links:
             if not link.url or link.url in visited_set:
                 continue
@@ -523,6 +573,77 @@ async def agentic_crawl(
     )
     await _emit_progress("done", None, None)
     return proposal
+
+
+def _apply_vision_orgs(
+    world: "WorldModel",
+    *,
+    orgs: list[dict],
+    role: str,
+    source_url: str,
+    source_image: str,
+) -> None:
+    """Merge vision-extracted entities + role-driven predicates into the world.
+
+    Confidence routing (single source of truth, see plan Assumptions):
+      ≥0.8       → included, requires_review=False
+      0.7..0.79  → included, requires_review=True
+      <0.7       → dropped entirely
+
+    Role routing: only roles in ``_ROLE_POLICY`` yield entities; others are
+    dropped silently (prompt already excludes them, this is a defensive gate).
+    """
+    policy = _ROLE_POLICY.get(role)
+    if policy is None:
+        return
+    entity_type, predicate_specs = policy
+
+    if not world.entities:
+        logger.info(
+            "_apply_vision_orgs: no root entity yet, dropping vision orgs for %s",
+            source_image,
+        )
+        return
+    root_index = 0
+
+    for org in orgs:
+        name = (org.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            confidence = float(org.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if confidence < VISION_REVIEW_FLOOR:
+            continue
+        requires_review = confidence < VISION_INCLUDE_THRESHOLD
+
+        entity = ProposedEntity(
+            name=name,
+            type=entity_type,
+            description=None,
+            source_url=source_url,
+            source_image=source_image,
+            confidence=confidence,
+            requires_review=requires_review,
+            metadata={"vision_role": role},
+        )
+        new_index = world.upsert_entity(entity)
+        # Record that this entity picked up a source_image (upsert_entity only
+        # sets it if previously empty; we want it even if LLM already added
+        # the entity from text context earlier).
+        if not world._entities[new_index].source_image:
+            world._entities[new_index].source_image = source_image
+        if requires_review:
+            world._entities[new_index].requires_review = True
+
+        for predicate, direction in predicate_specs:
+            if predicate not in ontology_registry.ALLOWED_PREDICATES:
+                continue
+            if direction == "out":
+                world.add_relationship(root_index, predicate, new_index)
+            else:  # "in"
+                world.add_relationship(new_index, predicate, root_index)
 
 
 def _extract_html(preview: Any) -> str:
