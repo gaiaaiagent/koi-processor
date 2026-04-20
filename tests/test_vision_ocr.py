@@ -244,10 +244,12 @@ class _FakeSession:
         self._response = response
         self.last_url = None
         self.last_allow_redirects = None
+        self.last_proxy = None
 
-    def get(self, url, *, headers=None, allow_redirects=True):
+    def get(self, url, *, headers=None, allow_redirects=True, proxy=None):
         self.last_url = url
         self.last_allow_redirects = allow_redirects
+        self.last_proxy = proxy
         return self._response
 
     async def __aenter__(self):
@@ -327,6 +329,34 @@ def test_good_image_fetch_returns_bytes(monkeypatch):
     raw, content_type, final_url = result
     assert raw == body
     assert content_type == "image/png"
+
+
+def test_blocked_image_retries_via_proxy(monkeypatch):
+    body = b"\x89PNG\r\n\x1a\nproxy image data"
+    direct_session = _FakeSession(
+        _FakeResponse(status=403, headers={"Content-Type": "text/plain"}, body=b"blocked")
+    )
+    proxy_session = _FakeSession(
+        _FakeResponse(status=200, headers={"Content-Type": "image/png"}, body=body)
+    )
+    sessions = [direct_session, proxy_session]
+
+    def _factory(*_args, **_kwargs):
+        return sessions.pop(0)
+
+    monkeypatch.setattr(vision_ocr.aiohttp, "ClientSession", _factory)
+    monkeypatch.setattr(vision_ocr, "_PROXY_URL", "http://proxy.internal:8080")
+
+    async def _run():
+        return await vision_ocr.fetch_image_bytes("https://www.example.com/logo.png")
+
+    result = asyncio.run(_run())
+    assert result is not None
+    raw, content_type, final_url = result
+    assert raw == body
+    assert content_type == "image/png"
+    assert direct_session.last_proxy is None
+    assert proxy_session.last_proxy == "http://proxy.internal:8080"
 
 
 # ---------------------------------------------------------------------------
