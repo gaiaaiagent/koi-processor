@@ -161,6 +161,7 @@ class WebPreview:
     matching_entities: List[MatchingEntity] = field(default_factory=list)
     fetch_error: Optional[str] = None
     rendered_with: str = "aiohttp"  # "substack_api", "aiohttp", "requests", "playwright", "scrapling"
+    raw_html: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -962,7 +963,7 @@ async def fetch_and_preview(
             return WebPreview(
                 url=url, rid=rid, domain=domain,
                 title=metadata.title, description=metadata.description,
-                content_text=content_text, content_hash=content_hash,
+                content_text=content_text, raw_html=substack_html, content_hash=content_hash,
                 word_count=word_count, metadata=metadata,
                 rendered_with="substack_api",
             )
@@ -1106,6 +1107,7 @@ async def fetch_and_preview(
         title=metadata.title or metadata.site_name or domain,
         description=metadata.description,
         content_text=content_text,
+        raw_html=html,
         content_hash=content_hash,
         word_count=word_count,
         metadata=metadata,

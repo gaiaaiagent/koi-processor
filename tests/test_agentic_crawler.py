@@ -148,6 +148,37 @@ def test_ac77_html_compaction_enforces_budget():
     assert page.truncations, "expected at least one truncation event"
 
 
+def test_fetch_and_preview_preserves_raw_html_contract():
+    from api import web_fetcher
+
+    page_text = " ".join(["watershed"] * 160)
+    html = (
+        "<html><head><title>Preview Contract</title></head>"
+        "<body>"
+        "<a href='/about'>About</a>"
+        "<img src='/logos.png' alt='Partner Logos'/>"
+        f"<p>{page_text}</p>"
+        "</body></html>"
+    )
+
+    async def _fake_fetch_html_aiohttp(url: str):
+        assert url == "https://example.org/"
+        return html, 200
+
+    async def _go():
+        with patch.object(web_fetcher, "_fetch_html_aiohttp", _fake_fetch_html_aiohttp), \
+             patch.object(web_fetcher, "PLAYWRIGHT_AVAILABLE", False), \
+             patch.object(web_fetcher, "SCRAPLING_AVAILABLE", False):
+            return await web_fetcher.fetch_and_preview("https://example.org/")
+
+    preview = asyncio.run(_go())
+    assert preview.raw_html == html
+    assert preview.rendered_with == "aiohttp"
+    preview_dict = preview.to_dict()
+    assert "raw_html" not in preview_dict
+    assert preview_dict["title"] == "Preview Contract"
+
+
 # ---------------------------------------------------------------------------
 # same_domain helper
 # ---------------------------------------------------------------------------
@@ -213,6 +244,73 @@ async def _run_crawl(
             fetch_fn=_fetch,
             lookup_fn=lookup_fn,
         )
+
+
+def test_agentic_crawl_uses_raw_html_when_content_text_is_sparse():
+    from api.web_fetcher import PageMetadata, WebPreview
+
+    start = "https://example.org/"
+    html = (
+        "<html><head><title>Partner Page</title></head>"
+        "<body>"
+        "<h1>Partner Page</h1>"
+        "<p>Partner directory text.</p>"
+        "<a href='/about'>About</a>"
+        "<a href='https://example.org/partners/alpha'>Alpha Partner</a>"
+        "<img src='/assets/partners.png' alt='Partner Logos'/>"
+        "</body></html>"
+    )
+    preview = WebPreview(
+        url=start,
+        rid="orn:web.page:example_org/test",
+        domain="example.org",
+        title="Partner Page",
+        description="",
+        content_text="Access Denied",
+        content_hash="hash",
+        word_count=2,
+        metadata=PageMetadata(),
+        raw_html=html,
+    )
+    seen: dict[str, object] = {}
+
+    async def _fetch(url: str):
+        assert url == start
+        return preview
+
+    async def _fake_analyze_page(*, page, goal, world_model_summary, allowed_types, allowed_predicates, model):
+        seen["title"] = page.title
+        seen["main_text"] = page.main_text
+        seen["links"] = page.links
+        seen["images"] = page.images
+        return _make_analysis([], judgment="sufficient"), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+    async def _go():
+        with patch.object(crawl_llm, "analyze_page", _fake_analyze_page):
+            return await agentic_crawl(
+                start_url=start,
+                fetch_fn=_fetch,
+                budget=CrawlBudget(max_pages=5, max_usd=1.0, max_seconds=60),
+            )
+
+    proposal = asyncio.run(_go())
+    assert proposal.stats["pages_visited"] == 1
+    assert seen["title"] == "Partner Page"
+    assert "Partner directory text." in str(seen["main_text"])
+    assert seen["links"] == [
+        {"url": "https://example.org/about", "anchor": "About"},
+        {"url": "https://example.org/partners/alpha", "anchor": "Alpha Partner"},
+    ]
+    assert seen["images"] == [
+        {
+            "src": "https://example.org/assets/partners.png",
+            "alt": "Partner Logos",
+            "context": "",
+        }
+    ]
 
 
 def test_happy_path_produces_entities_and_respects_domain():
