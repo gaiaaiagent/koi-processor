@@ -861,7 +861,8 @@ async def lookup_entity(
 async def resolve_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,
-    context: Optional[ResolutionContext] = None
+    context: Optional[ResolutionContext] = None,
+    skip_fuzzy: bool = False,
 ) -> Tuple[CanonicalEntity, bool]:
     """
     Resolve an entity against the knowledge base.
@@ -877,6 +878,8 @@ async def resolve_entity(
         conn: Database connection
         entity: The entity to resolve
         context: Optional disambiguation context (associated_people)
+        skip_fuzzy: When true, use Tier 1 exact only; on exact miss, create a
+            new entity instead of consulting alias/contextual/fuzzy/semantic tiers.
 
     Returns: (CanonicalEntity, is_new)
     """
@@ -912,6 +915,17 @@ async def resolve_entity(
             merged_with=entity.name if exact_match['entity_text'] != entity.name else None,
             confidence=1.0
         ), False
+
+    if skip_fuzzy:
+        logger.info("Exact-only resolution miss for '%s' (%s); creating new entity", entity.name, entity.type)
+        new_uri = generate_entity_uri(entity.name, entity.type)
+        return CanonicalEntity(
+            name=entity.name,
+            uri=new_uri,
+            type=entity.type,
+            is_new=True,
+            confidence=entity.confidence,
+        ), True
 
     # Tier 1.1: Alias match (check if input matches any registered alias)
     # Uses normalized name to search against TEXT[] aliases column

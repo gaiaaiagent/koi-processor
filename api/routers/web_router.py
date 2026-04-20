@@ -1520,6 +1520,10 @@ def create_router(pool, caps):
                     entity.index: _copy_entity_with_edits(entity, overrides.entity_edits.get(entity.index))
                     for entity in proposal.entities
                 }
+                renamed_indices = {
+                    idx for idx, edit in overrides.entity_edits.items()
+                    if edit.name is not None
+                }
                 root_index = proposal.root_entity_index
 
                 await conn.execute("SAVEPOINT inner_tx")
@@ -1547,7 +1551,12 @@ def create_router(pool, caps):
                                 confidence=entity.confidence,
                                 context=entity.description,
                             )
-                            canonical, is_new = await resolve_entity(conn, extracted, context=None)
+                            canonical, is_new = await resolve_entity(
+                                conn,
+                                extracted,
+                                context=None,
+                                skip_fuzzy=idx in renamed_indices,
+                            )
                             canonical_uri = canonical.uri
                             was_new = bool(is_new)
                             if is_new:

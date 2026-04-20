@@ -231,6 +231,46 @@ def _sample_proposal() -> dict[str, Any]:
     }
 
 
+def _org_pair_proposal(child_name: str = "District of Highlands") -> dict[str, Any]:
+    return {
+        "proposal_version": "v1",
+        "ontology_version": "1.3.0",
+        "start_url": "https://example.org/partners",
+        "root_entity_index": 0,
+        "entities": [
+            {
+                "index": 0,
+                "name": "Peninsula Streams Society",
+                "type": "Organization",
+                "description": "Root org",
+                "source_url": "https://example.org/partners",
+                "source_image": None,
+                "confidence": 0.99,
+                "requires_review": False,
+                "metadata": {},
+                "existing_rid": None,
+            },
+            {
+                "index": 1,
+                "name": child_name,
+                "type": "Organization",
+                "description": "Partner org",
+                "source_url": "https://example.org/partners",
+                "source_image": None,
+                "confidence": 0.99,
+                "requires_review": False,
+                "metadata": {},
+                "existing_rid": None,
+            },
+        ],
+        "relationships": [
+            {"subject_index": 0, "predicate": "collaborates_with", "object_index": 1},
+        ],
+        "recommended_next_crawls": [],
+        "stats": {},
+    }
+
+
 @pytest.mark.asyncio
 async def test_ac39_flag_off_returns_503(app_and_pool):
     app, _ = app_and_pool
@@ -566,6 +606,187 @@ async def test_commit_endpoint_captures_relationship_insert_errors_without_abort
         async with pool.acquire() as conn:
             await conn.execute("DROP TRIGGER IF EXISTS fail_web_crawl_relationship_insert ON entity_relationships")
             await conn.execute("DROP FUNCTION IF EXISTS fail_web_crawl_relationship_insert()")
+
+
+@pytest.mark.asyncio
+async def test_commit_endpoint_rename_override_skips_fuzzy_and_creates_new_entity(app_and_pool):
+    app, pool = app_and_pool
+    proposal = _org_pair_proposal()
+    job_id = await _seed_done_job(pool, proposal)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, entity_type, normalized_text, source, metadata)
+            VALUES
+                (
+                    'orn:test.entity:district-of-highlands',
+                    'District of Highlands',
+                    'Organization',
+                    'district of highlands',
+                    'seed',
+                    '{}'::jsonb
+                )
+            """
+        )
+
+    async with _aclient(app) as c:
+        r = await _commit(
+            c,
+            job_id,
+            {
+                "proposal_overrides": {
+                    "entity_edits": {
+                        1: {"name": "District of Saanich"},
+                    }
+                }
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    created = next(item for item in body["committed"] if item["name"] == "District of Saanich")
+    assert created["was_new"] is True
+    assert created["rid"] == "orn:personal-koi.entity:organization-district-of-saanich-39db6e8ee64f"
+
+    async with pool.acquire() as conn:
+        fresh = await conn.fetchrow(
+            """
+            SELECT fuseki_uri, entity_text
+            FROM entity_registry
+            WHERE fuseki_uri = 'orn:personal-koi.entity:organization-district-of-saanich-39db6e8ee64f'
+            """
+        )
+        rel_target = await conn.fetchval(
+            """
+            SELECT object_uri
+            FROM entity_relationships
+            WHERE subject_uri = 'orn:personal-koi.entity:organization-peninsula-streams-society-0d25ebb363c9'
+              AND predicate = 'collaborates_with'
+            """
+        )
+        reused_highlands = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM entity_relationships
+            WHERE subject_uri = 'orn:personal-koi.entity:organization-peninsula-streams-society-0d25ebb363c9'
+              AND predicate = 'collaborates_with'
+              AND object_uri = 'orn:test.entity:district-of-highlands'
+            """
+        )
+
+    assert fresh["entity_text"] == "District of Saanich"
+    assert rel_target == "orn:personal-koi.entity:organization-district-of-saanich-39db6e8ee64f"
+    assert reused_highlands == 0
+
+
+@pytest.mark.asyncio
+async def test_commit_endpoint_rename_override_still_allows_exact_match(app_and_pool):
+    app, pool = app_and_pool
+    proposal = _org_pair_proposal()
+    job_id = await _seed_done_job(pool, proposal)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, entity_type, normalized_text, source, metadata)
+            VALUES
+                (
+                    'orn:test.entity:district-of-saanich-existing',
+                    'District of Saanich',
+                    'Organization',
+                    'district of saanich',
+                    'seed',
+                    '{}'::jsonb
+                )
+            """
+        )
+
+    async with _aclient(app) as c:
+        r = await _commit(
+            c,
+            job_id,
+            {
+                "proposal_overrides": {
+                    "entity_edits": {
+                        1: {"name": "District of Saanich"},
+                    }
+                }
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    matched = next(item for item in body["committed"] if item["name"] == "District of Saanich")
+    assert matched["was_new"] is False
+    assert matched["rid"] == "orn:test.entity:district-of-saanich-existing"
+
+    async with pool.acquire() as conn:
+        rel_target = await conn.fetchval(
+            """
+            SELECT object_uri
+            FROM entity_relationships
+            WHERE subject_uri = 'orn:personal-koi.entity:organization-peninsula-streams-society-0d25ebb363c9'
+              AND predicate = 'collaborates_with'
+            """
+        )
+        fresh_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM entity_registry
+            WHERE fuseki_uri = 'orn:personal-koi.entity:organization-district-of-saanich-39db6e8ee64f'
+            """
+        )
+
+    assert rel_target == "orn:test.entity:district-of-saanich-existing"
+    assert fresh_count == 0
+
+
+@pytest.mark.asyncio
+async def test_commit_endpoint_non_renamed_entities_still_use_fuzzy_matching(app_and_pool):
+    app, pool = app_and_pool
+    proposal = _org_pair_proposal(child_name="District of Saanich")
+    job_id = await _seed_done_job(pool, proposal)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, entity_type, normalized_text, source, metadata)
+            VALUES
+                (
+                    'orn:test.entity:district-of-highlands',
+                    'District of Highlands',
+                    'Organization',
+                    'district of highlands',
+                    'seed',
+                    '{}'::jsonb
+                )
+            """
+        )
+
+    async with _aclient(app) as c:
+        r = await _commit(c, job_id)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    matched = next(item for item in body["committed"] if item["name"] == "District of Saanich")
+    assert matched["was_new"] is False
+    assert matched["rid"] == "orn:test.entity:district-of-highlands"
+
+    async with pool.acquire() as conn:
+        rel_target = await conn.fetchval(
+            """
+            SELECT object_uri
+            FROM entity_relationships
+            WHERE subject_uri = 'orn:personal-koi.entity:organization-peninsula-streams-society-0d25ebb363c9'
+              AND predicate = 'collaborates_with'
+            """
+        )
+
+    assert rel_target == "orn:test.entity:district-of-highlands"
 
 
 @pytest.mark.asyncio
