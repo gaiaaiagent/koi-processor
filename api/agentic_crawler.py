@@ -395,6 +395,7 @@ async def agentic_crawl(
     visited: list[str] = []
     visited_set: set[str] = set()
     consecutive_skips = 0
+    pending_vision: list[tuple[list[dict], str, str, str]] = []
 
     # Priority queue of (-priority, seq, url, reason). Negate for max-heap via heapq.
     seq_counter = 0
@@ -426,6 +427,20 @@ async def agentic_crawl(
             "candidates_remaining": len(candidates),
         }
         await progress_callback(payload)
+
+    def _flush_pending_vision() -> None:
+        nonlocal pending_vision
+        if not pending_vision or not world.entities:
+            return
+        for orgs, role, source_url, source_image in pending_vision:
+            _apply_vision_orgs(
+                world,
+                orgs=orgs,
+                role=role,
+                source_url=source_url,
+                source_image=source_image,
+            )
+        pending_vision = []
 
     while candidates and len(visited) < budget.max_pages:
         if cancel_check and await cancel_check():
@@ -493,6 +508,7 @@ async def agentic_crawl(
         consecutive_skips = 0
         cost_tracker.record(usage, crawl_llm.DEFAULT_MODEL)
         world.merge_page_analysis(analysis, source_url=url)
+        _flush_pending_vision()
 
         # Vision step: run OCR on LLM-flagged images up to budget.
         if vision_fn is not None and analysis.worth_ocr_images:
@@ -518,12 +534,16 @@ async def agentic_crawl(
                 world.register_vision_call()
                 if v_usage:
                     cost_tracker.record(v_usage, crawl_llm.DEFAULT_MODEL)
+                target_image = fetched_url or img_region.image_url
+                if not world.entities:
+                    pending_vision.append((orgs, img_region.role, url, target_image))
+                    continue
                 _apply_vision_orgs(
                     world,
                     orgs=orgs,
                     role=img_region.role,
                     source_url=url,
-                    source_image=fetched_url or img_region.image_url,
+                    source_image=target_image,
                 )
 
         for link in analysis.next_links:

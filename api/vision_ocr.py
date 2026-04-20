@@ -94,10 +94,19 @@ async def _fetch_image_once(
                     except ValueError:
                         pass
 
-                body = await response.content.read(MAX_IMAGE_BYTES + 1)
-                if len(body) > MAX_IMAGE_BYTES:
-                    logger.info("vision_ocr: image %s exceeded 5 MB during read", current)
-                    return None
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = await response.content.read(min(64 * 1024, MAX_IMAGE_BYTES + 1 - total))
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_IMAGE_BYTES:
+                        logger.info("vision_ocr: image %s exceeded 5 MB during read", current)
+                        return None
+                    chunks.append(chunk)
+
+                body = b"".join(chunks)
 
                 return body, content_type, current
 

@@ -216,21 +216,32 @@ def test_ac70_vision_fetch_blocks_private_urls(url):
 # ---------------------------------------------------------------------------
 
 class _FakeResponse:
-    def __init__(self, *, status=200, headers=None, body=b""):
+    def __init__(self, *, status=200, headers=None, body=b"", chunks=None):
         self.status = status
         self.headers = headers or {}
         self._body = body
+        self._chunks = list(chunks) if chunks is not None else None
+        self._content = self._Content(body, chunks=self._chunks)
 
     class _Content:
-        def __init__(self, body):
+        def __init__(self, body, *, chunks=None):
             self._body = body
+            self._chunks = list(chunks) if chunks is not None else None
+            self._sent_body = False
 
         async def read(self, cap):
+            if self._chunks is not None:
+                if not self._chunks:
+                    return b""
+                return self._chunks.pop(0)[: cap]
+            if self._sent_body:
+                return b""
+            self._sent_body = True
             return self._body[: cap]
 
     @property
     def content(self):
-        return self._Content(self._body)
+        return self._content
 
     async def __aenter__(self):
         return self
@@ -302,7 +313,7 @@ def test_oversize_actual_body_rejected(monkeypatch):
     resp = _FakeResponse(
         status=200,
         headers={"Content-Type": "image/jpeg"},  # No Content-Length header
-        body=big,
+        chunks=[big[i: i + 64 * 1024] for i in range(0, len(big), 64 * 1024)] + [b""],
     )
     _patched_session(monkeypatch, _FakeSession(resp))
 
@@ -323,6 +334,25 @@ def test_good_image_fetch_returns_bytes(monkeypatch):
 
     async def _run():
         return await vision_ocr.fetch_image_bytes("https://www.example.com/ok.png")
+
+    result = asyncio.run(_run())
+    assert result is not None
+    raw, content_type, final_url = result
+    assert raw == body
+    assert content_type == "image/png"
+
+
+def test_good_image_fetch_reads_until_eof(monkeypatch):
+    body = b"\x89PNG\r\n\x1a\nchunked image data"
+    resp = _FakeResponse(
+        status=200,
+        headers={"Content-Type": "image/png"},
+        chunks=[body[:7], body[7:15], body[15:], b""],
+    )
+    _patched_session(monkeypatch, _FakeSession(resp))
+
+    async def _run():
+        return await vision_ocr.fetch_image_bytes("https://www.example.com/chunked.png")
 
     result = asyncio.run(_run())
     assert result is not None
@@ -465,6 +495,71 @@ def test_vision_budget_stops_further_calls():
     assert partner[0]["source_image"].startswith("https://cdn.example.org/")
     assert partner[0]["metadata"]["vision_role"] == "partner_grid"
     assert proposal.stats["vision_calls"] == 1
+
+
+def test_vision_orgs_defer_until_root_entity_exists():
+    start = "https://example.org/partners"
+    about = "https://example.org/about"
+
+    async def _fetch(url):
+        class P:
+            raw_html = "<html><body>x</body></html>"
+            content_text = ""
+
+        return P()
+
+    analyses = {
+        start: PageAnalysis(
+            entities=[],
+            worth_ocr_images=[
+                ImageRegion(
+                    image_url="https://cdn.example.org/p.png",
+                    role="partner_grid",
+                    context="Our Partners",
+                )
+            ],
+            next_links=[NextLink(url=about, priority=0.9, reason="about")],
+            judgment="continue",
+        ),
+        about: PageAnalysis(
+            entities=[PEModel(name="Example Org", type="Organization", confidence=0.95)],
+            judgment="sufficient",
+        ),
+    }
+
+    async def _fake_analyze_page(*, page, **_kwargs):
+        return analyses[page.url], {"prompt_tokens": 10, "completion_tokens": 10}
+
+    async def _fake_vision(image_url, role, context):
+        return (
+            [{"name": "Partner One", "confidence": 0.9}],
+            {"prompt_tokens": 10, "completion_tokens": 5},
+            image_url,
+        )
+
+    async def _go():
+        with patch.object(crawl_llm, "analyze_page", _fake_analyze_page):
+            return await agentic_crawl(
+                start_url=start,
+                budget=CrawlBudget(max_pages=2, max_vision_calls=5),
+                fetch_fn=_fetch,
+                vision_fn=_fake_vision,
+            )
+
+    proposal = asyncio.run(_go())
+    names = {e["name"]: e for e in proposal.entities}
+    assert "Example Org" in names
+    assert "Partner One" in names
+    assert names["Partner One"]["source_image"] == "https://cdn.example.org/p.png"
+    rels = {
+        (
+            proposal.entities[r["subject_index"]]["name"],
+            r["predicate"],
+            proposal.entities[r["object_index"]]["name"],
+        )
+        for r in proposal.relationships
+    }
+    assert ("Example Org", "collaborates_with", "Partner One") in rels
 
 
 def test_vision_fn_none_disables_step_cleanly():
