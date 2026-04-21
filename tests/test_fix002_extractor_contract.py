@@ -490,7 +490,27 @@ class TestTypeAliasCoverage:
 # =============================================================================
 # GeminiExtractor Contract Tests (no API calls)
 # =============================================================================
+#
+# google-generativeai is listed in requirements.txt but is an optional
+# dependency for the Gemini extractor path, which is not used by any
+# production deployment (Octo, FR, GV, personal KOI all use OpenAI for
+# extraction). The gemini_extractor module unconditionally imports
+# google.generativeai at module load, so these tests get skipped
+# cleanly when the package is absent from the active venv.
 
+_gemini_available = True
+try:  # pragma: no cover — import-time availability check
+    from extraction.gemini_extractor import GeminiExtractor  # noqa: F401
+except (ImportError, ModuleNotFoundError):
+    _gemini_available = False
+
+_skip_if_no_gemini = pytest.mark.skipif(
+    not _gemini_available,
+    reason="google-generativeai not installed in this venv; Gemini extractor path not in use on any production node",
+)
+
+
+@_skip_if_no_gemini
 class TestGeminiExtractorContract:
     """Tests for GeminiExtractor._parse_extraction() contract.
 
@@ -656,6 +676,7 @@ class TestGeminiExtractorContract:
         assert rels[0]["confidence"] == 0.90
 
 
+@_skip_if_no_gemini
 class TestGeminiExtractorJsonExtraction:
     """Tests for GeminiExtractor._extract_json() method."""
 
@@ -713,6 +734,7 @@ class TestGeminiExtractorJsonExtraction:
         assert extractor._extract_json(None) == {}
 
 
+@_skip_if_no_gemini
 class TestGeminiExtractorEmptyResult:
     """Tests for GeminiExtractor._build_empty_result() method."""
 
