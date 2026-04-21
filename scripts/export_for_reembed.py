@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Export personal_koi tables for H200 re-embedding with Qwen3-Embedding-0.6B.
+"""Export KOI tables for re-embedding.
 
-Exports 3 JSONL files (one per table that needs re-embedding):
-  - entity_registry_for_reembed.jsonl
-  - session_chunks_for_reembed.jsonl
-  - knowledge_facts_for_reembed.jsonl
+Exports JSONL files (one per table that needs re-embedding):
+  - entity_registry_for_reembed.jsonl  (personal_koi + octo_koi)
+  - session_chunks_for_reembed.jsonl   (personal_koi only)
+  - knowledge_facts_for_reembed.jsonl  (personal_koi only)
+  - koi_memory_chunks_for_reembed.jsonl (octo_koi + personal_koi)
 
 Each line: {"id": ..., "text": "..."}
 DOCUMENT mode only (no instruction prefix) — stored embeddings are documents.
+
+Text formulas match the canonical fast_*_reembed.py scripts used during the
+Qwen3 migration, preserving semantic space consistency:
+  - entity_registry:    "{entity_text}: {context}. {description}"  (8000 chars)
+  - koi_memory_chunks:  "Page: {title}\n\n{text}" if title else text  (4000 chars)
+  - session_chunks:     chunk_text  (2000 chars, legacy default)
+  - knowledge_facts:    fact_text   (2000 chars, legacy default)
 
 Usage:
   python3 scripts/export_for_reembed.py [--db-url postgresql://...] [--output-dir ./reembed_data]
@@ -30,6 +38,7 @@ async def export_table(
     text_sql: str,
     filename: str,
     where: str = "",
+    max_chars: int = 2000,
 ):
     """Export (id, text) pairs as JSONL."""
     sql = f"SELECT {id_col} AS id, {text_sql} AS text FROM {table}"
@@ -42,24 +51,46 @@ async def export_table(
         for row in rows:
             text = row["text"]
             if text and text.strip():
-                f.write(json.dumps({"id": str(row["id"]), "text": text[:2000]}) + "\n")
+                f.write(json.dumps({"id": str(row["id"]), "text": text[:max_chars]}) + "\n")
                 count += 1
     print(f"  {filename}: {count} rows exported{' (NULL-only)' if where else ''}")
     return count
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Export personal_koi for H200 re-embedding")
+    parser = argparse.ArgumentParser(description="Export KOI tables for re-embedding")
     parser.add_argument("--db-url", default=os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi"))
     parser.add_argument("--output-dir", default="./reembed_data")
     parser.add_argument("--only-null", action="store_true",
                         help="Only export rows whose embedding column is NULL (incremental backfill).")
     parser.add_argument("--tables", default="entity_registry,session_chunks,knowledge_facts",
-                        help="Comma-separated subset of tables to export (default: all three).")
+                        help="Comma-separated subset of tables to export. "
+                             "Valid: entity_registry, session_chunks, knowledge_facts, koi_memory_chunks.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     selected = set(args.tables.split(","))
+
+    # Canonical formula matches scripts/fast_entity_reembed.py (context + description, 8000 chars)
+    entity_text_sql = """
+        COALESCE(entity_text, '') || CASE
+            WHEN COALESCE(metadata->>'context','') != '' OR COALESCE(description,'') != ''
+            THEN ': ' || TRIM(BOTH ' ' FROM
+                COALESCE(NULLIF(metadata->>'context',''),'') ||
+                CASE WHEN COALESCE(metadata->>'context','') != '' AND COALESCE(description,'') != ''
+                     THEN '. ' ELSE '' END ||
+                COALESCE(description,''))
+            ELSE ''
+        END
+    """.strip()
+
+    # Canonical formula matches scripts/fast_chunk_reembed.py (title + text, 4000 chars)
+    chunk_text_sql = """
+        CASE WHEN COALESCE(content->>'title','') != ''
+             THEN 'Page: ' || (content->>'title') || E'\n\n' || COALESCE(content->>'text','')
+             ELSE COALESCE(content->>'text','')
+        END
+    """.strip()
 
     conn = await asyncpg.connect(args.db_url)
     try:
@@ -70,9 +101,10 @@ async def main():
                 conn, args.output_dir,
                 table="entity_registry",
                 id_col="id",
-                text_sql="COALESCE(entity_text, '') || CASE WHEN description IS NOT NULL AND description != '' THEN ' — ' || description ELSE '' END",
+                text_sql=entity_text_sql,
                 filename="entity_registry_for_reembed.jsonl",
                 where="embedding IS NULL" if args.only_null else "",
+                max_chars=8000,
             )
 
         if "session_chunks" in selected:
@@ -95,8 +127,19 @@ async def main():
                 where="fact_embedding IS NULL" if args.only_null else "",
             )
 
-        print("\nDone. Upload these files to H200 and run:")
-        print("  python3 scripts/reembed_on_h200.py --input-dir ./reembed_data --output-dir ./reembed_results")
+        if "koi_memory_chunks" in selected:
+            await export_table(
+                conn, args.output_dir,
+                table="koi_memory_chunks",
+                id_col="id",
+                text_sql=chunk_text_sql,
+                filename="koi_memory_chunks_for_reembed.jsonl",
+                where="embedding IS NULL" if args.only_null else "",
+                max_chars=4000,
+            )
+
+        print("\nDone. Re-embed the JSONL files (OpenAI or H200), then run:")
+        print("  python3 scripts/import_reembeddings.py --input-dir <results_dir>")
     finally:
         await conn.close()
 
