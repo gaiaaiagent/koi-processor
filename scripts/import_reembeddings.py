@@ -22,6 +22,7 @@ TABLE_MAP = {
     "entity_registry": ("entity_registry", "id", "embedding"),
     "session_chunks": ("session_chunks", "id", "embedding"),
     "knowledge_facts": ("knowledge_facts", "id", "fact_embedding"),
+    "koi_memory_chunks": ("koi_memory_chunks", "id", "embedding"),
 }
 
 

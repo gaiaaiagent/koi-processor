@@ -69,19 +69,27 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         }
         return defaults.get(model, 1536)
 
+    def _supports_dimensions(self) -> bool:
+        """`dimensions` param is supported on text-embedding-3-* models, not ada-002."""
+        return self.model_name.startswith("text-embedding-3-")
+
+    def _create_kwargs(self, input_):
+        kwargs = {"model": self.model_name, "input": input_}
+        if self._supports_dimensions():
+            kwargs["dimensions"] = self.dimension
+        return kwargs
+
     async def embed(self, text: str) -> List[float]:
         response = await asyncio.to_thread(
             self._client.embeddings.create,
-            model=self.model_name,
-            input=text,
+            **self._create_kwargs(text),
         )
         return response.data[0].embedding
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         response = await asyncio.to_thread(
             self._client.embeddings.create,
-            model=self.model_name,
-            input=texts,
+            **self._create_kwargs(texts),
         )
         return [d.embedding for d in response.data]
 
