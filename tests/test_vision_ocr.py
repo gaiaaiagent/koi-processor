@@ -275,6 +275,13 @@ def _patched_session(monkeypatch, fake_session):
         return fake_session
 
     monkeypatch.setattr(vision_ocr.aiohttp, "ClientSession", _factory)
+    # Clear _PROXY_URL for any test that uses a single _FakeResponse —
+    # fetch_image_bytes retries with the proxy when the first fetch
+    # returns None, and the retry would consume a now-drained chunks
+    # list and assert False on (b'', ...) tuples instead of None.
+    # Tests that specifically exercise the proxy path re-set _PROXY_URL
+    # via their own monkeypatch call (e.g. test_proxy_support).
+    monkeypatch.setattr(vision_ocr, "_PROXY_URL", "")
 
 
 def test_non_image_content_type_rejected(monkeypatch):
