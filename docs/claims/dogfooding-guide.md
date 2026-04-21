@@ -14,7 +14,32 @@ The Claims Engine lets you create, review, and anchor **impact claims** on the R
 
 ## Via Claude Code MCP (Easiest)
 
-If you have Claude Code with the `personal-koi` MCP server configured, these tools are available:
+Install the dedicated **regen-claims-mcp** plugin — scoped to the Claims Engine surface only (no personal workflow dependencies):
+
+```bash
+git clone https://github.com/gaiaaiagent/regen-claims-mcp.git
+cd regen-claims-mcp && npm install && npm run build
+```
+
+Add to your Claude Code MCP config (ask Darren or Gregory for the team basic-auth creds):
+
+```json
+{
+  "mcpServers": {
+    "regen-claims": {
+      "command": "node",
+      "args": ["/absolute/path/to/regen-claims-mcp/dist/index.js"],
+      "env": {
+        "KOI_API_ENDPOINT": "https://regen.gaiaai.xyz",
+        "KOI_BASIC_AUTH_USER": "<team-user>",
+        "KOI_BASIC_AUTH_PASS": "<team-pass>"
+      }
+    }
+  }
+}
+```
+
+Once configured, the following tools are available from any Claude Code session:
 
 ### Create a claim
 ```
