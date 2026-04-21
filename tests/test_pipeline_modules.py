@@ -252,9 +252,16 @@ class TestEntityQualityFilterModule:
         assert len(result.entities) == 0
 
     def test_capitalized_person_allowed(self):
-        """Test capitalized person name is allowed."""
+        """Test capitalized multi-token person name is allowed.
+
+        Since FIX-016 (single-token capitalized PERSON without cue prefix
+        is blocked), this test uses a multi-token name. The module's
+        intent here is that a well-formed PERSON entity passes through —
+        single-token filtering is covered directly in
+        test_entity_quality_filter.test_blocks_single_token_person.
+        """
         module = EntityQualityFilterModule()
-        entity = Entity(name="Alice", type="PERSON")
+        entity = Entity(name="Alice Smith", type="PERSON")
         context = ProcessingContext(entities=[entity])
 
         result = module.process(context)
@@ -878,8 +885,8 @@ class TestModuleIntegration:
         ])
 
         entities = [
-            Entity(name="Alice", type="INDIVIDUAL"),  # INDIVIDUAL -> PERSON
-            Entity(name="we", type="INDIVIDUAL"),  # should still be blocked
+            Entity(name="Alice Smith", type="INDIVIDUAL"),  # INDIVIDUAL -> PERSON, multi-token passes filter
+            Entity(name="we", type="INDIVIDUAL"),  # should still be blocked (stop word)
         ]
         context = ProcessingContext(entities=entities)
 
@@ -897,12 +904,13 @@ class TestModuleIntegration:
             EntityQualityFilterModule()
         ])
 
-        entity = Entity(name="Alice and Bob", type="PERSON", confidence=0.9)
+        entity = Entity(name="Alice Smith and Bob Jones", type="PERSON", confidence=0.9)
         context = ProcessingContext(entities=[entity])
 
         result = pipeline.process(context)
 
-        # Both split entities should pass quality filter
+        # Both split entities should pass quality filter — multi-token so
+        # they clear the FIX-016 single-token-person block.
         assert len(result.entities) == 2
 
     def test_full_module_chain(self):
