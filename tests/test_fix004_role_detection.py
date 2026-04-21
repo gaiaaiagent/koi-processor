@@ -177,10 +177,14 @@ class TestFix004RoleDetection:
         assert passes is False
         assert reason == "generic_group"
 
-        # Capitalized singular terms should be blocked with generic_group
+        # Capitalized singular terms should be blocked. FIX-016's
+        # single_token_person guard may fire before the generic_group
+        # role detector since "Buyer" is both a single-token PERSON and a
+        # role term; either blocked-reason is acceptable as long as the
+        # entity is rejected.
         passes, reason = filter.filter_entity({"name": "Buyer", "type": "PERSON"})
         assert passes is False
-        assert reason == "generic_group"
+        assert reason in ("generic_group", "single_token_person")
 
         # Proper name should pass
         passes, reason = filter.filter_entity({"name": "Will Szal", "type": "PERSON"})
