@@ -52,6 +52,34 @@ Copy from `tests/eval/results/-<tag>-<yyyy-mm-dd>-<HHMMSS>.json` to
   (may not be present locally — that's the problem this directory
   addresses).
 
+### `openai-switch-full-2026-04-21.json`
+
+- **Captures:** post-OpenAI-embedding-switch state on Octo. Runtime
+  embedding provider changed from poly `Qwen3-Embedding-0.6B` to OpenAI
+  `text-embedding-3-large` @ dim=1024. All 2,839 entities + 3,675 chunks
+  re-embedded in OpenAI semantic space (one-time cost: $0.17).
+- **Config:** `gpt-4.1-mini` judge, `planner=true`, `answer_mode=default`,
+  100 questions total (97 scored after 3 known_limit exclusions).
+- **Headline metrics:**
+  - Faithfulness: **0.9816** (Δ −0.0006 vs p2 baseline, within ±1% gate)
+  - Answer relevancy: **0.842** (Δ +0.031, +3.8%)
+  - Context relevancy: **0.4562** (Δ +0.0225, +5.2%)
+  - OOD abstention accuracy: 1.0 (10/10)
+  - Classifier accuracy: 0.91
+  - Pass rate: 31/97 (vs 22/100 baseline, +9 passes)
+  - Avg latency: 7.07s (essentially flat vs 7.03s)
+- **Per-category CR deltas vs p2 baseline:**
+  - governance_policy 0.476 → 0.541 (**+0.065, +13.7%**) — largest jump
+  - relationship_path 0.490 → 0.514 (+0.024, +5.0%)
+  - commitment_claim 0.407 → 0.425 (+0.018, +4.5%)
+  - entity_definition 0.556 → 0.580 (+0.024, +4.4%)
+  - roadmap_status 0.327 → 0.335 (+0.008, +2.6%)
+  - out_of_domain 0.000 → 0.000 (flat, expected — abstentions)
+- **Use:** canonical post-OpenAI-switch comparison target. Any future
+  retrieval/prompt/routing optimization should beat this before being
+  promoted to production.
+- **Source run:** `tests/eval/results/-openai-switch-full-2026-04-21-103259.json`
+
 ## Running a comparison
 
 Use `run_eval.py --compare <baseline_A> <baseline_B>`:
