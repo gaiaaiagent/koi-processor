@@ -20,7 +20,34 @@ def client():
         yield c
 
 
-def test_unified_search_embedding_up(client):
+@pytest.fixture(scope="module")
+def embedding_up(client):
+    """Gate embedding_up test on actual unified-search behavior.
+
+    /health's embedding_available flag is optimistic; it doesn't detect an
+    embedding backend that is reachable but saturated. Probe the real
+    endpoint instead, with a generous timeout, and skip if it degrades
+    to text-only or fails — this test only has something meaningful to
+    assert when vector mode is live."""
+    try:
+        probe = client.get(
+            "/knowledge/unified-search",
+            params={"query": "healthcheck", "limit": 1},
+            timeout=60.0,
+        )
+    except httpx.HTTPError as e:
+        pytest.skip(f"KOI backend unreachable at {BASE_URL}: {e}")
+    if probe.status_code != 200:
+        pytest.skip(f"unified-search probe returned {probe.status_code}")
+    body = probe.json()
+    if not body.get("embedding_available") or body.get("degraded"):
+        pytest.skip(
+            "unified-search degraded (embedding backend unreachable or saturated); "
+            "vector-mode assertions not applicable"
+        )
+
+
+def test_unified_search_embedding_up(client, embedding_up):
     """Normal path: HTTP 200, embedding_available=true, no match_mode in metadata."""
     r = client.get("/knowledge/unified-search", params={"query": "entity resolution", "limit": 5})
     assert r.status_code == 200

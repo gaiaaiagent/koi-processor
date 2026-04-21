@@ -130,13 +130,38 @@ def _sha256(content: str) -> str:
 
 
 def _make_manager(pool, tmp_vault, event_queue):
+    """Build a VaultSyncManager isolated from production peer rows.
+
+    The local `personal_koi` DB is shared with real vault_sync_peers rows
+    (friend-e2e, nuc-personal with 7 folders including Organizations/
+    People/Meetings/etc., shawn). Tests should only see the peers they
+    registered via setup_peer. We override the instance methods so
+    _scan_async / reconcile / etc. operate against just the test peers.
+    """
     from api.vault_sync import VaultSyncManager
-    return VaultSyncManager(
+    mgr = VaultSyncManager(
         pool=pool,
         node_rid=MY_NODE,
         event_queue=event_queue,
         vault_path=str(tmp_vault),
     )
+
+    _TEST_PEERS = {PEER_NODE, PEER_NODE_B}
+    _orig_all = mgr._get_all_peers
+    _orig_by_source = mgr._get_all_peers_by_source
+
+    async def _all_peers():
+        rows = await _orig_all()
+        return [r for r in rows if r["peer_node_rid"] in _TEST_PEERS]
+
+    async def _peers_by_source(source_node):
+        if source_node not in _TEST_PEERS:
+            return []
+        return await _orig_by_source(source_node)
+
+    mgr._get_all_peers = _all_peers
+    mgr._get_all_peers_by_source = _peers_by_source
+    return mgr
 
 
 # =============================================================================
@@ -219,12 +244,19 @@ async def test_scan_deleted_file(pool, setup_peer, tmp_vault, mock_event_queue):
 
 
 @pytest.mark.anyio
-async def test_scan_skips_non_md(pool, setup_peer, tmp_vault, mock_event_queue):
-    """.txt, .pdf files in Shared/ are ignored."""
+async def test_scan_skips_unsupported_extensions(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Files with extensions not in VAULT_SYNC_PATTERNS (e.g. .pdf, .png) are ignored.
+
+    History: this test was originally `test_scan_skips_non_md` on the
+    assumption only Markdown was synced. Since commit 400e9c87 the
+    supported set expanded to include .md/.jsonl/.json/.jsonld/.txt/
+    .csv/.yaml/.yml/.toml, so using .txt as a negative case no longer
+    holds. .pdf + .png remain safely outside the set.
+    """
     mgr = _make_manager(pool, tmp_vault, mock_event_queue)
     shared = tmp_vault / "Shared"
-    (shared / "notes.txt").write_text("plain text")
     (shared / "doc.pdf").write_bytes(b"%PDF-1.4 fake")
+    (shared / "img.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
 
     await mgr._scan_async()
     mock_event_queue.add.assert_not_called()
@@ -814,7 +846,7 @@ async def test_reconcile_detect_missing_on_disk(pool, setup_peer, tmp_vault, moc
             "Shared/gone.md", _sha256("# Gone"), MY_NODE,
         )
 
-    result = await mgr.reconcile(mode="detect")
+    result = await mgr.reconcile(mode="detect", peer_rid=PEER_NODE)
     assert "Shared/gone.md" in result["missing_on_disk"]
     assert result["total_drift"] >= 1
 
@@ -835,7 +867,7 @@ async def test_reconcile_detect_hash_mismatch(pool, setup_peer, tmp_vault, mock_
             "Shared/stale.md", _sha256("# Old Version"), MY_NODE,
         )
 
-    result = await mgr.reconcile(mode="detect")
+    result = await mgr.reconcile(mode="detect", peer_rid=PEER_NODE)
     assert "Shared/stale.md" in result["hash_mismatch"]
     assert result["total_drift"] >= 1
 
@@ -848,7 +880,7 @@ async def test_reconcile_detect_missing_in_db(pool, setup_peer, tmp_vault, mock_
 
     (shared / "new-untracked.md").write_text("# Untracked")
 
-    result = await mgr.reconcile(mode="detect")
+    result = await mgr.reconcile(mode="detect", peer_rid=PEER_NODE)
     assert "Shared/new-untracked.md" in result["missing_in_db"]
     assert result["total_drift"] >= 1
 
@@ -865,7 +897,7 @@ async def test_reconcile_vault_unavailable_raises(pool, setup_peer, tmp_vault, m
     shutil.rmtree(tmp_vault / "Shared")
 
     with pytest.raises(VaultUnavailableError):
-        await mgr.reconcile(mode="detect")
+        await mgr.reconcile(mode="detect", peer_rid=PEER_NODE)
 
 
 # =============================================================================
@@ -881,7 +913,7 @@ async def test_reconcile_repair_disabled_by_default(pool, setup_peer, tmp_vault,
     # Here we test the manager-level repair which does work — the gate is at the router.
     mgr = _make_manager(pool, tmp_vault, mock_event_queue)
     # Repair without confirm returns drift report + repair_requires_confirm
-    result = await mgr.reconcile(mode="repair", confirm=False)
+    result = await mgr.reconcile(mode="repair", confirm=False, peer_rid=PEER_NODE)
     assert result.get("repair_requires_confirm") is True
 
 
@@ -892,7 +924,7 @@ async def test_reconcile_repair_requires_confirm(pool, setup_peer, tmp_vault, mo
     shared = tmp_vault / "Shared"
     (shared / "untracked.md").write_text("# Untracked")
 
-    result = await mgr.reconcile(mode="repair", confirm=False)
+    result = await mgr.reconcile(mode="repair", confirm=False, peer_rid=PEER_NODE)
     assert result["repair_requires_confirm"] is True
     assert result["total_drift"] >= 1
     assert "actions_taken" not in result
@@ -926,7 +958,7 @@ async def test_reconcile_repair_queues_events(pool, setup_peer, tmp_vault, mock_
             "Shared/repair-gone.md", _sha256("# Gone"), MY_NODE,
         )
 
-    result = await mgr.reconcile(mode="repair", confirm=True)
+    result = await mgr.reconcile(mode="repair", confirm=True, peer_rid=PEER_NODE)
     assert result["actions_taken"] == 3
     assert mock_event_queue.add.call_count >= 3
 
@@ -956,6 +988,7 @@ async def test_reconcile_repair_respects_paths(pool, setup_peer, tmp_vault, mock
     result = await mgr.reconcile(
         mode="repair", confirm=True,
         paths=["Shared/include-me.md"],
+        peer_rid=PEER_NODE,
     )
     assert result["actions_taken"] == 1
 
@@ -976,7 +1009,7 @@ async def test_reconcile_repair_max_actions(pool, setup_peer, tmp_vault, mock_ev
     for i in range(10):
         (shared / f"cap-{i}.md").write_text(f"# Cap {i}")
 
-    result = await mgr.reconcile(mode="repair", confirm=True, max_actions=3)
+    result = await mgr.reconcile(mode="repair", confirm=True, max_actions=3, peer_rid=PEER_NODE)
     assert result["actions_taken"] == 3
     assert result["capped"] is True
     assert result["remaining"] == 7
@@ -990,10 +1023,10 @@ async def test_reconcile_repair_idempotent(pool, setup_peer, tmp_vault, mock_eve
 
     (shared / "idempotent.md").write_text("# Idempotent")
 
-    result1 = await mgr.reconcile(mode="repair", confirm=True)
+    result1 = await mgr.reconcile(mode="repair", confirm=True, peer_rid=PEER_NODE)
     assert result1["actions_taken"] >= 1
 
-    result2 = await mgr.reconcile(mode="repair", confirm=True)
+    result2 = await mgr.reconcile(mode="repair", confirm=True, peer_rid=PEER_NODE)
     assert result2["total_drift"] == 0
     assert result2.get("actions_taken", 0) == 0
 
@@ -1008,7 +1041,7 @@ async def test_reconcile_repair_vault_unavailable(pool, setup_peer, tmp_vault, m
     shutil.rmtree(tmp_vault / "Shared")
 
     with pytest.raises(VaultUnavailableError):
-        await mgr.reconcile(mode="repair", confirm=True)
+        await mgr.reconcile(mode="repair", confirm=True, peer_rid=PEER_NODE)
 
 
 # =============================================================================
