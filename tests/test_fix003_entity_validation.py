@@ -11,8 +11,14 @@ Run with: PYTHONPATH=src pytest tests/test_fix003_entity_validation.py -v
 """
 
 import json
+import sys
 import pytest
 from pathlib import Path
+
+# Make the test self-contained: add src/ to sys.path so isolated runs
+# work without relying on other test files (e.g. test_fix002) being
+# collected first to set it up.
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 
 class TestMinLengthFilter:
@@ -44,12 +50,17 @@ class TestMinLengthFilter:
         assert filter.is_too_short("EU") == False
 
     def test_min_length_in_filter_entity(self):
-        """Verify too_short reason is returned in filter_entity."""
+        """Verify too_short reason is returned in filter_entity.
+
+        Uses type=ORGANIZATION (not PERSON) so the FIX-016
+        single_token_person guard doesn't fire first — we want to
+        exercise the too_short branch specifically.
+        """
         from knowledge_graph.improvements.entity_quality_filter import EntityQualityFilter
 
         filter = EntityQualityFilter()
 
-        passes, reason = filter.filter_entity({"name": "X", "type": "PERSON"})
+        passes, reason = filter.filter_entity({"name": "X", "type": "ORGANIZATION"})
         assert passes == False
         assert reason == "too_short"
 
@@ -101,12 +112,17 @@ class TestPlaceholderDetection:
         assert filter.is_placeholder("Cosmos Hub") == False
 
     def test_placeholder_in_filter_entity(self):
-        """Verify placeholder reason is returned in filter_entity."""
+        """Verify placeholder reason is returned in filter_entity.
+
+        Uses type=ORGANIZATION (not PERSON) so the FIX-016
+        single_token_person guard doesn't fire first — we want to
+        exercise the placeholder branch specifically.
+        """
         from knowledge_graph.improvements.entity_quality_filter import EntityQualityFilter
 
         filter = EntityQualityFilter()
 
-        passes, reason = filter.filter_entity({"name": "Unknown", "type": "PERSON"})
+        passes, reason = filter.filter_entity({"name": "Unknown", "type": "ORGANIZATION"})
         assert passes == False
         assert reason == "placeholder"
 
