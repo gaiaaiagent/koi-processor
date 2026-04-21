@@ -36,6 +36,7 @@ def _make_nodes(specs: list[tuple[str, str, list[str]]]) -> dict[str, DocNode]:
             doc_kind=doc_kind,
             status="active",
             depends_on=deps,
+            relates_to=[],
             file_path=f"{doc_id.replace('.', '/')}.md",
         )
         for doc_id, doc_kind, deps in specs
