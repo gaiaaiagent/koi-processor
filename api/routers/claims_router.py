@@ -35,8 +35,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from api.auth_deps import make_service_token_auth
 
 logger = logging.getLogger(__name__)
 
@@ -562,6 +564,12 @@ def create_router(pool, caps=None):
     """Return an APIRouter for claims engine endpoints."""
     router = APIRouter(prefix="/claims", tags=["claims"])
 
+    # Write-path auth: accept either a valid OAuth session Bearer (issued via
+    # the RFC 8628 device-code flow at /api/koi/auth/*) OR a fixed service
+    # token from env (KOI_CLAIMS_SERVICE_TOKEN) for backend-to-backend callers.
+    # Read endpoints remain open — add Depends(require_auth) only on POST/PATCH/DELETE.
+    require_auth = make_service_token_auth(pool)
+
     try:
         from api.federation_events import emit_domain_event
     except ImportError:
@@ -592,7 +600,8 @@ def create_router(pool, caps=None):
     # Create claim                                                         #
     # ------------------------------------------------------------------ #
 
-    @router.post("/", response_model=ClaimResponse, status_code=201)
+    @router.post("/", response_model=ClaimResponse, status_code=201,
+                 dependencies=[Depends(require_auth)])
     async def create_claim(body: ClaimCreateRequest):
         """Create a new impact claim. Registers as entity, writes graph edges."""
         # ADR-004: normalize and validate claim_type against FWG ClaimType enum
@@ -835,7 +844,8 @@ def create_router(pool, caps=None):
     # Claim from settlement with threshold policy (3A)                     #
     # ------------------------------------------------------------------ #
 
-    @router.post("/claim-from-settlement", response_model=ClaimFromSettlementResponse, status_code=201)
+    @router.post("/claim-from-settlement", response_model=ClaimFromSettlementResponse, status_code=201,
+                 dependencies=[Depends(require_auth)])
     async def claim_from_settlement(body: ClaimFromSettlementRequest):
         """Create Evidence from settlement, then create a claim with threshold-based auto-advance.
 
@@ -1097,7 +1107,8 @@ def create_router(pool, caps=None):
     # Verify (advance verification level)                                  #
     # ------------------------------------------------------------------ #
 
-    @router.patch("/{rid}/verify", response_model=ClaimResponse)
+    @router.patch("/{rid}/verify", response_model=ClaimResponse,
+                  dependencies=[Depends(require_auth)])
     async def verify_claim(rid: str, body: VerifyRequest):
         """Advance claim verification level. Validates state machine transitions."""
         new_level = body.new_level.lower()
@@ -1158,7 +1169,8 @@ def create_router(pool, caps=None):
     # Link evidence                                                        #
     # ------------------------------------------------------------------ #
 
-    @router.post("/{rid}/evidence", response_model=ClaimResponse)
+    @router.post("/{rid}/evidence", response_model=ClaimResponse,
+                 dependencies=[Depends(require_auth)])
     async def link_evidence(rid: str, body: EvidenceLinkRequest):
         """Attach an evidence entity to a claim via evidences_claim edge."""
         async with pool.acquire() as conn:
@@ -1252,7 +1264,7 @@ def create_router(pool, caps=None):
     # Extract claims from document (Phase 2)                               #
     # ------------------------------------------------------------------ #
 
-    @router.post("/extract")
+    @router.post("/extract", dependencies=[Depends(require_auth)])
     async def extract_claims(body: ClaimExtractRequest):
         """Extract structured claims from document text using AI."""
         from api.claim_extractor import extract_claims_from_text
@@ -1321,7 +1333,8 @@ def create_router(pool, caps=None):
     # Evidence from artifacts (Steel Thread Phase B)                        #
     # ------------------------------------------------------------------ #
 
-    @router.post("/evidence-from-artifacts", response_model=EvidenceFromArtifactsResponse, status_code=201)
+    @router.post("/evidence-from-artifacts", response_model=EvidenceFromArtifactsResponse, status_code=201,
+                 dependencies=[Depends(require_auth)])
     async def evidence_from_artifacts(body: EvidenceFromArtifactsRequest):
         """Create an Evidence entity from published interview artifacts.
 
@@ -1460,7 +1473,8 @@ def create_router(pool, caps=None):
     # Evidence from TBFF settlement (Capital Plane Phase 2)                #
     # ------------------------------------------------------------------ #
 
-    @router.post("/evidence-from-settlement", response_model=EvidenceFromSettlementResponse, status_code=201)
+    @router.post("/evidence-from-settlement", response_model=EvidenceFromSettlementResponse, status_code=201,
+                 dependencies=[Depends(require_auth)])
     async def evidence_from_settlement(body: EvidenceFromSettlementRequest):
         """Create an Evidence entity from a TBFF settlement event.
 
@@ -1636,7 +1650,8 @@ def create_router(pool, caps=None):
     # Brief → Claim Candidate Review (Phase 2 — review workflow v1)       #
     # ------------------------------------------------------------------ #
 
-    @router.post("/review-brief", response_model=BriefReviewResponse)
+    @router.post("/review-brief", response_model=BriefReviewResponse,
+                 dependencies=[Depends(require_auth)])
     async def review_brief(body: BriefReviewRequest):
         """Build a structured review packet from an explainer brief_payload.
 
@@ -1716,7 +1731,8 @@ def create_router(pool, caps=None):
             well_supported_count=well_supported,
         )
 
-    @router.post("/promote-candidate", response_model=PromoteCandidateResponse)
+    @router.post("/promote-candidate", response_model=PromoteCandidateResponse,
+                 dependencies=[Depends(require_auth)])
     async def promote_candidate(body: PromoteCandidateRequest):
         """Handle a single candidate review decision from a brief_payload.
 
@@ -1906,7 +1922,8 @@ def create_router(pool, caps=None):
     # Prepare anchor (Phase 4)                                             #
     # ------------------------------------------------------------------ #
 
-    @router.post("/{rid}/prepare-anchor", response_model=AnchorPrepareResponse)
+    @router.post("/{rid}/prepare-anchor", response_model=AnchorPrepareResponse,
+                 dependencies=[Depends(require_auth)])
     async def prepare_anchor(rid: str):
         """Non-broadcasting preflight: compute content hash and derive predicted IRI.
 
@@ -1961,7 +1978,7 @@ def create_router(pool, caps=None):
     @router.post("/{rid}/anchor", responses={
         200: {"model": AnchorResponse, "description": "Anchor confirmed — tx broadcast succeeded"},
         202: {"model": AnchorPendingResponse, "description": "Tx broadcast timed out — use /reconcile to check status"},
-    })
+    }, dependencies=[Depends(require_auth)])
     async def anchor_claim(rid: str):
         """Anchor a verified claim on the Regen Ledger mainnet.
 
@@ -2098,7 +2115,8 @@ def create_router(pool, caps=None):
     # Reconcile (check on-chain status of timed-out broadcasts)            #
     # ------------------------------------------------------------------ #
 
-    @router.post("/{rid}/reconcile", response_model=ReconcileResponse)
+    @router.post("/{rid}/reconcile", response_model=ReconcileResponse,
+                 dependencies=[Depends(require_auth)])
     async def reconcile_claim(rid: str):
         """Check on-chain status of a claim with a pending broadcast.
 
@@ -2471,7 +2489,8 @@ def create_router(pool, caps=None):
 
     _VALID_VERDICTS = {"pending", "approved", "rejected", "needs_info"}
 
-    @router.post("/{rid}/attestations", response_model=AttestationResponse, status_code=201)
+    @router.post("/{rid}/attestations", response_model=AttestationResponse, status_code=201,
+                 dependencies=[Depends(require_auth)])
     async def create_attestation(rid: str, body: AttestationCreateRequest):
         """Create or update an attestation on a claim (UPSERT by reviewer_uri).
 
@@ -2657,7 +2676,8 @@ def create_router(pool, caps=None):
     # Attestation anchoring                                                #
     # ------------------------------------------------------------------ #
 
-    @router.post("/{rid}/attestations/{att_rid}/anchor", response_model=AttestationAnchorResponse)
+    @router.post("/{rid}/attestations/{att_rid}/anchor", response_model=AttestationAnchorResponse,
+                 dependencies=[Depends(require_auth)])
     async def anchor_attestation(rid: str, att_rid: str):
         """Anchor an attestation on-chain via MsgAnchor.
 
@@ -2790,7 +2810,8 @@ def create_router(pool, caps=None):
             detail=result.get("reason", "Attestation anchoring not available"),
         )
 
-    @router.post("/{rid}/attestations/{att_rid}/reconcile", response_model=AttestationReconcileResponse)
+    @router.post("/{rid}/attestations/{att_rid}/reconcile", response_model=AttestationReconcileResponse,
+                 dependencies=[Depends(require_auth)])
     async def reconcile_attestation(rid: str, att_rid: str):
         """Check on-chain status of an attestation with a pending broadcast.
 
