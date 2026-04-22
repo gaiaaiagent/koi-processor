@@ -69,6 +69,11 @@ async def main():
     conn = await asyncpg.connect(args.db_url)
     try:
         total = 0
+        # Track which TABLE_MAP prefixes actually got imported so the
+        # verification loop can skip tables that don't exist in this DB
+        # (e.g. session_chunks / knowledge_facts are personal_koi-only; octo_koi
+        # only has entity_registry + koi_memory_chunks).
+        imported_prefixes = []
         for fname in sorted(os.listdir(args.input_dir)):
             if not fname.endswith("_embeddings.jsonl"):
                 continue
@@ -82,12 +87,14 @@ async def main():
             table, id_col, emb_col = TABLE_MAP[prefix]
             input_path = os.path.join(args.input_dir, fname)
             total += await import_file(conn, input_path, table, id_col, emb_col)
+            imported_prefixes.append(prefix)
 
         print(f"\nTotal: {total} embeddings imported")
 
-        # Verify
+        # Verify only the tables that actually received imports
         print("\nVerification:")
-        for prefix, (table, _, emb_col) in TABLE_MAP.items():
+        for prefix in imported_prefixes:
+            table, _, emb_col = TABLE_MAP[prefix]
             count = await conn.fetchval(f"SELECT count(*) FROM {table} WHERE {emb_col} IS NOT NULL")
             print(f"  {table}.{emb_col}: {count} non-null embeddings")
     finally:
