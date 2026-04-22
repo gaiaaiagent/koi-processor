@@ -12,7 +12,11 @@ The Claims Engine lets you create, review, and anchor **impact claims** on the R
 
 ---
 
-## Via Claude Code MCP (Easiest)
+## Via the browser (easiest)
+
+Open [regen.gaiaai.xyz/claims](https://regen.gaiaai.xyz/claims). The portal shows a sign-in button; sign in with your `@regen.network` email. Once authenticated you can create, review, attest, and anchor claims directly from the dashboard. Session lasts 1 hour.
+
+## Via Claude Code MCP
 
 Install the dedicated **regen-claims-mcp** plugin — scoped to the Claims Engine surface only (no personal workflow dependencies):
 
@@ -21,7 +25,7 @@ git clone https://github.com/gaiaaiagent/regen-claims-mcp.git
 cd regen-claims-mcp && npm install && npm run build
 ```
 
-Add to your Claude Code MCP config (ask Darren or Gregory for the team basic-auth creds):
+Add to your Claude Code MCP config:
 
 ```json
 {
@@ -30,14 +34,14 @@ Add to your Claude Code MCP config (ask Darren or Gregory for the team basic-aut
       "command": "node",
       "args": ["/absolute/path/to/regen-claims-mcp/dist/index.js"],
       "env": {
-        "KOI_API_ENDPOINT": "https://regen.gaiaai.xyz",
-        "KOI_BASIC_AUTH_USER": "<team-user>",
-        "KOI_BASIC_AUTH_PASS": "<team-pass>"
+        "KOI_API_ENDPOINT": "https://regen.gaiaai.xyz"
       }
     }
   }
 }
 ```
+
+**Auth:** reads work immediately without any setup. For write operations, run `regen_koi_authenticate` (tool in `regen-koi-mcp`) once — it stores a shared token at `~/.koi-auth.json` that this MCP reads automatically. Only `@regen.network` Google accounts are accepted.
 
 Once configured, the following tools are available from any Claude Code session:
 
