@@ -23,8 +23,8 @@ import httpx
 import urllib.parse
 import string
 from typing import Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Request, Depends, Header, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Cookie, HTTPException, Request, Depends, Header, Form
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 import asyncpg
 from loguru import logger
@@ -818,7 +818,7 @@ async def auth_callback(code: str, state: str, db=Depends(get_db)):
     """
     # Look up auth request by state_id
     auth_request = await db.fetchrow("""
-        SELECT id, device_code, user_code, user_email, status, expires_at
+        SELECT id, device_code, user_code, user_email, status, expires_at, callback_url
         FROM auth_requests
         WHERE state_id = $1
     """, state)
@@ -906,7 +906,23 @@ async def auth_callback(code: str, state: str, db=Depends(get_db)):
         VALUES ($1, $2, to_timestamp($3))
     """, session_token_hash, verified_email, session_expiry)
 
-    logger.info(f"[Auth] Authenticated {verified_email} via user_code {auth_request['user_code']}")
+    logger.info(f"[Auth] Authenticated {verified_email} via user_code={auth_request['user_code']!r} flow={'web' if auth_request['callback_url'] else 'device'}")
+
+    # Branch on flow type:
+    #   - Web flow (callback_url set) → set HttpOnly cookie, 303 back to portal
+    #   - Device flow (callback_url NULL) → return SUCCESS_HTML, MCP polls /auth/token
+    if auth_request["callback_url"]:
+        # Mark the auth_request as 'used' so the device-code path can't also consume it.
+        await db.execute("""
+            UPDATE auth_requests
+            SET status = 'used',
+                used_at = CURRENT_TIMESTAMP,
+                session_token = NULL
+            WHERE id = $1
+        """, auth_request["id"])
+        response = RedirectResponse(url=auth_request["callback_url"], status_code=303)
+        _set_session_cookie(response, session_token, session_expiry)
+        return response
 
     return SUCCESS_HTML.format(email=verified_email)
 
@@ -1036,3 +1052,184 @@ async def check_auth_status_legacy(device_code: str, db=Depends(get_db)):
             return {"status": result.error, "authenticated": False, "message": result.error_description}
 
     return result
+
+
+# =============================================================================
+# Browser (web) OAuth flow
+# =============================================================================
+# Complements the RFC 8628 device-code flow (for MCPs / CLIs) with a direct
+# browser redirect flow (for the /claims portal and future web apps). Both
+# flows land in the same `/auth/callback` and produce the same session_token
+# in `session_tokens`. The only difference is delivery:
+#   - device flow: MCP polls /auth/token, receives the plain token, stores it
+#   - web flow: backend sets an HttpOnly cookie and 303s the browser back
+#
+# The `auth_requests.callback_url` column distinguishes the two (NULL = device,
+# non-NULL = web). See migration 088.
+
+SESSION_COOKIE_NAME = "koi_session"
+SESSION_COOKIE_MAX_AGE = SESSION_TOKEN_LIFETIME_SECONDS  # align with token expiry
+
+# Only accept callback paths that clearly belong to our portal surface. Prevents
+# the `/auth/web/login?next=...` endpoint from becoming an open redirect.
+_ALLOWED_CALLBACK_PREFIXES = ("/claims", "/claims/", "/registry", "/digests", "/")
+
+
+def _is_safe_callback(path: str) -> bool:
+    """Only allow relative paths pointing at our own routes."""
+    if not path or not path.startswith("/"):
+        return False
+    # Reject protocol-relative (//evil.com) and multi-slash tricks.
+    if path.startswith("//"):
+        return False
+    # Reject any scheme/host in the path (belt-and-braces on top of startswith "/").
+    if "://" in path:
+        return False
+    return any(path == prefix or path.startswith(prefix.rstrip("/") + "/")
+               or path.startswith(prefix) for prefix in _ALLOWED_CALLBACK_PREFIXES)
+
+
+def _set_session_cookie(response, token: str, expiry_ts: float) -> None:
+    """Attach the session cookie to a response.
+
+    HttpOnly (no JS access), Secure (HTTPS only), SameSite=Lax (sent on
+    top-level navigations; blocks the dangerous cross-site POST cases but
+    works across tabs on our own site).
+    """
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        expires=int(expiry_ts),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+@router.get("/auth/web/login")
+async def web_login(next: str = "/claims", db=Depends(get_db)):
+    """Start the browser-facing OAuth flow.
+
+    Generates a one-time auth_request tied to a callback URL, then redirects
+    the browser to Google OAuth. After the user consents, `/auth/callback`
+    sets the session cookie and 303s back to ``next``.
+
+    Open-redirect protection: ``next`` must be a relative path to one of
+    our own routes (see ``_is_safe_callback``).
+    """
+    if not _is_safe_callback(next):
+        return HTMLResponse(
+            content=(
+                "<h1>Invalid callback URL</h1>"
+                "<p>The `next` parameter must be a relative path to a Regen route.</p>"
+            ),
+            status_code=400,
+        )
+
+    # Web flow has no device; we synthesize a placeholder device_code so the
+    # NOT-NULL constraint on auth_requests.device_code is satisfied. Prefix
+    # distinguishes it from real device codes.
+    synthetic_device_code = f"web:{secrets.token_hex(24)}"
+    state_id = generate_state_id()
+    expires_at = time.time() + DEVICE_CODE_LIFETIME_SECONDS
+
+    await db.execute(
+        """
+        INSERT INTO auth_requests (device_code, state_id, status, expires_at, callback_url)
+        VALUES ($1, $2, 'authorizing', to_timestamp($3), $4)
+        """,
+        synthetic_device_code, state_id, expires_at, next,
+    )
+
+    try:
+        creds = load_client_secrets()
+    except Exception:
+        return HTMLResponse(content="<h1>Error</h1><p>Server configuration error.</p>", status_code=500)
+
+    params = {
+        "client_id": creds["client_id"],
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": " ".join(SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state_id,
+        "hd": "regen.network",  # Hint to Google to show the @regen.network chooser
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+    logger.info(f"[Auth] Web login initiated, redirecting to Google (next={next})")
+    return RedirectResponse(url=auth_url, status_code=303)
+
+
+@router.get("/auth/me")
+async def auth_me(
+    authorization: Optional[str] = Header(None),
+    koi_session: Optional[str] = Cookie(None),
+    db=Depends(get_db),
+):
+    """Return the currently authenticated user, or 401 if none.
+
+    Used by the portal to decide whether to show the dashboard or the
+    sign-in prompt. Accepts either a Bearer header or the session cookie.
+    """
+    # Header beats cookie (matches auth_deps priority).
+    token = None
+    if authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+    if token is None and koi_session:
+        token = koi_session
+
+    if token is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token_hash = hash_token(token)
+    row = await db.fetchrow(
+        """
+        SELECT user_email, expires_at, revoked_at
+        FROM session_tokens
+        WHERE token_hash = $1
+        """,
+        token_hash,
+    )
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    if row["revoked_at"]:
+        raise HTTPException(status_code=401, detail="Session token has been revoked")
+    if row["expires_at"].timestamp() < time.time():
+        raise HTTPException(status_code=401, detail="Session token has expired")
+
+    return {
+        "email": row["user_email"],
+        "expires_at": row["expires_at"].isoformat(),
+    }
+
+
+@router.post("/auth/web/logout")
+async def web_logout(
+    koi_session: Optional[str] = Cookie(None),
+    db=Depends(get_db),
+):
+    """Clear the session cookie and revoke the underlying token.
+
+    Uses POST to avoid CSRF-triggered logout via <img> etc. The cookie is
+    SameSite=Lax which already blocks cross-site POSTs in modern browsers.
+    """
+    if koi_session:
+        token_hash = hash_token(koi_session)
+        await db.execute(
+            """
+            UPDATE session_tokens
+            SET revoked_at = CURRENT_TIMESTAMP
+            WHERE token_hash = $1 AND revoked_at IS NULL
+            """,
+            token_hash,
+        )
+
+    response = JSONResponse(content={"status": "logged_out"})
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    return response

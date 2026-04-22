@@ -31,8 +31,16 @@ Three factories:
     session token OR a fixed service token from env (for CI / backend-to-
     backend callers that don't have an OAuth identity).
 
-All three call the same validator so there's a single source of truth for
-what "authenticated" means.
+Two token-delivery mechanisms, both equivalent:
+  * ``Authorization: Bearer <token>`` header — used by MCPs and API clients.
+  * ``koi_session`` HttpOnly cookie — used by browsers (the /claims portal).
+    Set by the web OAuth flow (``GET /api/koi/auth/web/login``).
+
+Both resolve to the same ``session_tokens`` table. A single request can
+include either; header takes precedence if both are present (explicit wins).
+
+All three factories call the same validator so there's a single source of
+truth for what "authenticated" means.
 
 SECURITY NOTES
   * Token hashing matches ``auth_service.hash_token`` (SHA-256 hex) — the DB
@@ -41,6 +49,8 @@ SECURITY NOTES
     on every request.
   * The ``Authorization`` header parser is strict (``Bearer <token>``, two
     whitespace-separated parts, case-insensitive scheme).
+  * The session cookie must be set with ``HttpOnly; Secure; SameSite=Lax`` —
+    see auth_service.set_session_cookie.
 """
 
 from __future__ import annotations
@@ -52,9 +62,13 @@ import time
 from typing import Awaitable, Callable, Optional
 
 from asyncpg.pool import Pool
-from fastapi import Header, HTTPException
+from fastapi import Cookie, Header, HTTPException
 
 logger = logging.getLogger(__name__)
+
+# Cookie name used by the browser OAuth flow. Must match what
+# auth_service.web_login / auth_service.auth_callback set via Set-Cookie.
+SESSION_COOKIE_NAME = "koi_session"
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +90,23 @@ def _parse_bearer(authorization: Optional[str]) -> Optional[str]:
     return parts[1]
 
 
+def _extract_token(authorization: Optional[str], cookie_token: Optional[str]) -> Optional[str]:
+    """Pick a session token from either the Authorization header or a cookie.
+
+    Header wins if both are present — explicit Bearer is a stronger signal
+    than an auto-attached cookie, and matches the principle of least-surprise
+    for API clients that also happen to have a browser cookie lying around.
+    """
+    header_token = _parse_bearer(authorization)
+    if header_token is not None:
+        return header_token
+    if cookie_token:
+        return cookie_token
+    return None
+
+
 async def _validate_session_token(token: str, pool: Pool) -> str:
-    """Validate a Bearer session token against ``session_tokens``.
+    """Validate a session token against ``session_tokens``.
 
     Returns the authenticated user's email.
     Raises :class:`HTTPException` (401) on invalid / revoked / expired tokens.
@@ -110,17 +139,27 @@ OptionalAuthDep = Callable[..., Awaitable[Optional[str]]]
 
 
 def make_require_auth(pool: Pool) -> RequireAuthDep:
-    """Factory: FastAPI dependency that requires a valid session Bearer token.
+    """Factory: FastAPI dependency that requires a valid session token.
 
-    Returns the authenticated user's email. Raises 401 on any failure.
+    Accepts either ``Authorization: Bearer <token>`` header (API clients /
+    MCPs) or ``koi_session`` HttpOnly cookie (browsers). Returns the
+    authenticated user's email. Raises 401 on any failure.
     """
 
-    async def require_auth(authorization: Optional[str] = Header(None)) -> str:
-        if not authorization:
-            raise HTTPException(status_code=401, detail="Authorization header required")
-        token = _parse_bearer(authorization)
+    async def require_auth(
+        authorization: Optional[str] = Header(None),
+        koi_session: Optional[str] = Cookie(None),
+    ) -> str:
+        token = _extract_token(authorization, koi_session)
         if token is None:
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Authentication required. Provide an Authorization: Bearer "
+                    "header (for API clients) or sign in to obtain a session "
+                    "cookie (for browsers)."
+                ),
+            )
         return await _validate_session_token(token, pool)
 
     return require_auth
@@ -129,13 +168,17 @@ def make_require_auth(pool: Pool) -> RequireAuthDep:
 def make_optional_auth(pool: Pool) -> OptionalAuthDep:
     """Factory: FastAPI dependency that optionally binds a session to the request.
 
-    Returns ``user_email`` if a valid token is present, otherwise ``None``.
-    Never raises. Use on read endpoints where anonymous access is allowed but
-    an authenticated identity (when present) should be recorded for audit.
+    Returns ``user_email`` if a valid token is present (header or cookie),
+    otherwise ``None``. Never raises. Use on read endpoints where anonymous
+    access is allowed but an authenticated identity (when present) should be
+    recorded for audit.
     """
 
-    async def optional_auth(authorization: Optional[str] = Header(None)) -> Optional[str]:
-        token = _parse_bearer(authorization)
+    async def optional_auth(
+        authorization: Optional[str] = Header(None),
+        koi_session: Optional[str] = Cookie(None),
+    ) -> Optional[str]:
+        token = _extract_token(authorization, koi_session)
         if token is None:
             return None
         try:
@@ -151,37 +194,50 @@ def make_service_token_auth(
     env_var: str = "KOI_CLAIMS_SERVICE_TOKEN",
     service_identity: str = "service:claims-service",
 ) -> RequireAuthDep:
-    """Factory: dependency that accepts EITHER a valid session Bearer OR a
-    fixed service token read from environment.
+    """Factory: dependency that accepts a valid session token (header or
+    cookie) OR a fixed service token read from environment.
 
     Use for backend-to-backend callers (CI jobs, scheduled anchoring, the
     claims-service daemon itself) that need to write but don't have an OAuth
     identity.
 
-    The service token — if set — is compared constant-time against the header.
-    When the service token matches, the dependency returns
-    ``service_identity`` so the endpoint can still populate
-    ``operator_uri`` / ``created_by`` with a sensible value.
+    The service token — if set — is compared constant-time against the
+    header-only token (never cookie; services don't have cookies). When it
+    matches, the dependency returns ``service_identity`` so endpoints can
+    still populate ``operator_uri`` / ``created_by`` with a sensible value.
     """
 
     import secrets as _secrets
 
-    async def service_or_session(authorization: Optional[str] = Header(None)) -> str:
-        token = _parse_bearer(authorization)
+    async def service_or_session(
+        authorization: Optional[str] = Header(None),
+        koi_session: Optional[str] = Cookie(None),
+    ) -> str:
+        # Try service-token match first (header only — services don't use cookies)
+        header_token = _parse_bearer(authorization)
+        if header_token is not None:
+            service_token = os.getenv(env_var, "")
+            if service_token and _secrets.compare_digest(header_token, service_token):
+                return service_identity
+
+        # Fall through to regular session validation (either delivery mechanism)
+        token = _extract_token(authorization, koi_session)
         if token is None:
-            raise HTTPException(status_code=401, detail="Bearer token required")
-
-        # Constant-time compare against service token, if configured.
-        service_token = os.getenv(env_var, "")
-        if service_token and _secrets.compare_digest(token, service_token):
-            return service_identity
-
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Authentication required. Provide an Authorization: Bearer "
+                    "header (for API clients) or sign in to obtain a session "
+                    "cookie (for browsers)."
+                ),
+            )
         return await _validate_session_token(token, pool)
 
     return service_or_session
 
 
 __all__ = [
+    "SESSION_COOKIE_NAME",
     "make_require_auth",
     "make_optional_auth",
     "make_service_token_auth",
