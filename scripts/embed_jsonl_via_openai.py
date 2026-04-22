@@ -137,7 +137,7 @@ async def apply_embed(
     total_tokens = 0
     total_cost = 0.0
     consecutive_fails = 0
-    ts_iso = dt.datetime.utcnow().isoformat() + "Z"
+    ts_iso = dt.datetime.now(dt.timezone.utc).isoformat()
 
     # Ensure output dir exists
     Path(os.path.dirname(output_path) or ".").mkdir(parents=True, exist_ok=True)
