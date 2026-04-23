@@ -167,10 +167,15 @@ def get_signing_address() -> str:
 
 def _check_regen_cli() -> str:
     """Return path to regen binary, or raise if not found."""
+    explicit = os.environ.get("REGEN_CLI_PATH")
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return explicit
+        raise RuntimeError(f"REGEN_CLI_PATH={explicit!r} is not executable")
     regen_path = shutil.which("regen")
     if not regen_path:
         raise RuntimeError(
-            "regen CLI binary not found in PATH. "
+            "regen CLI binary not found. Set REGEN_CLI_PATH env var or add regen to PATH. "
             "Install from https://github.com/regen-network/regen-ledger/releases"
         )
     return regen_path

@@ -2917,4 +2917,45 @@ def create_router(pool, caps=None):
             "is_testnet": chain_id != "regen-1",
         }
 
+    # ------------------------------------------------------------------ #
+    # Identity (who am I — discover entity URIs for claimant/reviewer)    #
+    # ------------------------------------------------------------------ #
+
+    @router.get("/identity")
+    async def get_my_identity(user_email: str = Depends(require_auth)):
+        """Return the caller's email and entity URIs usable as --claimant or --reviewer.
+
+        Searches claims this user has created (by created_by) and the entity
+        registry for names derived from the email local-part. Useful for
+        onboarding: new users run this to discover their entity URIs before
+        creating claims or attestations.
+        """
+        async with pool.acquire() as conn:
+            claim_rows = await conn.fetch(
+                "SELECT DISTINCT claimant_uri FROM claims "
+                "WHERE created_by = $1 AND claimant_uri IS NOT NULL LIMIT 10",
+                user_email,
+            )
+            name_hint = user_email.split("@")[0].replace(".", " ").replace("-", " ").strip()
+            first = name_hint.split()[0] if name_hint.split() else name_hint
+            entity_rows = await conn.fetch(
+                "SELECT fuseki_uri, entity_text, entity_type FROM entity_registry "
+                "WHERE lower(entity_text) LIKE lower($1) OR lower(entity_text) LIKE lower($2) "
+                "LIMIT 5",
+                f"%{name_hint}%", f"{first}%",
+            )
+        return {
+            "email": user_email,
+            "claimant_uris": [r["claimant_uri"] for r in claim_rows],
+            "suggested_entities": [
+                {"uri": r["fuseki_uri"], "name": r["entity_text"], "type": r["entity_type"]}
+                for r in entity_rows
+            ],
+            "hint": (
+                "Use a claimant_uri or suggested entity URI as --claimant when creating claims "
+                "or --reviewer when attesting. If claimant_uris is empty, create your first "
+                "claim with your org/person URI to register it."
+            ),
+        }
+
     return router
