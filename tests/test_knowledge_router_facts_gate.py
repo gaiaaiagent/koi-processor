@@ -1,0 +1,318 @@
+import os
+import sys
+from pathlib import Path
+from uuid import uuid4
+
+import asyncpg
+import httpx
+import pytest
+from fastapi import FastAPI
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+DB_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
+
+
+class _SingleConnPool:
+    def __init__(self, conn):
+        self._conn = conn
+
+    class _CM:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *args):
+            return None
+
+    def acquire(self):
+        return self._CM(self._conn)
+
+
+class _ProbeConn:
+    def __init__(self, regclasses):
+        self.regclasses = regclasses
+        self.fetchval_calls = []
+
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        if "to_regclass" in query and args:
+            return self.regclasses.get(args[0])
+        return None
+
+
+class _RouterConn:
+    def __init__(self, *, fetch_rows=None, fetchval_values=None, forbidden=None):
+        self.fetch_rows = fetch_rows or {}
+        self.fetchval_values = fetchval_values or {}
+        self.forbidden = forbidden or ()
+        self.fetch_calls = []
+        self.fetchval_calls = []
+        self.execute_calls = []
+
+    def _check_forbidden(self, query):
+        normalized = " ".join(query.split())
+        for needle in self.forbidden:
+            assert needle not in normalized
+        return normalized
+
+    async def fetch(self, query, *args):
+        normalized = self._check_forbidden(query)
+        self.fetch_calls.append((normalized, args))
+        for needle, rows in self.fetch_rows.items():
+            if needle in normalized:
+                return rows
+        return []
+
+    async def fetchval(self, query, *args):
+        normalized = self._check_forbidden(query)
+        self.fetchval_calls.append((normalized, args))
+        for needle, value in self.fetchval_values.items():
+            if needle in normalized:
+                return value
+        return None
+
+    async def execute(self, query, *args):
+        normalized = self._check_forbidden(query)
+        self.execute_calls.append((normalized, args))
+        return "OK"
+
+
+def _build_app(
+    conn,
+    *,
+    facts_surface_available,
+    query_embed=None,
+    document_embed=None,
+):
+    from api.routers.knowledge_router import create_router
+
+    app = FastAPI()
+    app.state.facts_surface_available = facts_surface_available
+    app.include_router(
+        create_router(
+            _SingleConnPool(conn),
+            generate_query_embedding=query_embed,
+            generate_document_embedding=document_embed,
+        ),
+        prefix="/knowledge",
+    )
+    return app
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_startup_sets_facts_surface_flag(monkeypatch):
+    import api.personal_ingest_api as personal_ingest_api
+
+    async def fake_create_pool(*args, **kwargs):
+        return _SingleConnPool(fake_create_pool.conn)
+
+    async def fake_noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(personal_ingest_api.asyncpg, "create_pool", fake_create_pool)
+    monkeypatch.setattr(personal_ingest_api, "create_embedding_provider", lambda: None)
+    monkeypatch.setattr(personal_ingest_api, "ensure_schema", fake_noop)
+    monkeypatch.setattr("api.graph_queries.verify_indexes", fake_noop)
+    monkeypatch.setattr(personal_ingest_api, "_caps", None)
+
+    for regclasses, expected in (
+        (
+            {
+                "knowledge_facts": "public.knowledge_facts",
+                "knowledge_episodes": "public.knowledge_episodes",
+            },
+            True,
+        ),
+        (
+            {
+                "knowledge_facts": "public.knowledge_facts",
+                "knowledge_episodes": None,
+            },
+            False,
+        ),
+    ):
+        conn = _ProbeConn(regclasses)
+        fake_create_pool.conn = conn
+        if hasattr(personal_ingest_api.app.state, "facts_surface_available"):
+            delattr(personal_ingest_api.app.state, "facts_surface_available")
+
+        await personal_ingest_api.startup()
+
+        assert personal_ingest_api.app.state.facts_surface_available is expected
+        assert any(
+            args == ("knowledge_facts",) for _, args in conn.fetchval_calls
+        )
+        assert any(
+            args == ("knowledge_episodes",) for _, args in conn.fetchval_calls
+        )
+
+
+@pytest.mark.anyio
+async def test_unified_search_includes_facts_when_surface_available():
+    async def query_embed(_query):
+        return [0.1, 0.2, 0.3]
+
+    conn = _RouterConn(
+        fetch_rows={
+            "FROM knowledge_facts f": [
+                {
+                    "id": "fact-1",
+                    "subject_uri": "entity:test-subject",
+                    "predicate": "SUPPORTS",
+                    "object_uri": "entity:test-object",
+                    "fact_text": "Test subject supports test object.",
+                    "episode_name": "Episode One",
+                    "score": 0.91,
+                }
+            ]
+        }
+    )
+    app = _build_app(
+        conn,
+        facts_surface_available=True,
+        query_embed=query_embed,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/knowledge/unified-search",
+            params={"query": "supports", "include": "facts", "limit": 5},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["X-Facts-Surface"] == "available"
+    body = response.json()
+    assert body["facts"]
+    assert body["facts"][0]["source"] == "fact"
+    assert body["results"][0]["source"] == "fact"
+    assert any("FROM knowledge_facts f" in query for query, _ in conn.fetch_calls)
+
+
+@pytest.mark.anyio
+async def test_unified_search_skips_facts_when_surface_unavailable():
+    async def query_embed(_query):
+        return [0.1, 0.2, 0.3]
+
+    conn = _RouterConn(forbidden=("knowledge_facts", "knowledge_episodes"))
+    app = _build_app(
+        conn,
+        facts_surface_available=False,
+        query_embed=query_embed,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/knowledge/unified-search",
+            params={"query": "supports", "include": "facts", "limit": 5},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["X-Facts-Surface"] == "unavailable"
+    body = response.json()
+    assert body["facts"] == []
+    assert body["results"] == []
+
+
+@pytest.mark.anyio
+async def test_create_episode_returns_503_when_surface_unavailable():
+    conn = _RouterConn(forbidden=("knowledge_facts", "knowledge_episodes"))
+    app = _build_app(conn, facts_surface_available=False)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/knowledge/episodes",
+            json={
+                "name": "Unavailable episode",
+                "facts": [
+                    {
+                        "subject": "Unavailable subject",
+                        "predicate": "RELATES_TO",
+                        "fact_text": "Unavailable subject relates to something.",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {"error": "facts surface not configured on this node"}
+    }
+
+
+@pytest.mark.anyio
+async def test_search_facts_returns_empty_when_surface_unavailable():
+    conn = _RouterConn(forbidden=("knowledge_facts", "knowledge_episodes"))
+    app = _build_app(conn, facts_surface_available=False)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/knowledge/facts/search",
+            params={"query": "salmon"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["X-Facts-Surface"] == "unavailable"
+    assert response.json() == {"facts": [], "count": 0}
+
+
+@pytest.mark.anyio
+async def test_create_episode_succeeds_when_surface_available():
+    conn = await asyncpg.connect(DB_URL)
+    tx = conn.transaction()
+    await tx.start()
+
+    try:
+        app = _build_app(conn, facts_surface_available=True)
+        source_document = f"unit-test://facts-gate/{uuid4()}"
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/knowledge/episodes",
+                json={
+                    "name": "Gate success episode",
+                    "source_document": source_document,
+                    "facts": [
+                        {
+                            "subject": "Gate success subject",
+                            "predicate": "RELATES_TO",
+                            "object_literal": "Gate success literal",
+                            "fact_text": "Gate success subject relates to Gate success literal.",
+                        }
+                    ],
+                    "create_entities": True,
+                },
+            )
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["facts_created"] == 1
+        assert body["facts_skipped"] == 0
+
+        episode_id = await conn.fetchval(
+            "SELECT id FROM knowledge_episodes WHERE source_document = $1",
+            source_document,
+        )
+        fact_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE episode_id = $1",
+            episode_id,
+        )
+
+        assert episode_id is not None
+        assert fact_count == 1
+    finally:
+        await tx.rollback()
+        await conn.close()
