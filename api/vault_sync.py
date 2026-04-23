@@ -37,6 +37,14 @@ _VAULT_READONLY_INCOMING_PATHS: list = [
     for p in os.getenv("KOI_VAULT_READONLY_PATHS", "").split(",")
     if p.strip()
 ]
+# Paths excluded from vault sync entirely (all event types rejected).
+# Hidden-directory components (any segment starting with ".") are always excluded.
+# Add explicit overrides via KOI_VAULT_EXCLUDE_PATHS, e.g. "Shared/messages/"
+_VAULT_EXCLUDE_PATHS: list = [
+    p.strip().rstrip("/") + "/"
+    for p in os.getenv("KOI_VAULT_EXCLUDE_PATHS", "").split(",")
+    if p.strip()
+]
 _VAULT_SYNC_EXTENSIONS = tuple("." + p.lstrip("*.") for p in VAULT_SYNC_PATTERNS)  # (".md", ".jsonl", ...)
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
@@ -91,6 +99,7 @@ class SyncMetrics:
     rejected_stale_event: int = 0
     rejected_unauthorized_source: int = 0
     rejected_path_authoritative: int = 0
+    rejected_path_excluded: int = 0
     # Backpressure (WP3)
     scans_capped: int = 0
     # Watcher (WP4)
@@ -130,6 +139,7 @@ _REJECT_FIELD_MAP = {
     "stale_event": "rejected_stale_event",
     "unauthorized_source": "rejected_unauthorized_source",
     "path_authoritative_local": "rejected_path_authoritative",
+    "path_excluded": "rejected_path_excluded",
 }
 
 
@@ -453,6 +463,20 @@ class VaultSyncManager:
             self._reject("path_traversal", rid, source_node, event_id, f"relative_path escapes shared folder: {relative_path}")
             return
 
+        # Exclude hidden directories (e.g. Shared/.obsidian/, Shared/.letta/) and
+        # explicit KOI_VAULT_EXCLUDE_PATHS. These generate constant conflicts from
+        # machine-local state (Obsidian workspace.json, app caches, etc.).
+        _path_parts = relative_path.split("/")
+        if any(part.startswith(".") for part in _path_parts[:-1]):
+            self._reject("path_excluded", rid, source_node, event_id,
+                         f"hidden directory in path: {relative_path}")
+            return
+        for _excl in _VAULT_EXCLUDE_PATHS:
+            if relative_path.startswith(_excl):
+                self._reject("path_excluded", rid, source_node, event_id,
+                             f"path excluded by config: {relative_path}")
+                return
+
         # Locally-authoritative path guard — reject UPDATE/FORGET from remote peers for
         # paths this node owns. NEW events are still accepted so peers can create new files.
         if event_type in ("UPDATE", "FORGET") and _VAULT_READONLY_INCOMING_PATHS:
@@ -738,8 +762,13 @@ class VaultSyncManager:
                 if md_file.is_symlink() or not md_file.is_file():
                     continue
                 try:
-                    rel_path = f"{shared_folder}/{md_file.relative_to(base_dir)}"
+                    _inner = md_file.relative_to(base_dir)
+                    rel_path = f"{shared_folder}/{_inner}"
                 except ValueError:
+                    continue
+                if any(part.startswith(".") for part in _inner.parts[:-1]):
+                    continue
+                if any(rel_path.startswith(_excl) for _excl in _VAULT_EXCLUDE_PATHS):
                     continue
                 try:
                     content = md_file.read_bytes()
@@ -949,8 +978,16 @@ class VaultSyncManager:
                 continue
 
             try:
-                rel_path = f"{shared_folder}/{md_file.relative_to(base_dir)}"
+                _inner = md_file.relative_to(base_dir)
+                rel_path = f"{shared_folder}/{_inner}"
+                _inner_parts = _inner.parts
             except ValueError:
+                continue
+
+            # Skip hidden directories (e.g. .obsidian/, .letta/) and explicit exclude paths
+            if any(part.startswith(".") for part in _inner_parts[:-1]):
+                continue
+            if any(rel_path.startswith(_excl) for _excl in _VAULT_EXCLUDE_PATHS):
                 continue
 
             seen_paths.add(rel_path)
