@@ -1393,6 +1393,23 @@ async def startup():
         else:
             logger.info("Tier 2 semantic matching: DISABLED (no embedding provider)")
 
+        async with db_pool.acquire() as conn:
+            facts_regclass = await conn.fetchval(
+                "SELECT to_regclass($1)", "knowledge_facts"
+            )
+            episodes_regclass = await conn.fetchval(
+                "SELECT to_regclass($1)", "knowledge_episodes"
+            )
+            app.state.facts_surface_available = bool(
+                facts_regclass and episodes_regclass
+            )
+            logger.info(
+                "facts_surface_available=%s (knowledge_facts=%s, knowledge_episodes=%s)",
+                app.state.facts_surface_available,
+                "present" if facts_regclass else "absent",
+                "present" if episodes_regclass else "absent",
+            )
+
         # 3. Ensure schema (uses provider dimension for new tables)
         dim = embedding_provider.dimension if embedding_provider else 1536
         async with db_pool.acquire() as conn:

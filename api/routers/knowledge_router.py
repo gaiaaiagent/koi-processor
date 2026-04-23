@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -165,11 +166,27 @@ def create_router(
     _doc_embed = generate_document_embedding or generate_embedding
     router = APIRouter(tags=["knowledge"])
 
+    def _facts_surface_available(request: Request) -> bool:
+        return bool(getattr(request.app.state, "facts_surface_available", True))
+
+    def _facts_surface_headers(request: Request) -> Dict[str, str]:
+        return {
+            "X-Facts-Surface": (
+                "available" if _facts_surface_available(request) else "unavailable"
+            )
+        }
+
     # -------------------------------------------------------------------
     # POST /episodes — create episode with facts
     # -------------------------------------------------------------------
     @router.post("/episodes", response_model=EpisodeCreateResponse, status_code=201)
-    async def create_episode(body: EpisodeCreateRequest):
+    async def create_episode(request: Request, body: EpisodeCreateRequest):
+        if not _facts_surface_available(request):
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "facts surface not configured on this node"},
+            )
+
         valid_at = _dt(body.valid_at)
         metadata = body.metadata or {}
 
@@ -369,11 +386,18 @@ def create_router(
     # -------------------------------------------------------------------
     @router.get("/facts/search")
     async def search_facts(
+        request: Request,
         query: str = Query(..., description="Search query"),
         limit: int = Query(10, ge=1, le=100),
         group_id: Optional[str] = Query(None),
         include_expired: bool = Query(False),
     ):
+        if not _facts_surface_available(request):
+            return JSONResponse(
+                content={"facts": [], "count": 0},
+                headers=_facts_surface_headers(request),
+            )
+
         if not _query_embed:
             raise HTTPException(
                 status_code=503,
@@ -423,12 +447,19 @@ def create_router(
     # -------------------------------------------------------------------
     @router.get("/episodes")
     async def list_episodes(
+        request: Request,
         source_document: Optional[str] = Query(None),
         query: Optional[str] = Query(None),
         group_id: Optional[str] = Query(None),
         created_after: Optional[str] = Query(None, description="ISO datetime — only return episodes created after this timestamp"),
         limit: int = Query(20, ge=1, le=100),
     ):
+        if not _facts_surface_available(request):
+            return JSONResponse(
+                content={"episodes": [], "count": 0},
+                headers=_facts_surface_headers(request),
+            )
+
         async with pool.acquire() as conn:
             conditions = []
             params: list = []
@@ -477,10 +508,22 @@ def create_router(
     # -------------------------------------------------------------------
     @router.get("/entity/{uri:path}/facts")
     async def entity_facts(
+        request: Request,
         uri: str,
         include_expired: bool = Query(False),
         limit: int = Query(50, ge=1, le=200),
     ):
+        if not _facts_surface_available(request):
+            return JSONResponse(
+                content={
+                    "entity_uri": uri,
+                    "entity_name": None,
+                    "facts": [],
+                    "count": 0,
+                },
+                headers=_facts_surface_headers(request),
+            )
+
         async with pool.acquire() as conn:
             validity_filter = "" if include_expired else "AND f.valid_to IS NULL"
 
@@ -513,6 +556,8 @@ def create_router(
     # -------------------------------------------------------------------
     @router.get("/unified-search")
     async def unified_search(
+        request: Request,
+        response: Response,
         query: str = Query(..., description="Search query"),
         limit: int = Query(10, ge=1, le=50),
         include: str = Query(
@@ -525,6 +570,8 @@ def create_router(
     ):
         surfaces = [s.strip() for s in include.split(",")]
         k = 60  # RRF constant
+        facts_surface_available = _facts_surface_available(request)
+        response.headers.update(_facts_surface_headers(request))
 
         # ── Attempt embedding; degrade gracefully on any failure ──────
         degraded = False
@@ -551,6 +598,7 @@ def create_router(
                     "unified-search degraded: embedding raised %s", exc)
 
         all_results: list[dict] = []
+        facts_results: list[dict] = []
 
         async with pool.acquire() as conn:
             if degraded:
@@ -581,7 +629,7 @@ def create_router(
                             })
 
                     # Facts: ILIKE on fact_text (offset to rank below entities)
-                    if "facts" in surfaces:
+                    if "facts" in surfaces and facts_surface_available:
                         conditions = " OR ".join(
                             f"fact_text ILIKE ${i + 1}"
                             for i in range(len(words)))
@@ -598,7 +646,7 @@ def create_router(
                             LIMIT ${len(words) + 1}
                         """, *f_params)
                         for rank, row in enumerate(rows):
-                            all_results.append({
+                            fact_result = {
                                 "text": row["fact_text"],
                                 "score": 1.0 / (k + 20 + rank + 1),
                                 "source": "fact",
@@ -609,7 +657,11 @@ def create_router(
                                     "object": row["object_uri"],
                                     "match_mode": "text",
                                 },
-                            })
+                            }
+                            facts_results.append(fact_result)
+                            all_results.append(fact_result)
+                    else:
+                        facts_results = []
 
                     # Sessions: ILIKE on chunk_text (lowest priority)
                     if "sessions" in surfaces:
@@ -695,6 +747,7 @@ def create_router(
                 await conn.execute("SET ivfflat.probes = 10")
 
                 # Entities (vector similarity, exclude private)
+                facts_results = []
                 if "entities" in surfaces:
                     rows = await conn.fetch("""
                         SELECT fuseki_uri, entity_text, entity_type,
@@ -715,7 +768,7 @@ def create_router(
                         })
 
                 # Facts (vector similarity, joined with episodes)
-                if "facts" in surfaces:
+                if "facts" in surfaces and facts_surface_available:
                     rows = await conn.fetch("""
                         SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
                                f.fact_text, e.name AS episode_name,
@@ -728,7 +781,7 @@ def create_router(
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):
-                        all_results.append({
+                        fact_result = {
                             "text": row["fact_text"],
                             "score": 1.0 / (k + rank + 1),
                             "source": "fact",
@@ -739,7 +792,9 @@ def create_router(
                                 "object": row["object_uri"],
                                 "vector_score": float(row["score"]),
                             },
-                        })
+                        }
+                        facts_results.append(fact_result)
+                        all_results.append(fact_result)
 
                 # Sessions (vector similarity on chunk_text)
                 if "sessions" in surfaces:
@@ -876,6 +931,7 @@ def create_router(
 
         response: dict = {
             "results": all_results,
+            "facts": facts_results,
             "query": query,
             "surfaces_queried": surfaces,
             "total_results": len(all_results),
