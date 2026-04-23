@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 DB_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
+TEST_SERVICE_TOKEN = "test-service-token-deadbeef"
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +151,13 @@ async def client(test_app):
 
 
 @pytest.fixture
+async def claims_auth_client(client, monkeypatch):
+    monkeypatch.setenv("KOI_CLAIMS_SERVICE_TOKEN", TEST_SERVICE_TOKEN)
+    client.headers.update({"Authorization": f"Bearer {TEST_SERVICE_TOKEN}"})
+    return client
+
+
+@pytest.fixture
 async def conn(test_app):
     """Direct DB connection (same transaction as the app)."""
     _, conn = test_app
@@ -159,6 +167,8 @@ async def conn(test_app):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+pytestmark = pytest.mark.usefixtures("claims_auth_client")
 
 @pytest.mark.anyio
 async def test_create_attestation(client, conn):
