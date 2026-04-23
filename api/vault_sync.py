@@ -1157,6 +1157,10 @@ class VaultSyncManager:
                 # File was deleted locally — edit wins over delete, recreate
                 pass  # Fall through to write
             elif file_exists and local_row:
+                if local_row["content_hash"] == content_hash:
+                    # Content already matches incoming — idempotent, no conflict needed
+                    await self._record_applied(source_node, event_id, rid)
+                    return
                 if not base_hash:
                     # No causal proof — treat as conflict
                     self._metrics.conflicts_created += 1
