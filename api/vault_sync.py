@@ -28,6 +28,15 @@ logger = logging.getLogger(__name__)
 
 MAX_VAULT_FILE_BYTES = 1_048_576  # 1 MB
 VAULT_SYNC_PATTERNS = ("*.md", "*.jsonl", "*.json", "*.jsonld", "*.txt", "*.csv", "*.yaml", "*.yml", "*.toml")
+
+# Paths listed here are authoritative on this node — incoming UPDATE/FORGET events from
+# peers are rejected so remote enrichment never overwrites locally-owned files.
+# Comma-separated folder prefixes, e.g. "Meetings/,People/,Organizations/,Projects/"
+_VAULT_READONLY_INCOMING_PATHS: list = [
+    p.strip().rstrip("/") + "/"
+    for p in os.getenv("KOI_VAULT_READONLY_PATHS", "").split(",")
+    if p.strip()
+]
 _VAULT_SYNC_EXTENSIONS = tuple("." + p.lstrip("*.") for p in VAULT_SYNC_PATTERNS)  # (".md", ".jsonl", ...)
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
@@ -81,6 +90,7 @@ class SyncMetrics:
     rejected_integrity_mismatch: int = 0
     rejected_stale_event: int = 0
     rejected_unauthorized_source: int = 0
+    rejected_path_authoritative: int = 0
     # Backpressure (WP3)
     scans_capped: int = 0
     # Watcher (WP4)
@@ -119,6 +129,7 @@ _REJECT_FIELD_MAP = {
     "integrity_mismatch": "rejected_integrity_mismatch",
     "stale_event": "rejected_stale_event",
     "unauthorized_source": "rejected_unauthorized_source",
+    "path_authoritative_local": "rejected_path_authoritative",
 }
 
 
@@ -441,6 +452,15 @@ class VaultSyncManager:
         if not target_path.is_relative_to(base_dir):
             self._reject("path_traversal", rid, source_node, event_id, f"relative_path escapes shared folder: {relative_path}")
             return
+
+        # Locally-authoritative path guard — reject UPDATE/FORGET from remote peers for
+        # paths this node owns. NEW events are still accepted so peers can create new files.
+        if event_type in ("UPDATE", "FORGET") and _VAULT_READONLY_INCOMING_PATHS:
+            for prefix in _VAULT_READONLY_INCOMING_PATHS:
+                if relative_path.startswith(prefix):
+                    self._reject("path_authoritative_local", rid, source_node, event_id,
+                                 f"incoming {event_type} rejected: {relative_path} is locally authoritative")
+                    return
 
         # Size check
         manifest_bytes = manifest.get("bytes", 0)
