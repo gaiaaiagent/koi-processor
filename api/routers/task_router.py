@@ -313,6 +313,8 @@ def create_router(pool, caps) -> APIRouter:
         project_uri: Optional[str] = Query(None, description="Exact project_uri match (preferred over ?project)"),
         due_before: Optional[str] = Query(None, description="ISO date — tasks due before this date"),
         due_after: Optional[str] = Query(None, description="ISO date — tasks due after (inclusive) this date"),
+        updated_before: Optional[str] = Query(None, description="ISO date — tasks last updated before this date (stale-no-activity filter)"),
+        updated_after: Optional[str] = Query(None, description="ISO date — tasks last updated on or after this date"),
         source_note: Optional[str] = Query(None, description="Substring match on source_note"),
         source_type: Optional[str] = Query(None, description="Exact match on source_type"),
         limit: int = Query(100, ge=1, le=1000),
@@ -378,6 +380,14 @@ def create_router(pool, caps) -> APIRouter:
                 d = _parse_date(due_after)
                 if d:
                     add("due_date >= ?", d)
+            if updated_before:
+                d = _parse_date(updated_before)
+                if d:
+                    add("updated_at < ?", d)
+            if updated_after:
+                d = _parse_date(updated_after)
+                if d:
+                    add("updated_at >= ?", d)
 
             # Source filters
             if source_note:
