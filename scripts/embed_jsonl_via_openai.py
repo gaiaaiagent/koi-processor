@@ -120,6 +120,7 @@ async def apply_embed(
     api_key: str,
     db_url: Optional[str],
     table: Optional[str],
+    dimensions: int = OPENAI_DIMENSIONS,
 ) -> Tuple[int, int, float]:
     """Returns (processed_count, total_tokens, total_cost)."""
     from openai import OpenAI
@@ -154,7 +155,7 @@ async def apply_embed(
                     client.embeddings.create,
                     model=OPENAI_MODEL,
                     input=texts,
-                    dimensions=OPENAI_DIMENSIONS,
+                    dimensions=dimensions,
                 )
                 consecutive_fails = 0
             except Exception as e:
@@ -209,6 +210,8 @@ def main():
     p.add_argument("--apply", action="store_true", help="Call OpenAI and write embeddings")
     p.add_argument("--table", help="DB table name for provenance stamps (e.g. entity_registry)")
     p.add_argument("--db-url", default=os.getenv("POSTGRES_URL"), help="DB URL for provenance stamps")
+    p.add_argument("--dimensions", type=int, default=OPENAI_DIMENSIONS,
+                   help=f"Target embedding dimension (default {OPENAI_DIMENSIONS}). text-embedding-3-large supports any ≤ 3072.")
     args = p.parse_args()
 
     if not (args.dry_run or args.apply):
@@ -233,9 +236,10 @@ def main():
         sys.exit(2)
 
     processed, tokens, cost = asyncio.run(
-        apply_embed(records, args.output, api_key, args.db_url, args.table)
+        apply_embed(records, args.output, api_key, args.db_url, args.table,
+                    dimensions=args.dimensions)
     )
-    print(f"\nDone: processed={processed} tokens={tokens} cost=${cost:.4f}")
+    print(f"\nDone: processed={processed} tokens={tokens} cost=${cost:.4f} dim={args.dimensions}")
     print(f"Output: {args.output}")
 
 

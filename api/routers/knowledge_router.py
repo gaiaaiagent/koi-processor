@@ -747,14 +747,16 @@ def create_router(
                 await conn.execute("SET ivfflat.probes = 10")
 
                 # Entities (vector similarity, exclude private)
+                # OpenAI text-embedding-3-large @ 3072-dim via halfvec HNSW index.
+                # Rollback: see migrations 089/090 + config/personal.env.
                 facts_results = []
                 if "entities" in surfaces:
                     rows = await conn.fetch("""
                         SELECT fuseki_uri, entity_text, entity_type,
-                               1 - (embedding <=> $1::vector) AS score
+                               1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
                         FROM entity_registry
-                        WHERE embedding IS NOT NULL AND NOT node_private
-                        ORDER BY embedding <=> $1::vector
+                        WHERE embedding_3072 IS NOT NULL AND NOT node_private
+                        ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):
@@ -842,12 +844,12 @@ def create_router(
                         SELECT mc.chunk_rid,
                                mc.content->>'text' AS chunk_text,
                                mc.metadata,
-                               1 - (mc.embedding <=> $1::vector) AS score
+                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
                         FROM koi_memory_chunks mc
-                        WHERE mc.embedding IS NOT NULL
+                        WHERE mc.embedding_3072 IS NOT NULL
                           AND mc.metadata->>'repo' IS NOT NULL
                           {d_filter}
-                        ORDER BY mc.embedding <=> $1::vector
+                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                         LIMIT 20
                     """, *d_params_vec)
                     for rank, row in enumerate(rows):
@@ -872,11 +874,11 @@ def create_router(
                                mc.content->>'title' AS title,
                                mc.content->>'wiki_url' AS wiki_url,
                                mc.content->>'section_title' AS section_title,
-                               1 - (mc.embedding <=> $1::vector) AS score
+                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
                         FROM koi_memory_chunks mc
-                        WHERE mc.embedding IS NOT NULL
+                        WHERE mc.embedding_3072 IS NOT NULL
                           AND mc.document_rid LIKE 'mediawiki:%'
-                        ORDER BY mc.embedding <=> $1::vector
+                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):

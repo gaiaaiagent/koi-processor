@@ -62,17 +62,35 @@ async def import_file(conn, input_path: str, table: str, id_col: str, emb_col: s
 
 async def main():
     parser = argparse.ArgumentParser(description="Import re-embeddings into personal_koi")
-    parser.add_argument("--input-dir", required=True)
+    # Either scan a directory of <prefix>_embeddings.jsonl files (legacy mode),
+    # or import a single JSONL into a specified --table / --column.
+    parser.add_argument("--input-dir", help="Directory of <prefix>_embeddings.jsonl files (legacy mode)")
+    parser.add_argument("--input", help="Single JSONL input (use with --table)")
+    parser.add_argument("--table", help="Target table (required with --input)")
+    parser.add_argument("--id-col", default="id", help="Id column name (default: id)")
+    parser.add_argument("--column", help="Target embedding column (overrides TABLE_MAP default)")
     parser.add_argument("--db-url", default=os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi"))
     args = parser.parse_args()
+
+    if not (args.input_dir or args.input):
+        parser.error("Specify --input-dir OR --input")
+    if args.input and not args.table:
+        parser.error("--input requires --table")
 
     conn = await asyncpg.connect(args.db_url)
     try:
         total = 0
-        # Track which TABLE_MAP prefixes actually got imported so the
-        # verification loop can skip tables that don't exist in this DB
-        # (e.g. session_chunks / knowledge_facts are personal_koi-only; octo_koi
-        # only has entity_registry + koi_memory_chunks).
+
+        # Single-file mode
+        if args.input:
+            emb_col = args.column or "embedding"
+            total += await import_file(conn, args.input, args.table, args.id_col, emb_col)
+            count = await conn.fetchval(f"SELECT count(*) FROM {args.table} WHERE {emb_col} IS NOT NULL")
+            print(f"\nTotal: {total} embeddings imported")
+            print(f"Verification: {args.table}.{emb_col}: {count} non-null embeddings")
+            return
+
+        # Legacy directory-scan mode
         imported_prefixes = []
         for fname in sorted(os.listdir(args.input_dir)):
             if not fname.endswith("_embeddings.jsonl"):
@@ -85,16 +103,18 @@ async def main():
                 continue
 
             table, id_col, emb_col = TABLE_MAP[prefix]
+            if args.column:
+                emb_col = args.column
             input_path = os.path.join(args.input_dir, fname)
             total += await import_file(conn, input_path, table, id_col, emb_col)
-            imported_prefixes.append(prefix)
+            imported_prefixes.append((prefix, emb_col))
 
         print(f"\nTotal: {total} embeddings imported")
 
         # Verify only the tables that actually received imports
         print("\nVerification:")
-        for prefix in imported_prefixes:
-            table, _, emb_col = TABLE_MAP[prefix]
+        for prefix, emb_col in imported_prefixes:
+            table, _, _ = TABLE_MAP[prefix]
             count = await conn.fetchval(f"SELECT count(*) FROM {table} WHERE {emb_col} IS NOT NULL")
             print(f"  {table}.{emb_col}: {count} non-null embeddings")
     finally:

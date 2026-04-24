@@ -1360,14 +1360,15 @@ async def startup():
         # 1. Init embedding provider (reads env vars only, no API call)
         embedding_provider = create_embedding_provider()
 
-        # 2. Dimension guard: check provider dim matches ALL runtime vector columns.
-        #    Uses explicit matrix — NOT discovery by column name.
+        # 2. Dimension guard: check provider dim matches ALL runtime vector columns
+        #    that the query path reads. Uses explicit matrix — NOT discovery.
         #    Excludes koi_embeddings.dim_* (intentionally multi-dimension).
+        #    2026-04-23: migrated to embedding_3072 for entities + chunks;
+        #    session_chunks/knowledge_facts not migrated (unmigrated surfaces
+        #    degrade to text/skip at query time, not blocked at startup).
         RUNTIME_VECTOR_COLUMNS = [
-            ("entity_registry", "embedding"),
-            ("koi_memory_chunks", "embedding"),
-            ("session_chunks", "embedding"),
-            ("knowledge_facts", "fact_embedding"),
+            ("entity_registry", "embedding_3072"),
+            ("koi_memory_chunks", "embedding_3072"),
         ]
         if embedding_provider:
             async with db_pool.acquire() as conn:
@@ -2050,10 +2051,10 @@ async def embedding_preflight():
 
                 top5 = await conn.fetch("""
                     SELECT fuseki_uri, entity_text,
-                           1 - (embedding <=> $1::vector) AS similarity
+                           1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
                     FROM entity_registry
-                    WHERE embedding IS NOT NULL AND NOT node_private
-                    ORDER BY embedding <=> $1::vector
+                    WHERE embedding_3072 IS NOT NULL AND NOT node_private
+                    ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                     LIMIT 5
                 """, str(emb))
 
@@ -4607,15 +4608,15 @@ async def search_knowledge_base(request: SearchRequest):
                         c.document_rid as rid,
                         m.content->>'title' as title,
                         LEFT(c.content->>'text', 500) as content_preview,
-                        1 - (c.embedding <=> $1::vector) as similarity,
+                        1 - (c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) as similarity,
                         m.source_sensor,
                         m.metadata
                     FROM koi_memory_chunks c
                     JOIN koi_memories m ON m.rid = c.document_rid
-                    WHERE c.embedding IS NOT NULL
+                    WHERE c.embedding_3072 IS NOT NULL
                       AND c.document_rid NOT IN (SELECT rid FROM unnest($3::text[]) as rid)
                     {source_filter.replace('m.source_sensor', 'm.source_sensor')}
-                    ORDER BY c.document_rid, c.embedding <=> $1::vector
+                    ORDER BY c.document_rid, c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                     LIMIT $2
                 """
 
@@ -5030,10 +5031,10 @@ async def _graph_guided_retrieval(
     try:
         seed_rows = await conn.fetch("""
             SELECT id, fuseki_uri, entity_text, entity_type, metadata,
-                   1 - (embedding <=> $1::vector) AS similarity
+                   1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
             FROM entity_registry
-            WHERE embedding IS NOT NULL AND NOT node_private
-            ORDER BY embedding <=> $1::vector
+            WHERE embedding_3072 IS NOT NULL AND NOT node_private
+            ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
             LIMIT $2
         """, embedding_str, top_k)
     except (asyncpg.exceptions.UndefinedColumnError,
@@ -5215,11 +5216,11 @@ async def _graph_guided_retrieval(
                 c.content->>'section_id' AS section_id,
                 c.content->>'section_title' AS section_title,
                 c.content->>'wiki_url' AS wiki_url,
-                1 - (c.embedding <=> $1::vector) AS similarity
+                1 - (c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
             FROM koi_memory_chunks c
             JOIN koi_memories m ON m.rid = c.document_rid
-            WHERE c.embedding IS NOT NULL
-            ORDER BY c.embedding <=> $1::vector
+            WHERE c.embedding_3072 IS NOT NULL
+            ORDER BY c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
             LIMIT 8
         """, embedding_str)
         for cr in chunk_rows:
