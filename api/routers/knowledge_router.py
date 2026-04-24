@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import subprocess
+
+import asyncpg
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from uuid import UUID
@@ -769,19 +771,26 @@ def create_router(
                             "metadata": {"vector_score": float(row["score"])},
                         })
 
-                # Facts (vector similarity, joined with episodes)
+                # Facts (vector similarity, joined with episodes).
+                # knowledge_facts.fact_embedding is still 1024-dim (not yet
+                # migrated to 3072); dim-mismatch here is expected under the
+                # current 3072 provider — catch and skip gracefully.
                 if "facts" in surfaces and facts_surface_available:
-                    rows = await conn.fetch("""
-                        SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
-                               f.fact_text, e.name AS episode_name,
-                               1 - (f.fact_embedding <=> $1::vector) AS score
-                        FROM knowledge_facts f
-                        LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
-                        WHERE f.valid_to IS NULL
-                          AND f.fact_embedding IS NOT NULL
-                        ORDER BY f.fact_embedding <=> $1::vector
-                        LIMIT 20
-                    """, emb_str)
+                    try:
+                        rows = await conn.fetch("""
+                            SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
+                                   f.fact_text, e.name AS episode_name,
+                                   1 - (f.fact_embedding <=> $1::vector) AS score
+                            FROM knowledge_facts f
+                            LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
+                            WHERE f.valid_to IS NULL
+                              AND f.fact_embedding IS NOT NULL
+                            ORDER BY f.fact_embedding <=> $1::vector
+                            LIMIT 20
+                        """, emb_str)
+                    except asyncpg.exceptions.DataError as e:
+                        logger.warning("facts surface vector query skipped: %s", e)
+                        rows = []
                     for rank, row in enumerate(rows):
                         fact_result = {
                             "text": row["fact_text"],
@@ -798,7 +807,9 @@ def create_router(
                         facts_results.append(fact_result)
                         all_results.append(fact_result)
 
-                # Sessions (vector similarity on chunk_text)
+                # Sessions (vector similarity on chunk_text).
+                # session_chunks.embedding is still 1024-dim (not yet migrated
+                # to 3072); catch dim-mismatch and skip.
                 if "sessions" in surfaces:
                     table_exists = await conn.fetchval("""
                         SELECT EXISTS (
@@ -806,15 +817,20 @@ def create_router(
                             WHERE table_name = 'session_chunks'
                         )
                     """)
+                    rows = []
                     if table_exists:
-                        rows = await conn.fetch("""
-                            SELECT sc.id, sc.session_id, sc.chunk_text,
-                                   1 - (sc.embedding <=> $1::vector) AS score
-                            FROM session_chunks sc
-                            WHERE sc.embedding IS NOT NULL
-                            ORDER BY sc.embedding <=> $1::vector
-                            LIMIT 20
-                        """, emb_str)
+                        try:
+                            rows = await conn.fetch("""
+                                SELECT sc.id, sc.session_id, sc.chunk_text,
+                                       1 - (sc.embedding <=> $1::vector) AS score
+                                FROM session_chunks sc
+                                WHERE sc.embedding IS NOT NULL
+                                ORDER BY sc.embedding <=> $1::vector
+                                LIMIT 20
+                            """, emb_str)
+                        except asyncpg.exceptions.DataError as e:
+                            logger.warning("sessions surface vector query skipped: %s", e)
+                            rows = []
                         for rank, row in enumerate(rows):
                             all_results.append({
                                 "text": row["chunk_text"][:500],
