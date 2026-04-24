@@ -301,9 +301,9 @@ Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCES
 - `scripts/code_bridge/sync_stubs_to_age.py` - AGE stub sync
 
 ### Learning Field Projection (Phase 1)
-- `scripts/project_bridge_notes.py` — Projects bridge notes from Spore and IC repos into KOI as Claims, Concepts, and Questions with argumentative edges (`supports`/`opposes`). Two claim layers: source claims (extracted from notes) and review claims (proposed canon changes). Uses `POST /claims/` API for claims, direct SQL for stance edges and questions. Idempotent; supports claim versioning via `supersedes_rid` on re-projection.
+- `scripts/project_bridge_notes.py` — Projects bridge notes from Spore, IC, FC (Flow Coding), and PM (Poietic Match) repos into KOI as Claims, Concepts, and Questions with argumentative edges (`supports`/`opposes`). Two claim layers: source claims (extracted from notes) and review claims (proposed canon changes). Uses `POST /claims/` API for claims, direct SQL for stance edges and questions. Idempotent; supports claim versioning via `supersedes_rid` on re-projection. Within Spore's graph-projections architecture (spore:ADR-0058 / spore:ADR-0070), this script operates as one infrastructure surface inside the Epistemic primary's KOI materialization — bridge-note intake — and does not itself encode the full 3-primary + 5-view-template taxonomy. See spore:ADR-0071 for the cross-repo scope clarification and pm:ADR-0016 for the PM-side canon realignment.
   - Usage: `python scripts/project_bridge_notes.py --dry-run` or `--apply` (optional `--note <path>` for single note)
-  - Claimant orgs: `org:spore-learning-field`, `org:ic-learning-field`
+  - Claimant orgs: `org:spore-learning-field`, `org:ic-learning-field`, `org:flow-coding-learning-field`, `org:poietic-match-learning-field`
   - Provenance: `metadata.source = 'learning_field'`, `metadata.projection_batch`, `metadata.project_uri`
   - Rollback: delete edges by `source = 'learning_field'`, then claims/entities by `metadata->>'source' = 'learning_field'` (see plan rollback section)
 - `scripts/verify_learning_field.sql` — Phase 1 verification checklist. Run: `psql personal_koi -f scripts/verify_learning_field.sql`

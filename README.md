@@ -299,7 +299,9 @@ valid_entities = kg.process_entities_batch(entities)
 
 ## Learning Field Graph Projection
 
-Projects bridge notes from [Spore](https://github.com/DarrenZal/spore) and [Intelligence Commons](https://github.com/DarrenZal/intelligence-commons) into the KOI knowledge graph as an argumentative learning layer. Built on top of the Claims Engine.
+Projects bridge notes from [Spore](https://github.com/DarrenZal/spore), [Intelligence Commons](https://github.com/DarrenZal/intelligence-commons), Flow Coding (FC), and Poietic Match (PM) into the KOI knowledge graph as an argumentative learning layer. Built on top of the Claims Engine.
+
+Within Spore's graph-projections architecture (spore:ADR-0058 / spore:ADR-0070), this script operates as one infrastructure surface inside the Epistemic primary's KOI materialization — bridge-note intake — and does not itself encode the full `3-primary + 5-view-template` taxonomy. See spore:ADR-0071 for the cross-repo scope clarification and pm:ADR-0016 for the PM-side canon realignment.
 
 **Two claim layers:**
 - **Source claims** — extracted from bridge note Claim Registers, linked to Concepts via `about`

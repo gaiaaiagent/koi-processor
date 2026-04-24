@@ -2,9 +2,15 @@
 """
 Learning Field Graph Projection — Phase 1, Step 7
 
-Projects bridge notes from Spore and IC into the KOI knowledge graph as
-structured Claim, Concept, and Question entities with argumentative edges
-(supports/opposes).
+Projects bridge notes from Spore, Intelligence Commons (IC), Flow Coding (FC),
+and Poietic Match (PM) into the KOI knowledge graph as structured Claim,
+Concept, and Question entities with argumentative edges (supports/opposes).
+
+Within Spore's graph-projections architecture (spore:ADR-0058 / spore:ADR-0070),
+this script operates as one infrastructure surface inside the Epistemic primary's
+KOI materialization — bridge-note intake — and does not itself encode the full
+3-primary + 5-view-template taxonomy. See spore:ADR-0071 for the cross-repo
+scope clarification and pm:ADR-0016 for the PM-side canon realignment.
 
 Two claim layers:
   - Source claims: extracted from bridge note Claim Registers
