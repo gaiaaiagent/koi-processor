@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import fnmatch
 import hashlib
 import itertools
 import json
@@ -39,12 +40,36 @@ _VAULT_READONLY_INCOMING_PATHS: list = [
 ]
 # Paths excluded from vault sync entirely (all event types rejected).
 # Hidden-directory components (any segment starting with ".") are always excluded.
-# Add explicit overrides via KOI_VAULT_EXCLUDE_PATHS, e.g. "Shared/messages/"
-_VAULT_EXCLUDE_PATHS: list = [
-    p.strip().rstrip("/") + "/"
+# Add explicit overrides via KOI_VAULT_EXCLUDE_PATHS, comma-separated.
+# Patterns with glob metacharacters (*, ?, [seq]) match the full relative_path
+# via fnmatch — e.g. "*(conflict *).md" excludes vault-sync conflict copies.
+# Patterns without metacharacters use legacy prefix semantics — e.g.
+# "Shared/messages/" excludes everything under that folder.
+_VAULT_EXCLUDE_PATTERNS: list = [
+    p.strip()
     for p in os.getenv("KOI_VAULT_EXCLUDE_PATHS", "").split(",")
     if p.strip()
 ]
+_GLOB_META_RE = re.compile(r"[*?\[]")
+
+
+def _path_excluded(rel_path: str) -> bool:
+    """Return True if rel_path matches any KOI_VAULT_EXCLUDE_PATHS pattern.
+
+    Glob patterns (containing *, ?, [seq]) are matched via fnmatchcase
+    against the full relative_path (case-sensitive, matching Linux/macOS
+    APFS default behavior). Patterns without metacharacters are treated
+    as folder prefixes (legacy semantics).
+    """
+    for pat in _VAULT_EXCLUDE_PATTERNS:
+        if _GLOB_META_RE.search(pat):
+            if fnmatch.fnmatchcase(rel_path, pat):
+                return True
+        else:
+            prefix = pat.rstrip("/") + "/"
+            if rel_path.startswith(prefix):
+                return True
+    return False
 _VAULT_SYNC_EXTENSIONS = tuple("." + p.lstrip("*.") for p in VAULT_SYNC_PATTERNS)  # (".md", ".jsonl", ...)
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
@@ -113,6 +138,8 @@ class SyncMetrics:
     auto_repairs_failed: int = 0
     # Event queue cleanup
     event_queue_cleaned: int = 0
+    # Transient apply-side errors (race conditions etc.) — events deferred for retry
+    transient_errors: int = 0
     # Timestamps
     last_scan_started_at: Optional[str] = None
     last_scan_completed_at: Optional[str] = None
@@ -481,11 +508,10 @@ class VaultSyncManager:
             self._reject("path_excluded", rid, source_node, event_id,
                          f"hidden directory in path: {relative_path}")
             return
-        for _excl in _VAULT_EXCLUDE_PATHS:
-            if relative_path.startswith(_excl):
-                self._reject("path_excluded", rid, source_node, event_id,
-                             f"path excluded by config: {relative_path}")
-                return
+        if _path_excluded(relative_path):
+            self._reject("path_excluded", rid, source_node, event_id,
+                         f"path excluded by config: {relative_path}")
+            return
 
         # Locally-authoritative path guard — reject UPDATE/FORGET from remote peers for
         # paths this node owns. NEW events are still accepted so peers can create new files.
@@ -778,7 +804,7 @@ class VaultSyncManager:
                     continue
                 if any(part.startswith(".") for part in _inner.parts[:-1]):
                     continue
-                if any(rel_path.startswith(_excl) for _excl in _VAULT_EXCLUDE_PATHS):
+                if _path_excluded(rel_path):
                     continue
                 try:
                     content = md_file.read_bytes()
@@ -997,7 +1023,7 @@ class VaultSyncManager:
             # Skip hidden directories (e.g. .obsidian/, .letta/) and explicit exclude paths
             if any(part.startswith(".") for part in _inner_parts[:-1]):
                 continue
-            if any(rel_path.startswith(_excl) for _excl in _VAULT_EXCLUDE_PATHS):
+            if _path_excluded(rel_path):
                 continue
 
             seen_paths.add(rel_path)
@@ -1199,8 +1225,46 @@ class VaultSyncManager:
         file_exists = target_path.exists() and not target_path.is_symlink()
 
         if event_type == "NEW" and file_exists:
-            if local_row and local_row["content_hash"] == content_hash:
-                # Idempotent — same content
+            # Compute on-disk hash so we can short-circuit even when local_row is missing
+            # (Branch #1 fix: NEW event for path with no vault_sync_state row was creating
+            # false conflicts even when on-disk content matched the incoming hash).
+            if local_row:
+                local_hash = local_row["content_hash"]
+            else:
+                try:
+                    local_hash = hashlib.sha256(target_path.read_bytes()).hexdigest()
+                except (FileNotFoundError, PermissionError, OSError) as e:
+                    # Race: file vanished or became unreadable between file_exists check
+                    # and read. Do NOT record applied — event will be retried on next poll.
+                    self._metrics.transient_errors += 1
+                    logger.warning(
+                        "vault_sync.new_branch_hash_race path=%s error=%s event=%s — deferring",
+                        relative_path, e, event_id,
+                    )
+                    return
+            if local_hash == content_hash:
+                # Idempotent — same content. Backfill vault_sync_state row if missing
+                # so subsequent NEW events don't re-trigger this code path.
+                if not local_row:
+                    now = datetime.now(timezone.utc)
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            """INSERT INTO vault_sync_state
+                               (relative_path, content_hash, origin_node, origin_seq, file_size_bytes,
+                                last_synced_at, last_modified_at, is_deleted, deleted_at)
+                               VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL)
+                               ON CONFLICT (relative_path) DO UPDATE SET
+                                   content_hash = EXCLUDED.content_hash,
+                                   origin_node = EXCLUDED.origin_node,
+                                   origin_seq = EXCLUDED.origin_seq,
+                                   file_size_bytes = EXCLUDED.file_size_bytes,
+                                   last_synced_at = EXCLUDED.last_synced_at,
+                                   last_modified_at = EXCLUDED.last_modified_at,
+                                   is_deleted = FALSE,
+                                   deleted_at = NULL,
+                                   updated_at = NOW()""",
+                            relative_path, content_hash, origin_node, origin_seq, file_size, now, now,
+                        )
                 await self._record_applied(source_node, event_id, rid)
                 return
             # Conflict: file exists with different content
