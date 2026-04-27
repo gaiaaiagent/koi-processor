@@ -238,6 +238,37 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
         _poller.vault_sync = _vault_sync
         await _vault_sync.load_metrics()
         _vault_sync.start_watcher()
+
+        # Persistent peer-folder safety check for KOI_VAULT_MIRROR_PATHS:
+        # if any non-MacBook peer is subscribed to a top-level folder we mirror,
+        # log a single ERROR. Operator removes the peer manually (we don't
+        # auto-revoke). Catches drift over time vs the one-shot pre-flight gate.
+        from api.vault_sync import _VAULT_MIRROR_PATTERNS as _vmp
+        if _vmp:
+            try:
+                mirror_top_folders = set()
+                for pat in _vmp:
+                    top = pat.strip("/").split("/", 1)[0]
+                    if top:
+                        mirror_top_folders.add(top)
+                async with pool.acquire() as _conn:
+                    rows = await _conn.fetch(
+                        "SELECT peer_node_rid, shared_folder FROM vault_sync_peers "
+                        "WHERE shared_folder = ANY($1::text[]) "
+                        "AND peer_node_rid NOT LIKE 'orn:koi-net.node:darren-personal+%'",
+                        list(mirror_top_folders),
+                    )
+                if rows:
+                    for r in rows:
+                        logger.error(
+                            "vault_sync.unsafe_mirror_peer_subscription "
+                            "peer=%s folder=%s — non-MacBook peer subscribed to a "
+                            "mirrored folder; mirror mode will accept their writes "
+                            "unconditionally. Remove this subscription if unintended.",
+                            r["peer_node_rid"], r["shared_folder"],
+                        )
+            except Exception as e:
+                logger.warning("vault_sync.mirror_peer_check_failed reason=%s", e)
         # Wire the trigger endpoint to this manager (was wired via personal.py before,
         # but that path is broken — VaultSyncManager constructor requires node_rid etc.)
         try:

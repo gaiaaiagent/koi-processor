@@ -50,7 +50,28 @@ _VAULT_EXCLUDE_PATTERNS: list = [
     for p in os.getenv("KOI_VAULT_EXCLUDE_PATHS", "").split(",")
     if p.strip()
 ]
+# Mirror paths — incoming events overwrite local content unconditionally
+# (no conflict-copy generation). Use on the MIRROR-side node when a peer
+# OWNS the path (via KOI_VAULT_READONLY_PATHS). Same parser semantics as
+# KOI_VAULT_EXCLUDE_PATHS (fnmatch + startswith fallback).
+_VAULT_MIRROR_PATTERNS: list = [
+    p.strip()
+    for p in os.getenv("KOI_VAULT_MIRROR_PATHS", "").split(",")
+    if p.strip()
+]
 _GLOB_META_RE = re.compile(r"[*?\[]")
+
+
+def _matches_pattern_set(rel_path: str, patterns: list) -> bool:
+    for pat in patterns:
+        if _GLOB_META_RE.search(pat):
+            if fnmatch.fnmatchcase(rel_path, pat):
+                return True
+        else:
+            prefix = pat.rstrip("/") + "/"
+            if rel_path.startswith(prefix):
+                return True
+    return False
 
 
 def _path_excluded(rel_path: str) -> bool:
@@ -61,15 +82,54 @@ def _path_excluded(rel_path: str) -> bool:
     APFS default behavior). Patterns without metacharacters are treated
     as folder prefixes (legacy semantics).
     """
-    for pat in _VAULT_EXCLUDE_PATTERNS:
-        if _GLOB_META_RE.search(pat):
-            if fnmatch.fnmatchcase(rel_path, pat):
-                return True
-        else:
-            prefix = pat.rstrip("/") + "/"
-            if rel_path.startswith(prefix):
-                return True
-    return False
+    return _matches_pattern_set(rel_path, _VAULT_EXCLUDE_PATTERNS)
+
+
+def _path_in_mirror(rel_path: str) -> bool:
+    """Return True if rel_path matches any KOI_VAULT_MIRROR_PATHS pattern.
+
+    Same matching semantics as _path_excluded (fnmatch + startswith).
+    """
+    return _matches_pattern_set(rel_path, _VAULT_MIRROR_PATTERNS)
+
+
+# Startup overlap warning: paths in BOTH READONLY and MIRROR are
+# ambiguous. READONLY wins (owner is safer default), but log so operator
+# can clean up. We test by applying each MIRROR pattern to each READONLY
+# prefix and vice versa.
+def _check_readonly_mirror_overlap() -> list:
+    """Return list of (readonly_pattern, mirror_pattern) overlapping pairs."""
+    overlaps = []
+    for ro_pat in _VAULT_READONLY_INCOMING_PATHS:
+        # READONLY uses startswith semantics — synthesize a sample path
+        # that any glob would have to match.
+        sample = ro_pat + "sample.md"
+        if _matches_pattern_set(sample, _VAULT_MIRROR_PATTERNS):
+            for mp in _VAULT_MIRROR_PATTERNS:
+                if _GLOB_META_RE.search(mp):
+                    if fnmatch.fnmatchcase(sample, mp):
+                        overlaps.append((ro_pat, mp))
+                else:
+                    prefix = mp.rstrip("/") + "/"
+                    if sample.startswith(prefix) or prefix.startswith(ro_pat):
+                        overlaps.append((ro_pat, mp))
+    return overlaps
+
+
+# Emit overlap warning at module load (READONLY-wins precedence still applies).
+_RO_MIRROR_OVERLAPS = _check_readonly_mirror_overlap()
+if _RO_MIRROR_OVERLAPS:
+    logger.warning(
+        "vault_sync.readonly_mirror_overlap pairs=%s — READONLY wins; clean up config",
+        _RO_MIRROR_OVERLAPS,
+    )
+if _VAULT_MIRROR_PATTERNS:
+    logger.info(
+        "vault_sync.mirror_mode_active patterns=%s — incoming events for these paths "
+        "will overwrite local content unconditionally (no conflict copies generated)",
+        _VAULT_MIRROR_PATTERNS,
+    )
+
 _VAULT_SYNC_EXTENSIONS = tuple("." + p.lstrip("*.") for p in VAULT_SYNC_PATTERNS)  # (".md", ".jsonl", ...)
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_RECONCILE_INTERVAL = 6 * 3600  # 6 hours
@@ -140,6 +200,12 @@ class SyncMetrics:
     event_queue_cleaned: int = 0
     # Transient apply-side errors (race conditions etc.) — events deferred for retry
     transient_errors: int = 0
+    # Mirror-mode counters (KOI_VAULT_MIRROR_PATHS)
+    mirror_overwrite: int = 0
+    mirror_forget: int = 0
+    mirror_authorship_change: int = 0
+    mirror_forget_rejected_no_state: int = 0
+    mirror_forget_rejected_non_owner: int = 0
     # Timestamps
     last_scan_started_at: Optional[str] = None
     last_scan_completed_at: Optional[str] = None
@@ -1222,6 +1288,46 @@ class VaultSyncManager:
         source_node: str, event_id: str, rid: str,
         file_size: int, timestamp: str,
     ):
+        # Mirror mode: if path is in KOI_VAULT_MIRROR_PATHS, accept the event
+        # unconditionally (skip conflict-copy branches). The line-591 stale-event
+        # guard in apply_event() has already run before we get here, so old
+        # events from the same origin can't slip through.
+        if _path_in_mirror(relative_path):
+            if local_row and local_row.get("origin_node") and local_row["origin_node"] != origin_node:
+                logger.info(
+                    "vault_sync.mirror_authorship_change path=%s old_origin=%s new_origin=%s",
+                    relative_path, local_row["origin_node"], origin_node,
+                )
+                self._metrics.mirror_authorship_change += 1
+            await self._atomic_write(target_path, markdown)
+            now = datetime.now(timezone.utc)
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO vault_sync_state
+                       (relative_path, content_hash, origin_node, origin_seq, file_size_bytes,
+                        last_synced_at, last_modified_at, is_deleted, deleted_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL)
+                       ON CONFLICT (relative_path) DO UPDATE SET
+                           content_hash = EXCLUDED.content_hash,
+                           origin_node = EXCLUDED.origin_node,
+                           origin_seq = EXCLUDED.origin_seq,
+                           file_size_bytes = EXCLUDED.file_size_bytes,
+                           last_synced_at = EXCLUDED.last_synced_at,
+                           last_modified_at = EXCLUDED.last_modified_at,
+                           is_deleted = FALSE,
+                           deleted_at = NULL,
+                           updated_at = NOW()""",
+                    relative_path, content_hash, origin_node, origin_seq, file_size, now, now,
+                )
+            try:
+                st = target_path.stat()
+                self._stat_cache[relative_path] = (st.st_mtime_ns, st.st_size, content_hash)
+            except OSError:
+                pass
+            await self._record_applied(source_node, event_id, rid)
+            self._metrics.mirror_overwrite += 1
+            return
+
         file_exists = target_path.exists() and not target_path.is_symlink()
 
         if event_type == "NEW" and file_exists:
@@ -1337,6 +1443,54 @@ class VaultSyncManager:
         origin_node: str, origin_seq: int,
         source_node: str, event_id: str, rid: str,
     ):
+        # Mirror mode: same-origin stale check + owner-only restriction, then accept.
+        if _path_in_mirror(relative_path):
+            # Stale check (same author, older or equal seq)
+            if local_row and local_row["origin_node"] == origin_node \
+                    and origin_seq <= local_row["origin_seq"]:
+                logger.info(
+                    "vault_sync.mirror_forget_stale path=%s origin_seq=%s <= local=%s",
+                    relative_path, origin_seq, local_row["origin_seq"],
+                )
+                await self._record_applied(source_node, event_id, rid)
+                return
+            # Owner-only restriction: no state row → reject for safety
+            if local_row is None:
+                logger.warning(
+                    "vault_sync.mirror_forget_rejected_no_state path=%s event=%s — "
+                    "cannot verify owner; dropping",
+                    relative_path, event_id,
+                )
+                self._metrics.mirror_forget_rejected_no_state += 1
+                return
+            # Owner-only restriction: state row exists but origin differs → reject
+            if local_row["origin_node"] != origin_node:
+                logger.warning(
+                    "vault_sync.mirror_forget_rejected_non_owner path=%s "
+                    "non_owner=%s real_owner=%s",
+                    relative_path, origin_node, local_row["origin_node"],
+                )
+                self._metrics.mirror_forget_rejected_non_owner += 1
+                return
+            # Accept: delete file + mark deleted
+            try:
+                if target_path.exists():
+                    target_path.unlink()
+            except OSError as e:
+                logger.error("vault_sync.mirror_forget_delete_error path=%s error=%s",
+                             target_path, e)
+            self._stat_cache.pop(relative_path, None)
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE vault_sync_state
+                       SET is_deleted=TRUE, deleted_at=NOW(), updated_at=NOW()
+                       WHERE relative_path=$1""",
+                    relative_path,
+                )
+            await self._record_applied(source_node, event_id, rid)
+            self._metrics.mirror_forget += 1
+            return
+
         if not local_row or local_row["is_deleted"]:
             # Already deleted — no-op
             await self._record_applied(source_node, event_id, rid)
