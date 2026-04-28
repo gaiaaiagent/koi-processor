@@ -808,8 +808,10 @@ def create_router(
                         all_results.append(fact_result)
 
                 # Sessions (vector similarity on chunk_text).
-                # session_chunks.embedding is still 1024-dim (not yet migrated
-                # to 3072); catch dim-mismatch and skip.
+                # Migrated to embedding_3072 (OpenAI text-embedding-3-large) per
+                # plan session-recall-tier-1-expanded P_E (2026-04-27/28).
+                # pgvector caps full-precision vector ANN at 2000 dims; use
+                # halfvec(3072) cast on both sides to hit the HNSW index.
                 if "sessions" in surfaces:
                     table_exists = await conn.fetchval("""
                         SELECT EXISTS (
@@ -822,10 +824,10 @@ def create_router(
                         try:
                             rows = await conn.fetch("""
                                 SELECT sc.id, sc.session_id, sc.chunk_text,
-                                       1 - (sc.embedding <=> $1::vector) AS score
+                                       1 - (sc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
                                 FROM session_chunks sc
-                                WHERE sc.embedding IS NOT NULL
-                                ORDER BY sc.embedding <=> $1::vector
+                                WHERE sc.embedding_3072 IS NOT NULL
+                                ORDER BY sc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                                 LIMIT 20
                             """, emb_str)
                         except asyncpg.exceptions.DataError as e:
