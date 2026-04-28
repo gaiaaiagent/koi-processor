@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 
 import asyncpg
 from datetime import datetime, timezone
@@ -571,6 +572,9 @@ def create_router(
         is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
         repo: Optional[str] = Query(None, description="Filter docs by repo name (e.g. darren-workflow)"),
     ):
+        # Tier-2 instrumentation: per-route latency_ms (Step 6).
+        _t_route_start = time.monotonic()
+
         surfaces = [s.strip() for s in include.split(",")]
         k = 60  # RRF constant
         facts_surface_available = _facts_surface_available(request)
@@ -1036,6 +1040,9 @@ def create_router(
         all_results.sort(key=lambda x: x["score"], reverse=True)
         all_results = all_results[:limit]
 
+        # Tier-2: latency_ms field on response (Step 6 instrumentation).
+        _latency_ms = round((time.monotonic() - _t_route_start) * 1000, 1)
+
         response: dict = {
             "results": all_results,
             "facts": facts_results,
@@ -1043,6 +1050,7 @@ def create_router(
             "surfaces_queried": surfaces,
             "total_results": len(all_results),
             "embedding_available": not degraded,
+            "latency_ms": _latency_ms,
         }
         if degraded:
             response["degraded"] = True

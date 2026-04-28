@@ -314,32 +314,139 @@ def query_claude_mem_sqlite(query_text: str, db_path: Path, top_k: int = 5) -> R
 
 def query_graphiti_http(query_text: str, graphiti_url: str, top_k: int = 5,
                         timeout: float = 10.0) -> Result:
-    """B3: HTTP query against Graphiti FastAPI server. Endpoint and response shape
-    must be verified at POC time per Operational Runbook + execution-time pre-flight."""
-    # Placeholder shape — verify with `curl <graphiti_url>/openapi.json` at POC time.
-    url = f"{graphiti_url.rstrip('/')}/search"
-    body = json.dumps({"query": query_text, "top_k": top_k}).encode()
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+    """B3 (deprecated stub): HTTP query against Graphiti FastAPI server.
+
+    Pivoted 2026-04-28: Graphiti runs as Python library, not HTTP server, in the
+    POC (operator finding via FalkorDB docs `agentic-memory/graphiti.html`). Use
+    `query_graphiti_python` instead. Stub kept for the --baseline b3-http
+    invocation in case a server-mode benchmark is wanted later.
+    """
+    return Result(session_ids=[], latencies_ms=[0.0],
+                  raw_response="<b3-http deprecated; use --baseline b3 (python lib)>")
+
+
+# Module-level Graphiti instance — initialized once per bench run, reused per query.
+_GRAPHITI_INSTANCE: Optional[Any] = None
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+
+
+def _get_graphiti(group_id: str = "graphiti_poc_20260428"):
+    """Lazy-init Graphiti+FalkorDB.
+
+    NOTE (graphiti-core 0.29.0 quirk): FalkorDriver writes to graph keyed by
+    `group_id` during add_episode but reads from graph keyed by `database`
+    constructor arg. To read what we wrote, configure `database=group_id`.
+
+    Tier-2 override (additive): GRAPHITI_GROUP_ID env var overrides the
+    POC default; Tier-2 sets it to "koi_canon_v1".
+    """
+    group_id = os.environ.get("GRAPHITI_GROUP_ID", group_id)
+    global _GRAPHITI_INSTANCE
+    if _GRAPHITI_INSTANCE is not None:
+        return _GRAPHITI_INSTANCE
+    if "EMBEDDING_DIM" not in os.environ:
+        os.environ["EMBEDDING_DIM"] = "3072"
+    from graphiti_core import Graphiti
+    from graphiti_core.driver.falkordb_driver import FalkorDriver
+    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+
+    driver = FalkorDriver(host="localhost", port=6380, database=group_id)
+    embedder = OpenAIEmbedder(
+        config=OpenAIEmbedderConfig(embedding_model="text-embedding-3-large", embedding_dim=3072)
     )
+    _GRAPHITI_INSTANCE = Graphiti(graph_driver=driver, embedder=embedder)
+    return _GRAPHITI_INSTANCE
+
+
+def query_graphiti_python(query_text: str, top_k: int = 5,
+                          group_id: Optional[str] = None) -> Result:
+    """B3: Direct Python library call into Graphiti.
+
+    Each ADR was ingested with a session-attribution footer. The LLM extracts
+    the session UUID as a named Entity, with `(:Episodic)-[:MENTIONS]->(:Entity)`
+    edges from each ADR-episode to its session-UUID entity. (The LLM did NOT
+    create direct entity-to-entity RELATES_TO links to sessions, so the bench
+    must walk one extra hop.)
+
+    Algorithm:
+      1. Hybrid search → top 20 edges (FactResult / EntityEdge), each carrying
+         an `episodes` list of Episodic UUIDs.
+      2. Collect the Episodic UUIDs across all top edges.
+      3. Single Cypher query: walk each Episodic via MENTIONS → Entity, return
+         entity names whose text contains a UUID-shaped substring.
+      4. Regex-extract UUIDs in edge-rank order; dedupe; return top_k.
+
+    Tier-2 (Strand-D fix) variant: with explicit RELATES_TO {AUTHORED_WITHIN}
+    edges between ADR-Entity and session-UUID-Entity, the regex over edge.fact
+    surfaces session UUIDs without needing the episode-walk fallback.
+    """
+    if group_id is None:
+        group_id = os.environ.get("GRAPHITI_GROUP_ID", "graphiti_poc_20260428")
+    import asyncio
+
+    async def _run():
+        g = _get_graphiti(group_id=group_id)
+        edges = await g.search(
+            query=query_text, group_ids=[group_id], num_results=20
+        )
+        # For each edge, the `episodes` field lists the episodic UUIDs that
+        # produced this fact. We use those to walk MENTIONS → session-UUID nodes.
+        episodes_by_edge: list[list[str]] = []
+        all_episodes: list[str] = []
+        for e in edges:
+            eps = getattr(e, "episodes", None) or []
+            episodes_by_edge.append(list(eps))
+            for ep in eps:
+                if ep not in all_episodes:
+                    all_episodes.append(ep)
+        # Walk Episodic -> MENTIONS -> Entity in one query
+        ep_to_session_names: dict[str, list[str]] = {}
+        if all_episodes:
+            recs, _, _ = await g.driver.execute_query(
+                "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) "
+                "WHERE ep.uuid IN $uuids "
+                "RETURN ep.uuid AS ep_uuid, n.name AS name",
+                uuids=all_episodes,
+            )
+            for r in recs:
+                ep_to_session_names.setdefault(r.get("ep_uuid"), []).append(r.get("name") or "")
+        return edges, episodes_by_edge, ep_to_session_names
+
     t0 = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
-    except urllib.error.URLError as e:
+        edges, episodes_by_edge, ep_to_names = asyncio.run(_run())
+    except Exception as e:
         return Result(session_ids=[], latencies_ms=[(time.monotonic() - t0) * 1000],
                       raw_response=f"<graphiti error: {e}>")
     latency_ms = (time.monotonic() - t0) * 1000
 
-    # Extract session IDs — schema TBD; placeholder assumes results have a session_id field.
     session_ids: list[str] = []
-    for r in payload.get("results", [])[:top_k]:
-        sid = r.get("session_id") or r.get("episode_name", "").split(":", 1)[-1]
-        if sid:
-            session_ids.append(sid)
+    seen: set[str] = set()
+    debug_lines: list[str] = []
+    for e, eps in zip(edges, episodes_by_edge):
+        fact_text = getattr(e, "fact", "") or ""
+        edge_name = getattr(e, "name", "") or ""
+        # walk to mentioned entities for these episodes
+        names: list[str] = []
+        for ep in eps:
+            names.extend(ep_to_names.get(ep, []))
+        haystack = " | ".join([fact_text] + names)
+        debug_lines.append(f"{edge_name[:30]} | eps={len(eps)} | mentions=[{','.join(set(n[:25] for n in names))[:120]}] | {fact_text[:50]}")
+        for m in _UUID_RE.finditer(haystack):
+            sid = m.group(0).lower()
+            if sid not in seen:
+                seen.add(sid)
+                session_ids.append(sid)
+                if len(session_ids) >= top_k:
+                    break
+        if len(session_ids) >= top_k:
+            break
 
     return Result(session_ids=session_ids, latencies_ms=[latency_ms],
-                  raw_response=json.dumps(payload)[:2000])
+                  raw_response="\n".join(debug_lines)[:2000])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -413,6 +520,9 @@ def run_bench(baseline: str, queries: list[Query], args) -> list[dict[str, Any]]
             result = query_claude_mem_sqlite(q.query, Path(args.claude_mem_db), top_k=5)
             transport = "sqlite"
         elif baseline == "b3":
+            result = query_graphiti_python(q.query, top_k=5)
+            transport = "python-lib"
+        elif baseline == "b3-http":
             result = query_graphiti_http(q.query, args.graphiti_url, top_k=5)
             transport = "http"
         else:
@@ -460,7 +570,7 @@ def write_csv(rows: list[dict[str, Any]], output_path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--baseline", required=True,
-                        choices=["b0", "b0-sqlite", "b1", "b2", "b3"])
+                        choices=["b0", "b0-sqlite", "b1", "b2", "b3", "b3-http"])
     parser.add_argument("--queries", required=True, type=Path,
                         help="path to bench queries YAML")
     parser.add_argument("--output", required=True, type=Path,
