@@ -1,0 +1,19 @@
+# IC + PM canon-alignment ADRs missing 3072-dim embeddings reconcile manifest
+# Date: 2026-04-28
+# Trigger: Sub-B KOI graph projection spike (G1 finding cross-repo extension)
+# Spike memo: spore/tmp/sub-b-koi-graph-projection-spike-2026-04-27.md
+# Companion manifest: reconcile-spore-phase4-2026-04-27.txt (Spore-side; 29 docs)
+# Cause: ADRs authored after 2026-04-23 OpenAI 3072-dim migration; doc-scanner
+# indexed them but did not trigger re-embedding via the new endpoint.
+# Scope: 8 IC + PM canon-alignment + prose-realignment ADRs (44 chunks total).
+# Routing: MUST run via OpenAI text-embedding-3-large at 3072-dim (NOT poly /embed
+# which is legacy 1024-dim); see koi-processor CLAUDE.md note fe8713f1.
+
+ic.canon-decision.canon-alignment-through-spore-adr-0070
+ic.canon-decision.canon-alignment-through-spore-adr-0077
+ic.canon-decision.canon-alignment-through-spore-adr-0082
+pm.canon-decision.canon-alignment-through-spore-adr-0060
+pm.canon-decision.canon-alignment-through-spore-adr-0070
+pm.canon-decision.canon-alignment-through-spore-adr-0077
+pm.canon-decision.canon-alignment-through-spore-adr-0082
+pm.canon-decision.pm-canon-prose-realignment-per-spore-adr-0071

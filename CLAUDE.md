@@ -21,11 +21,14 @@
 - **`scripts/import_reembeddings.py --input/--table/--column/--id-col`** — for re-embedding pipelines
 - OR update reconcile script to accept `--provider openai` flag (one-line change pulling `OpenAIEmbeddingProvider` from `api/embedding_provider.py:53` instead of `RemoteEmbeddingProvider:173`)
 
-**Pending reconcile work** (staged manifests; awaiting OpenAI-routed rerun):
-- `scripts/manifests/reconcile-spore-phase4-2026-04-27.txt` — 29 Spore Phase-4 docs missing 3072-dim embeddings (committed 2026-04-27 at `e22068db`; rerun not completed because reconcile script routed to poly /embed which returned 503 Service Unavailable)
-- Plus 8 IC + PM canon-alignment ADRs missing 3072-dim (cross-repo manifest yet to compose; surface from Sub-B KOI graph projection spike at `~/projects/spore/tmp/sub-b-koi-graph-projection-spike-2026-04-27.md`)
+**Reconcile work — RESOLVED 2026-04-28** via durable utility:
+- **`scripts/backfill_3072_embeddings_from_manifest.py --manifest <path>`** — durable-by-template backfill: for each doc_id in manifest, finds chunks with `embedding_3072 IS NULL`, embeds via OpenAI text-embedding-3-large @ 3072-dim, UPDATEs in place. No re-chunking, no re-indexing — column-update only on existing chunks. Repeatable `--manifest` flag combines manifests. Cost-abort guard at $5.
+- 2026-04-28 run: 37 docs (29 Spore Phase-4 + 8 IC+PM canon-alignment) / 247 chunks / 11.5s / $0.0315. All 247 chunks now carry 3072-dim embeddings; 0 missing across all three repos.
+- Manifest file naming convention: `scripts/manifests/reconcile-<scope>-<YYYY-MM-DD>.txt` (one doc_id per line; `#` comments). Reusable for future "manifest of doc_ids needing 3072-dim backfill" jobs.
 
-**Provider abstraction location**: `api/embedding_provider.py` — has `OpenAIEmbeddingProvider` (line 53), `OllamaEmbeddingProvider` (line 97), `SentenceTransformerProvider` (line 136), `RemoteEmbeddingProvider` (line 173). `OpenAIEmbeddingProvider` already supports `text-embedding-3-large` at 3072-dim (line 68).
+**`scripts/reconcile_missing_chunks.py` is now the deferred path**: a durable patch that re-routes it to OpenAI is its own scoped sprint when reconcile machinery needs that investment (it re-indexes from source files which is heavier than the column-update job today's 247-chunk backfill needed). For now: prefer `backfill_3072_embeddings_from_manifest.py` for column-only backfills.
+
+**Provider abstraction location**: `api/embedding_provider.py` — has `OpenAIEmbeddingProvider` (line 53), `OllamaEmbeddingProvider` (line 97), `SentenceTransformerProvider` (line 136), `RemoteEmbeddingProvider` (line 173). `OpenAIEmbeddingProvider` already supports `text-embedding-3-large` at 3072-dim (line 68). `backfill_3072_embeddings_from_manifest.py` uses the OpenAI client directly (mirrors `embed_jsonl_via_openai.py` shape) rather than going through the provider abstraction — kept simple for the column-update job.
 
 ---
 
