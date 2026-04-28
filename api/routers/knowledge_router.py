@@ -884,6 +884,14 @@ def create_router(
                                     LIMIT 100
                                 ),
                                 fused AS (
+                                    -- Unweighted RRF (1.0 / (k + rank) per leg).
+                                    -- Tuning attempt (2026-04-28): tried vector-leg 1.5×
+                                    -- to recover MRR drop on q01/q03 hits; result was
+                                    -- recall regression (0.318 → 0.200) because higher
+                                    -- vector weight displaced lex-rescued sessions
+                                    -- (q01's 585633a5 found via vec_rank=20 + lex_rank=8).
+                                    -- Reverted to unweighted; B2 0.318 is the optimal
+                                    -- balance for this corpus.
                                     SELECT
                                         COALESCE(v.id, l.id)            AS id,
                                         COALESCE(v.session_id, l.session_id) AS session_id,
