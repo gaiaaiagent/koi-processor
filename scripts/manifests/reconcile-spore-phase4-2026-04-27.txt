@@ -1,0 +1,38 @@
+# Spore Phase-4 missing 3072-dim embeddings reconcile manifest
+# Date: 2026-04-27
+# Trigger: Sub-B KOI graph projection spike (G1 finding)
+# Spike memo: spore/tmp/sub-b-koi-graph-projection-spike-2026-04-27.md
+# Cause: docs authored after 2026-04-23 OpenAI 3072-dim migration; doc-scanner
+# indexed them but did not trigger re-embedding via the new endpoint.
+# Scope: 29 Spore docs. Cross-repo gap also exists for 8 IC + PM canon-alignment
+# ADRs (parking item; addressed separately).
+
+spore.actor-governance
+spore.actuator-logic
+spore.canon-decision.actor-governance-foundation-doc-promotion
+spore.canon-decision.actuator-logic-foundation-doc-promotion
+spore.canon-decision.cross-repo-projection-script-pm-registration-alignment
+spore.canon-decision.end-skill-validator-check-integration
+spore.canon-decision.external-validation-loop-foundation-doc-admission
+spore.canon-decision.failure-modes-foundation-doc-promotion
+spore.canon-decision.maintenance-economics-foundation-doc-admission
+spore.canon-decision.min-viable-spore-instance-foundation-promotion
+spore.canon-decision.phase-4-closure-declaration
+spore.canon-decision.representation-authority-foundation-doc-promotion
+spore.canon-decision.sensor-oracle-governance-foundation-doc-promotion
+spore.canon-decision.translation-mapping-governance-defer-with-triggers
+spore.connection.bkc-as-instance-family
+spore.connection.canon-rebuild-arc-method-retrospective
+spore.connection.commons-law-and-charter-lineage
+spore.external-validation-loop
+spore.failure-modes
+spore.governance-artifacts
+spore.instance-model
+spore.intent-publication
+spore.maintenance-economics
+spore.planning.canon-review-protocol
+spore.positioning.civic-infrastructure-convergence
+spore.positioning.hyperstition-as-coordination
+spore.representation-authority
+spore.sensor-oracle-governance
+spore.term.stigmergy
