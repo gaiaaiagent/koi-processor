@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 
 import asyncpg
@@ -807,11 +808,27 @@ def create_router(
                         facts_results.append(fact_result)
                         all_results.append(fact_result)
 
-                # Sessions (vector similarity on chunk_text).
-                # Migrated to embedding_3072 (OpenAI text-embedding-3-large) per
-                # plan session-recall-tier-1-expanded P_E (2026-04-27/28).
-                # pgvector caps full-precision vector ANN at 2000 dims; use
-                # halfvec(3072) cast on both sides to hit the HNSW index.
+                # Sessions (HYBRID retrieval: pgvector dense + tsvector lexical
+                # fused by RRF inside SQL).
+                #
+                # P2 hybrid refactor (plan session-recall-tier-1-expanded
+                # 2026-04-28). Two ranked legs:
+                #   (a) pgvector cosine over embedding_3072 (OpenAI 3072-dim,
+                #       text-embedding-3-large; HNSW halfvec(3072) index)
+                #   (b) tsvector ts_rank_cd over chunk_tsv (GENERATED STORED
+                #       to_tsvector('english', chunk_text); GIN index)
+                #
+                # Reciprocal Rank Fusion combines per-leg ranks at k=60 (Octo
+                # Pattern B6). Each leg fetches top 100 chunks; FULL OUTER JOIN
+                # on chunk id yields the union; rrf_score sums the two
+                # contributions. Caller sees a single ranked list of top 20
+                # chunks, with internal vector_score + lex_score for diagnostics.
+                #
+                # Lexical query: convert user query to OR-disjunctive
+                # websearch_to_tsquery to maximize partial-match recall on
+                # natural-language queries (e.g. "When did F2 transition...");
+                # AND-conjunctive plainto_tsquery is too restrictive for the
+                # benchmark's recall-shape.
                 if "sessions" in surfaces:
                     table_exists = await conn.fetchval("""
                         SELECT EXISTS (
@@ -821,25 +838,87 @@ def create_router(
                     """)
                     rows = []
                     if table_exists:
+                        # Build OR-disjunctive tsquery string from user query.
+                        # Hyphens preserved (websearch handles ADR-0080 etc).
+                        # Stopwords filtered to reduce 0-recall on natural-
+                        # language phrasings.
+                        _stopwords = {
+                            "the", "what", "when", "where", "how", "why",
+                            "which", "who", "is", "are", "was", "were", "be",
+                            "been", "being", "do", "did", "does", "done",
+                            "can", "could", "should", "would", "may", "might",
+                            "must", "shall", "will", "or", "and", "but",
+                            "not", "of", "to", "for", "on", "at", "in", "by",
+                            "with", "from", "as", "into", "that", "this",
+                            "these", "those", "there", "here", "then", "than",
+                            "such", "also", "very", "more", "most", "just",
+                            "only", "over", "under", "have", "has", "had",
+                        }
+                        _toks = re.findall(r"[A-Za-z0-9_-]{2,}", query.lower())
+                        _toks = [t for t in _toks if t not in _stopwords]
+                        ts_query_str = " OR ".join(_toks) if _toks else query
+
                         try:
                             rows = await conn.fetch("""
-                                SELECT sc.id, sc.session_id, sc.chunk_text,
-                                       1 - (sc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
-                                FROM session_chunks sc
-                                WHERE sc.embedding_3072 IS NOT NULL
-                                ORDER BY sc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                                WITH vec_ranked AS (
+                                    SELECT id, session_id, chunk_text,
+                                           ROW_NUMBER() OVER (
+                                               ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                                           ) AS rnk,
+                                           1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS vec_score
+                                    FROM session_chunks
+                                    WHERE embedding_3072 IS NOT NULL
+                                    ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                                    LIMIT 100
+                                ),
+                                lex_ranked AS (
+                                    SELECT sc.id, sc.session_id, sc.chunk_text,
+                                           ROW_NUMBER() OVER (
+                                               ORDER BY ts_rank_cd(sc.chunk_tsv, q) DESC
+                                           ) AS rnk,
+                                           ts_rank_cd(sc.chunk_tsv, q) AS lex_score
+                                    FROM session_chunks sc,
+                                         websearch_to_tsquery('english', $2) q
+                                    WHERE sc.chunk_tsv @@ q
+                                    ORDER BY ts_rank_cd(sc.chunk_tsv, q) DESC
+                                    LIMIT 100
+                                ),
+                                fused AS (
+                                    SELECT
+                                        COALESCE(v.id, l.id)            AS id,
+                                        COALESCE(v.session_id, l.session_id) AS session_id,
+                                        COALESCE(v.chunk_text, l.chunk_text) AS chunk_text,
+                                        v.vec_score                      AS vec_score,
+                                        l.lex_score                      AS lex_score,
+                                        v.rnk                            AS vec_rank,
+                                        l.rnk                            AS lex_rank,
+                                        COALESCE(1.0 / (60 + v.rnk), 0)
+                                        + COALESCE(1.0 / (60 + l.rnk), 0) AS rrf_score
+                                    FROM vec_ranked v
+                                    FULL OUTER JOIN lex_ranked l USING (id)
+                                )
+                                SELECT id, session_id, chunk_text,
+                                       vec_score, lex_score, vec_rank, lex_rank, rrf_score
+                                FROM fused
+                                ORDER BY rrf_score DESC
                                 LIMIT 20
-                            """, emb_str)
+                            """, emb_str, ts_query_str)
                         except asyncpg.exceptions.DataError as e:
-                            logger.warning("sessions surface vector query skipped: %s", e)
+                            logger.warning("sessions surface hybrid query skipped: %s", e)
                             rows = []
                         for rank, row in enumerate(rows):
                             all_results.append({
-                                "text": row["chunk_text"][:500],
+                                "text": (row["chunk_text"] or "")[:500],
                                 "score": 1.0 / (k + rank + 1),
                                 "source": "session",
                                 "session_id": row["session_id"],
-                                "metadata": {"vector_score": float(row["score"])},
+                                "metadata": {
+                                    "vec_score": float(row["vec_score"]) if row["vec_score"] is not None else None,
+                                    "lex_score": float(row["lex_score"]) if row["lex_score"] is not None else None,
+                                    "vec_rank": int(row["vec_rank"]) if row["vec_rank"] is not None else None,
+                                    "lex_rank": int(row["lex_rank"]) if row["lex_rank"] is not None else None,
+                                    "rrf_score": float(row["rrf_score"]),
+                                },
                             })
 
                 # Docs (vector similarity on koi_memory_chunks from doc-scanner)
