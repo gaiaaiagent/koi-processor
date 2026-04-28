@@ -12,6 +12,23 @@
 
 ---
 
+## ⚠️ Embedding Provider Note (post-2026-04-23 OpenAI migration)
+
+**Personal-KOI canonical embedding source**: OpenAI `text-embedding-3-large` at 3072-dim (migration completed 2026-04-23 per personal-koi reframe; was previously poly-served Qwen-1024).
+
+**`scripts/reconcile_missing_chunks.py` gotcha**: currently imports `RemoteEmbeddingProvider` (poly /embed at `http://10.100.0.1:8352`) by default. This routes to the legacy poly server, which may be overloaded or down. Post-migration, prefer one of:
+- **`scripts/embed_jsonl_via_openai.py --dimensions 3072`** — OpenAI direct, accepts JSONL input
+- **`scripts/import_reembeddings.py --input/--table/--column/--id-col`** — for re-embedding pipelines
+- OR update reconcile script to accept `--provider openai` flag (one-line change pulling `OpenAIEmbeddingProvider` from `api/embedding_provider.py:53` instead of `RemoteEmbeddingProvider:173`)
+
+**Pending reconcile work** (staged manifests; awaiting OpenAI-routed rerun):
+- `scripts/manifests/reconcile-spore-phase4-2026-04-27.txt` — 29 Spore Phase-4 docs missing 3072-dim embeddings (committed 2026-04-27 at `e22068db`; rerun not completed because reconcile script routed to poly /embed which returned 503 Service Unavailable)
+- Plus 8 IC + PM canon-alignment ADRs missing 3072-dim (cross-repo manifest yet to compose; surface from Sub-B KOI graph projection spike at `~/projects/spore/tmp/sub-b-koi-graph-projection-spike-2026-04-27.md`)
+
+**Provider abstraction location**: `api/embedding_provider.py` — has `OpenAIEmbeddingProvider` (line 53), `OllamaEmbeddingProvider` (line 97), `SentenceTransformerProvider` (line 136), `RemoteEmbeddingProvider` (line 173). `OpenAIEmbeddingProvider` already supports `text-embedding-3-large` at 3072-dim (line 68).
+
+---
+
 ## What This Project Is
 
 Improving the quality of Regen Network's knowledge graph (KOI system) through:
