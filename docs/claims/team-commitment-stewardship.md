@@ -5,7 +5,7 @@
 | Author | Darren Zal ([darren@regen.network](mailto:darren@regen.network)) |
 | Date | 2026-04-30 |
 | Document type | koi-repo response (companion to `regenos-charter-response-darren.md`) |
-| Status | Draft v3 — folds in three FAtF integrations: (1) spawner-recognition as distinct credit-flow (Dalrymple/edge-funder analog, §2 + §3); (2) wise legibility + untracked-allocation discipline as new §5.5 (FAtF §4 + Ruddick); (3) frontier-bridging hint in §6 (Kirsanow's percolation reading, FAtF §3). Plus self-initiated triad-collapse case explicit in §2. v2 added substrate-vs-sidecar architectural alternative to §4 (Apr 30 conversation, surfacing labor-asymmetry gap in v1). v1 peer-reviewed via 3-round Codex `/review-plan` (gpt-5.5, x-high). |
+| Status | Draft v4 — adds §3.5 *anchoring posture*: the team-task pool reframed as a **typed application of the existing claims engine** (not a new system); two-tier anchor posture (default ephemeral, opt-in at attestation for high-stakes commitments); Layer 0/1/2 dogfooding ladder placing team commitments between decision-doc anchoring (Layer 0, already proposed) and external partner pipelines (Layer 2, already in production). v3 added FAtF integrations (spawner-recognition, wise legibility, frontier-bridging hint, self-initiated triad-collapse). v2 added substrate-vs-sidecar architecture. v1 peer-reviewed via 3-round Codex `/review-plan` (gpt-5.5, x-high). |
 | Responding to | [RegenOS Architecture Decisions Charter v1.0 (Open Questions)](https://www.notion.so/regennetwork/RegenOS-Architecture-Decisions-Charter-v1-0-Open-Questions-34f25b77eda18131b5f8eacae84f2024) (Gregory Landua, 2026-04-25, last edited 2026-04-28) |
 | Suggested permanent location | `~/projects/RegenAI/koi-processor/docs/claims/team-commitment-stewardship.md` |
 | Companion | [`regenos-charter-response-darren.md`](./regenos-charter-response-darren.md) — initial koi-repo response to the same Charter |
@@ -18,6 +18,8 @@
 This memo is a koi-repo response companion to the *RegenOS Architecture Decisions Charter v1.0 (Open Questions)* (Gregory Landua, 2026-04-25, last edited 2026-04-28) and to my own initial response (`regenos-charter-response-darren.md`, 2026-04-30). It does not propose a new charter decision; it threads through three existing ones — **D1** (compilation agent locus, ratifying the operational hybrid), **D5** (KOI as federation rail), and **D6** (claims-engine + provenance) — and proposes one architectural extension that composes across all three: **promoting tasks to first-class witnessed-commitment objects with provenance, and adding a KOI-mediated team task pool with consent-tier discipline applied inward.**
 
 The memo's load-bearing claim is that *team attention is the modal commons of organizational coordination* — borrowing Will Ruddick's framing of care as the modal commons (cf. *Beyond the Claims Engine* §1, citing Ruddick's *Journal of a Grassroots Economist*) — and that the existing meeting-processing pipeline is already operating an implicit, single-node version of this commons. Naming it explicitly, with provenance and consent disciplines, is the small step that makes it sustainable as the team grows beyond one node.
+
+A second load-bearing claim, made explicit in v4 (see §3.5): the architecture proposed below is, structurally, **a typed application of the existing claims engine** — not a new system. Witness / attestation / promise map onto the claims-engine primitives already shipped (witness-claim / `MsgAttest` / future-temporal-attestation). Anchoring high-stakes team commitments to the Regen Ledger via `x/data MsgAnchor` is the natural Layer 1 dogfooding loop between decision-document anchoring (Layer 0, already recommended in the charter response §2.3) and external partner-facing claims pipelines (Layer 2, already in production at SeaTrees / CI / etc).
 
 **Topology in scope.** Three tiers (per `koi-processor/CLAUDE.md` deploy table):
 
@@ -128,9 +130,59 @@ The `attestations` array is append-only; each attestation event (accept, reject,
 
 Four things this schema buys:
 1. **Auditability** — for any task, you can trace back to the witness event and the attestation chain. This is what makes the pipeline *legible* to a Marie-tier reader and to the team itself.
-2. **Anchorability** — the task object carries the metadata needed for `x/data MsgAnchor` (consistent with D6's claims-engine + regen-signing rail). Anchoring tasks is parking-lot, but the schema doesn't preclude it.
+2. **Anchorability** — the task object carries the metadata needed for `x/data MsgAnchor` to the Regen Ledger (consistent with D6's claims-engine + regen-signing rail). The schema explicitly supports the two-tier anchor posture in §3.5.
 3. **Disposition vocabulary** — the `accept / reject / redirect / supersede` action enum gives the disposition pass (§4 below) a stable shape.
 4. **Spawner-credit visibility** — the `spawner_uri` field makes attention-work attributable: who did the work of surfacing this task from transcript noise / cross-meeting context / fuzzy-then-named-it. Today's task ledger renders that work invisible; recording it is the first step toward recognizing it (via aggregation, social signal, or — eventually — graph-native economic flows of the FAtF §3 type, well outside this memo's scope).
+
+## 3.5 Anchoring posture: the team-task pool as a typed claims-engine application
+
+The architecture proposed in this memo is, structurally, **a typed application of the existing claims engine** — not a new system. The mapping is direct:
+
+| Team-task lifecycle (this memo) | Claims-engine primitive (already shipped) |
+|---|---|
+| Task spawn (someone surfaces a candidate) | Witness claim — `claims-engine v1` (`api/routers/claims_router.py`) |
+| Triage attestation (team-member vouches) | Attestation — `MsgAttest`, shipped 2026-04-21 (per `regen-claims-mcp` rollout) |
+| Owner acceptance (the promise) | Attestation with future-temporal orientation (commitment) |
+| Disposition pass (`accept / reject / redirect / redact / supersede`) | Existing attestation action enum, with task-specific extensions |
+| Anchor (optional, per-task at attestation time) | `x/data MsgAnchor` to Regen Ledger |
+
+What this means concretely: the §4 flow is the claims-engine flow with tasks as the typed payload. The disposition vocabulary is a typed extension of the attestation action enum, not a new thing. The implementation surface area shrinks correspondingly — what looked like "build a new system" is actually "add a typed task-payload schema, a `/tasks/propose` thin wrapper around `/claims/`, and a disposition CLI that emits `MsgAttest` calls."
+
+### Two-tier anchor posture
+
+Most tasks stay ephemeral — internal team coordination, no anchor needed. The cost (transaction fees, latency, cognitive overhead) would dwarf the value of `MsgAnchor`-ing every standup action item. But a *subset* of commitments have higher stakes and benefit from the audit-grade trail an on-chain anchor provides:
+
+- **Grant deliverables** — commitments to a funder that something will ship by a date.
+- **Contractual obligations** — promises tied to revenue, partnership terms, or formal SLAs.
+- **Public-promise commitments** — anything announced externally (forum post, press release, conference deck, partner memo) that the team will deliver X by Y.
+- **Cross-org coordination commitments** — tasks where another organization is depending on us (today's CI IT-memo task, today's Waka integration analysis, the SeaTrees deferred-pilot). The other party's accountability surface improves materially when their counterparty's commitment is on-chain.
+
+The architecture decides anchoring per-task at the attestation step. **Default: not anchored.** The owner (or attesting team-member) opts in via the disposition tool: `accept --anchor` (or via a `commitment_class` tag in the task body that triggers automatic anchoring at acceptance). This produces a `MsgAnchor` event for the witness + attestation chain immediately and stores `tx_hash` in the provenance block.
+
+The `consent_tier` column from §3 gates this — only `team` / `org` / `public` tiers are eligible. Anchoring a `private`-tier task would leak content via the hash-only anchor's metadata trail and is rejected by the disposition pass.
+
+### Layer 0 / 1 / 2 dogfooding ladder
+
+The charter response §2.3 explicitly recommends anchoring the Charter v1.0 + v2.0 + every subsequent decision document as an internal-first claims-engine usage path — to "catch claims-engine API issues with our own docs before exposing to ecocredit/partner workflows." Anchoring high-stakes team commitments is the natural *next layer* in that ladder:
+
+```
+Layer 0  Static decision documents (Charter, ADRs, this memo).
+         Already proposed (charter response §2.3). Low-frequency, append-only.
+
+Layer 1  Living team commitments (high-stakes tasks: grant deliverables,
+NEW IN   contractual obligations, public-promise commitments,
+THIS     cross-org coordination commitments). Medium-frequency,
+MEMO     lifecycle-anchored. Exercises the full attestation lifecycle
+         (accept/reject/redirect/supersede) under realistic team conditions.
+
+Layer 2  External partner pipelines (SeaTrees V&V, CI, future
+         ecocredit projects). Already in production. Variable-frequency,
+         partner-facing risk.
+```
+
+**Layer 1 is the load-bearing dogfooding bridge.** It produces meaningful claims-engine production traffic without partner-facing risk; it stress-tests the attestation lifecycle under realistic multi-party conditions; it makes the team's own work *legible to the ledger* in a way visible to other teams running on Regen Network. The team's high-stakes commitments become the highest-volume, lowest-stakes input class to the claims engine — exactly the dogfooding shape that surfaces edge cases before they hit Layer 2 partner workflows.
+
+A specific worry mitigated by Layer 1: today the only realistic dogfooding traffic for novel claims-engine features (typed attestation extensions, vocabulary-version-contract changes, anchor-cadence experiments) comes from Layer 0 (slow, infrequent, append-only) or Layer 2 (high-stakes, partner-visible, expensive to break). Layer 1 fills the gap — high-frequency enough to surface volume bugs, low-stakes enough to recover gracefully when something breaks.
 
 ## 4. Flow sketch: KOI-mediated submission with a disposition pass
 
@@ -324,7 +376,7 @@ This memo extends three existing decisions; it does not introduce a new one.
 
 **D5 (KOI federation).** Charter response §2.2 confirms KOI as consent-mediated sovereignty rail. This memo extends the federation surface from knowledge objects (RIDs) and governance objects (SpecDoc RIDs) to *commitment objects* (Task RIDs with provenance). The consent_tier discipline applies symmetrically. The "governance-object federation via SpecDoc RIDs is supported but unproven at multi-org scale" caveat applies to commitment-objects too; v0 demo is intra-team only. The architecture explicitly avoids using any one member's personal-koi as the team backend (gatekeeper-role-accrual rejection); the layered §4.2 shape (shared-backend substrate + per-member sidecars, both feeding the same disposition pass on the shared tier) is the operational form of "consent-mediated sovereignty, not RPC" — substrate consent is at the meeting-upload layer, sidecar consent is at the task-proposal layer, both opt-in.
 
-**D6 (claims-engine + provenance).** Charter response §2.3 confirms claims-engine + regen-signing as canonical pair, with consent envelope in payload, vocabulary-version contract, and standards-alignment posture (C2PA + W3C VC). This memo extends the claims-engine vocabulary by mapping the witness/attestation/promise triad onto task lifecycle. The provenance schema is anchorable; the disposition vocabulary is a candidate addition to the v1 claims-engine API contract.
+**D6 (claims-engine + provenance).** Charter response §2.3 confirms claims-engine + regen-signing as canonical pair, with consent envelope in payload, vocabulary-version contract, and standards-alignment posture (C2PA + W3C VC). The team-task pool proposed here is, structurally, **a typed application of the claims engine** (per §3.5) — not a new system — with witness / attestation / promise mapping onto witness-claim / `MsgAttest` / future-temporal-attestation respectively. The disposition vocabulary is a candidate typed extension of the attestation action enum. **Anchoring is the load-bearing dogfooding angle**: §3.5's two-tier posture (most tasks ephemeral; high-stakes commitments anchored at attestation time via `x/data MsgAnchor`) places the team's living commitments as Layer 1 between Layer 0 (decision-document anchoring, already recommended in the charter response §2.3) and Layer 2 (external partner pipelines, already in production). Layer 1 is the highest-frequency, lowest-stakes claims-engine production traffic the team has access to — exactly the dogfooding shape that catches edge cases before they hit partner workflows.
 
 Three non-collisions worth naming:
 - **Does not adjudicate meta-canon** (per charter response §2.3 caution). Tasks are not ADRs; the disposition pass does not retroactively re-adjudicate decisions, only resolves task-level proposals.
@@ -337,6 +389,10 @@ Three non-collisions worth naming:
 - **Substrate-first or sidecar-first implementation order?** §4.2 recommends substrate-first (build the shared-backend agent before extending the per-member meeting-tasks skill to point at the shared inbox), on the argument that the substrate handles the largest population (members without local pipelines) and so delivers the most value-per-line-of-code. But sidecar-first has its own logic: the per-member pipeline already exists, and pointing the existing `meeting-tasks` skill at a `/tasks/propose` endpoint is a smaller change than building a new shared-backend agent from scratch. Both ship the same end-state; the difference is which population gets value first. Defer to Greg + decision session for ordering. Memo's recommendation is substrate-first but not load-bearing.
 - **What governance shape does the shared-backend agent's configuration carry?** Per §4.1, the agent's prompts/models/extraction logic become governance surface. Options: (a) treat as ordinary code under regular review; (b) elevate to formal SpecDoc-tracked artifact with versioned-and-anchored prompts; (c) hybrid — code under review, but extraction-shape changes (entity types, predicate vocabulary) require explicit team-attestation. Defer to D6 vocabulary-version contract discussion.
 - **Where does the shared-backend agent run, exactly?** The Regen AI production backend is shared-tier (the consent boundary), but the agent process could run as: (i) a long-running daemon on the prod server itself, (ii) an on-demand worker invoked via API when a meeting transcript is uploaded, (iii) external-to-prod (e.g., another node that has read access to prod's transcript store). Each has different failure modes. Default (ii) — on-demand worker — for v1 simplicity.
+
+**Open — added in v4 (anchoring posture):**
+- **Anchor-class taxonomy.** §3.5 names four candidate classes that warrant anchoring (grant deliverables, contractual obligations, public-promise commitments, cross-org coordination). Are these the right classes, or are some missing? Should the system enforce a pre-condition (e.g., refuse to anchor a task without a `commitment_class` tag in the task body) or trust opt-in discipline at the attestation step? Should anchoring carry a *cost-of-anchor* check (estimated tx fee + latency at acceptance time) so the operator sees what they're committing to? Defer to claims-engine team for partner-driven constraints and to v0 demo retro for team norms.
+- **Layer 1 metric posture.** What signals does the team want to see from Layer 1 dogfooding traffic? Anchor success rate? Time-from-acceptance-to-`MsgAnchor`-confirmation? Reconcile-pending-tail? These mirror the existing eval harness for Layer 2 (`scripts/eval_claims_pipeline.py`) but at a different frequency. Defer to a focused implementation conversation; not load-bearing for v1 architecture.
 
 **Open — added in v3 (FAtF integration):**
 - **Spawner-credit governance.** Should the system aggregate spawner-credit over time as a soft signal of who's surfacing useful tasks (cf. v3 §3 "Spawner-credit visibility")? Tradeoff: visibility helps recognize underappreciated attention work that today goes unattributed (per Dalrymple's edge-funder logic in FAtF §2); over-quantifying becomes performance theatre and reproduces the "every contribution must be measurable" pathology that wise legibility (§5.5) explicitly rejects. Lean: aggregate at the *team-quarterly-retro* layer (slow, qualitative, episodic), not at the per-task or per-week layer.
