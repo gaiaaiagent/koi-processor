@@ -1,10 +1,18 @@
+<!-- workstream: koi-infra -->
+
+> **Stream scope:** koi-infra (this repo + `personal-koi-mcp`). Cross-stream recommendations require operator opt-in. See `~/CLAUDE.md` "Stream-scope discipline" for rule. Sister surface for Codex sessions: `AGENTS.md` in this directory.
+
 # Project Context for Claude
 
-> **DEPLOY WARNING**: This checkout (`koi-processor`, branch `regen-prod`) is NOT the deploy
-> source for the personal-koi server or NUC federation. The deploy source is the **koi-server
-> worktree** (`~/projects/RegenAI/koi-server`, branch `server/stable`). `deploy.sh` in the
-> Dobby repo rsyncs from koi-server, not here. Cherry-pick commits from koi-server into this
-> repo to keep history aligned, but do not expect edits here to reach production.
+> **DEPLOY TOPOLOGY** (current as of 2026-04-29; see `c4d3a045` 2026-03-12 collapse + `12ecd839` 2026-04-14 stable re-introduction for history):
+>
+> | Branch | Surface | How it deploys |
+> |---|---|---|
+> | **`regen-prod`** (this checkout) | **Local personal-koi** (port 8351) + **NUC federation** | Local: `launchctl kickstart com.personal.koi-processor` reloads from this working tree. NUC: Dobby's `deploy.sh` rsyncs from this working tree. |
+> | **`stable`** | **RegenAI public production** (`darren@202.61.196.119`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep this branch clean. |
+> | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. The old `koi-server` worktree was removed when `server/stable→regen-prod` merged. |
+>
+> Translation: edits committed on `regen-prod` reach personal-koi + NUC immediately. Only RegenAI public production needs an explicit cherry-pick + push to `stable`, on operator's promotion cadence.
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
 **Status**: ✅ COMPLETE - Production Deployed (2025-12-25)
