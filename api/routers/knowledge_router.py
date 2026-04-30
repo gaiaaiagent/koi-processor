@@ -260,14 +260,19 @@ def create_router(
                     fact_embedding = await _doc_embed(fact.fact_text)
 
                 # --- Dedup + invalidation ---
+                # Reads from fact_embedding_3072 (post-migration 096); halfvec
+                # cast required because pgvector full-precision indexes cap at
+                # 2000 dims (see migration 097).
                 if fact_embedding:
                     existing = await conn.fetch("""
                         SELECT id, fact_text, predicate, object_uri,
-                               1 - (fact_embedding <=> $1::vector) AS similarity
+                               1 - (fact_embedding_3072::halfvec(3072)
+                                    <=> $1::halfvec(3072)) AS similarity
                         FROM knowledge_facts
                         WHERE subject_uri = $2 AND valid_to IS NULL
-                          AND fact_embedding IS NOT NULL
-                        ORDER BY fact_embedding <=> $1::vector
+                          AND fact_embedding_3072 IS NOT NULL
+                        ORDER BY fact_embedding_3072::halfvec(3072)
+                                 <=> $1::halfvec(3072)
                         LIMIT 5
                     """, str(fact_embedding), subject_uri)
 
@@ -306,7 +311,7 @@ def create_router(
                 await conn.execute("""
                     INSERT INTO knowledge_facts
                         (episode_id, subject_uri, predicate, object_uri,
-                         object_literal, fact_text, fact_embedding,
+                         object_literal, fact_text, fact_embedding_3072,
                          valid_from, valid_to, group_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10)
                 """, episode_id, subject_uri, fact.predicate.upper(),
@@ -372,10 +377,12 @@ def create_router(
         if embed_fn:
             embedding = await embed_fn(name)
 
+        # Writes to embedding_3072 (post-migration 089); legacy embedding
+        # column (1024) retained for rollback only — do not write to it.
         await conn.execute("""
             INSERT INTO entity_registry
                 (fuseki_uri, entity_text, normalized_text, entity_type,
-                 source, embedding)
+                 source, embedding_3072)
             VALUES ($1, $2, $3, $4, $5, $6::vector)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """, new_uri, name, normalized, entity_type,
@@ -426,13 +433,15 @@ def create_router(
                        f.subject_uri, f.predicate, f.object_uri,
                        f.object_literal, f.fact_text,
                        f.valid_from, f.valid_to, f.created_at,
-                       1 - (f.fact_embedding <=> $1::vector) AS similarity
+                       1 - (f.fact_embedding_3072::halfvec(3072)
+                            <=> $1::halfvec(3072)) AS similarity
                 FROM knowledge_facts f
                 LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
-                WHERE f.fact_embedding IS NOT NULL
+                WHERE f.fact_embedding_3072 IS NOT NULL
                   {validity_filter}
                   {group_filter}
-                ORDER BY f.fact_embedding <=> $1::vector
+                ORDER BY f.fact_embedding_3072::halfvec(3072)
+                         <=> $1::halfvec(3072)
                 LIMIT $2
             """, *params)
 
@@ -777,20 +786,23 @@ def create_router(
                         })
 
                 # Facts (vector similarity, joined with episodes).
-                # knowledge_facts.fact_embedding is still 1024-dim (not yet
-                # migrated to 3072); dim-mismatch here is expected under the
-                # current 3072 provider — catch and skip gracefully.
+                # Reads from fact_embedding_3072 (post-migration 096); halfvec
+                # cast required because pgvector full-precision indexes cap at
+                # 2000 dims (see migration 097). Old 1024-dim rows backfilled
+                # NULL — they're filtered by the IS NOT NULL guard.
                 if "facts" in surfaces and facts_surface_available:
                     try:
                         rows = await conn.fetch("""
                             SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
                                    f.fact_text, e.name AS episode_name,
-                                   1 - (f.fact_embedding <=> $1::vector) AS score
+                                   1 - (f.fact_embedding_3072::halfvec(3072)
+                                        <=> $1::halfvec(3072)) AS score
                             FROM knowledge_facts f
                             LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
                             WHERE f.valid_to IS NULL
-                              AND f.fact_embedding IS NOT NULL
-                            ORDER BY f.fact_embedding <=> $1::vector
+                              AND f.fact_embedding_3072 IS NOT NULL
+                            ORDER BY f.fact_embedding_3072::halfvec(3072)
+                                     <=> $1::halfvec(3072)
                             LIMIT 20
                         """, emb_str)
                     except asyncpg.exceptions.DataError as e:
