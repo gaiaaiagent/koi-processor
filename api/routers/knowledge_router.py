@@ -94,6 +94,20 @@ class EpisodeRecord(BaseModel):
     fact_count: Optional[int] = None
 
 
+class RecallWalkRequest(BaseModel):
+    query: str = Field(..., description="Natural-language query")
+    shape: str = Field(
+        "semantic",
+        description="One of: semantic | temporal | relationship",
+    )
+    limit: int = Field(5, ge=1, le=20)
+    group_id: Optional[str] = Field(
+        None,
+        description="Filter walk to a specific knowledge_episodes.group_id (e.g. koi_canon_v1)",
+    )
+    max_hops: int = Field(3, ge=1, le=5, description="Cap on CTE walk depth")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1068,6 +1082,252 @@ def create_router(
             response["degraded"] = True
             response["degraded_reason"] = degraded_reason
         return response
+
+    # -------------------------------------------------------------------
+    # POST /recall-walk — shape-routed recall over knowledge_facts via
+    # PostgreSQL recursive CTE. Replaces the FalkorDB-Cypher walk in
+    # python/graphiti_recall.py per Phase 3 of plan
+    # `koi-graph-consolidation-retire-graphiti.md`.
+    #
+    # Walk: start from a unified-search seed → episode → fact-graph traversal
+    # over AUTHORED_WITHIN + RELATES_TO predicates → return surfaced subjects,
+    # objects, and session UUIDs (extracted from object_uri or fact_text).
+    #
+    # Shape flags:
+    #   - "semantic"     filters out expired edges (valid_to IS NOT NULL).
+    #   - "temporal"     same as semantic (currently-valid only) but the
+    #                    response surfaces valid_from explicitly per fact.
+    #   - "relationship" includes expired edges with `expired: true` marker.
+    # -------------------------------------------------------------------
+    @router.post("/recall-walk")
+    async def recall_walk(request: Request, body: RecallWalkRequest):
+        if not _facts_surface_available(request):
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "facts surface not configured on this node"},
+            )
+        if not _query_embed:
+            raise HTTPException(
+                status_code=503,
+                detail="Embedding provider not configured",
+            )
+
+        t_total_start = time.monotonic()
+        shape = body.shape.lower()
+        if shape not in ("semantic", "temporal", "relationship"):
+            shape = "semantic"
+
+        # Phase 1: query embedding for episode seed lookup.
+        t_query_start = time.monotonic()
+        query_embedding = await _query_embed(body.query)
+        if not query_embedding:
+            raise HTTPException(
+                status_code=500, detail="Failed to generate query embedding"
+            )
+        emb_str = str(query_embedding)
+        latency_query_ms = round((time.monotonic() - t_query_start) * 1000, 1)
+
+        # Phase 2: walk in SQL.
+        t_walk_start = time.monotonic()
+        results: list[dict] = []
+        walk_path: list[dict] = []
+        seed_episode_ids: list[str] = []
+        session_uuid_re = re.compile(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            re.IGNORECASE,
+        )
+
+        async with pool.acquire() as conn:
+            # 2a. Seed episodes via vector similarity over fact_embedding_3072
+            #     (find episodes whose facts semantically match the query).
+            #     Then also try matching against episode names/content via
+            #     fact text join. Group_id filter is optional.
+            group_filter = "AND f.group_id = $2" if body.group_id else ""
+            seed_params: list = [emb_str]
+            if body.group_id:
+                seed_params.append(body.group_id)
+            try:
+                seed_rows = await conn.fetch(
+                    f"""
+                    SELECT DISTINCT f.episode_id,
+                           MIN(f.fact_embedding_3072::halfvec(3072)
+                               <=> $1::halfvec(3072)) AS dist
+                    FROM knowledge_facts f
+                    WHERE f.episode_id IS NOT NULL
+                      AND f.fact_embedding_3072 IS NOT NULL
+                      AND f.valid_to IS NULL
+                      {group_filter}
+                    GROUP BY f.episode_id
+                    ORDER BY dist
+                    LIMIT 12
+                    """,
+                    *seed_params,
+                )
+            except asyncpg.exceptions.DataError as e:
+                logger.warning("recall-walk seed query skipped: %s", e)
+                seed_rows = []
+
+            seed_episode_ids = [str(r["episode_id"]) for r in seed_rows]
+            walk_path.append(
+                {"phase": "seed", "n_episodes": len(seed_episode_ids)}
+            )
+
+            if not seed_episode_ids:
+                latency_walk_ms = round((time.monotonic() - t_walk_start) * 1000, 1)
+                return {
+                    "results": [],
+                    "walk_path": walk_path,
+                    "routing": {
+                        "shape_resolved": shape,
+                        "shape_source": "endpoint",
+                        "legs_queried": ["koi"],
+                    },
+                    "latency_ms": {
+                        "total": round((time.monotonic() - t_total_start) * 1000, 1),
+                        "query_phase": latency_query_ms,
+                        "walk_phase": latency_walk_ms,
+                    },
+                }
+
+            # 2b. Recursive CTE walk: start from seed episodes, traverse
+            #     fact graph by subject_uri/object_uri up to max_hops.
+            include_expired = shape == "relationship"
+            validity_filter = "" if include_expired else "AND f.valid_to IS NULL"
+            walk_predicates = ("AUTHORED_WITHIN", "RELATES_TO", "RELATED_TO")
+            walk_rows = await conn.fetch(
+                f"""
+                WITH RECURSIVE
+                seed AS (
+                    SELECT DISTINCT subject_uri AS uri
+                    FROM knowledge_facts
+                    WHERE episode_id = ANY($1::uuid[])
+                ),
+                walk(uri, depth) AS (
+                    SELECT uri, 0 FROM seed
+                    UNION
+                    SELECT
+                        CASE WHEN f.subject_uri = w.uri
+                             THEN COALESCE(f.object_uri, f.object_literal)
+                             ELSE f.subject_uri END,
+                        w.depth + 1
+                    FROM walk w
+                    JOIN knowledge_facts f
+                      ON (f.subject_uri = w.uri OR f.object_uri = w.uri)
+                    WHERE w.depth < $2
+                      AND f.predicate = ANY($3::text[])
+                      {validity_filter}
+                )
+                SELECT
+                    f.id, f.episode_id, f.subject_uri, f.predicate,
+                    f.object_uri, f.object_literal, f.fact_text,
+                    f.valid_from, f.valid_to, f.created_at,
+                    e.name AS episode_name, e.source_document, e.metadata AS ep_metadata
+                FROM knowledge_facts f
+                LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
+                WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
+                       OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
+                  AND f.predicate = ANY($3::text[])
+                  {validity_filter}
+                ORDER BY f.created_at DESC
+                LIMIT $4
+                """,
+                seed_episode_ids,
+                body.max_hops,
+                list(walk_predicates),
+                max(body.limit * 4, 20),
+            )
+
+            walk_path.append(
+                {
+                    "phase": "walk",
+                    "max_hops": body.max_hops,
+                    "n_facts": len(walk_rows),
+                }
+            )
+
+            # 2c. Project facts → result items with session-uuid extraction.
+            seen_session_ids: set[str] = set()
+            for row in walk_rows:
+                fact_text = row["fact_text"] or ""
+                # Extract session UUID from object_uri (Session entity path)
+                # or fact_text (legacy graphiti-style "session <uuid>" text).
+                object_uri = row["object_uri"] or ""
+                literal = row["object_literal"] or ""
+                # Direct UUID in object_uri or literal:
+                for candidate in (object_uri, literal, fact_text):
+                    for m in session_uuid_re.finditer(candidate):
+                        sid = m.group(0).lower()
+                        if sid not in seen_session_ids:
+                            seen_session_ids.add(sid)
+
+                ep_metadata = _parse_jsonb(row["ep_metadata"])
+                expired = bool(row["valid_to"])
+                results.append(
+                    {
+                        "id": str(row["id"]),
+                        "score": 1.0,  # walk hits are rank-stable; uniform score
+                        "leg": "koi",
+                        "content": fact_text[:500],
+                        "metadata": {
+                            "source": "fact",
+                            "subject_uri": row["subject_uri"],
+                            "predicate": row["predicate"],
+                            "object_uri": row["object_uri"],
+                            "object_literal": row["object_literal"],
+                            "valid_from": (
+                                row["valid_from"].isoformat()
+                                if row["valid_from"] else None
+                            ),
+                            "valid_to": (
+                                row["valid_to"].isoformat()
+                                if row["valid_to"] else None
+                            ),
+                            "expired": expired,
+                            "episode_id": str(row["episode_id"]) if row["episode_id"] else None,
+                            "episode_name": row["episode_name"],
+                            "source_document": row["source_document"],
+                            "batch_id": ep_metadata.get("batch_id"),
+                            "doc_kind": ep_metadata.get("doc_kind"),
+                            "repo": ep_metadata.get("repo"),
+                        },
+                    }
+                )
+                if len(results) >= body.limit:
+                    break
+
+            # 2d. Add a synthetic "session" item per surfaced session UUID
+            #     for parity with graphiti_recall.py output shape (the recall
+            #     MCP tool emits one item per session_id when present).
+            for sid in list(seen_session_ids)[: body.limit]:
+                results.append(
+                    {
+                        "id": sid,
+                        "score": 1.0,
+                        "leg": "koi",
+                        "content": f"claude-code session {sid}",
+                        "metadata": {
+                            "source": "session",
+                            "session_id": sid,
+                        },
+                    }
+                )
+
+        latency_walk_ms = round((time.monotonic() - t_walk_start) * 1000, 1)
+        return {
+            "results": results[: body.limit + len(seen_session_ids)],
+            "walk_path": walk_path,
+            "session_ids": list(seen_session_ids)[: body.limit],
+            "routing": {
+                "shape_resolved": shape,
+                "shape_source": "endpoint",
+                "legs_queried": ["koi"],
+            },
+            "latency_ms": {
+                "total": round((time.monotonic() - t_total_start) * 1000, 1),
+                "query_phase": latency_query_ms,
+                "walk_phase": latency_walk_ms,
+            },
+        }
 
     # -------------------------------------------------------------------
     # Shared helper
