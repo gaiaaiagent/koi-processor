@@ -412,7 +412,8 @@ def create_router(pool, caps) -> APIRouter:
                         WHEN 'medium' THEN 3
                         WHEN 'low' THEN 4
                         ELSE 5
-                    END
+                    END,
+                    id ASC
                 LIMIT ${len(params) - 1} OFFSET ${len(params)}
             """
             rows = await conn.fetch(query, *params)
