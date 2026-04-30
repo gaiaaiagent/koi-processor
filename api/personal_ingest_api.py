@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""
-Personal KOI Ingest API
-
-FastAPI server for ingesting pre-extracted entities from Claude Code.
-Runs on port 8351 as part of the personal KOI-net.
-
-This endpoint accepts entities already extracted by Claude (no LLM cost)
-and performs:
-1. Entity deduplication against the personal knowledge base
-2. Canonical URI assignment
-3. Storage in PostgreSQL with pgvector embeddings
-4. Returns resolved entities with URIs for vault linking
-
-Entity Resolution Tiers:
-- Tier 1: Exact match (normalized text, B-Tree index)
-- Tier 1.x: Fuzzy string match (Jaro-Winkler similarity)
-- Tier 2: Semantic match (BGE embeddings + pgvector HNSW)
-- Tier 3: Create new entity with deterministic URI
-"""
+"""FastAPI ingest server for personal KOI-net: deduplicates and persists pre-extracted knowledge graph entities on port 8351."""
 
 import json as json_module_global
 import importlib.util
