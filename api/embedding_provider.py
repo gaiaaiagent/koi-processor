@@ -7,15 +7,62 @@ with a factory that reads env vars.
 Query/document split:
   - embed() / embed_batch() = DOCUMENT mode (no instruction prefix)
   - embed_query() = QUERY mode (with instruction prefix for retrieval)
+
+Phase 8 B2 (2026-04-29): per-prompt-type token tracking. The abstract
+`EmbeddingProvider.embed_or_none` accepts a `prompt_type` parameter and emits
+one JSONL record per call to `~/.koi/logs/embedding-tokens.jsonl`.
 """
 
 import asyncio
+import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ─── B2: per-prompt-type token tracking ──────────────────────────────────────
+_METRICS_DIR = Path(os.path.expanduser("~/.koi/logs"))
+_METRICS_PATH = _METRICS_DIR / "embedding-tokens.jsonl"
+_VALID_PROMPT_TYPES = {"extraction", "dedup", "query", "rerank", "unknown"}
+
+
+def _emit_embedding_metric(
+    provider: str,
+    model: str,
+    prompt_type: str,
+    text_len: int,
+    prompt_tokens: Optional[int],
+    is_query: bool,
+    duration_ms: float,
+    ok: bool,
+) -> None:
+    """Best-effort metric emission. Never raises (would block embedding calls)."""
+    try:
+        if prompt_type not in _VALID_PROMPT_TYPES:
+            prompt_type = "unknown"
+        _METRICS_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "provider": provider,
+            "model": model,
+            "prompt_type": prompt_type,
+            "is_query": is_query,
+            "text_chars": text_len,
+            "prompt_tokens": prompt_tokens,  # exact for OpenAI; None elsewhere
+            "duration_ms": round(duration_ms, 1),
+            "ok": ok,
+        }
+        with _METRICS_PATH.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        # metrics emission MUST NEVER block the caller
+        pass
 
 
 class EmbeddingProvider(ABC):
@@ -39,14 +86,53 @@ class EmbeddingProvider(ABC):
         """Generate embeddings for multiple texts (DOCUMENT mode). Default: sequential."""
         return [await self.embed(t) for t in texts]
 
-    async def embed_or_none(self, text: str, is_query: bool = False) -> Optional[List[float]]:
-        """Generate embedding, returning None on failure instead of raising."""
+    async def embed_or_none(
+        self,
+        text: str,
+        is_query: bool = False,
+        prompt_type: str = "unknown",
+    ) -> Optional[List[float]]:
+        """Generate embedding, returning None on failure instead of raising.
+
+        Phase 8 B2: emits a JSONL metric to `~/.koi/logs/embedding-tokens.jsonl`
+        with `prompt_type` tag. Valid prompt_type values:
+          extraction | dedup | query | rerank | unknown
+        Unrecognized values are coerced to 'unknown' in the metric line.
+        Token count is exact for OpenAI; None for Ollama/SentenceTransformer/Remote.
+        """
+        t0 = time.monotonic()
+        provider_name = type(self).__name__.replace("EmbeddingProvider", "").lower()
         try:
             if is_query:
-                return await self.embed_query(text)
-            return await self.embed(text)
+                emb = await self.embed_query(text)
+            else:
+                emb = await self.embed(text)
+            duration_ms = (time.monotonic() - t0) * 1000
+            tokens = getattr(self, "_last_prompt_tokens", None)
+            _emit_embedding_metric(
+                provider=provider_name,
+                model=self.model_name,
+                prompt_type=prompt_type,
+                text_len=len(text or ""),
+                prompt_tokens=tokens,
+                is_query=is_query,
+                duration_ms=duration_ms,
+                ok=True,
+            )
+            return emb
         except Exception as e:
+            duration_ms = (time.monotonic() - t0) * 1000
             logger.warning(f"Embedding failed ({self.model_name}): {e}")
+            _emit_embedding_metric(
+                provider=provider_name,
+                model=self.model_name,
+                prompt_type=prompt_type,
+                text_len=len(text or ""),
+                prompt_tokens=None,
+                is_query=is_query,
+                duration_ms=duration_ms,
+                ok=False,
+            )
             return None
 
 
@@ -84,6 +170,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             self._client.embeddings.create,
             **self._create_kwargs(text),
         )
+        # B2: capture prompt_tokens for token-tracking metric.
+        try:
+            self._last_prompt_tokens = int(response.usage.prompt_tokens)
+        except Exception:
+            self._last_prompt_tokens = None
         return response.data[0].embedding
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
@@ -91,6 +182,10 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             self._client.embeddings.create,
             **self._create_kwargs(texts),
         )
+        try:
+            self._last_prompt_tokens = int(response.usage.prompt_tokens)
+        except Exception:
+            self._last_prompt_tokens = None
         return [d.embedding for d in response.data]
 
 

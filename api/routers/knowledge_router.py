@@ -52,6 +52,20 @@ class EpisodeCreateRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     facts: List[FactInput] = Field(default_factory=list)
     create_entities: bool = Field(True, description="Create missing entities in entity_registry")
+    # Task A 2026-04-29: parallel-attribution dedup-shape fix.
+    # When false (default): cosine>0.95 skip requires (predicate, object_uri)
+    # to ALSO match — parallel attributions like AUTHORED_WITHIN with
+    # different session UUIDs coexist instead of getting silently dropped.
+    # When true: legacy single-valued-predicate behavior — same (subject,
+    # predicate) with different object_uri SUPERSEDES the existing fact
+    # (sets valid_to=NOW()). Use for SUPERSEDES / REPLACES / INVALIDATES
+    # predicates and similar single-valued relationships.
+    expire_existing: bool = Field(
+        False,
+        description="If true, same-(subject,predicate) different-object writes "
+        "supersede existing facts (legacy behavior). If false (default), "
+        "parallel attributions coexist."
+    )
 
 
 class FactRecord(BaseModel):
@@ -290,14 +304,27 @@ def create_router(
                         LIMIT 5
                     """, str(fact_embedding), subject_uri)
 
-                    # Check for near-duplicate (similarity > 0.95)
+                    # Check for near-duplicate (similarity > 0.95).
+                    # Task A 2026-04-29: parallel-attribution dedup-shape fix.
+                    # The skip condition now also requires (predicate, object_uri)
+                    # to match — otherwise parallel attributions like
+                    # AUTHORED_WITHIN with different session UUIDs (which produce
+                    # near-identical fact_text differing only by the embedded
+                    # UUID) would be silently dropped on cosine>0.95.
+                    # Re-writes of the EXACT same fact still skip correctly
+                    # because (subject, predicate, object_uri, fact_text)
+                    # all match.
+                    predicate_upper = fact.predicate.upper()
                     skip = False
                     for row in existing:
                         sim = float(row['similarity'])
-                        if sim > 0.95:
+                        if sim > 0.95 \
+                                and row['predicate'] == predicate_upper \
+                                and row['object_uri'] == object_uri:
                             logger.info(
                                 f"Skipped duplicate fact: {fact.fact_text} "
-                                f"(similarity: {sim:.3f} with fact {row['id']})")
+                                f"(similarity: {sim:.3f} with fact {row['id']}; "
+                                f"same predicate+object)")
                             facts_skipped += 1
                             skip = True
                             break
@@ -305,22 +332,27 @@ def create_router(
                     if skip:
                         continue
 
-                    # Invalidation: same subject + same predicate + different object → retire old
-                    predicate_upper = fact.predicate.upper()
-                    for row in existing:
-                        sim = float(row['similarity'])
-                        if (row['predicate'] == predicate_upper
-                                and row['object_uri'] != object_uri
-                                and sim > 0.5):
-                            await conn.execute("""
-                                UPDATE knowledge_facts
-                                SET valid_to = NOW()
-                                WHERE id = $1
-                            """, row['id'])
-                            logger.info(
-                                f"Superseded fact {row['id']}: "
-                                f"{row['fact_text']} → {fact.fact_text}")
-                            facts_superseded += 1
+                    # Invalidation: same subject + same predicate + different object → retire old.
+                    # Task A 2026-04-29: now opt-in via request-level
+                    # `expire_existing=true`. Default false → parallel
+                    # attributions coexist (correct for AUTHORED_WITHIN /
+                    # RELATES_TO / MENTIONS). Set true for single-valued
+                    # predicates like SUPERSEDES / REPLACES / INVALIDATES.
+                    if body.expire_existing:
+                        for row in existing:
+                            sim = float(row['similarity'])
+                            if (row['predicate'] == predicate_upper
+                                    and row['object_uri'] != object_uri
+                                    and sim > 0.5):
+                                await conn.execute("""
+                                    UPDATE knowledge_facts
+                                    SET valid_to = NOW()
+                                    WHERE id = $1
+                                """, row['id'])
+                                logger.info(
+                                    f"Superseded fact {row['id']}: "
+                                    f"{row['fact_text']} → {fact.fact_text}")
+                                facts_superseded += 1
 
                 await conn.execute("""
                     INSERT INTO knowledge_facts
@@ -594,6 +626,16 @@ def create_router(
         status: Optional[str] = Query(None, description="Filter docs by status (e.g. active, draft)"),
         is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
         repo: Optional[str] = Query(None, description="Filter docs by repo name (e.g. darren-workflow)"),
+        rerank: str = Query(
+            "rrf",
+            description="Reranker: 'rrf' (default; pure RRF score) or 'mmr' (Maximal Marginal Relevance — diversity-aware)",
+        ),
+        mmr_lambda: float = Query(
+            0.5,
+            ge=0.0,
+            le=1.0,
+            description="MMR λ parameter [0,1]. 1.0 = pure relevance (≈RRF), 0.0 = pure diversity. Default 0.5.",
+        ),
     ):
         # Tier-2 instrumentation: per-route latency_ms (Step 6).
         _t_route_start = time.monotonic()
@@ -1062,9 +1104,87 @@ def create_router(
                 except Exception as _e:
                     logger.warning("unified-search vault surface failed: %s", _e)
 
-        # Sort by RRF score descending, take top N
+        # Sort by RRF score descending; truncate to a 2× candidate pool when
+        # MMR is requested, otherwise straight to limit.
         all_results.sort(key=lambda x: x["score"], reverse=True)
-        all_results = all_results[:limit]
+
+        rerank_mode = (rerank or "rrf").lower()
+        rerank_applied = "rrf"
+        if rerank_mode == "mmr" and not degraded and len(all_results) > 1:
+            # ── B1 MMR pass (Phase 8 capability parity, 2026-04-29) ──────
+            # Maximal Marginal Relevance: post-RRF diversity-aware reranking.
+            # candidates = top 2*limit (or all if smaller) → embed each
+            # result's text → iteratively select highest-scoring candidate
+            # by MMR formula:
+            #   mmr_score(c) = λ·rrf_score(c) - (1-λ)·max_cosine(c, S)
+            # where S is the already-selected set.
+            # Embedding via _doc_embed (same provider as fact/entity writes).
+            cand_pool = all_results[: max(limit * 2, 20)]
+            try:
+                # Embed candidates in parallel-friendly serial calls.
+                # B2: tag with prompt_type="rerank" so token-tracking metrics
+                # distinguish MMR diversity-pass embeddings from extraction
+                # writes. Best-effort kwarg pass-through; older provider
+                # wrappers without the param still work via TypeError catch.
+                cand_embeddings: list[Optional[List[float]]] = []
+                for c in cand_pool:
+                    text = (c.get("text") or "").strip()
+                    if not text or _doc_embed is None:
+                        cand_embeddings.append(None)
+                        continue
+                    try:
+                        emb = await _doc_embed(text[:2000], prompt_type="rerank")
+                    except TypeError:
+                        emb = await _doc_embed(text[:2000])
+                    cand_embeddings.append(emb)
+                # Iterative MMR selection.
+                import math as _math
+                def _cos(a, b):
+                    if not a or not b:
+                        return 0.0
+                    s = sum(x * y for x, y in zip(a, b))
+                    na = _math.sqrt(sum(x * x for x in a))
+                    nb = _math.sqrt(sum(y * y for y in b))
+                    if na == 0 or nb == 0:
+                        return 0.0
+                    return s / (na * nb)
+                selected_idx: list[int] = []
+                remaining_idx: set[int] = set(range(len(cand_pool)))
+                # Normalize RRF scores into [0,1] for the relevance term so
+                # the (1-λ) diversity-penalty is on a comparable scale.
+                _rrf_scores = [c["score"] for c in cand_pool]
+                _rrf_max = max(_rrf_scores) if _rrf_scores else 1.0
+                while remaining_idx and len(selected_idx) < limit:
+                    best_i = None
+                    best_mmr = float("-inf")
+                    for i in remaining_idx:
+                        rel = (cand_pool[i]["score"] / _rrf_max) if _rrf_max > 0 else 0.0
+                        max_sim = 0.0
+                        emb_i = cand_embeddings[i]
+                        for j in selected_idx:
+                            sim = _cos(emb_i, cand_embeddings[j])
+                            if sim > max_sim:
+                                max_sim = sim
+                        mmr = mmr_lambda * rel - (1 - mmr_lambda) * max_sim
+                        if mmr > best_mmr:
+                            best_mmr = mmr
+                            best_i = i
+                    if best_i is None:
+                        break
+                    selected_idx.append(best_i)
+                    remaining_idx.remove(best_i)
+                    # Annotate result with MMR diagnostics.
+                    cand_pool[best_i].setdefault("metadata", {})
+                    cand_pool[best_i]["metadata"]["mmr_score"] = best_mmr
+                    cand_pool[best_i]["metadata"]["mmr_rank"] = len(selected_idx)
+                all_results = [cand_pool[i] for i in selected_idx]
+                rerank_applied = "mmr"
+            except Exception as _mmr_err:
+                logger.warning("MMR rerank failed; falling back to RRF: %s", _mmr_err)
+                all_results = all_results[:limit]
+                rerank_applied = "rrf_fallback_after_mmr_error"
+        else:
+            all_results = all_results[:limit]
 
         # Tier-2: latency_ms field on response (Step 6 instrumentation).
         _latency_ms = round((time.monotonic() - _t_route_start) * 1000, 1)
@@ -1077,6 +1197,8 @@ def create_router(
             "total_results": len(all_results),
             "embedding_available": not degraded,
             "latency_ms": _latency_ms,
+            "rerank_applied": rerank_applied,
+            "mmr_lambda": mmr_lambda if rerank_applied == "mmr" else None,
         }
         if degraded:
             response["degraded"] = True

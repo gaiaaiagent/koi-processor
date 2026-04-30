@@ -374,28 +374,38 @@ class ShortestPathResponse(BaseModel):
 # Embedding Service (provider-agnostic, explicit query/document split)
 # =============================================================================
 
-async def generate_query_embedding(text: str) -> Optional[List[float]]:
+async def generate_query_embedding(text: str, prompt_type: str = "query") -> Optional[List[float]]:
     """Generate QUERY embedding (with instruction prefix for retrieval).
 
     Use for: /chat retrieval, session search, fact search, entity resolution,
     semantic classifier, unified search — any read/search path.
+
+    Phase 8 B2: prompt_type defaults to 'query'; callers may override (e.g.
+    'rerank' for MMR diversity-pass embeddings).
     """
     if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
         return None
     normalized = normalize_entity_text(text)
-    return await embedding_provider.embed_or_none(normalized, is_query=True)
+    return await embedding_provider.embed_or_none(
+        normalized, is_query=True, prompt_type=prompt_type
+    )
 
 
-async def generate_document_embedding(text: str) -> Optional[List[float]]:
+async def generate_document_embedding(text: str, prompt_type: str = "extraction") -> Optional[List[float]]:
     """Generate DOCUMENT embedding (no instruction prefix for storage).
 
     Use for: entity creation, fact storage, ingest, chunk re-embedding —
     any write/persist path.
+
+    Phase 8 B2: prompt_type defaults to 'extraction'; callers may override
+    (e.g. 'dedup' for fact-write near-duplicate checks).
     """
     if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
         return None
     normalized = normalize_entity_text(text)
-    return await embedding_provider.embed_or_none(normalized, is_query=False)
+    return await embedding_provider.embed_or_none(
+        normalized, is_query=False, prompt_type=prompt_type
+    )
 
 
 # Backward-compatible alias — calls QUERY mode (most existing callers are reads).
