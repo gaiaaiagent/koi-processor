@@ -23,6 +23,11 @@ feeds:
     slug: p2pfoundation
     domain: commons
     tags: [commons, p2p]
+    enabled: false  # 2026-04-30: 403 Cloudflare bot-block; replaced by shareable below
+  - url: https://www.shareable.net/feed/
+    slug: shareable
+    domain: commons
+    tags: [commons, sharing-economy]
     enabled: true
   - url: https://www.resilience.org/feed/
     slug: resilience
@@ -43,6 +48,11 @@ feeds:
     slug: kolektivo
     domain: regen
     tags: [bioregionalism, regen]
+    enabled: false  # 2026-04-30: 404 (Substack URL changed); replaced by celo below (Kolektivo built on Celo, semantic continuity)
+  - url: https://blog.celo.org/feed
+    slug: celo
+    domain: regen
+    tags: [refi, layer2, regen]
     enabled: true
   - url: https://medium.com/feed/@designforsustainability
     slug: danielchristianwahl
