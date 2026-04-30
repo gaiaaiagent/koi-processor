@@ -1,0 +1,61 @@
+feeds:
+  - url: https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_engineering.xml
+    slug: anthropic
+    domain: ai
+    tags: [anthropic, models]
+    enabled: true
+  - url: https://lilianweng.github.io/index.xml
+    slug: lilianweng
+    domain: ai
+    tags: [llm, agents, research]
+    enabled: true
+  - url: https://simonwillison.net/atom/everything/
+    slug: simonwillison
+    domain: ai
+    tags: [llm, tooling]
+    enabled: true
+  - url: https://magazine.sebastianraschka.com/feed
+    slug: sebastianraschka
+    domain: ai
+    tags: [llm, research]
+    enabled: true
+  - url: https://blog.p2pfoundation.net/feed
+    slug: p2pfoundation
+    domain: commons
+    tags: [commons, p2p]
+    enabled: true
+  - url: https://www.resilience.org/feed/
+    slug: resilience
+    domain: commons
+    tags: [bioregionalism, resilience]
+    enabled: true
+  - url: https://www.henrikkarlsson.xyz/feed
+    slug: hraundalur
+    domain: commons
+    tags: [epistemics, scenius]
+    enabled: true
+  - url: https://refidao.substack.com/feed
+    slug: refidao
+    domain: regen
+    tags: [refi, regen]
+    enabled: true
+  - url: https://kolektivohub.substack.com/feed
+    slug: kolektivo
+    domain: regen
+    tags: [bioregionalism, regen]
+    enabled: true
+  - url: https://medium.com/feed/@designforsustainability
+    slug: danielchristianwahl
+    domain: regen
+    tags: [regeneration, bioregionalism]
+    enabled: true
+  - url: https://www.latent.space/feed
+    slug: latentspace
+    domain: engineering
+    tags: [agents, engineering]
+    enabled: true
+  - url: https://hamel.dev/index.xml
+    slug: hamel
+    domain: engineering
+    tags: [evals, llmops]
+    enabled: true
