@@ -65,12 +65,16 @@ async def entity_lookup(
             placeholders = ", ".join(f"${i}" for i in range(3, 3 + len(type_params)))
             type_filter = f"AND entity_type NOT IN ({placeholders})"
         try:
+            # Reads from embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration);
+            # halfvec cast required because pgvector full-precision vector ANN caps
+            # at 2000 dims. Uses idx_entity_registry_embedding_3072_hnsw.
             rows = await conn.fetch(f"""
                 SELECT fuseki_uri, entity_text, entity_type, metadata,
-                       1 - (embedding <=> $1::vector) AS similarity
+                       1 - (embedding_3072::halfvec(3072)
+                            <=> $1::halfvec(3072)) AS similarity
                 FROM entity_registry
-                WHERE embedding IS NOT NULL {privacy_filter} {type_filter}
-                ORDER BY embedding <=> $1::vector
+                WHERE embedding_3072 IS NOT NULL {privacy_filter} {type_filter}
+                ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                 LIMIT $2
             """, embedding_str, max_results, *type_params)
         except (asyncpg.exceptions.UndefinedColumnError,

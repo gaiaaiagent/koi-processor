@@ -236,13 +236,18 @@ async def resolve_entity_multi_tier(
 
     semantic_threshold = schema.semantic_threshold
 
-    # pgvector cosine distance: 1 - distance = similarity
+    # pgvector cosine distance: 1 - distance = similarity.
+    # Reads from embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration);
+    # halfvec cast required because pgvector full-precision vector ANN caps
+    # at 2000 dims. Uses idx_entity_registry_embedding_3072_hnsw.
     sem_row = await conn.fetchrow(
         """
-        SELECT fuseki_uri, 1 - (embedding <=> $1::vector) AS similarity
+        SELECT fuseki_uri,
+               1 - (embedding_3072::halfvec(3072)
+                    <=> $1::halfvec(3072)) AS similarity
         FROM entity_registry
-        WHERE entity_type = $2 AND embedding IS NOT NULL
-        ORDER BY embedding <=> $1::vector
+        WHERE entity_type = $2 AND embedding_3072 IS NOT NULL
+        ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
         LIMIT 1
         """,
         str(query_embedding),

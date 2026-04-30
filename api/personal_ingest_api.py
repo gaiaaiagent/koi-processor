@@ -1076,25 +1076,32 @@ async def resolve_entity(
         if embedding:
             semantic_threshold = schema.semantic_threshold
 
-            # Query for semantic matches using pgvector cosine similarity
+            # Query for semantic matches using pgvector cosine similarity.
+            # Reads from embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration);
+            # halfvec cast required because pgvector full-precision vector ANN caps
+            # at 2000 dims. Uses idx_entity_registry_embedding_3072_hnsw.
             if entity.type:
                 semantic_match = await conn.fetchrow("""
                     SELECT id, fuseki_uri, entity_text, entity_type,
-                           1 - (embedding <=> $1::vector) AS similarity
+                           1 - (embedding_3072::halfvec(3072)
+                                <=> $1::halfvec(3072)) AS similarity
                     FROM entity_registry
-                    WHERE embedding IS NOT NULL
+                    WHERE embedding_3072 IS NOT NULL
                       AND entity_type = $2
-                      AND 1 - (embedding <=> $1::vector) > $3
+                      AND 1 - (embedding_3072::halfvec(3072)
+                               <=> $1::halfvec(3072)) > $3
                     ORDER BY similarity DESC
                     LIMIT 1
                 """, str(embedding), entity.type, semantic_threshold)
             else:
                 semantic_match = await conn.fetchrow("""
                     SELECT id, fuseki_uri, entity_text, entity_type,
-                           1 - (embedding <=> $1::vector) AS similarity
+                           1 - (embedding_3072::halfvec(3072)
+                                <=> $1::halfvec(3072)) AS similarity
                     FROM entity_registry
-                    WHERE embedding IS NOT NULL
-                      AND 1 - (embedding <=> $1::vector) > $2
+                    WHERE embedding_3072 IS NOT NULL
+                      AND 1 - (embedding_3072::halfvec(3072)
+                               <=> $1::halfvec(3072)) > $2
                     ORDER BY similarity DESC
                     LIMIT 1
                 """, str(embedding), semantic_threshold)
@@ -1171,11 +1178,14 @@ async def store_new_entity(
             logger.info(f"Generated phonetic code for new {entity.type}: {entity.name} -> {phonetic_code}")
 
     if embedding:
+        # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
+        # Legacy embedding (1024) column is no longer populated for new rows;
+        # existing 1024 vectors remain for back-compat reads but are not authoritative.
         await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
-                source, first_seen_rid, metadata, embedding, phonetic_code
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector, $9)
+                source, first_seen_rid, metadata, embedding_3072, phonetic_code
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector(3072), $9)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """,
             canonical.uri,
