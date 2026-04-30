@@ -4160,15 +4160,19 @@ async def search_sessions(request: SearchSessionsRequest):
                 "message": "Session chunks table not found. Run the session sensor first."
             }
 
-        # Check if we have embeddings
+        # Check if we have embeddings (3072-dim post-2026-04-23 OpenAI migration;
+        # session_chunks is fully backfilled — see migration 094 for legacy column drop)
         has_embeddings = await conn.fetchval("""
             SELECT EXISTS (
-                SELECT 1 FROM session_chunks WHERE embedding IS NOT NULL LIMIT 1
+                SELECT 1 FROM session_chunks WHERE embedding_3072 IS NOT NULL LIMIT 1
             )
         """)
 
         if has_embeddings and embedding_provider and ENABLE_SEMANTIC_MATCHING:
-            # Semantic search with embeddings
+            # Semantic search with embeddings.
+            # Reads from embedding_3072; halfvec cast required because pgvector
+            # full-precision vector ANN caps at 2000 dims.
+            # Uses idx_session_chunks_embedding_3072_hnsw.
             query_embedding = await generate_query_embedding(request.query)
 
             if query_embedding:
@@ -4177,12 +4181,13 @@ async def search_sessions(request: SearchSessionsRequest):
                     rows = await conn.fetch("""
                         SELECT sc.session_id, sc.session_rid, sc.chunk_index,
                                sc.chunk_text, sc.timestamp,
-                               1 - (sc.embedding <=> $1::vector) AS similarity,
+                               1 - (sc.embedding_3072::halfvec(3072)
+                                    <=> $1::halfvec(3072)) AS similarity,
                                sil.summary, sil.first_prompt
                         FROM session_chunks sc
                         LEFT JOIN session_ingestion_log sil ON sc.session_id = sil.session_id
                         WHERE sc.session_id = $2
-                          AND sc.embedding IS NOT NULL
+                          AND sc.embedding_3072 IS NOT NULL
                         ORDER BY similarity DESC
                         LIMIT $3
                     """, str(query_embedding), request.session_id, request.limit)
@@ -4191,11 +4196,12 @@ async def search_sessions(request: SearchSessionsRequest):
                     rows = await conn.fetch("""
                         SELECT sc.session_id, sc.session_rid, sc.chunk_index,
                                sc.chunk_text, sc.timestamp,
-                               1 - (sc.embedding <=> $1::vector) AS similarity,
+                               1 - (sc.embedding_3072::halfvec(3072)
+                                    <=> $1::halfvec(3072)) AS similarity,
                                sil.summary, sil.first_prompt
                         FROM session_chunks sc
                         LEFT JOIN session_ingestion_log sil ON sc.session_id = sil.session_id
-                        WHERE sc.embedding IS NOT NULL
+                        WHERE sc.embedding_3072 IS NOT NULL
                         ORDER BY similarity DESC
                         LIMIT $2
                     """, str(query_embedding), request.limit)
@@ -4287,7 +4293,7 @@ async def get_session_stats():
             "SELECT COUNT(*) FROM session_chunks"
         )
         chunks_with_embeddings = await conn.fetchval(
-            "SELECT COUNT(*) FROM session_chunks WHERE embedding IS NOT NULL"
+            "SELECT COUNT(*) FROM session_chunks WHERE embedding_3072 IS NOT NULL"
         )
 
         recent_sessions = await conn.fetch("""

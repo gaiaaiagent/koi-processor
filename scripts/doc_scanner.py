@@ -45,7 +45,7 @@ import yaml
 
 # Add repo root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from api.embedding_provider import RemoteEmbeddingProvider
+from api.embedding_provider import OpenAIEmbeddingProvider
 from api.chunker import TextChunker
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -54,9 +54,11 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
-EMBEDDING_REMOTE_URL = os.getenv("EMBEDDING_REMOTE_URL", "http://10.100.0.1:8352")
-EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+# Post-2026-04-23 OpenAI text-embedding-3-large @ 3072-dim migration.
+# Writes to koi_memory_chunks.embedding_3072.
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "3072"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 EXCLUDE_DIRS = {"node_modules", "venv", ".venv", "__pycache__", ".git", "dist", "build", "archive"}
 CHUNK_SIZE = 500
@@ -215,15 +217,16 @@ async def upsert_chunks(
         if emb is None:
             chunk_meta_i["embedding_failed"] = True
         emb_str = json.dumps(emb) if emb is not None else None
+        # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
         await conn.execute("""
             INSERT INTO koi_memory_chunks
-                (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding, metadata)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector, $7::jsonb)
+                (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding_3072, metadata)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector(3072), $7::jsonb)
             ON CONFLICT (chunk_rid) DO UPDATE SET
                 chunk_index = EXCLUDED.chunk_index,
                 total_chunks = EXCLUDED.total_chunks,
                 content = EXCLUDED.content,
-                embedding = EXCLUDED.embedding,
+                embedding_3072 = EXCLUDED.embedding_3072,
                 metadata = EXCLUDED.metadata
         """, chunk_rid, rid, i, len(chunks),
             json.dumps(chunk_content), emb_str, json.dumps(chunk_meta_i))
@@ -240,10 +243,15 @@ async def scan_repo(
     delete_missing: bool = True,
 ) -> Dict[str, int]:
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
-    embedder = RemoteEmbeddingProvider(
-        base_url=EMBEDDING_REMOTE_URL,
-        dimension=EMBEDDING_DIMENSION,
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "OPENAI_API_KEY not set — required for doc_scanner post-2026-04-23 "
+            "OpenAI 3072-dim migration. Source config/personal.env or export the key."
+        )
+    embedder = OpenAIEmbeddingProvider(
+        api_key=OPENAI_API_KEY,
         model=EMBEDDING_MODEL,
+        dimension=EMBEDDING_DIMENSION,
     )
     chunker = TextChunker(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 

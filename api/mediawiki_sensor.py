@@ -565,13 +565,14 @@ class MediaWikiSensor:
                         embedding_str = '[' + ','.join(str(x) for x in embeddings[idx]) + ']'
 
                     if embedding_str:
+                        # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
                         await conn.execute("""
                             INSERT INTO koi_memory_chunks
-                                (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding)
-                            VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
+                                (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding_3072)
+                            VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector(3072))
                             ON CONFLICT (chunk_rid) DO UPDATE SET
                                 content = EXCLUDED.content,
-                                embedding = EXCLUDED.embedding
+                                embedding_3072 = EXCLUDED.embedding_3072
                         """, chunk_rid, doc_rid, idx, len(chunk_entries),
                             chunk_content, embedding_str)
                     else:

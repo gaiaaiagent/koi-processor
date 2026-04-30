@@ -264,6 +264,10 @@ async def text_search(
 
         if q_embedding_str:
             try:
+                # Reads from embedding_3072 (post-2026-04-23 OpenAI 3072-dim
+                # migration); halfvec cast required because pgvector full-precision
+                # vector ANN caps at 2000 dims. Uses
+                # idx_koi_memory_chunks_embedding_3072_hnsw.
                 chunk_rows = await conn.fetch(f"""
                     WITH vector_results AS (
                         SELECT c.id, c.document_rid,
@@ -273,11 +277,15 @@ async def text_search(
                                c.content->>'section_id' AS section_id,
                                c.content->>'section_title' AS section_title,
                                c.content->>'wiki_url' AS wiki_url,
-                               ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vrank
+                               ROW_NUMBER() OVER (
+                                   ORDER BY c.embedding_3072::halfvec(3072)
+                                            <=> $1::halfvec(3072)
+                               ) AS vrank
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.embedding IS NOT NULL {code_filter}
-                        ORDER BY c.embedding <=> $1::vector LIMIT 40
+                        WHERE c.embedding_3072 IS NOT NULL {code_filter}
+                        ORDER BY c.embedding_3072::halfvec(3072)
+                                 <=> $1::halfvec(3072) LIMIT 40
                     ),
                     bm25_results AS (
                         SELECT c.id, c.document_rid,

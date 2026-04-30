@@ -651,10 +651,11 @@ class GitHubSensor:
                                 embedding = await self._embed_fn(embed_text[:2000])
                                 if embedding:
                                     embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
+                                    # Writes to dim_3072 (post-2026-04-23 OpenAI 3072-dim migration).
                                     await conn.execute("""
-                                        INSERT INTO koi_embeddings (memory_id, dim_1024)
-                                        VALUES ($1, $2::vector)
-                                        ON CONFLICT (memory_id) DO UPDATE SET dim_1024 = EXCLUDED.dim_1024
+                                        INSERT INTO koi_embeddings (memory_id, dim_3072)
+                                        VALUES ($1, $2::vector(3072))
+                                        ON CONFLICT (memory_id) DO UPDATE SET dim_3072 = EXCLUDED.dim_3072
                                     """, memory_id, embedding_str)
                                     embed_count += 1
 
@@ -703,13 +704,14 @@ class GitHubSensor:
 
                                 total = len(meaningful)
                                 if chunk_embedding:
+                                    # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
                                     await conn.execute("""
                                         INSERT INTO koi_memory_chunks
-                                            (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding)
-                                        VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
+                                            (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding_3072)
+                                        VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector(3072))
                                         ON CONFLICT (chunk_rid) DO UPDATE SET
                                             content = EXCLUDED.content,
-                                            embedding = EXCLUDED.embedding
+                                            embedding_3072 = EXCLUDED.embedding_3072
                                     """, chunk_rid, rid, idx, total, chunk_content, chunk_embedding)
                                 else:
                                     await conn.execute("""
@@ -728,10 +730,11 @@ class GitHubSensor:
                                 embedding = await self._embed_fn(embed_text[:2000])
                                 if embedding:
                                     embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
+                                    # Writes to dim_3072 (post-2026-04-23 OpenAI 3072-dim migration).
                                     await conn.execute("""
-                                        INSERT INTO koi_embeddings (memory_id, dim_1024)
-                                        VALUES ($1, $2::vector)
-                                        ON CONFLICT (memory_id) DO UPDATE SET dim_1024 = EXCLUDED.dim_1024
+                                        INSERT INTO koi_embeddings (memory_id, dim_3072)
+                                        VALUES ($1, $2::vector(3072))
+                                        ON CONFLICT (memory_id) DO UPDATE SET dim_3072 = EXCLUDED.dim_3072
                                     """, memory_id, embedding_str)
                                     embed_count += 1
 
@@ -743,10 +746,11 @@ class GitHubSensor:
                             embedding = await self._embed_fn(embed_text[:2000])
                             if embedding:
                                 embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
+                                # Writes to dim_3072 (post-2026-04-23 OpenAI 3072-dim migration).
                                 await conn.execute("""
-                                    INSERT INTO koi_embeddings (memory_id, dim_1024)
-                                    VALUES ($1, $2::vector)
-                                    ON CONFLICT (memory_id) DO UPDATE SET dim_1024 = EXCLUDED.dim_1024
+                                    INSERT INTO koi_embeddings (memory_id, dim_3072)
+                                    VALUES ($1, $2::vector(3072))
+                                    ON CONFLICT (memory_id) DO UPDATE SET dim_3072 = EXCLUDED.dim_3072
                                 """, memory_id, embedding_str)
                                 embed_count += 1
 
@@ -784,13 +788,14 @@ class GitHubSensor:
                                     chunk_embedding = '[' + ','.join(str(x) for x in emb) + ']'
 
                             if chunk_embedding:
+                                # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
                                 await conn.execute("""
                                     INSERT INTO koi_memory_chunks
-                                        (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding)
-                                    VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
+                                        (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding_3072)
+                                    VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector(3072))
                                     ON CONFLICT (chunk_rid) DO UPDATE SET
                                         content = EXCLUDED.content,
-                                        embedding = EXCLUDED.embedding
+                                        embedding_3072 = EXCLUDED.embedding_3072
                                 """, chunk_rid, rid, chunk["index"], chunk["total_chunks"],
                                     chunk_content, chunk_embedding)
                             else:
@@ -894,7 +899,7 @@ class GitHubSensor:
             embed_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM koi_embeddings ke "
                 "JOIN koi_memories m ON m.id = ke.memory_id "
-                "WHERE m.source_sensor='github-sensor' AND ke.dim_1024 IS NOT NULL"
+                "WHERE m.source_sensor='github-sensor' AND ke.dim_3072 IS NOT NULL"
             )
             repos = await conn.fetch(
                 "SELECT repo_name, last_scan_at, last_commit_sha, file_count, code_entity_count, status "
