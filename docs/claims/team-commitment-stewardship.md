@@ -5,7 +5,7 @@
 | Author | Darren Zal ([darren@regen.network](mailto:darren@regen.network)) |
 | Date | 2026-04-30 |
 | Document type | koi-repo response (companion to `regenos-charter-response-darren.md`) |
-| Status | Draft v2 — adds substrate-vs-sidecar architectural alternative to §4 (per Apr 30 design conversation surfacing a gap in v1: labor-asymmetry of per-member-pipeline-only framing). Earlier draft v1 peer-reviewed via 3-round Codex `/review-plan` (gpt-5.5, x-high). |
+| Status | Draft v3 — folds in three FAtF integrations: (1) spawner-recognition as distinct credit-flow (Dalrymple/edge-funder analog, §2 + §3); (2) wise legibility + untracked-allocation discipline as new §5.5 (FAtF §4 + Ruddick); (3) frontier-bridging hint in §6 (Kirsanow's percolation reading, FAtF §3). Plus self-initiated triad-collapse case explicit in §2. v2 added substrate-vs-sidecar architectural alternative to §4 (Apr 30 conversation, surfacing labor-asymmetry gap in v1). v1 peer-reviewed via 3-round Codex `/review-plan` (gpt-5.5, x-high). |
 | Responding to | [RegenOS Architecture Decisions Charter v1.0 (Open Questions)](https://www.notion.so/regennetwork/RegenOS-Architecture-Decisions-Charter-v1-0-Open-Questions-34f25b77eda18131b5f8eacae84f2024) (Gregory Landua, 2026-04-25, last edited 2026-04-28) |
 | Suggested permanent location | `~/projects/RegenAI/koi-processor/docs/claims/team-commitment-stewardship.md` |
 | Companion | [`regenos-charter-response-darren.md`](./regenos-charter-response-darren.md) — initial koi-repo response to the same Charter |
@@ -65,6 +65,10 @@ A task lifecycle maps onto this triad cleanly:
 
 The current pipeline conflates Spawn and Acceptance: a task written to `Tasks/*.md` with `status: inbox` carries both the witness-claim ("the agent saw this in the transcript") and an implicit promise ("Darren is the owner") — but no attestation step where Darren actually vouched for it. In single-node operation that's fine, because Darren is the only attester; in multi-node the ambiguity becomes a consent failure.
 
+**The triad describes the general case where speech-acts diffuse across multiple people.** The simplest case is **self-initiated** — a single person spawns, attests, and promises all in one move ("I should just do this"). All three speech-acts collapse onto one person; the team-task-pool architecture is mostly irrelevant for this case (no proposal, no disposition pass, no shared inbox needed). The pool's value is precisely in the *non-collapsed* cases — when person A spawns by surfacing the task, person B attests by vouching for it, and person C accepts as owner; or when an agent spawns and the team triages. Naming the collapsed case explicitly makes the diffused cases more legible by contrast, and makes clear that the architecture isn't trying to capture every commitment — it's trying to make legible the cross-person speech-act flows that already happen tacitly.
+
+**Spawner-recognition as a distinct credit-flow** (Dalrymple/edge-funder analog from FAtF §2). When the speech-acts diffuse, the *spawner* — the person whose attention surfaced the task in the first place — is doing substantive work that today's task ledger makes invisible. Today only the *owner who completes* gets credit; the person who *named the thing into existence* is unrecorded. By analogy with Dalrymple's retro-causal framing of impact certificates: the *edge-spawner* took the early risk of attention (extracting signal from transcript noise, putting a name to a fuzzy commitment) and the architecture should record that as a first-class attribution distinct from owner-credit. The provenance schema (§3) carries this via a new `spawner_uri` field; for self-initiated tasks `spawner_uri == owner_uri` (no surprise); for agent-inferred tasks `spawner_uri` is the human operator of the agent that surfaced it (the member whose pipeline ran), distinct from `extractor.agent_id`.
+
 The temporal-register question from "Beyond the Claims Engine" §2 ("given this is true, what do we do?" / "what was the action, if this turned out to be true?" / "what should we do to make this true?") also applies. Most existing meeting-task systems (including ours) optimize for the first question — they capture *present-register* action items. They occasionally retrospect (second question, e.g. our cancel-as-superseded pass today). They rarely capture **prospective commitments** (third question — "we want X to exist, and here's a pledge toward bringing it into being") as first-class objects. The team-task-pool is the natural surface where prospective commitments could live.
 
 ## 3. Schema sketch: provenance and consent on `task_registry`
@@ -95,6 +99,7 @@ CREATE INDEX idx_task_registry_provenance_gin ON task_registry USING GIN (proven
 ```json
 {
   "speech_act": "witness | attestation | promise",
+  "spawner_uri": "[[People/Darren Zal]]",
   "source_rid": "vault:Meetings/Regen AI/2026-04-30 Regen AI Meeting",
   "source_span": { "type": "transcript", "start_offset": 1234, "end_offset": 1456 },
   "extractor": {
@@ -119,12 +124,13 @@ CREATE INDEX idx_task_registry_provenance_gin ON task_registry USING GIN (proven
 }
 ```
 
-The `attestations` array is append-only; each attestation event (accept, reject, redirect, supersede) appends a record. The `consent_tier` column governs federation visibility; `private` (default) never leaves the local node.
+The `attestations` array is append-only; each attestation event (accept, reject, redirect, supersede) appends a record. The `consent_tier` column governs federation visibility; `private` (default) never leaves the local node. The `spawner_uri` field records the *human* who originated the surfacing of this task — the edge-spawner whose attention created it, distinct from the owner who eventually completes it. For self-initiated tasks, spawner equals owner; for asked-and-accepted, spawner is the asker; for agent-inferred, spawner is the operator of the inference pipeline.
 
-Three things this schema buys:
+Four things this schema buys:
 1. **Auditability** — for any task, you can trace back to the witness event and the attestation chain. This is what makes the pipeline *legible* to a Marie-tier reader and to the team itself.
 2. **Anchorability** — the task object carries the metadata needed for `x/data MsgAnchor` (consistent with D6's claims-engine + regen-signing rail). Anchoring tasks is parking-lot, but the schema doesn't preclude it.
 3. **Disposition vocabulary** — the `accept / reject / redirect / supersede` action enum gives the disposition pass (§4 below) a stable shape.
+4. **Spawner-credit visibility** — the `spawner_uri` field makes attention-work attributable: who did the work of surfacing this task from transcript noise / cross-meeting context / fuzzy-then-named-it. Today's task ledger renders that work invisible; recording it is the first step toward recognizing it (via aggregation, social signal, or — eventually — graph-native economic flows of the FAtF §3 type, well outside this memo's scope).
 
 ## 4. Flow sketch: KOI-mediated submission with a disposition pass
 
@@ -255,6 +261,27 @@ This memo's contribution is to apply both *inward* — to teammate attentional c
 
 **CARE/OCAP/FPIC extended inward.** Borrowing the BKC consent envelope discipline (charter response §2.3): the pool must support a **redaction / non-anchor disposition** as first-class. A member who attests "actually, don't track this — sensitive HR conversation, off-the-record" must produce a binding redaction signal that propagates. The schema's `attestations` array supports this via a `redact` action; the disposition pass must honor redactions before any team-tier surfacing.
 
+## 5.5 Wise legibility and untracked allocation
+
+The four sovereignty invariants and four power-capture mechanisms above answer "how do we track team commitments without violating consent?" There is a complementary question they do not answer: **what should we deliberately not track in the first place?** Borrowing FAtF §4 (wise legibility + untracked allocation, drawing on Ruddick), the architecture must explicitly admit a category of work that is *intentionally never proposed*, and treat that as healthy rather than as leakage.
+
+**Wise legibility.** Not all attention should be machine-readable. Some classes of human practice resist legibility by design and become worse if forced into a tracking system:
+
+- *Exploratory work in pre-articulation phase* — the half-formed thought that needs to remain half-formed for a few more days before anyone names it.
+- *Relational maintenance* — checking in on a teammate, listening when someone's stuck, the quiet attention that holds a team together. Naming it as a task degrades it.
+- *Thinking time* — sustained un-decomposed attention to a problem before it's well-formed enough to break into action items.
+- *Private commitments* — work a teammate is doing that genuinely is nobody else's business until it ships, including personal practice and external commitments that intersect with team work.
+
+The redaction disposition (§5 power-capture #4) handles after-the-fact removal — the case where something *was* proposed and shouldn't have been. Wise legibility is the discipline of *never proposing in the first place*: an `extraction.skip` policy, configurable per-meeting and per-extractor, that keeps certain classes of content out of the proposal layer entirely.
+
+**Untracked allocation.** A team-task-pool that captures *every* commitment is a panopticon. The architecture should explicitly *budget* for off-pool attention as a first-class category:
+
+- A reasonable rule of thumb (defer to team discussion for the actual number): at least 20–30% of any teammate's working attention is *unallocated by the system*, by design.
+- Pool participation rates matter less than pool *quality*. A team where everyone proposes 100% of their attention is unhealthy; the pool becomes the surface for performance theatre rather than collective sense-making.
+- The architecture should make untracked-allocation visible at the *aggregate* level (e.g., voluntary reporting of off-pool time as a single line in standup, never further-decomposed), not at the individual-task level.
+
+This is the discipline that makes the pool sustainable. Without it, the system biases toward overcaptured attention — and the eventual response is either burnout, gaming, or quiet exit. With it, the pool is a *partial* surface that admits its own incompleteness, which is paradoxically the only way it can be trusted.
+
 ## 6. Tasks → specs → roadmap arc: the modal commons of attention
 
 Will Ruddick's framing in *Beyond the Claims Engine* §1, threaded through "Attention turned into care; care into commitment; commitment into coordination; coordination into learning; learning back into wiser care," names what the meeting-task pipeline already half-does. Today's status-machine collapses all phases into `inbox / open / waiting / done / cancelled`. The lifecycle is real; the schema doesn't reflect it.
@@ -264,6 +291,8 @@ A second move worth naming: **tasks aren't isolated to-dos; they ladder into spe
 Concrete: the 9 tasks created today all relate to *Regen OS* and *Conservation International proposal* — both candidates for SpecDoc registration if not already registered. Adding a `spec_rid` field to the provenance block (linking task to spec) makes the *commitment-pool of attention* legible: you can ask the system "show me all current commitments to Regen OS spec evolution" and get a coherent answer.
 
 Kirsanow's frame from "Funding at the Frontier" §3 sharpens this further: investment lives at the **frontier** of the discourse graph. By analogy, attention should accrue at the frontier of the team's spec-DAG — the unverified-but-load-bearing edges, the bridges between sparse clusters. Tasks at the frontier are leverage tasks. Tasks at saturated areas are diminishing-returns tasks. The pool, with provenance pointing at SpecDoc RIDs, makes that distinction tractable.
+
+**Frontier-bridging as a leverage shape (speculative — flagged for follow-up).** FAtF §3's percolation reading of the discourse graph distinguishes saturation (diminishing returns) from frontier (leverage), and identifies *bridges between sparse clusters* as the highest-leverage investment sites — bets that, if they succeed, trigger structural reorganization of the field. The direct analog at team scale: tasks that bridge two otherwise-disconnected clusters in the spec-DAG carry more leverage per unit of attention than tasks extending an already-active cluster. Concrete: today's Conservation-International IT-memo task bridges the CI-deal cluster with the Regen-OS / Keycloak-auth-decision cluster — a structural bridge — vs. "Marie sets up the tool registry repo" which extends the already-saturated Regen-OS-tooling cluster. A query shape worth prototyping: *"show me current commitments that bridge clusters X and Y"* surfaces high-leverage in-flight work distinct from raw activity volume. Whether this is useful at team scale or only at funding scale is an open question — flagged as parking-lot for a possible "spec-DAG as discourse graph" follow-up memo, not load-bearing for the v1 architecture.
 
 This connects but doesn't conflate with funding-at-the-frontier mechanics. Internal-team attention allocation is a smaller game than public-goods funding; same shape, different scale. The arc is: explicit attentional commitments → composed into specs → composed into the spec-DAG → roots in the roadmap. The pool is the ledger of in-flight commitments at the bottom of that ladder.
 
@@ -308,6 +337,10 @@ Three non-collisions worth naming:
 - **Substrate-first or sidecar-first implementation order?** §4.2 recommends substrate-first (build the shared-backend agent before extending the per-member meeting-tasks skill to point at the shared inbox), on the argument that the substrate handles the largest population (members without local pipelines) and so delivers the most value-per-line-of-code. But sidecar-first has its own logic: the per-member pipeline already exists, and pointing the existing `meeting-tasks` skill at a `/tasks/propose` endpoint is a smaller change than building a new shared-backend agent from scratch. Both ship the same end-state; the difference is which population gets value first. Defer to Greg + decision session for ordering. Memo's recommendation is substrate-first but not load-bearing.
 - **What governance shape does the shared-backend agent's configuration carry?** Per §4.1, the agent's prompts/models/extraction logic become governance surface. Options: (a) treat as ordinary code under regular review; (b) elevate to formal SpecDoc-tracked artifact with versioned-and-anchored prompts; (c) hybrid — code under review, but extraction-shape changes (entity types, predicate vocabulary) require explicit team-attestation. Defer to D6 vocabulary-version contract discussion.
 - **Where does the shared-backend agent run, exactly?** The Regen AI production backend is shared-tier (the consent boundary), but the agent process could run as: (i) a long-running daemon on the prod server itself, (ii) an on-demand worker invoked via API when a meeting transcript is uploaded, (iii) external-to-prod (e.g., another node that has read access to prod's transcript store). Each has different failure modes. Default (ii) — on-demand worker — for v1 simplicity.
+
+**Open — added in v3 (FAtF integration):**
+- **Spawner-credit governance.** Should the system aggregate spawner-credit over time as a soft signal of who's surfacing useful tasks (cf. v3 §3 "Spawner-credit visibility")? Tradeoff: visibility helps recognize underappreciated attention work that today goes unattributed (per Dalrymple's edge-funder logic in FAtF §2); over-quantifying becomes performance theatre and reproduces the "every contribution must be measurable" pathology that wise legibility (§5.5) explicitly rejects. Lean: aggregate at the *team-quarterly-retro* layer (slow, qualitative, episodic), not at the per-task or per-week layer.
+- **Untracked-allocation budget.** What's the team's collective rule-of-thumb for off-pool attention (§5.5)? 20%? 30%? Per-teammate self-set? No system-imposed number defensible without team input; defer to team discussion at v0 demo retro.
 
 **Open — operational:**
 - Should the disposition pass run as a cron (every 6 hours, end-of-day) or on-demand (member triggers via `/tasks/dispose` MCP call)? Tradeoff: cron surfaces convergence faster; on-demand respects local-first cleanly. Probably both with sensible defaults.
