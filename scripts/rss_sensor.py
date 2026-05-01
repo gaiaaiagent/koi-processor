@@ -23,6 +23,17 @@ from urllib.request import Request, urlopen
 
 import asyncpg
 import feedparser
+
+# Cloudflare and similar gateways block default Python user-agents.
+# Use a browser-like UA on every feedparser request + the urlopen fallback.
+# 2026-04-30: failed feeds with default UA: docs.anthropic.com claude-code rss,
+# blog.langchain.com, www.cognition.ai/blog. All worked after this change.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+feedparser.USER_AGENT = _BROWSER_UA
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -99,7 +110,7 @@ def _parse_feed(url: str) -> Any:
     if parsed.entries or not getattr(parsed, "bozo", False):
         return parsed
 
-    req = Request(url, headers={"User-Agent": "dobby-rss-sensor/1.0"})
+    req = Request(url, headers={"User-Agent": _BROWSER_UA})
     with urlopen(req, timeout=30) as resp:
         body = resp.read()
     text = body.decode("utf-8", errors="replace")

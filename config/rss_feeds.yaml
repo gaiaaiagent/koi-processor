@@ -69,3 +69,100 @@ feeds:
     domain: engineering
     tags: [evals, llmops]
     enabled: true
+
+  # ─── Phase 1.5 expansion (2026-04-30) — named-author Substacks + AI subdomain feeds ───
+
+  # AI subdomain — model labs / release notes
+  - url: https://github.com/anthropics/claude-code/releases.atom
+    slug: claude-code-releases
+    domain: ai
+    tags: [anthropic, claude-code, releases]
+    enabled: true  # docs.anthropic.com/.../rss.xml 301s to HTML; using GitHub releases atom instead
+  - url: https://openai.com/blog/rss.xml
+    slug: openai
+    domain: ai
+    tags: [openai, models]
+    enabled: true
+  - url: https://huggingface.co/blog/feed.xml
+    slug: huggingface
+    domain: ai
+    tags: [open-models, ml]
+    enabled: true
+
+  # AI commentary / policy
+  - url: https://importai.substack.com/feed
+    slug: importai
+    domain: ai
+    tags: [policy, frontier, jack-clark]
+    enabled: true
+  - url: https://thezvi.substack.com/feed
+    slug: zvi
+    domain: ai
+    tags: [ai-safety, commentary]
+    enabled: true
+  - url: https://natesnewsletter.substack.com/feed
+    slug: natesnewsletter
+    domain: ai
+    tags: [agents, nate-jones, paid]
+    enabled: true
+  - url: https://news.smol.ai/rss.xml
+    slug: ainews-smol
+    domain: ai
+    tags: [daily, swyx, aggregator]
+    enabled: true
+
+  # AI engineering / agent infra
+  - url: https://github.com/langchain-ai/langchain/releases.atom
+    slug: langchain-releases
+    domain: ai
+    tags: [agents, llmops, releases]
+    enabled: true  # blog.langchain.com/rss 301s to HTML; using GitHub releases atom instead
+  - url: https://www.cognition.ai/blog?format=rss
+    slug: cognition
+    domain: ai
+    tags: [agents, devin]
+    enabled: false  # 2026-04-30: returns HTML not RSS; no public RSS endpoint found
+  - url: https://benkuhn.net/rss.xml
+    slug: benkuhn
+    domain: ai
+    tags: [anthropic, engineering]
+    enabled: true
+
+  # Commons / civilizational / meta-crisis (named authors from existing reading)
+  - url: https://indyjohar.substack.com/feed
+    slug: indyjohar
+    domain: commons
+    tags: [dark-matter-labs, civic-design, institutional-form]
+    enabled: true
+  - url: https://www.consilienceproject.org/feed
+    slug: consilience
+    domain: commons
+    tags: [meta-crisis, schmachtenberger, civilizational]
+    enabled: true
+  - url: https://medium.com/feed/@danielschmachtenberger
+    slug: schmachtenberger
+    domain: commons
+    tags: [meta-crisis, civilization-emerging]
+    enabled: true
+  - url: https://natehagens.substack.com/feed
+    slug: greatsimplification
+    domain: commons
+    tags: [energy, civilization, hagens]
+    enabled: true
+  - url: https://perspecteeva.substack.com/feed
+    slug: perspectiva
+    domain: commons
+    tags: [meta-crisis, philosophy]
+    enabled: true
+  - url: https://subconscious.substack.com/feed
+    slug: subconscious
+    domain: commons
+    tags: [protocol-design, brander, computing]
+    enabled: true
+
+  # Regen / ReFi (named author from essay-trilogy mining)
+  - url: https://willruddick.substack.com/feed
+    slug: willruddick
+    domain: regen
+    tags: [grassroots-economics, commitment-pools, ruddick]
+    enabled: true
