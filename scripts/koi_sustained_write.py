@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """KOI-native sustained-write: koi_memories → /knowledge/episodes API.
 
-Phase 2 of plan `koi-graph-consolidation-retire-graphiti.md`. Replaces
-`graphiti_sustained_write.py` for the new path: writes Spore canon-rebuild
-artifacts (decision-record, foundation, architecture) directly to PostgreSQL
-via the `/knowledge/episodes` endpoint, eliminating the FalkorDB sidecar
-detour and the dual-attribution-paths problem.
+Phase 2 of plan `koi-graph-consolidation-retire-graphiti.md` (2026-04-29).
+Writes Spore canon-rebuild artifacts (decision-record, foundation, architecture)
+directly to PostgreSQL via the `/knowledge/episodes` endpoint. Single-substrate
+path that eliminated the dual-attribution problem and replaced the prior
+`graphiti_sustained_write.py` (now retired alongside the FalkorDB sidecar at
+2026-04-30 Wave 1 close-out).
 
 Per plan §Decision-gate D1+D2:
   - ADR-Entity → entity_type=SpecDoc (URI shape: orn:personal-koi.entity:specdoc-<slug>-<hash>)
