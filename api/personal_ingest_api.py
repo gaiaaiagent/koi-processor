@@ -320,6 +320,15 @@ class ResolveRequest(BaseModel):
     type_hint: Optional[str] = None
     limit: int = 5
     context: Optional[ResolutionContext] = None
+    # Wave 2 B2 (2026-04-30): resolver-persistence asymmetry fix.
+    # When false (default; backwards-compatible): resolver may return
+    # is_new=true with a freshly-computed URI but does NOT persist the
+    # row to entity_registry. Caller must direct-INSERT if persistence
+    # is desired. When true: on is_new, the resolver also calls
+    # store_new_entity() so the row is committed before the response
+    # returns. Use this when the URI is going to be referenced
+    # immediately (e.g. as subject_uri in /knowledge/episodes facts).
+    persist: bool = False
 
 
 # Graph traversal response models
@@ -2561,7 +2570,8 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
 async def resolve_entity_get(
     label: str,
     type_hint: Optional[str] = None,
-    limit: int = 5
+    limit: int = 5,
+    persist: bool = False,
 ):
     """
     Resolve an entity label to canonical entity (GET - backward compatible).
@@ -2570,18 +2580,23 @@ async def resolve_entity_get(
         label: Entity name to resolve
         type_hint: Optional entity type filter
         limit: Maximum candidates (default 5)
+        persist: If true and is_new=true, commit the new row to
+                 entity_registry before returning. Default false
+                 (backwards-compatible; legacy callers unchanged).
+                 Wave 2 B2 — see ResolveRequest.persist.
 
-    Returns candidates with URIs and confidence scores.
+    Returns candidates with URIs, confidence scores, and `persisted` flag.
     """
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
 
     entity = ExtractedEntity(name=label, type=type_hint or "")
+    persisted = False
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, context=None)
 
         if canonical is None:
-            return {"candidates": [], "is_new": False}
+            return {"candidates": [], "is_new": False, "persisted": False}
 
         # Hide node_private entities from public resolution
         if not is_new:
@@ -2590,7 +2605,21 @@ async def resolve_entity_get(
                 canonical.uri
             )
             if is_private:
-                return {"candidates": [], "is_new": False}
+                return {"candidates": [], "is_new": False, "persisted": False}
+
+        # Wave 2 B2 — see resolve_entity_post for full rationale.
+        if persist and is_new:
+            try:
+                await store_new_entity(
+                    conn, entity, canonical,
+                    document_rid="entity-resolve-api",
+                    source="entity-resolve-api",
+                )
+                persisted = True
+            except Exception as e:
+                logger.warning(
+                    f"persist=true: store_new_entity failed for {canonical.uri}: {e}"
+                )
 
     return {
         "candidates": [{
@@ -2600,7 +2629,8 @@ async def resolve_entity_get(
             "confidence": canonical.confidence,
             "merged_with": canonical.merged_with
         }],
-        "is_new": is_new
+        "is_new": is_new,
+        "persisted": persisted,
     }
 
 
@@ -2628,11 +2658,12 @@ async def resolve_entity_post(request: ResolveRequest):
         raise HTTPException(status_code=503, detail="Database not available")
 
     entity = ExtractedEntity(name=request.label, type=request.type_hint or "")
+    persisted = False
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, request.context)
 
         if canonical is None:
-            return {"candidates": [], "is_new": False}
+            return {"candidates": [], "is_new": False, "persisted": False}
 
         # Hide node_private entities from public resolution
         if not is_new:
@@ -2641,7 +2672,29 @@ async def resolve_entity_post(request: ResolveRequest):
                 canonical.uri
             )
             if is_private:
-                return {"candidates": [], "is_new": False}
+                return {"candidates": [], "is_new": False, "persisted": False}
+
+        # Wave 2 B2: opt-in persistence. When persist=true and is_new=true,
+        # commit the row via store_new_entity() so callers can immediately
+        # reference the URI in subsequent writes (subject_uri / object_uri
+        # in /knowledge/episodes). store_new_entity is INSERT-IF-NOT-EXISTS
+        # so re-runs are safe.
+        if request.persist and is_new:
+            try:
+                # document_rid is a soft-required arg on store_new_entity;
+                # for resolver-driven creation there's no source document,
+                # so we pass a sentinel that won't accidentally collide
+                # with real koi_memories rids.
+                await store_new_entity(
+                    conn, entity, canonical,
+                    document_rid="entity-resolve-api",
+                    source="entity-resolve-api",
+                )
+                persisted = True
+            except Exception as e:
+                logger.warning(
+                    f"persist=true: store_new_entity failed for {canonical.uri}: {e}"
+                )
 
     return {
         "candidates": [{
@@ -2651,7 +2704,8 @@ async def resolve_entity_post(request: ResolveRequest):
             "confidence": canonical.confidence,
             "merged_with": canonical.merged_with
         }],
-        "is_new": is_new
+        "is_new": is_new,
+        "persisted": persisted,
     }
 
 

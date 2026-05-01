@@ -254,18 +254,23 @@ def fetch_rows(
 
 
 def resolve_entity_uri(
-    client: httpx.Client, label: str, type_hint: str
-) -> tuple[str, bool]:
-    """POST /entity/resolve with type_hint; return (uri, is_new).
+    client: httpx.Client, label: str, type_hint: str, persist: bool = True
+) -> tuple[str, bool, bool]:
+    """POST /entity/resolve with type_hint; return (uri, is_new, persisted).
 
-    Tier 3 path returns is_new=True without persisting; caller must
-    direct-write the entity row before /knowledge/episodes will dedup it
-    via Tier 1.
+    Wave 2 B2 (2026-04-30): resolver-persistence asymmetry resolved at the
+    API. Pass `persist=true` (default) so the resolver commits the new row
+    to entity_registry server-side before returning. The previous workaround
+    of direct-INSERT via `ensure_entity_row()` is no longer required.
+
+    Returns (uri, is_new, persisted). When is_new=False, persisted=False
+    (no work needed; row already existed). When is_new=True and persist=True,
+    persisted=True iff store_new_entity succeeded server-side.
     """
     r = client.post(
         f"{KOI_BASE_URL}/entity/resolve",
-        json={"label": label, "type_hint": type_hint},
-        timeout=15.0,
+        json={"label": label, "type_hint": type_hint, "persist": persist},
+        timeout=30.0,
     )
     r.raise_for_status()
     data = r.json()
@@ -274,18 +279,17 @@ def resolve_entity_uri(
         # Resolver returned no candidate (rare; defensive)
         raise RuntimeError(f"resolver returned no candidate for label={label!r}")
     cand = candidates[0]
-    return cand["uri"], bool(data.get("is_new"))
+    return cand["uri"], bool(data.get("is_new")), bool(data.get("persisted"))
 
 
 def ensure_entity_row(
     conn, uri: str, label: str, entity_type: str, batch_id: str
 ) -> bool:
-    """INSERT entity_registry row if not present (idempotent on fuseki_uri UNIQUE).
+    """DEPRECATED — kept for backwards-compat only. Use resolve_entity_uri(persist=True)
+    which performs the same INSERT server-side via store_new_entity().
 
     Returns True if a row was newly inserted; False if it already existed.
-    Caller has already gotten the canonical URI from /entity/resolve.
     """
-    # Use ON CONFLICT to make idempotent; check rowcount to know whether new.
     normalized = label.lower().strip()
     metadata_json = json.dumps({"batch_id": batch_id, "source": "koi_sustained_write"})
     with conn.cursor() as cur:
@@ -357,7 +361,6 @@ def post_episode(
 
 def ingest_one(
     client: httpx.Client,
-    db_conn,
     row: tuple,
     batch_id: str,
     log_fn,
@@ -365,10 +368,14 @@ def ingest_one(
 ) -> dict:
     """Ingest a single koi_memories row.
 
-    For decision-record kinds: pre-resolve SpecDoc + Session entities, write
-    entity rows if new, then POST /knowledge/episodes with AUTHORED_WITHIN
-    facts. For other kinds: POST episode with empty facts (RELATES_TO from
-    frontmatter is Phase 7 work).
+    For decision-record kinds: pre-resolve+persist SpecDoc + Session entities
+    via /entity/resolve?persist=true, then POST /knowledge/episodes with
+    AUTHORED_WITHIN facts. For other kinds: POST episode with empty facts
+    (RELATES_TO from frontmatter is Phase 7 work).
+
+    Wave 2 B2 (2026-04-30): direct DB connection no longer required —
+    persistence happens server-side via the resolver. Caller no longer
+    needs to pass a psycopg connection.
     """
     rid, title, text, created_at, doc_kind, repo = row
     ref_time = (
@@ -405,41 +412,40 @@ def ingest_one(
         log_fn({"event": "dry_run", **out})
         return out
 
-    # 1. Pre-resolve SpecDoc entity for this ADR/foundation/architecture doc.
+    # 1. Pre-resolve + persist SpecDoc entity for this ADR/foundation/architecture
+    #    doc. Wave 2 B2: persist=True commits server-side via store_new_entity()
+    #    so the URI is immediately referenceable in /knowledge/episodes facts.
     specdoc_label = specdoc_label_for(rid)
     try:
-        specdoc_uri, specdoc_is_new = resolve_entity_uri(client, specdoc_label, "SpecDoc")
+        specdoc_uri, specdoc_is_new, specdoc_persisted = resolve_entity_uri(
+            client, specdoc_label, "SpecDoc", persist=True
+        )
         out["specdoc_uri"] = specdoc_uri
         if specdoc_is_new:
-            inserted = ensure_entity_row(
-                db_conn, specdoc_uri, specdoc_label, "SpecDoc", batch_id
+            log_fn(
+                {
+                    "event": "specdoc_entity_created" if specdoc_persisted else "specdoc_entity_resolved_not_persisted",
+                    "rid": rid,
+                    "label": specdoc_label,
+                    "uri": specdoc_uri,
+                    "persisted": specdoc_persisted,
+                }
             )
-            if inserted:
-                log_fn(
-                    {
-                        "event": "specdoc_entity_created",
-                        "rid": rid,
-                        "label": specdoc_label,
-                        "uri": specdoc_uri,
-                    }
-                )
-                db_conn.commit()
-            else:
-                # Race condition or pre-existing row that resolver missed — fine.
-                log_fn(
-                    {
-                        "event": "specdoc_entity_existed",
-                        "rid": rid,
-                        "uri": specdoc_uri,
-                    }
-                )
+        else:
+            log_fn(
+                {
+                    "event": "specdoc_entity_existed",
+                    "rid": rid,
+                    "uri": specdoc_uri,
+                }
+            )
     except Exception as e:
         out["error"] = f"specdoc_resolve_fail: {e}"
         log_fn({"event": "specdoc_resolve_fail", "rid": rid, "err": str(e)[:300]})
         return out
 
-    # 2. For decision-record kinds: pre-resolve Session entities and build
-    #    AUTHORED_WITHIN facts.
+    # 2. For decision-record kinds: pre-resolve + persist Session entities and
+    #    build AUTHORED_WITHIN facts.
     facts: list[dict] = []
     if doc_kind == "decision-record":
         m = re.match(
@@ -455,21 +461,19 @@ def ingest_one(
         for s_uuid in session_uuids:
             s_label = session_label_for(s_uuid)
             try:
-                s_uri, s_is_new = resolve_entity_uri(client, s_label, "Session")
+                s_uri, s_is_new, s_persisted = resolve_entity_uri(
+                    client, s_label, "Session", persist=True
+                )
                 out["session_uris"].append(s_uri)
                 if s_is_new:
-                    inserted = ensure_entity_row(
-                        db_conn, s_uri, s_label, "Session", batch_id
+                    log_fn(
+                        {
+                            "event": "session_entity_created" if s_persisted else "session_entity_resolved_not_persisted",
+                            "session_uuid": s_uuid,
+                            "uri": s_uri,
+                            "persisted": s_persisted,
+                        }
                     )
-                    if inserted:
-                        log_fn(
-                            {
-                                "event": "session_entity_created",
-                                "session_uuid": s_uuid,
-                                "uri": s_uri,
-                            }
-                        )
-                        db_conn.commit()
             except Exception as e:
                 log_fn(
                     {
@@ -594,9 +598,8 @@ def main() -> int:
         log_f.close()
         return 0
 
-    # DB conn for direct entity_registry writes (autocommit off; explicit commits).
-    db_conn = psycopg.connect(DB_URL)
-
+    # Wave 2 B2: direct DB conn no longer needed for entity_registry writes —
+    # /entity/resolve?persist=true commits server-side via store_new_entity().
     n_episodes_added = 0
     n_episodes_reused = 0
     n_facts_created = 0
@@ -606,7 +609,7 @@ def main() -> int:
     t_start = time.time()
     try:
         for i, row in enumerate(rows):
-            out = ingest_one(client, db_conn, row, args.batch_id, log_fn)
+            out = ingest_one(client, row, args.batch_id, log_fn)
             if out["episode_added"]:
                 n_episodes_added += 1
             if out["episode_reused"]:
@@ -628,7 +631,6 @@ def main() -> int:
                 f"sup={out['facts_superseded']}"
             )
     finally:
-        db_conn.close()
         client.close()
 
     dur = time.time() - t_start

@@ -41,8 +41,16 @@ def _emit_embedding_metric(
     is_query: bool,
     duration_ms: float,
     ok: bool,
+    is_batch: bool = False,
+    batch_size: Optional[int] = None,
 ) -> None:
-    """Best-effort metric emission. Never raises (would block embedding calls)."""
+    """Best-effort metric emission. Never raises (would block embedding calls).
+
+    Wave 3 C4 (2026-04-30): supports batch records via `is_batch=true` +
+    `batch_size`. For batches, `text_len` is the sum of per-text char lengths
+    and `prompt_tokens` is the aggregate (when known). One metric line per
+    batch call (not per text within the batch).
+    """
     try:
         if prompt_type not in _VALID_PROMPT_TYPES:
             prompt_type = "unknown"
@@ -57,7 +65,10 @@ def _emit_embedding_metric(
             "prompt_tokens": prompt_tokens,  # exact for OpenAI; None elsewhere
             "duration_ms": round(duration_ms, 1),
             "ok": ok,
+            "is_batch": is_batch,
         }
+        if is_batch:
+            rec["batch_size"] = batch_size
         with _METRICS_PATH.open("a") as f:
             f.write(json.dumps(rec) + "\n")
     except Exception:
@@ -85,6 +96,56 @@ class EmbeddingProvider(ABC):
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple texts (DOCUMENT mode). Default: sequential."""
         return [await self.embed(t) for t in texts]
+
+    async def embed_batch_or_none(
+        self,
+        texts: List[str],
+        prompt_type: str = "unknown",
+    ) -> Optional[List[List[float]]]:
+        """Generate batch embeddings with B2/C4 token-tracking metric emission.
+
+        Wave 3 C4 (2026-04-30): one aggregate JSONL record per batch call
+        (not per text). Token count is the OpenAI-reported aggregate when
+        the provider supplies it via `_last_prompt_tokens`. Returns None
+        on failure (matches embed_or_none semantics).
+        """
+        t0 = time.monotonic()
+        provider_name = type(self).__name__.replace("EmbeddingProvider", "").lower()
+        text_chars = sum(len(t or "") for t in texts)
+        batch_size = len(texts)
+        try:
+            embs = await self.embed_batch(texts)
+            duration_ms = (time.monotonic() - t0) * 1000
+            tokens = getattr(self, "_last_prompt_tokens", None)
+            _emit_embedding_metric(
+                provider=provider_name,
+                model=self.model_name,
+                prompt_type=prompt_type,
+                text_len=text_chars,
+                prompt_tokens=tokens,
+                is_query=False,
+                duration_ms=duration_ms,
+                ok=True,
+                is_batch=True,
+                batch_size=batch_size,
+            )
+            return embs
+        except Exception as e:
+            duration_ms = (time.monotonic() - t0) * 1000
+            logger.warning(f"Batch embedding failed ({self.model_name}): {e}")
+            _emit_embedding_metric(
+                provider=provider_name,
+                model=self.model_name,
+                prompt_type=prompt_type,
+                text_len=text_chars,
+                prompt_tokens=None,
+                is_query=False,
+                duration_ms=duration_ms,
+                ok=False,
+                is_batch=True,
+                batch_size=batch_size,
+            )
+            return None
 
     async def embed_or_none(
         self,

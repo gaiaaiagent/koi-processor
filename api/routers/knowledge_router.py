@@ -29,6 +29,51 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# B1 (2026-04-30): Predicate-aware default supersession policy.
+#
+# Refines yesterday's per-request `expire_existing` flag into a per-predicate
+# policy. Three buckets:
+#   - SUPERSEDE_PREDICATES: single-valued; new fact with different object_uri
+#     auto-retires the old (sets valid_to=NOW). Use for canonical replacement
+#     relationships.
+#   - COEXIST_PREDICATES: multi-valued; new facts always insert; old facts
+#     never touched. Parallel attributions are valid.
+#   - Unknown predicates: fall through to per-request `expire_existing` flag
+#     (yesterday's mechanism). Default behavior unchanged for predicates we
+#     haven't classified yet.
+#
+# All matches case-insensitive; values stored UPPER_CASE per existing
+# convention (predicate_upper).
+# ---------------------------------------------------------------------------
+
+SUPERSEDE_PREDICATES: frozenset[str] = frozenset({
+    "SUPERSEDES",
+    "REPLACES",
+    "INVALIDATES",
+    "DEPRECATES",
+})
+
+COEXIST_PREDICATES: frozenset[str] = frozenset({
+    "AUTHORED_WITHIN",
+    "MENTIONS",
+    "RELATES_TO",
+    "DEPENDS_ON",
+})
+
+
+def _resolve_supersession_policy(predicate_upper: str, request_flag: bool) -> bool:
+    """Return True if same-(subj,pred) different-object should retire old fact.
+
+    Order: predicate-bucket match wins over request flag; unknown falls through.
+    """
+    if predicate_upper in SUPERSEDE_PREDICATES:
+        return True
+    if predicate_upper in COEXIST_PREDICATES:
+        return False
+    return request_flag
+
+
+# ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
 
@@ -120,6 +165,21 @@ class RecallWalkRequest(BaseModel):
         description="Filter walk to a specific knowledge_episodes.group_id (e.g. koi_canon_v1)",
     )
     max_hops: int = Field(3, ge=1, le=5, description="Cap on CTE walk depth")
+    # Wave 3 C2 (2026-04-30): null-answer-shape detection. When set, the walk
+    # restricts to facts whose `predicate IN (...)` and emits an explicit
+    # null_answer block when 0 such facts surface. Use for supersession-shape
+    # queries (e.g. "Has ADR-X been superseded?" with predicate_filter=["SUPERSEDED_BY"]).
+    predicate_filter: Optional[List[str]] = Field(
+        None,
+        description="If set, walk only emits facts with predicate IN (this list). "
+        "When the filtered walk returns 0 rows, the response carries a structured "
+        "null_answer block instead of falling back to the unfiltered walk.",
+    )
+    subject_uri: Optional[str] = Field(
+        None,
+        description="If set, anchor the null_answer block's subject. Used together with "
+        "predicate_filter to assert 'no edge of this type exists from this subject'.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,15 +289,19 @@ def create_router(
         episode_reused = False
 
         async with pool.acquire() as conn:
-            # 1. Check for existing episode by source_document (dedup)
+            # 1. Check for existing episode by (source_document, group_id) (dedup).
+            # Wave 2 B3 (2026-04-30): scope dedup to group_id so multi-group
+            # writes with the same source_document don't accidentally collapse
+            # into a single episode. Today (2026-04-30) all production episodes
+            # are in `koi_canon_v1` so 0 collisions exist; B3 hardens forward.
             import json as json_mod
             episode_id = None
             if body.source_document:
                 episode_id = await conn.fetchval("""
                     SELECT id FROM knowledge_episodes
-                    WHERE source_document = $1
+                    WHERE source_document = $1 AND group_id = $2
                     LIMIT 1
-                """, body.source_document)
+                """, body.source_document, body.group_id)
 
             if episode_id:
                 episode_reused = True
@@ -333,12 +397,16 @@ def create_router(
                         continue
 
                     # Invalidation: same subject + same predicate + different object → retire old.
-                    # Task A 2026-04-29: now opt-in via request-level
+                    # Task A 2026-04-29: opt-in via request-level
                     # `expire_existing=true`. Default false → parallel
-                    # attributions coexist (correct for AUTHORED_WITHIN /
-                    # RELATES_TO / MENTIONS). Set true for single-valued
-                    # predicates like SUPERSEDES / REPLACES / INVALIDATES.
-                    if body.expire_existing:
+                    # attributions coexist.
+                    # Wave 2 B1 2026-04-30: predicate-aware default. SUPERSEDE
+                    # bucket auto-retires; COEXIST bucket auto-coexists; unknown
+                    # falls through to request flag (yesterday's behavior).
+                    should_supersede = _resolve_supersession_policy(
+                        predicate_upper, body.expire_existing
+                    )
+                    if should_supersede:
                         for row in existing:
                             sim = float(row['similarity'])
                             if (row['predicate'] == predicate_upper
@@ -1121,22 +1189,23 @@ def create_router(
             # Embedding via _doc_embed (same provider as fact/entity writes).
             cand_pool = all_results[: max(limit * 2, 20)]
             try:
-                # Embed candidates in parallel-friendly serial calls.
-                # B2: tag with prompt_type="rerank" so token-tracking metrics
-                # distinguish MMR diversity-pass embeddings from extraction
-                # writes. Best-effort kwarg pass-through; older provider
-                # wrappers without the param still work via TypeError catch.
-                cand_embeddings: list[Optional[List[float]]] = []
-                for c in cand_pool:
-                    text = (c.get("text") or "").strip()
+                # Wave 3 C1 (2026-04-30): MMR latency optimization —
+                # asyncio.gather parallelizes the candidate embedding calls
+                # so the network round-trips overlap instead of serializing.
+                # B2: prompt_type="rerank" tags the metric line; best-effort
+                # kwarg pass-through with TypeError fallback for older shims.
+                async def _embed_one(text: str) -> Optional[List[float]]:
                     if not text or _doc_embed is None:
-                        cand_embeddings.append(None)
-                        continue
+                        return None
                     try:
-                        emb = await _doc_embed(text[:2000], prompt_type="rerank")
+                        return await _doc_embed(text[:2000], prompt_type="rerank")
                     except TypeError:
-                        emb = await _doc_embed(text[:2000])
-                    cand_embeddings.append(emb)
+                        return await _doc_embed(text[:2000])
+
+                _texts = [(c.get("text") or "").strip() for c in cand_pool]
+                cand_embeddings: list[Optional[List[float]]] = await asyncio.gather(
+                    *(_embed_one(t) for t in _texts)
+                )
                 # Iterative MMR selection.
                 import math as _math
                 def _cos(a, b):
@@ -1313,9 +1382,20 @@ def create_router(
 
             # 2b. Recursive CTE walk: start from seed episodes, traverse
             #     fact graph by subject_uri/object_uri up to max_hops.
+            #     Wave 3 C2: when body.predicate_filter is set, restrict the
+            #     final SELECT (not the walk traversal) to those predicates.
+            #     The walk itself still uses default walk_predicates so the
+            #     graph traversal isn't artificially constrained — only the
+            #     emitted result set.
             include_expired = shape == "relationship"
             validity_filter = "" if include_expired else "AND f.valid_to IS NULL"
             walk_predicates = ("AUTHORED_WITHIN", "RELATES_TO", "RELATED_TO")
+            # Result-emit predicate set: filter if requested, else default walk set.
+            emit_predicates = (
+                [p.upper() for p in body.predicate_filter]
+                if body.predicate_filter
+                else list(walk_predicates)
+            )
             walk_rows = await conn.fetch(
                 f"""
                 WITH RECURSIVE
@@ -1348,7 +1428,7 @@ def create_router(
                 LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
                 WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
                        OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
-                  AND f.predicate = ANY($3::text[])
+                  AND f.predicate = ANY($5::text[])
                   {validity_filter}
                 ORDER BY f.created_at DESC
                 LIMIT $4
@@ -1357,6 +1437,7 @@ def create_router(
                 body.max_hops,
                 list(walk_predicates),
                 max(body.limit * 4, 20),
+                emit_predicates,
             )
 
             walk_path.append(
@@ -1364,6 +1445,7 @@ def create_router(
                     "phase": "walk",
                     "max_hops": body.max_hops,
                     "n_facts": len(walk_rows),
+                    "predicate_filter": body.predicate_filter,
                 }
             )
 
@@ -1435,7 +1517,25 @@ def create_router(
                 )
 
         latency_walk_ms = round((time.monotonic() - t_walk_start) * 1000, 1)
-        return {
+        # Wave 3 C2: emit a structured null_answer block when predicate_filter
+        # was set AND the filtered walk returned 0 facts. Lets callers
+        # distinguish "no edge of this type exists" from "there might be edges
+        # we just didn't return any." Subject anchor optional but recommended
+        # for assertion shape.
+        null_answer: Optional[dict] = None
+        if body.predicate_filter and len(walk_rows) == 0:
+            null_answer = {
+                "predicate": body.predicate_filter,
+                "subject": body.subject_uri,
+                "asserted": "no edge found",
+                "scope": {
+                    "group_id": body.group_id,
+                    "shape": shape,
+                    "max_hops": body.max_hops,
+                    "seed_episodes": len(seed_episode_ids),
+                },
+            }
+        resp = {
             "results": results[: body.limit + len(seen_session_ids)],
             "walk_path": walk_path,
             "session_ids": list(seen_session_ids)[: body.limit],
@@ -1450,6 +1550,9 @@ def create_router(
                 "walk_phase": latency_walk_ms,
             },
         }
+        if null_answer is not None:
+            resp["null_answer"] = null_answer
+        return resp
 
     # -------------------------------------------------------------------
     # Shared helper
