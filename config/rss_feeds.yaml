@@ -100,6 +100,43 @@ feeds:
     domain: ai
     tags: [anthropic, claude, product]
     enabled: true
+
+  # Deep learning + geometric deep learning (2026-05-02 expansion)
+  - url: https://medium.com/feed/@michael-bronstein
+    slug: bronstein
+    domain: ai
+    tags: [gdl, gnn, geometric-deep-learning, bronstein]
+    enabled: true
+  - url: https://petar-v.com/feed
+    slug: petar-velickovic
+    domain: ai
+    tags: [gdl, gnn, deepmind, velickovic]
+    enabled: true
+  - url: https://distill.pub/rss.xml
+    slug: distill
+    domain: ai
+    tags: [dl, explanations, canonical]
+    enabled: true
+  - url: https://thegradient.pub/rss/
+    slug: thegradient
+    domain: ai
+    tags: [dl, ai-research, publication]
+    enabled: true
+  - url: http://export.arxiv.org/api/query?search_query=cat:cs.LG+AND+abs:%22sheaf%22&max_results=20&sortBy=submittedDate&sortOrder=descending
+    slug: arxiv-sheaf
+    domain: ai
+    tags: [arxiv, sheaf-neural-network, sheaf-diffusion, gdl]
+    enabled: true
+  - url: http://export.arxiv.org/api/query?search_query=cat:cs.LG+AND+abs:%22heterophilic%22&max_results=20&sortBy=submittedDate&sortOrder=descending
+    slug: arxiv-heterophilic
+    domain: ai
+    tags: [arxiv, heterophilic, graph-learning, gdl]
+    enabled: true
+  - url: http://export.arxiv.org/api/query?search_query=cat:cs.LG+AND+abs:%22graph+neural%22&max_results=20&sortBy=submittedDate&sortOrder=descending
+    slug: arxiv-gnn
+    domain: ai
+    tags: [arxiv, graph-neural-networks, gnn, gdl]
+    enabled: true
   - url: https://openai.com/blog/rss.xml
     slug: openai
     domain: ai
