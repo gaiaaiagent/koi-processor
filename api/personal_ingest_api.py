@@ -1940,15 +1940,34 @@ async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint"""
+async def health_check(request: Request):
+    """Health check endpoint.
+
+    Wave A A2 (2026-05-01): includes `null_embed_fact_count_db` (durable;
+    queries `knowledge_facts WHERE fact_embedding_3072 IS NULL`) and
+    `null_embed_fact_counter_process` (transient; in-process counter
+    accumulating since boot, cleared on restart). Non-zero values surface
+    silent embedding-provider degradation; pair with
+    `/diagnostics/embedding-health` for current-state failure rate.
+    """
     try:
+        null_embed_count_db = 0
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            try:
+                null_embed_count_db = await conn.fetchval("""
+                    SELECT COUNT(*) FROM knowledge_facts
+                    WHERE fact_embedding_3072 IS NULL
+                      AND valid_to IS NULL
+                """) or 0
+            except Exception:
+                null_embed_count_db = -1  # signal "query failed"
 
         # Get loaded entity types from schema
         schemas = get_entity_schemas()
         entity_types = list(schemas.keys())
+
+        process_counter = int(getattr(request.app.state, "null_embed_fact_counter", 0))
 
         return {
             "status": "healthy",
@@ -1966,7 +1985,9 @@ async def health_check():
                 "tier15_contextual": True,
                 "tier2_semantic": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,
                 "tier3_create": True
-            }
+            },
+            "null_embed_fact_count_db": null_embed_count_db,
+            "null_embed_fact_counter_process": process_counter,
         }
     except Exception as e:
         return JSONResponse(
@@ -2111,6 +2132,115 @@ async def embedding_preflight():
         results["dimension_check"]["pass"] and results["canary_check"]["pass"]
     )
     return results
+
+
+@app.get("/diagnostics/embedding-health")
+async def embedding_health(
+    window: int = 20,
+    fail_threshold: float = 0.20,
+):
+    """Wave A A1 (2026-05-01): proactive embedding-degradation surface.
+
+    Reads `~/.koi/logs/embedding-tokens.jsonl` (Phase 8 B2 instrumentation;
+    one record per call to `embed_or_none`/`embed_batch_or_none`) and computes
+    the failure-rate over the last `window` records. No additional API spend —
+    relies on real traffic. Use `/diagnostics/embedding-preflight` for explicit
+    synthetic-canary checks.
+
+    Query params:
+      window:         How many recent records to inspect (default 20).
+      fail_threshold: Failure rate above which `degraded=true` is set
+                      (default 0.20 = 20%).
+
+    Returns: {
+      degraded: bool,
+      failure_rate: float in [0, 1],
+      recent_calls: int (actual count examined; <= window),
+      ok: int,
+      fail: int,
+      window_start: ISO8601 or null,
+      window_end: ISO8601 or null,
+      last_error: str or null,
+      log_path: str,
+      log_present: bool,
+    }
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    log_path = _Path(_os.path.expanduser("~/.koi/logs/embedding-tokens.jsonl"))
+    out = {
+        "degraded": False,
+        "failure_rate": 0.0,
+        "recent_calls": 0,
+        "ok": 0,
+        "fail": 0,
+        "window_start": None,
+        "window_end": None,
+        "last_error": None,
+        "log_path": str(log_path),
+        "log_present": log_path.exists(),
+        "fail_threshold": fail_threshold,
+        "window_requested": window,
+    }
+    if not log_path.exists():
+        return out
+
+    # Tail-read last `window` non-marker records. Files can grow large; use a
+    # bounded tail scan instead of a full read.
+    try:
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            chunk = min(file_size, 256 * 1024)  # 256 KiB tail window
+            f.seek(file_size - chunk)
+            tail = f.read().decode("utf-8", errors="replace")
+        lines = [ln for ln in tail.splitlines() if ln.startswith("{")]
+        recent = lines[-window:] if len(lines) > window else lines
+    except Exception as e:
+        out["last_error"] = f"log_read_error: {e}"
+        return out
+
+    ok_count = 0
+    fail_count = 0
+    last_error_seen: Optional[str] = None
+    window_start: Optional[str] = None
+    window_end: Optional[str] = None
+    # NOTE: module-level `json` is aliased to `json_module_global` (see line 22)
+    # to dodge a name collision; rebind locally for readability inside the loop.
+    import json as _json_local
+    for ln in recent:
+        try:
+            r = _json_local.loads(ln)
+        except Exception:
+            continue
+        ts = r.get("ts")
+        if ts:
+            if window_start is None:
+                window_start = ts
+            window_end = ts
+        if r.get("ok"):
+            ok_count += 1
+        else:
+            fail_count += 1
+            # Track the most recent failure shape (provider/model/prompt_type).
+            last_error_seen = (
+                f"{r.get('provider')}:{r.get('model')}:"
+                f"{r.get('prompt_type')}:fail@{ts}"
+            )
+
+    total = ok_count + fail_count
+    out["recent_calls"] = total
+    out["ok"] = ok_count
+    out["fail"] = fail_count
+    out["window_start"] = window_start
+    out["window_end"] = window_end
+    if total > 0:
+        out["failure_rate"] = round(fail_count / total, 4)
+        out["degraded"] = out["failure_rate"] > fail_threshold
+    if last_error_seen:
+        out["last_error"] = last_error_seen
+    return out
 
 
 @app.get("/graph-version")

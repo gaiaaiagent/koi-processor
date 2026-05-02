@@ -138,6 +138,12 @@ class EpisodeCreateResponse(BaseModel):
     facts_superseded: int = 0
     entities_resolved: int
     entities_created: int
+    # Wave A A2 (2026-05-01): null-embed observability. Count of facts in
+    # this request that were written with `fact_embedding_3072=NULL`
+    # (typically because the embedding provider was degraded). NULL-embedded
+    # facts BYPASS future cosine dedup, so this count surfaces silent-fail
+    # episodes immediately at write-time.
+    facts_null_embed: int = 0
 
 
 class EpisodeRecord(BaseModel):
@@ -323,6 +329,7 @@ def create_router(
             facts_created = 0
             facts_skipped = 0
             facts_superseded = 0
+            facts_null_embed = 0  # Wave A A2: silent-fail surface
             for fact in body.facts:
                 # Resolve subject
                 subject_uri, is_new = await _resolve_or_create(
@@ -422,6 +429,33 @@ def create_router(
                                     f"{row['fact_text']} → {fact.fact_text}")
                                 facts_superseded += 1
 
+                # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
+                # writes. When fact_embedding is None (provider degraded /
+                # quota / auth fail), the fact still writes (don't lose data)
+                # but we (a) log structured WARNING with the predicate +
+                # subject identifying the affected fact, (b) bump a process-
+                # level counter on app.state for /health to surface, and
+                # (c) bump per-response facts_null_embed so the caller sees
+                # the silent-fail count immediately.
+                if fact_embedding is None:
+                    facts_null_embed += 1
+                    logger.warning(
+                        "null_embed_fact_write subject=%s predicate=%s "
+                        "group_id=%s episode_id=%s — provider degraded; "
+                        "fact written without fact_embedding_3072 and will "
+                        "BYPASS future cosine dedup until re-embedded",
+                        subject_uri,
+                        fact.predicate.upper(),
+                        body.group_id,
+                        episode_id,
+                    )
+                    try:
+                        request.app.state.null_embed_fact_counter = (
+                            getattr(request.app.state, "null_embed_fact_counter", 0) + 1
+                        )
+                    except Exception:
+                        pass
+
                 await conn.execute("""
                     INSERT INTO knowledge_facts
                         (episode_id, subject_uri, predicate, object_uri,
@@ -442,6 +476,7 @@ def create_router(
             facts_superseded=facts_superseded,
             entities_resolved=entities_resolved,
             entities_created=entities_created,
+            facts_null_embed=facts_null_embed,
         )
 
     async def _resolve_or_create(

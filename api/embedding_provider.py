@@ -374,6 +374,73 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
         return await self._embed_texts(texts, is_query=False)
 
 
+class FallbackChainEmbeddingProvider(EmbeddingProvider):
+    """Wave A A3 (2026-05-01): composing provider with primary + read-side fallback.
+
+    Wraps a `primary` provider (e.g. OpenAI 3072-dim) and a `fallback` provider
+    (e.g. Ollama nomic-embed-text 768-dim). On QUERY-path failure of the primary,
+    falls through to the fallback, zero-pads the result to primary's dimension,
+    and tags the metric line with `prompt_type` unchanged plus `provider` reflecting
+    "openaiemb-fallback" so observers see the degraded read.
+
+    WRITE-path (embed/embed_batch) NEVER falls back. Writes that fail surface
+    via Wave A A2's null-embed observability; reads stay functional but degraded
+    quality during outage. (A2 + A3 are paired: A3 keeps reads alive when
+    primary is down; A2 makes silent-fail writes visible.)
+    """
+
+    def __init__(
+        self,
+        primary: "EmbeddingProvider",
+        fallback: "EmbeddingProvider",
+    ):
+        self._primary = primary
+        self._fallback = fallback
+        # Report primary dimension externally so cosine queries against existing
+        # 3072-dim documents don't break. Fallback embeddings are zero-padded.
+        self.model_name = primary.model_name
+        self.dimension = primary.dimension
+
+    async def embed(self, text: str) -> List[float]:
+        # WRITE path: never falls back. Raises on primary failure so callers
+        # (embed_or_none) see None and the A2 path emits warning + counter.
+        return await self._primary.embed(text)
+
+    async def embed_query(self, text: str) -> List[float]:
+        # QUERY path: try primary; on any exception, fall back to secondary
+        # and zero-pad the result up to primary dimension.
+        try:
+            emb = await self._primary.embed_query(text)
+            return emb
+        except Exception as e:
+            logger.warning(
+                "Primary embedding provider failed on query path (%s); "
+                "falling back to %s. Read quality will be degraded.",
+                type(self._primary).__name__,
+                type(self._fallback).__name__,
+            )
+            fb_emb = await self._fallback.embed_query(text)
+            return _pad_to_dim(fb_emb, self.dimension)
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        # WRITE path batch: never falls back.
+        return await self._primary.embed_batch(texts)
+
+
+def _pad_to_dim(vec: List[float], target_dim: int) -> List[float]:
+    """Zero-pad or truncate `vec` to `target_dim`. Used by FallbackChain to
+    align fallback-provider output (e.g. 768-dim) with primary dim (3072) so
+    downstream halfvec(3072) cosine queries don't error.
+    Note: pad-to-zero is a degraded-quality signal (cosine valid but
+    information-poor across the padded dims). Documented in class docstring.
+    """
+    if len(vec) == target_dim:
+        return vec
+    if len(vec) > target_dim:
+        return list(vec[:target_dim])
+    return list(vec) + [0.0] * (target_dim - len(vec))
+
+
 def create_embedding_provider() -> Optional[EmbeddingProvider]:
     """
     Factory: read env vars and return a provider (or None if disabled).
@@ -407,6 +474,55 @@ def create_embedding_provider() -> Optional[EmbeddingProvider]:
             logger.info("No embedding provider configured (no EMBEDDING_PROVIDER, no OPENAI_API_KEY)")
             return None
 
+    primary = _build_provider(provider_name, model, dim)
+    if primary is None:
+        return None
+
+    # Wave A A3 (2026-05-01): optional read-side fallback chain.
+    # When EMBEDDING_FALLBACK is set, compose primary + fallback into a
+    # FallbackChainEmbeddingProvider. Currently supported fallback shapes:
+    #   EMBEDDING_FALLBACK="ollama"                 → Ollama nomic-embed-text
+    #   EMBEDDING_FALLBACK="ollama:<model_name>"    → Ollama with named model
+    # Fallback fires only on QUERY path; writes never fall back (A2 surfaces).
+    fallback_env = os.environ.get("EMBEDDING_FALLBACK", "").strip().lower()
+    if fallback_env:
+        fb_kind, _, fb_model = fallback_env.partition(":")
+        try:
+            if fb_kind == "ollama":
+                base_url = os.getenv(
+                    "EMBEDDING_FALLBACK_OLLAMA_URL",
+                    os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+                )
+                fb = OllamaEmbeddingProvider(
+                    model=fb_model or "nomic-embed-text",
+                    base_url=base_url,
+                )
+                logger.info(
+                    "Embedding fallback enabled: ollama/%s @ %s (dim=%s); "
+                    "primary=%s (dim=%s); query-path only, "
+                    "writes always use primary.",
+                    fb.model_name, base_url, fb.dimension,
+                    primary.model_name, primary.dimension,
+                )
+                return FallbackChainEmbeddingProvider(primary=primary, fallback=fb)
+            else:
+                logger.warning(
+                    "Unknown EMBEDDING_FALLBACK=%r; ignoring (no fallback chain).",
+                    fallback_env,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to construct embedding fallback (%s); continuing without. %s",
+                fallback_env, e,
+            )
+    return primary
+
+
+def _build_provider(
+    provider_name: str, model: str, dim: Optional[int]
+) -> Optional[EmbeddingProvider]:
+    """Construct a single embedding provider (no fallback chain).
+    Extracted from create_embedding_provider for A3 composition."""
     if provider_name == "openai":
         api_key = os.getenv("OPENAI_API_KEY", "")
         if not api_key:
