@@ -225,10 +225,22 @@ async def run(args: argparse.Namespace) -> None:
                 embed_texts = [f"Page: {title}\n\n{c['text']}" for c in chunks]
 
             # Batch embed (up to 100 per API call)
+            # Pack 2 (2026-04-28): migrated to embed_batch_or_none for
+            # B2/C4 token-tracking metric emission. Returns None on
+            # whole-batch failure; raise to preserve outer per-doc
+            # fail-loud semantics (outer try/except catches & increments
+            # error_count, then continues to next doc).
             embeddings = []
             for batch_start_idx in range(0, len(embed_texts), 100):
                 batch = embed_texts[batch_start_idx:batch_start_idx + 100]
-                batch_embs = await embedder.embed_batch(batch)
+                batch_embs = await embedder.embed_batch_or_none(
+                    batch, prompt_type="extraction"
+                )
+                if batch_embs is None:
+                    raise RuntimeError(
+                        f"embed_batch_or_none returned None for "
+                        f"batch_start_idx={batch_start_idx}, size={len(batch)}"
+                    )
                 embeddings.extend(batch_embs)
 
             # Store in DB within a transaction

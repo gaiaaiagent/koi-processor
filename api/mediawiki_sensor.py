@@ -508,12 +508,21 @@ class MediaWikiSensor:
             embed_texts = [ce[1] for ce in contextualized_entries]
             for batch_start in range(0, len(embed_texts), 100):
                 batch = embed_texts[batch_start:batch_start + 100]
-                try:
-                    batch_embs = await self._embedder.embed_batch(batch)
-                    embeddings.extend(batch_embs)
-                except Exception as e:
-                    logger.warning(f"Embed batch failed: {e}")
+                # Pack 2 (2026-04-28): migrated to embed_batch_or_none for
+                # B2/C4 token-tracking metric emission (one aggregate JSONL
+                # record per batch with is_batch=true). Returns None on
+                # whole-batch failure (matches embed_or_none semantics).
+                batch_embs = await self._embedder.embed_batch_or_none(
+                    batch, prompt_type="extraction"
+                )
+                if batch_embs is None:
+                    logger.warning(
+                        f"Embed batch failed (size={len(batch)}); "
+                        "falling back to None embeddings for this batch."
+                    )
                     embeddings.extend([None] * len(batch))
+                else:
+                    embeddings.extend(batch_embs)
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():

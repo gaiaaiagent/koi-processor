@@ -25,6 +25,16 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+# Pack 2.2 (2026-04-28): per-request fallback-fired observability.
+# `was_fallback_fired()` reports whether FallbackChainEmbeddingProvider
+# fell through to the secondary on the most recent embed_query call in
+# the current async context. Used to surface `degraded_embedding: true`
+# in unified-search responses when reads succeeded but on a degraded path.
+from api.embedding_provider import (
+    reset_fallback_fired,
+    was_fallback_fired,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -799,6 +809,10 @@ def create_router(
         degraded_reason: Optional[str] = None
         query_embedding: Optional[List[float]] = None
 
+        # Pack 2.2: reset the fallback-fired marker at request entry so a
+        # prior request's flag can never bleed into this one.
+        reset_fallback_fired()
+
         if not _query_embed:
             degraded = True
             degraded_reason = "embedding_unavailable"
@@ -817,6 +831,13 @@ def create_router(
                 degraded_reason = "embedding_failed"
                 logger.warning(
                     "unified-search degraded: embedding raised %s", exc)
+
+        # Pack 2.2: capture the fallback-fired marker immediately after
+        # the embedding call. True iff FallbackChainEmbeddingProvider
+        # fell through to its secondary provider on a query path
+        # (read succeeded but on degraded quality). Distinct from
+        # `degraded` above which signals embedding-unavailable / None.
+        embedding_fallback_fired = was_fallback_fired()
 
         all_results: list[dict] = []
         facts_results: list[dict] = []
@@ -1353,6 +1374,13 @@ def create_router(
         if degraded:
             response["degraded"] = True
             response["degraded_reason"] = degraded_reason
+        # Pack 2.2: surface fallback-fired-but-recovered case at request
+        # scope. Distinct from `degraded` (embedding unavailable / None);
+        # this signals "read succeeded on the secondary provider, quality
+        # is degraded for this response only." Field is omitted (not False)
+        # in the non-degraded path to keep response shape stable.
+        if embedding_fallback_fired:
+            response["degraded_embedding"] = True
         return response
 
     # -------------------------------------------------------------------

@@ -206,14 +206,24 @@ async def run_backfill(args):
         # Re-embed if needed
         embeddings = [None] * len(updates)
         if not args.skip_embed and embedder:
-            try:
-                for batch_start in range(0, len(embed_texts), 100):
-                    batch = embed_texts[batch_start:batch_start + 100]
-                    batch_embs = await embedder.embed_batch(batch)
-                    for j, emb in enumerate(batch_embs):
-                        embeddings[batch_start + j] = emb
-            except Exception as e:
-                logger.warning(f"Embedding failed for {doc_rid}: {e}")
+            # Pack 2 (2026-04-28): migrated to embed_batch_or_none for
+            # B2/C4 token-tracking metric emission (one aggregate JSONL
+            # record per batch with is_batch=true). Returns None on
+            # whole-batch failure; per-batch handling keeps partial progress
+            # across batches in the same doc.
+            for batch_start in range(0, len(embed_texts), 100):
+                batch = embed_texts[batch_start:batch_start + 100]
+                batch_embs = await embedder.embed_batch_or_none(
+                    batch, prompt_type="extraction"
+                )
+                if batch_embs is None:
+                    logger.warning(
+                        f"Embedding failed for {doc_rid} (batch_start={batch_start}, "
+                        f"size={len(batch)}); leaving these chunks with None embedding."
+                    )
+                    continue
+                for j, emb in enumerate(batch_embs):
+                    embeddings[batch_start + j] = emb
 
         # Write to DB
         async with pool.acquire() as conn:

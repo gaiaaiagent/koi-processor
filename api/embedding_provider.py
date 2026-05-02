@@ -19,6 +19,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -30,6 +31,33 @@ logger = logging.getLogger(__name__)
 _METRICS_DIR = Path(os.path.expanduser("~/.koi/logs"))
 _METRICS_PATH = _METRICS_DIR / "embedding-tokens.jsonl"
 _VALID_PROMPT_TYPES = {"extraction", "dedup", "query", "rerank", "unknown"}
+
+
+# ─── Pack 2.2 (2026-04-28): per-request fallback-fired observability ────────
+# ContextVar tracks whether the FallbackChainEmbeddingProvider had to fall
+# through to the secondary provider on a query path. Async-safe across
+# await boundaries (each request gets its own context). Read by the
+# unified-search handler to inject `degraded_embedding: true` into responses
+# when the primary embedding provider failed but the fallback recovered the
+# read.
+_fallback_fired: ContextVar[bool] = ContextVar("koi_embedding_fallback_fired", default=False)
+
+
+def reset_fallback_fired() -> None:
+    """Reset the fallback-fired marker for the current async context.
+
+    Callers (request handlers) should invoke this at request entry so a
+    prior request's flag does not bleed in. Note: ContextVar values are
+    already scoped per-task, so explicit reset is belt-and-suspenders;
+    cheap and unambiguous.
+    """
+    _fallback_fired.set(False)
+
+
+def was_fallback_fired() -> bool:
+    """Return True if FallbackChainEmbeddingProvider fell through during
+    the current async context's most recent embed_query call(s)."""
+    return _fallback_fired.get()
 
 
 def _emit_embedding_metric(
@@ -409,6 +437,11 @@ class FallbackChainEmbeddingProvider(EmbeddingProvider):
     async def embed_query(self, text: str) -> List[float]:
         # QUERY path: try primary; on any exception, fall back to secondary
         # and zero-pad the result up to primary dimension.
+        # Pack 2.2: clear the per-context fallback marker on entry; set it
+        # if the fallback path actually fires. Handlers read the marker
+        # after the embedding call to surface `degraded_embedding: true`
+        # at response scope.
+        _fallback_fired.set(False)
         try:
             emb = await self._primary.embed_query(text)
             return emb
@@ -419,6 +452,7 @@ class FallbackChainEmbeddingProvider(EmbeddingProvider):
                 type(self._primary).__name__,
                 type(self._fallback).__name__,
             )
+            _fallback_fired.set(True)
             fb_emb = await self._fallback.embed_query(text)
             return _pad_to_dim(fb_emb, self.dimension)
 

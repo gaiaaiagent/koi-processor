@@ -124,10 +124,18 @@ async def main(args):
             texts.append(text[:8000])  # truncate to avoid token limits
             uris.append(row["fuseki_uri"])
 
-        try:
-            embeddings = await provider.embed_batch(texts)
-        except Exception as e:
-            logger.error(f"Batch {batch_start//BATCH_SIZE + 1} failed: {e}")
+        # Pack 2 (2026-04-28): migrated to embed_batch_or_none for
+        # B2/C4 token-tracking metric emission. Returns None on
+        # whole-batch failure (matches embed_or_none semantics); same
+        # back-off/continue behavior as the prior try/except.
+        embeddings = await provider.embed_batch_or_none(
+            texts, prompt_type="extraction"
+        )
+        if embeddings is None:
+            logger.error(
+                f"Batch {batch_start//BATCH_SIZE + 1} failed "
+                f"(embed_batch_or_none returned None)"
+            )
             failures += len(batch)
             await asyncio.sleep(5)  # back off on failure
             continue
