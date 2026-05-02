@@ -3,8 +3,9 @@
 Learning Field Graph Projection — Phase 1, Step 7
 
 Projects bridge notes from Spore, Intelligence Commons (IC), Flow Coding (FC),
-and Poietic Match (PM) into the KOI knowledge graph as structured Claim,
-Concept, and Question entities with argumentative edges (supports/opposes).
+Poietic Match (PM), and bioregional-coordination into the KOI knowledge graph
+as structured Claim, Concept, and Question entities with argumentative edges
+(supports/opposes).
 
 Within Spore's graph-projections architecture (spore:ADR-0058 / spore:ADR-0070),
 this script operates as one infrastructure surface inside the Epistemic primary's
@@ -63,6 +64,11 @@ PROJECTS = {
         "project_id": "pm",
         "claimant_uri": "org:poietic-match-learning-field",
         "bridge_dir": Path.home() / "projects/poietic-match/docs/research/connections",
+    },
+    "bioregional-coordination": {
+        "project_id": "bioregional-coordination",
+        "claimant_uri": "org:bioregional-coordination-learning-field",
+        "bridge_dir": Path.home() / "projects/bioregional-coordination/docs/research/connections",
     },
 }
 
@@ -879,7 +885,7 @@ async def project_bridge_note(
 # ---------------------------------------------------------------------------
 
 def discover_bridge_notes() -> list[tuple[Path, str]]:
-    """Find all bridge notes across both repos."""
+    """Find all bridge notes across configured project repos."""
     notes = []
 
     for project_key, cfg in PROJECTS.items():
@@ -888,7 +894,7 @@ def discover_bridge_notes() -> list[tuple[Path, str]]:
             log.warning(f"Bridge dir not found: {bridge_dir}")
             continue
 
-        for md_path in sorted(bridge_dir.glob("*.md")):
+        for md_path in sorted(bridge_dir.rglob("*.md")):
             if md_path.name == "CLAUDE.md":
                 continue
             # Parse frontmatter rather than substring-match the body —
@@ -937,6 +943,8 @@ async def main():
             project_key = "fc"
         elif "poietic-match" in str(note_path):
             project_key = "pm"
+        elif "bioregional-coordination" in str(note_path):
+            project_key = "bioregional-coordination"
         else:
             project_key = "spore"
         note_paths = [(note_path, project_key)]
@@ -952,8 +960,13 @@ async def main():
     # Connect to KOI
     conn = await asyncpg.connect("postgresql://localhost:5432/personal_koi")
 
-    # Verify claimant orgs exist
-    for cfg in PROJECTS.values():
+    active_project_keys = {project_key for _, project_key in note_paths}
+
+    # Verify claimant orgs exist for projects participating in this run.
+    # Optional configured projects may not have KOI seed entities until they
+    # first author bridge notes.
+    for project_key in sorted(active_project_keys):
+        cfg = PROJECTS[project_key]
         exists = await conn.fetchval(
             "SELECT 1 FROM entity_registry WHERE fuseki_uri = $1",
             cfg["claimant_uri"],
@@ -962,8 +975,9 @@ async def main():
             log.error(f"Claimant entity missing: {cfg['claimant_uri']}")
             sys.exit(1)
 
-    # Verify project URIs resolve
-    for cfg in PROJECTS.values():
+    # Verify project URIs resolve for projects participating in this run.
+    for project_key in sorted(active_project_keys):
+        cfg = PROJECTS[project_key]
         try:
             uri = await resolve_project_uri(conn, cfg["project_id"])
             log.info(f"Project {cfg['project_id']} → {uri}")
