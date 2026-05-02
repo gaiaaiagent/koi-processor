@@ -42,23 +42,69 @@ logger = logging.getLogger(__name__)
 #     (yesterday's mechanism). Default behavior unchanged for predicates we
 #     haven't classified yet.
 #
+# Wave B B2 (2026-05-03): operator-extensible via env vars at module-load time.
+#   SUPERSEDE_PREDICATES env var (comma-separated) — defaults to the four
+#     canonical names below if unset/empty.
+#   COEXIST_PREDICATES env var (comma-separated) — defaults to the four
+#     canonical names below if unset/empty.
+# Whitespace + empty-token entries are stripped; values normalized to
+# UPPER_CASE per existing predicate_upper convention. Setting the env to a
+# non-empty value REPLACES the default set entirely (does not extend); operators
+# wanting to add a single predicate must include the canonical four in their
+# override. Example:
+#   SUPERSEDE_PREDICATES="SUPERSEDES,REPLACES,INVALIDATES,DEPRECATES,EXTENDS"
+#
 # All matches case-insensitive; values stored UPPER_CASE per existing
 # convention (predicate_upper).
 # ---------------------------------------------------------------------------
 
-SUPERSEDE_PREDICATES: frozenset[str] = frozenset({
+_DEFAULT_SUPERSEDE_PREDICATES: frozenset[str] = frozenset({
     "SUPERSEDES",
     "REPLACES",
     "INVALIDATES",
     "DEPRECATES",
 })
 
-COEXIST_PREDICATES: frozenset[str] = frozenset({
+_DEFAULT_COEXIST_PREDICATES: frozenset[str] = frozenset({
     "AUTHORED_WITHIN",
     "MENTIONS",
     "RELATES_TO",
     "DEPENDS_ON",
 })
+
+
+def _parse_predicate_env(env_name: str, default: frozenset[str]) -> frozenset[str]:
+    """Parse a comma-separated predicate list from env. Returns default if
+    unset, empty, or all-whitespace. Tokens stripped + uppercased; empty
+    tokens (e.g. trailing comma) discarded.
+    """
+    raw = os.environ.get(env_name, "")
+    tokens = [t.strip().upper() for t in raw.split(",") if t.strip()]
+    if not tokens:
+        return default
+    return frozenset(tokens)
+
+
+SUPERSEDE_PREDICATES: frozenset[str] = _parse_predicate_env(
+    "SUPERSEDE_PREDICATES", _DEFAULT_SUPERSEDE_PREDICATES,
+)
+COEXIST_PREDICATES: frozenset[str] = _parse_predicate_env(
+    "COEXIST_PREDICATES", _DEFAULT_COEXIST_PREDICATES,
+)
+
+# Log the effective policy at module-load so operators can confirm overrides
+# took effect (or the defaults applied as expected).
+if SUPERSEDE_PREDICATES != _DEFAULT_SUPERSEDE_PREDICATES \
+        or COEXIST_PREDICATES != _DEFAULT_COEXIST_PREDICATES:
+    logger.info(
+        "Predicate policy overrides active. SUPERSEDE=%s COEXIST=%s",
+        sorted(SUPERSEDE_PREDICATES), sorted(COEXIST_PREDICATES),
+    )
+else:
+    logger.info(
+        "Predicate policy: defaults. SUPERSEDE=%s COEXIST=%s",
+        sorted(SUPERSEDE_PREDICATES), sorted(COEXIST_PREDICATES),
+    )
 
 
 def _resolve_supersession_policy(predicate_upper: str, request_flag: bool) -> bool:
