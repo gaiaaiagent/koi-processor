@@ -4,7 +4,7 @@
 
 ✅ **Provenance System Enhanced (September 27, 2025)**: Complete parent-child document relationships with full URL preservation through provenance chain.
 
-✅ **Text Extraction Fixed (Sept 14, 2025)**: Pipeline now processing 100% clean, uncorrupted text after fixing sensor extraction issues.
+✅ **Text Extraction Fixed (September 14, 2025)**: Pipeline now processing 100% clean, uncorrupted text after fixing sensor extraction issues.
 
 A comprehensive sensor-to-agent pipeline that processes real-time content from KOI sensors, generates embeddings, handles deduplication and versioning, and provides immediate semantic search capabilities for AI agents.
 
