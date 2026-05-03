@@ -59,7 +59,7 @@ def generate_comparison(packets, openai_answers, anthropic_answers, outpath: Pat
         "",
         f"**Packets:** {len(packets)} frozen prompt packets from Octo",
         f"**OpenAI model:** {os.getenv('CHAT_MODEL', os.getenv('CHAT_LLM_MODEL', 'gpt-4o-mini'))}",
-        f"**Anthropic model:** {os.getenv('ANTHROPIC_CHAT_MODEL', 'claude-sonnet-4-20250514')}",
+        f"**Anthropic model:** {os.getenv('ANTHROPIC_CHAT_MODEL', 'claude-sonnet-4-6')}",
         f"**Temperature:** {TEMPERATURE}, **Max tokens:** {MAX_TOKENS}",
         "",
         "## Scoring Rubric (1-5 per dimension)",
@@ -149,7 +149,7 @@ async def main():
         sys.exit(1)
 
     openai_model = os.getenv("CHAT_MODEL", os.getenv("CHAT_LLM_MODEL", "gpt-4o-mini"))
-    anthropic_model = os.getenv("ANTHROPIC_CHAT_MODEL", "claude-sonnet-4-20250514")
+    anthropic_model = os.getenv("ANTHROPIC_CHAT_MODEL", "claude-sonnet-4-6")
 
     openai_provider = OpenAIChatProvider(api_key=openai_key, default_model=openai_model)
     anthropic_provider = AnthropicChatProvider(api_key=anthropic_key, default_model=anthropic_model)

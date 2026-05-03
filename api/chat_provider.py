@@ -73,7 +73,7 @@ class AnthropicChatProvider(ChatProvider):
 
     provider_name = "anthropic"
 
-    def __init__(self, api_key: str, default_model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, api_key: str, default_model: str = "claude-sonnet-4-6"):
         import anthropic
         self._client = anthropic.Anthropic(api_key=api_key)
         self.default_model = default_model
@@ -153,7 +153,7 @@ def create_chat_provider() -> ChatProvider:
         return OpenAIChatProvider(api_key=_require_key(_OPENAI_KEY_VAR), default_model=model)
 
     if provider == "anthropic":
-        model = os.getenv("CHAT_MODEL", "claude-sonnet-4-20250514")
+        model = os.getenv("CHAT_MODEL", "claude-sonnet-4-6")
         return AnthropicChatProvider(api_key=_require_key(_ANTHROPIC_KEY_VAR), default_model=model)
 
     raise ValueError(f"Unsupported CHAT_PROVIDER: {provider!r} (supported: 'openai', 'anthropic')")
