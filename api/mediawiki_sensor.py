@@ -396,22 +396,30 @@ class MediaWikiSensor:
                     "template_type": parsed.template_type,
                     "page_class": parsed.page_class,
                 })
-                doc_metadata = json.dumps({
+                doc_metadata_dict = {
                     "source_rid": parsed.source_rid,
                     "page_id": parsed.page_id,
                     "word_count": parsed.word_count,
                     "revision_id": parsed.revision_id,
-                })
+                }
+                doc_metadata = json.dumps(doc_metadata_dict)
+
+                # Privacy: promote metadata is_private/access_source to dedicated columns.
+                # Sticky-OR on ON CONFLICT — once-private-stays-private (Phase 1 / tech-backlog #23).
+                is_private = bool(doc_metadata_dict.get('is_private', False))
+                access_source = doc_metadata_dict.get('access_source')
 
                 await conn.execute("""
-                    INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata)
-                    VALUES ($1, $2, 'UPDATE', 'mediawiki-sensor', $3::jsonb, $4::jsonb)
+                    INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata, is_private, access_source)
+                    VALUES ($1, $2, 'UPDATE', 'mediawiki-sensor', $3::jsonb, $4::jsonb, $5, $6)
                     ON CONFLICT (rid) DO UPDATE SET
                         event_type = 'UPDATE',
                         content = EXCLUDED.content,
                         metadata = EXCLUDED.metadata,
+                        is_private = (koi_memories.is_private OR EXCLUDED.is_private),
+                        access_source = COALESCE(koi_memories.access_source, EXCLUDED.access_source),
                         updated_at = NOW()
-                """, uuid.uuid4(), doc_rid, doc_content, doc_metadata)
+                """, uuid.uuid4(), doc_rid, doc_content, doc_metadata, is_private, access_source)
 
                 # Delete old chunks
                 await conn.execute(

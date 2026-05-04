@@ -790,13 +790,19 @@ async def store_processed_document(
     # Calculate content hash for document
     content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
 
+    # Privacy: promote metadata is_private/access_source to dedicated columns.
+    # Sticky-OR on ON CONFLICT — once-private-stays-private (Phase 1 / tech-backlog #23).
+    is_private = bool((metadata or {}).get('is_private', False))
+    access_source = (metadata or {}).get('access_source')
+
     # Store document in koi_memories (not chunks)
     await conn.execute("""
         INSERT INTO koi_memories (
             id, rid, cid, version, event_type, source_sensor,
             content, metadata, published_at, published_confidence,
-            content_hash, source_content_rid, is_chunk
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE)
+            content_hash, source_content_rid, is_chunk,
+            is_private, access_source
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE, $13, $14)
         ON CONFLICT (rid) DO UPDATE SET
             content = $7,
             metadata = $8,
@@ -804,6 +810,8 @@ async def store_processed_document(
             published_confidence = $10,
             content_hash = $11,
             source_content_rid = $12,
+            is_private = (koi_memories.is_private OR EXCLUDED.is_private),
+            access_source = COALESCE(koi_memories.access_source, EXCLUDED.access_source),
             updated_at = NOW()
     """,
         str(uuid.uuid4()),
@@ -823,7 +831,9 @@ async def store_processed_document(
         published_at,
         published_confidence,
         content_hash,
-        source_content_rid
+        source_content_rid,
+        is_private,
+        access_source
     )
 
     logger.info(f"Stored processed document in koi_memories: {document_rid}")
@@ -939,13 +949,19 @@ async def store_legacy_memory_chunk(
         # Calculate content hash
         content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
 
+        # Privacy: promote metadata is_private/access_source to dedicated columns
+        # (Phase 1 / tech-backlog #23). ON CONFLICT (id) DO NOTHING means
+        # initial-INSERT is the only write path here; sticky-OR is moot.
+        chunk_is_private = bool((metadata or {}).get('is_private', False))
+        chunk_access_source = (metadata or {}).get('access_source')
+
         # Store in koi_memories
         await conn.execute("""
             INSERT INTO koi_memories (
                 id, rid, cid, version, event_type, source_sensor,
                 content, metadata, published_at, published_confidence,
-                content_hash
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                content_hash, is_private, access_source
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (id) DO NOTHING
         """,
             memory_id,
@@ -958,7 +974,9 @@ async def store_legacy_memory_chunk(
             json.dumps(json_serialize(metadata)),
             published_at,
             published_confidence,
-            content_hash
+            content_hash,
+            chunk_is_private,
+            chunk_access_source
         )
     else:
         # Store in legacy memories table

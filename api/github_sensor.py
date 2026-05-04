@@ -605,21 +605,29 @@ class GitHubSensor:
 
             event_type = "NEW" if fr["rel_path"] not in existing_hashes else "UPDATE"
 
+            # Privacy: promote metadata is_private/access_source to dedicated columns.
+            # Sticky-OR on ON CONFLICT — once-private-stays-private (Phase 1 / tech-backlog #23).
+            is_private = bool(doc_metadata.get('is_private', False))
+            access_source = doc_metadata.get('access_source')
+
             try:
                 async with self.pool.acquire() as conn:
                     # Upsert into koi_memories
                     memory_id = await conn.fetchval("""
-                        INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata)
-                        VALUES ($1, $2, $3, 'github-sensor', $4::jsonb, $5::jsonb)
+                        INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata, is_private, access_source)
+                        VALUES ($1, $2, $3, 'github-sensor', $4::jsonb, $5::jsonb, $6, $7)
                         ON CONFLICT (rid) DO UPDATE SET
                             event_type = EXCLUDED.event_type,
                             content = EXCLUDED.content,
                             metadata = EXCLUDED.metadata,
+                            is_private = (koi_memories.is_private OR EXCLUDED.is_private),
+                            access_source = COALESCE(koi_memories.access_source, EXCLUDED.access_source),
                             updated_at = NOW()
                         RETURNING id
                     """, uuid.uuid4(), rid, event_type,
                         json_module.dumps(doc_content),
-                        json_module.dumps(doc_metadata))
+                        json_module.dumps(doc_metadata),
+                        is_private, access_source)
 
                     doc_count += 1
 
