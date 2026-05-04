@@ -26,13 +26,16 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────
 
-DEFAULT_API = "https://regen-rest.publicnode.com"
+DEFAULT_API = "https://rest-regen.ecostake.com"
 # Fallback REST providers ordered by tx-search depth.
-# PublicNode has the deepest history; EcoStake is decent; Polkachu is shallow.
+# EcoStake and Cosmos Directory both serve archive history (verified 2026-05-04
+# via probe of block 25,500,000 from 2026-02-09). PublicNode and Polkachu are
+# pruned (lowest available height ~25.7M and ~26.1M respectively) so they
+# can't reliably answer queries that need to walk older blocks.
 FALLBACK_APIS = [
-    "https://regen-rest.publicnode.com",
     "https://rest-regen.ecostake.com",
-    "https://regen-api.polkachu.com",
+    "https://rest.cosmos.directory/regen",
+    "https://regen-rest.publicnode.com",
 ]
 # MBS01 batch denom prefixes (SeaTrees / Seatrees+ Biodiversity Blocks)
 # Only known batch: MBS01-001-20240601-20340531-001
@@ -118,6 +121,12 @@ BLOOM_COLUMNS = [
 
 # ── HTTP helpers ─────────────────────────────────────────────────────
 
+class PrunedHistoryError(RuntimeError):
+    """Raised when a Cosmos REST provider can't serve the requested block height
+    because it has pruned that history. Lets the fallback chain skip the dead
+    provider instead of running a 50-page scan that returns silently empty."""
+
+
 def _get(url: str, params: dict = None) -> dict:
     """GET request returning parsed JSON."""
     if params:
@@ -127,10 +136,16 @@ def _get(url: str, params: dict = None) -> dict:
     req.add_header("User-Agent", "seatrees-bloom-export/1.0")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         body = e.read().decode()[:500]
+        if "lowest height is" in body or "is not available" in body:
+            raise PrunedHistoryError(body) from e
         raise RuntimeError(f"HTTP {e.code} from {url}: {body}") from e
+    # Some providers return a 200 with a Cosmos error envelope in the body.
+    if isinstance(data, dict) and "lowest height is" in str(data.get("message") or ""):
+        raise PrunedHistoryError(data["message"])
+    return data
 
 
 # ── Metadata cache ───────────────────────────────────────────────────
@@ -265,6 +280,8 @@ def _scan_txs(api: str, action: str, start_dt, end_dt, batch_prefixes: tuple,
 
         try:
             data = _get(url)
+        except PrunedHistoryError:
+            raise
         except Exception as e:
             log.error("Failed to query page %d: %s", page, e)
             break
@@ -338,11 +355,15 @@ def query_retirements(api_url: str, start_date: str, end_date: str, batch_prefix
         if found:
             log.info("  Found %d retirements from %s", len(found), action.split(".")[-1])
         retirements.extend(found)
-        # SeaTrees MBS01 retirements are executed via authz/MsgExec. Once we find
-        # matching retirements there, scanning MsgRetire and MsgBuyDirect mainly
-        # adds duplicate work and pushes the export past proxy/client timeouts.
-        if action == "/cosmos.authz.v1beta1.MsgExec" and found:
-            log.info("  Using MsgExec results for SeaTrees export; skipping slower fallback action scans")
+        # SeaTrees MBS01 retirements are *exclusively* executed via authz/MsgExec
+        # (group-policy account). After scanning MsgExec, MsgRetire/MsgBuyDirect
+        # cannot contain MBS01 retirements — they'd just churn through thousands
+        # of unrelated txs (24K+ daily) and push the export past proxy timeouts.
+        # Always break, regardless of whether we found anything: an empty result
+        # is a real "no retirements in window" answer that should return fast.
+        if action == "/cosmos.authz.v1beta1.MsgExec":
+            log.info("  Done with MsgExec scan (%d match%s); skipping unrelated MsgRetire/MsgBuyDirect actions",
+                     len(found), "" if len(found) == 1 else "es")
             break
 
     # Deduplicate across action types (same tx could appear in multiple searches)
@@ -366,15 +387,25 @@ def query_retirements_with_fallback(api_url: str, start_date: str, end_date: str
         if fb.rstrip("/") != api_url.rstrip("/"):
             apis.append(fb)
 
+    last_provider_was_authoritative = False
     for api in apis:
         log.info("Trying %s ...", api)
-        results = query_retirements(api, start_date, end_date, batch_prefixes, max_pages=max_pages)
+        try:
+            results = query_retirements(api, start_date, end_date, batch_prefixes, max_pages=max_pages)
+        except PrunedHistoryError as e:
+            log.warning("Provider %s is pruned (%s); trying next provider...", api, e)
+            continue
         if results:
             log.info("Got %d retirements from %s", len(results), api)
             return results
-        log.warning("0 results from %s, trying next provider...", api)
+        # Empty result from a provider that didn't error is authoritative —
+        # no need to keep trying the rest of the chain just to confirm zero.
+        log.info("0 retirements from %s in date range (provider responded successfully)", api)
+        last_provider_was_authoritative = True
+        break
 
-    log.warning("All providers returned 0 results")
+    if not last_provider_was_authoritative:
+        log.warning("All providers failed (pruned/errored); cannot determine retirement count")
     return []
 
 
