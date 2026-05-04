@@ -55,6 +55,7 @@ class CommitmentResponse(BaseModel):
     validity_start: Optional[datetime]
     validity_end: Optional[datetime]
     state: str
+    scope: Optional[str] = None
     evidence_uri: Optional[str]
     metadata: Dict[str, Any]
     created_at: datetime
@@ -94,6 +95,7 @@ class PoolResponse(BaseModel):
     activation_threshold_count: Optional[int]
     demurrage_rate_monthly: float
     state: str
+    scope: Optional[str] = None
     metadata: Dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -298,6 +300,7 @@ def create_router(pool, caps=None):
         state: Optional[str] = Query(None, description="Filter by state"),
         pledger_uri: Optional[str] = Query(None),
         pool_rid: Optional[str] = Query(None),
+        offer_type: Optional[str] = Query(None, description="Filter by offer type (labor, goods, service, knowledge, stewardship)"),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
     ):
@@ -317,6 +320,10 @@ def create_router(pool, caps=None):
             if pool_rid:
                 conditions.append(f"pool_id = (SELECT id FROM commitment_pools WHERE pool_rid = ${i})")
                 params.append(pool_rid)
+                i += 1
+            if offer_type:
+                conditions.append(f"c.offer_type = ${i}")
+                params.append(offer_type)
                 i += 1
 
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
@@ -929,6 +936,7 @@ def _row_to_commitment(row) -> CommitmentResponse:
         validity_start=row.get("validity_start"),
         validity_end=row.get("validity_end"),
         state=row["state"],
+        scope=row.get("scope"),
         evidence_uri=row.get("evidence_uri"),
         metadata=meta or {},
         created_at=row["created_at"],
@@ -951,6 +959,7 @@ def _row_to_pool(row) -> PoolResponse:
         activation_threshold_count=row.get("activation_threshold_count"),
         demurrage_rate_monthly=float(row["demurrage_rate_monthly"]),
         state=row["state"],
+        scope=row.get("scope"),
         metadata=meta or {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],

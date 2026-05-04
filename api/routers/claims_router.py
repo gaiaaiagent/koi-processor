@@ -774,6 +774,7 @@ def create_router(pool, caps=None):
         claim_type: Optional[str] = Query(None, description="Filter by claim type"),
         claimant_uri: Optional[str] = Query(None, description="Filter by claimant"),
         about_uri: Optional[str] = Query(None, description="Filter by about entity (via graph edge)"),
+        since: Optional[datetime] = Query(None, description="Filter to claims created on or after this ISO datetime (e.g. 2026-01-01T00:00:00Z)"),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
     ):
@@ -801,6 +802,10 @@ def create_router(pool, caps=None):
                     WHERE predicate = 'about' AND object_uri = ${i}
                 )""")
                 params.append(about_uri)
+                i += 1
+            if since:
+                conditions.append(f"c.created_at >= ${i}")
+                params.append(since)
                 i += 1
 
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
