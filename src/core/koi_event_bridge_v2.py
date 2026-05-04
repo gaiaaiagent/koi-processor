@@ -460,18 +460,27 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
         if 'url' in event.bundle.manifest.metadata and 'source_url' not in metadata:
             metadata['source_url'] = event.bundle.manifest.metadata['url']
 
+        # Privacy: promote bundle-metadata is_private/access_source to dedicated columns.
+        # Sticky-OR on ON CONFLICT — once-private-stays-private (Phase 1 / tech-backlog #23).
+        bundle_meta = event.bundle.manifest.metadata or {}
+        is_private = bool(bundle_meta.get('is_private', False))
+        access_source = bundle_meta.get('access_source')
+
         # Insert new version with publication tracking
         await conn.execute("""
             INSERT INTO koi_memories (
                 id, rid, cid, version, previous_version_id,
                 event_type, source_sensor, content, metadata,
-                published_at, published_confidence, content_hash
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                published_at, published_confidence, content_hash,
+                is_private, access_source
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (rid) DO UPDATE SET
                 content = EXCLUDED.content,
                 metadata = EXCLUDED.metadata,
                 published_at = EXCLUDED.published_at,
                 content_hash = EXCLUDED.content_hash,
+                is_private = (koi_memories.is_private OR EXCLUDED.is_private),
+                access_source = COALESCE(koi_memories.access_source, EXCLUDED.access_source),
                 superseded_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
         """,
@@ -489,7 +498,9 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
             json.dumps(metadata),
             published_at,
             published_confidence,
-            content_hash
+            content_hash,
+            is_private,
+            access_source
         )
 
         # Fetch the actual memory_id from database (in case ON CONFLICT kept the old UUID)
