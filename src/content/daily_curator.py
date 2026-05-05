@@ -113,6 +113,8 @@ class DailyCurator:
                         FROM koi_memories km
                         WHERE km.superseded_at IS NULL
                           AND km.event_type != 'FORGET'
+                          -- Exclude private content (#28: curator SQL privacy audit)
+                          AND (km.is_private = FALSE OR km.is_private IS NULL)
                           AND km.published_at >= NOW() - INTERVAL '%s hours'
                           AND km.published_confidence >= $1
                           AND (

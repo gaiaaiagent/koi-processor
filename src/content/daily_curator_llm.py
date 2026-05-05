@@ -288,6 +288,8 @@ class DailyCuratorLLM:
             FROM koi_memories
             WHERE rid LIKE %s
               AND superseded_at IS NULL
+              -- Exclude private content (#28: curator SQL privacy audit)
+              AND (is_private = FALSE OR is_private IS NULL)
               AND event_type != 'FORGET'
               AND rid NOT LIKE '%%heartbeat%%'
             ORDER BY published_at ASC
@@ -324,6 +326,8 @@ class DailyCuratorLLM:
                     WHERE source_sensor LIKE '%discourse%'
                       AND (rid LIKE 'regen.forum-post:%' OR rid LIKE 'regen.forum-topic:%')
                       AND superseded_at IS NULL
+                      -- Exclude private content (#28: curator SQL privacy audit)
+                      AND (is_private = FALSE OR is_private IS NULL)
                       AND event_type != 'FORGET'
                       AND published_at IS NOT NULL
                     ORDER BY published_at DESC
@@ -449,6 +453,8 @@ Requirements:
                     FROM koi_memories
                     WHERE superseded_at IS NULL
                       AND event_type != 'FORGET'
+                      -- Exclude private content (#28: curator SQL privacy audit)
+                      AND (is_private = FALSE OR is_private IS NULL)
                       -- Exclude all heartbeat content
                       AND content::text NOT LIKE '%sensor_heartbeat%'
                       AND content::text NOT LIKE '%heartbeat%'
