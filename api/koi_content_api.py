@@ -294,5 +294,6 @@ async def get_statistics(
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # Run on port 8007 to avoid conflicts
-    uvicorn.run(app, host="0.0.0.0", port=8007)
+    # Run on port 8007 — bind to localhost; team service is reached only
+    # via authenticated localhost callers (not via host bridge or public ufw).
+    uvicorn.run(app, host="127.0.0.1", port=8007)
