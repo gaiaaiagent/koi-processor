@@ -182,6 +182,8 @@ class WeeklyAggregator:
             FROM koi_memories
             WHERE superseded_at IS NULL
                 AND event_type != 'FORGET'
+                -- Exclude private content (#28: curator SQL privacy audit)
+                AND (is_private = FALSE OR is_private IS NULL)
                 -- Exclude all heartbeat content
                 AND content::text NOT LIKE '%%sensor_heartbeat%%'
                 AND content::text NOT LIKE '%%heartbeat%%'

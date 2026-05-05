@@ -109,6 +109,8 @@ class WeeklyCuratorLLM:
                       FROM koi_memories
                       WHERE superseded_at IS NULL
                         AND event_type != 'FORGET'
+                        -- Exclude private content (#28: curator SQL privacy audit)
+                        AND (is_private = FALSE OR is_private IS NULL)
                         -- Exclude all heartbeat content
                         AND content::text NOT LIKE '%sensor_heartbeat%'
                         AND content::text NOT LIKE '%heartbeat%'
@@ -1176,6 +1178,8 @@ Format as structured JSON with these exact keys:
                         SELECT content->>'text' AS text, metadata
                         FROM koi_memories
                         WHERE superseded_at IS NULL
+                          -- Exclude private content (#28: curator SQL privacy audit)
+                          AND (is_private = FALSE OR is_private IS NULL)
                           AND metadata->>'url' = $1
                           AND rid NOT LIKE '%#chunk%'
                         ORDER BY created_at DESC
@@ -1205,6 +1209,8 @@ Format as structured JSON with these exact keys:
                         SELECT content->>'text' AS text, metadata, rid
                         FROM koi_memories
                         WHERE superseded_at IS NULL
+                          -- Exclude private content (#28: curator SQL privacy audit)
+                          AND (is_private = FALSE OR is_private IS NULL)
                           AND metadata->>'url' = $1
                           AND rid LIKE '%#chunk%'
                         ORDER BY rid
