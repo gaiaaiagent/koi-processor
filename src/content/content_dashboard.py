@@ -11,6 +11,8 @@ from flask_compress import Compress
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import time
+import hashlib
 import json
 import yaml
 import subprocess
@@ -106,6 +108,66 @@ def require_auth(f):
         if config['dashboard'].get('auth_enabled', False):
             if 'user' not in session:
                 return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def validate_session_token_sync(token: str) -> Optional[str]:
+    """Validate a Bearer session token against the session_tokens table.
+
+    Mirrors the SHA-256 hash + lookup pattern used by koi-query-api.ts and
+    src/services/auth_service.py. Returns user_email if the token is valid,
+    unrevoked, unexpired, and bound to a @regen.network address. Else None.
+    """
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    try:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT user_email, expires_at, revoked_at
+                FROM session_tokens
+                WHERE token_hash = %s
+                """,
+                (token_hash,),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"session_tokens lookup failed: {e}")
+        return None
+    if not row or row.get("revoked_at") is not None:
+        return None
+    expires_at = row.get("expires_at")
+    if expires_at and expires_at.timestamp() < time.time():
+        return None
+    user_email = row.get("user_email") or ""
+    if not user_email.endswith("@regen.network"):
+        return None
+    return user_email
+
+
+def require_bearer_auth(f):
+    """Gate endpoint behind a valid @regen.network session token.
+
+    Used for cache-first endpoints (weekly digest variants) where there is no
+    SQL WHERE clause to splice an is_private filter into. The cached file may
+    contain content sourced from private documents, so the right Phase 2 fix
+    is to gate access entirely until the underlying curator SQL is audited.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        parts = auth.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return jsonify({"error": "Bearer token required"}), 401
+        user_email = validate_session_token_sync(parts[1])
+        if not user_email:
+            return jsonify({"error": "Invalid or expired session token"}), 401
         return f(*args, **kwargs)
     return decorated_function
 
@@ -2338,10 +2400,14 @@ Uses existing BGE embeddings in the database
 """
 
 @app.route('/api/koi/weekly-digest', methods=['GET'])
+@require_bearer_auth
 def koi_weekly_digest():
     """
     API endpoint for MCP to fetch weekly digest.
     Returns the most recent digest or generates a new one.
+
+    Phase 2 (#23): Bearer auth required. Cached digests may include content
+    from private documents; gate access until curator SQL audit lands.
     """
     import asyncio
     from datetime import datetime, timedelta
@@ -2538,11 +2604,14 @@ def koi_weekly_digest():
         }])
 
 @app.route('/api/koi/weekly-digest/notebooklm', methods=['GET'])
+@require_bearer_auth
 def koi_weekly_digest_notebooklm():
     """
     API endpoint for MCP to fetch NotebookLM export.
     Returns full content including forum posts and Notion pages.
     Generates on demand if no recent export exists.
+
+    Phase 2 (#23): Bearer auth required. Same rationale as /weekly-digest.
     """
     import asyncio
     from datetime import datetime, timedelta

@@ -5,11 +5,14 @@ Provides access to KOI pipeline structure and component metadata
 """
 
 import os
+import time
 import json
+import hashlib
 import asyncio
 import httpx
+import asyncpg
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
@@ -399,6 +402,49 @@ async def get_service_health(endpoint: str) -> str:
         pass
     return "offline"
 
+# =============================================================================
+# Optional Bearer auth for privacy filtering
+# Mirrors the SHA-256 hash + session_tokens lookup in src/services/auth_service.py
+# Returns user_email when a valid @regen.network token is presented, else None.
+# Endpoints use the return value to splice an is_private filter into their WHERE clause.
+# =============================================================================
+
+async def get_optional_user_email(authorization: Optional[str] = Header(None)) -> Optional[str]:
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token_hash = hashlib.sha256(parts[1].encode()).hexdigest()
+    try:
+        conn = await asyncpg.connect(
+            host='localhost', port=5433, database='eliza',
+            user='postgres', password='postgres'
+        )
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT user_email, expires_at, revoked_at
+                FROM session_tokens
+                WHERE token_hash = $1
+                """,
+                token_hash,
+            )
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.warning(f"session_tokens lookup failed: {e}")
+        return None
+    if not row or row["revoked_at"] is not None:
+        return None
+    if row["expires_at"] and row["expires_at"].timestamp() < time.time():
+        return None
+    user_email = row["user_email"] or ""
+    if not user_email.endswith("@regen.network"):
+        return None
+    return user_email
+
+
 # API Endpoints
 
 @app.get("/health")
@@ -750,11 +796,10 @@ async def list_available_rids(
     context: Optional[str] = Query(default=None, description="Filter by RID context pattern"),
     offset: int = Query(default=0, ge=0),
     indexed_after: Optional[str] = Query(default=None, description="Only RIDs indexed after this date (YYYY-MM-DD)"),
-    indexed_before: Optional[str] = Query(default=None, description="Only RIDs indexed before this date (YYYY-MM-DD)")
+    indexed_before: Optional[str] = Query(default=None, description="Only RIDs indexed before this date (YYYY-MM-DD)"),
+    user_email: Optional[str] = Depends(get_optional_user_email),
 ):
     """List available RIDs from indexed documents (koi_memories)"""
-
-    import asyncpg
 
     try:
         # Connect to database
@@ -775,6 +820,9 @@ async def list_available_rids(
                 "rid NOT LIKE '%:demo:%'",
                 "(is_chunk = FALSE OR is_chunk IS NULL)"  # Only parent documents, not chunks
             ]
+            # Privacy filter: unauthenticated callers see only public rows
+            if not user_email:
+                where_conditions.append("(is_private = FALSE OR is_private IS NULL)")
             params = []
             param_idx = 1
 
@@ -902,14 +950,14 @@ async def list_available_rids(
 async def rid_lookup(
     rid: str,
     include_chunks: bool = Query(default=True, description="Include chunk documents"),
-    limit: int = Query(default=50, le=200)
+    limit: int = Query(default=50, le=200),
+    user_email: Optional[str] = Depends(get_optional_user_email),
 ):
     """Look up documents by exact RID match from koi_memories.
 
     This queries the database directly by RID, unlike /query which uses semantic search.
     Returns the base document and optionally all chunks.
     """
-    import asyncpg
     from urllib.parse import unquote
 
     # URL decode the RID
@@ -928,9 +976,12 @@ async def rid_lookup(
             # Build query - search for exact RID or RID with chunk suffix
             base_rid = rid.split('#')[0]  # Remove chunk suffix if present
 
+            # Unauthenticated callers see only public rows
+            privacy_clause = "" if user_email else " AND (is_private = FALSE OR is_private IS NULL)"
+
             if include_chunks:
                 # Get base doc and all chunks
-                query = """
+                query = f"""
                     SELECT
                         rid,
                         content->>'title' as title,
@@ -945,14 +996,14 @@ async def rid_lookup(
                             ELSE -1
                         END as chunk_index
                     FROM koi_memories
-                    WHERE rid = $1 OR rid LIKE $2
+                    WHERE (rid = $1 OR rid LIKE $2){privacy_clause}
                     ORDER BY chunk_index ASC
                     LIMIT $3
                 """
                 params = [base_rid, f"{base_rid}#chunk%", limit]
             else:
                 # Get only exact RID match
-                query = """
+                query = f"""
                     SELECT
                         rid,
                         content->>'title' as title,
@@ -963,7 +1014,7 @@ async def rid_lookup(
                         is_chunk,
                         -1 as chunk_index
                     FROM koi_memories
-                    WHERE rid = $1
+                    WHERE rid = $1{privacy_clause}
                     LIMIT $2
                 """
                 params = [rid, limit]

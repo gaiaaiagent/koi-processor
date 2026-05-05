@@ -4984,17 +4984,24 @@ app.get('/api/koi/health', async (req, res) => {
 // Statistics endpoint
 app.get('/api/koi/stats', async (req, res) => {
   try {
+    const authHeader = req.headers['authorization'] as string | undefined;
+    const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const userEmail = await validateSessionToken(sessionToken);
+    const privacyFilter = buildPrivacyFilter(!!userEmail, 'm');
+
     // Total documents
-    const totalResult = await pool.query('SELECT COUNT(*) as total FROM koi_memories');
+    const totalResult = await pool.query(
+      `SELECT COUNT(*) as total FROM koi_memories m WHERE 1=1 ${privacyFilter}`
+    );
     const total = parseInt(totalResult.rows[0].total);
 
     // By source
     const bySourceResult = await pool.query(`
       SELECT
-        metadata->>'source' as source,
+        m.metadata->>'source' as source,
         COUNT(*) as count
-      FROM koi_memories
-      WHERE metadata->>'source' IS NOT NULL
+      FROM koi_memories m
+      WHERE m.metadata->>'source' IS NOT NULL ${privacyFilter}
       GROUP BY source
       ORDER BY count DESC
     `);
@@ -5002,8 +5009,8 @@ app.get('/api/koi/stats', async (req, res) => {
     // Recent activity (last 7 days)
     const recentResult = await pool.query(`
       SELECT COUNT(*) as recent
-      FROM koi_memories
-      WHERE created_at > NOW() - INTERVAL '7 days'
+      FROM koi_memories m
+      WHERE m.created_at > NOW() - INTERVAL '7 days' ${privacyFilter}
     `);
     const recent = parseInt(recentResult.rows[0].recent);
 
