@@ -70,6 +70,11 @@ PROJECTS = {
         "claimant_uri": "org:bioregional-coordination-learning-field",
         "bridge_dir": Path.home() / "projects/bioregional-coordination/docs/research/connections",
     },
+    "bioregional-mapping": {
+        "project_id": "bioregional-mapping",
+        "claimant_uri": "org:bioregional-mapping-learning-field",
+        "bridge_dir": Path.home() / "projects/bioregional-mapping/docs/research/connections",
+    },
 }
 
 DISPOSITION_SLUG = {
