@@ -109,8 +109,10 @@ async def search(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/koi/content/domains")
-async def get_domains():
-    """Get all domains with content counts"""
+async def get_domains(
+    user_email: str = Depends(get_authorized_user)
+):
+    """Get all domains with content counts (authenticated)"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -134,8 +136,11 @@ async def get_domains():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/koi/content/pages/{domain}")
-async def get_pages_by_domain(domain: str):
-    """Get all pages sensed from a specific domain (website or discourse forum)"""
+async def get_pages_by_domain(
+    domain: str,
+    user_email: str = Depends(get_authorized_user)
+):
+    """Get all pages sensed from a specific domain (website or discourse forum) (authenticated)"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -162,8 +167,10 @@ async def get_pages_by_domain(domain: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/koi/content/notion")
-async def get_notion_pages():
-    """Get all Notion pages that have been sensed"""
+async def get_notion_pages(
+    user_email: str = Depends(get_authorized_user)
+):
+    """Get all Notion pages that have been sensed (authenticated)"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -187,8 +194,10 @@ async def get_notion_pages():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/koi/content/sources")
-async def get_all_sources():
-    """Get all sources grouped by sensor type"""
+async def get_all_sources(
+    user_email: str = Depends(get_authorized_user)
+):
+    """Get all sources grouped by sensor type (authenticated)"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -242,8 +251,10 @@ async def get_all_sources():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/koi/content/statistics")
-async def get_statistics():
-    """Get overall content statistics"""
+async def get_statistics(
+    user_email: str = Depends(get_authorized_user)
+):
+    """Get overall content statistics (authenticated)"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
