@@ -294,6 +294,10 @@ async def get_statistics(
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # Run on port 8007 — bind to localhost; team service is reached only
-    # via authenticated localhost callers (not via host bridge or public ufw).
-    uvicorn.run(app, host="127.0.0.1", port=8007)
+    # Run on port 8007. Bind to 0.0.0.0 so the docker container nginx can reach
+    # us via the host bridge gateway (172.17.0.1:8007) — required for /api/koi/auth/,
+    # /api/koi/activate, and /api/koi/content/ routes proxied through the live
+    # nginx container. External public reach is blocked by ufw (only 22/80/443/3001
+    # are open). Application-layer auth (Depends(get_authorized_user)) gates content
+    # + auth endpoints; ufw + auth gate together provide defense-in-depth.
+    uvicorn.run(app, host="0.0.0.0", port=8007)
