@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from api.utils import validity_filter_clause
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -37,6 +39,7 @@ class IntentIngestRequest(BaseModel):
     quantity: Optional[str] = None
     description: Optional[str] = None
     decayRate: Optional[str] = "normal"
+    validFrom: Optional[str] = None  # ISO date YYYY-MM-DD -> DATE
     expiresAt: Optional[str] = None
     captureMethod: Optional[str] = "manual"
     sourceDocument: Optional[str] = None
@@ -56,6 +59,8 @@ class IntentDiscoveryResponse(BaseModel):
     asset_offered: Optional[str] = None
     asset_wanted: Optional[str] = None
     quantity: Optional[str] = None
+    valid_from: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 class IntentDetailResponse(IntentDiscoveryResponse):
@@ -83,6 +88,8 @@ class IntentPatchRequest(BaseModel):
     description: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
+    validFrom: Optional[str] = None  # ISO date; explicit null clears
+    expiresAt: Optional[str] = None  # ISO date; explicit null clears
 
 
 class ReviewRequest(BaseModel):
@@ -320,6 +327,8 @@ def create_router(pool) -> APIRouter:
             asset_offered=row_dict.get("asset_offered"),
             asset_wanted=row_dict.get("asset_wanted"),
             quantity=row_dict.get("quantity"),
+            valid_from=row_dict.get("valid_from"),
+            expires_at=row_dict.get("expires_at"),
         )
 
     def _to_detail(row_dict: Dict[str, Any]) -> IntentDetailResponse:
@@ -333,6 +342,8 @@ def create_router(pool) -> APIRouter:
             asset_offered=row_dict.get("asset_offered"),
             asset_wanted=row_dict.get("asset_wanted"),
             quantity=row_dict.get("quantity"),
+            valid_from=row_dict.get("valid_from"),
+            expires_at=row_dict.get("expires_at"),
             intent_key=row_dict["intent_key"],
             publisher_name=row_dict["publisher_name"],
             priority=row_dict.get("priority", 100.0),
@@ -373,6 +384,7 @@ def create_router(pool) -> APIRouter:
         """
         intent_rid = _generate_intent_rid(req.intentKey)
         entity_text = _build_entity_text(req)
+        valid_from = _parse_date(req.validFrom)
         expires_at = _parse_date(req.expiresAt)
 
         async with pool.acquire() as conn:
@@ -403,7 +415,7 @@ def create_router(pool) -> APIRouter:
                     publisher_name, publisher_contact, publisher_uri,
                     landscape_group, visibility,
                     asset_offered, asset_wanted, quantity, description,
-                    priority, decay_rate, last_refreshed_at, expires_at,
+                    priority, decay_rate, last_refreshed_at, valid_from, expires_at,
                     capture_method, source_document, source_excerpt,
                     entered_by, reviewed_by, ai_confidence,
                     tags, created_at, updated_at
@@ -413,10 +425,10 @@ def create_router(pool) -> APIRouter:
                     $5, $6, $7,
                     $8, COALESCE($9, 'local'),
                     $10, $11, $12, $13,
-                    100.0, COALESCE($14, 'normal'), NOW(), $15,
-                    COALESCE($16, 'manual'), $17, $18,
-                    $19, NULL, $20,
-                    $21, NOW(), NOW()
+                    100.0, COALESCE($14, 'normal'), NOW(), $15, $16,
+                    COALESCE($17, 'manual'), $18, $19,
+                    $20, NULL, $21,
+                    $22, NOW(), NOW()
                 )
                 ON CONFLICT (intent_key) DO UPDATE SET
                     intent_type     = EXCLUDED.intent_type,
@@ -441,6 +453,8 @@ def create_router(pool) -> APIRouter:
                                                intent_registry.description),
                     decay_rate      = COALESCE(EXCLUDED.decay_rate,
                                                intent_registry.decay_rate),
+                    valid_from      = COALESCE(EXCLUDED.valid_from,
+                                               intent_registry.valid_from),
                     expires_at      = COALESCE(EXCLUDED.expires_at,
                                                intent_registry.expires_at),
                     capture_method  = COALESCE(EXCLUDED.capture_method,
@@ -465,7 +479,7 @@ def create_router(pool) -> APIRouter:
                 req.publisherName, req.publisherContact, publisher_uri,
                 req.landscapeGroup, req.visibility,
                 req.assetOffered, req.assetWanted, req.quantity, req.description,
-                req.decayRate, expires_at,
+                req.decayRate, valid_from, expires_at,
                 req.captureMethod, req.sourceDocument, req.sourceExcerpt,
                 req.enteredBy, req.aiConfidence,
                 req.tags or [],
@@ -502,6 +516,17 @@ def create_router(pool) -> APIRouter:
         intent_type: Optional[str] = Query(None),
         asset_offered: Optional[str] = Query(None),
         asset_wanted: Optional[str] = Query(None),
+        t_now: Optional[str] = Query(
+            None,
+            description=(
+                "ISO date YYYY-MM-DD. When set, filters out intents whose "
+                "[valid_from, expires_at] window does not contain t_now. "
+                "Default-off, opt-in."
+            ),
+        ),
+        include_out_of_window: bool = Query(
+            False, description="Bypass validity filter when t_now is set."
+        ),
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ):
@@ -534,7 +559,26 @@ def create_router(pool) -> APIRouter:
             if asset_wanted:
                 add("asset_wanted = ?", asset_wanted)
 
+            # Opt-in validity filter on intent_registry (DATE columns).
+            t_now_date: Optional[date] = None
+            if t_now:
+                try:
+                    t_now_date = date.fromisoformat(t_now)
+                except ValueError:
+                    t_now_date = None
+            validity_sql, validity_binds = validity_filter_clause(
+                t_now=t_now_date,
+                include_out_of_window=include_out_of_window,
+                start_col="valid_from",
+                end_col="expires_at",
+                value_cast="::date",
+                next_param_index=len(params) + 1,
+            )
+            params.extend(validity_binds)
+
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
+            if validity_sql:
+                where = (where or "WHERE 1=1") + validity_sql
 
             params += [limit, offset]
             query = f"""
@@ -557,6 +601,17 @@ def create_router(pool) -> APIRouter:
         landscape_group: Optional[str] = Query(None),
         intent_type: Optional[str] = Query(None),
         capture_method: Optional[str] = Query(None),
+        t_now: Optional[str] = Query(
+            None,
+            description=(
+                "ISO date YYYY-MM-DD. When set, filters out intents whose "
+                "[valid_from, expires_at] window does not contain t_now. "
+                "Default-off, opt-in."
+            ),
+        ),
+        include_out_of_window: bool = Query(
+            False, description="Bypass validity filter when t_now is set."
+        ),
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ):
@@ -585,7 +640,26 @@ def create_router(pool) -> APIRouter:
             if capture_method:
                 add("capture_method = ?", capture_method)
 
+            # Same opt-in validity filter as list_intents_discovery.
+            t_now_date: Optional[date] = None
+            if t_now:
+                try:
+                    t_now_date = date.fromisoformat(t_now)
+                except ValueError:
+                    t_now_date = None
+            validity_sql, validity_binds = validity_filter_clause(
+                t_now=t_now_date,
+                include_out_of_window=include_out_of_window,
+                start_col="valid_from",
+                end_col="expires_at",
+                value_cast="::date",
+                next_param_index=len(params) + 1,
+            )
+            params.extend(validity_binds)
+
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
+            if validity_sql:
+                where = (where or "WHERE 1=1") + validity_sql
 
             params += [limit, offset]
             query = f"""
@@ -670,6 +744,18 @@ def create_router(pool) -> APIRouter:
                 updates["notes"] = req.notes
             if req.tags is not None:
                 updates["tags"] = req.tags
+
+            # Validity columns: explicit-null clears; valid string sets; absent skips.
+            explicitly_set = req.model_fields_set
+            for field, col in (("validFrom", "valid_from"), ("expiresAt", "expires_at")):
+                if field in explicitly_set:
+                    raw = getattr(req, field)
+                    if raw is None:
+                        updates[col] = None
+                    else:
+                        parsed = _parse_date(raw)
+                        if parsed is not None:
+                            updates[col] = parsed
 
             # Auto-timestamps based on status transition
             new_status = req.status if req.status is not None else old_status
@@ -985,8 +1071,15 @@ def create_router(pool) -> APIRouter:
         SWAP intents are treated as both OFFER and WANT simultaneously.
         """
         async with pool.acquire() as conn:
-            # Fetch active intents, optionally filtered by landscape group
-            conditions = ["status = 'active'"]
+            # Fetch active intents, optionally filtered by landscape group.
+            # Phase 1 scope expansion: matcher MUST NOT propose against expired
+            # or not-yet-valid intents. Native CURRENT_DATE predicate (not via
+            # the helper) — matcher has no t_now param; "now" is server-side.
+            conditions = [
+                "status = 'active'",
+                "(valid_from IS NULL OR valid_from <= CURRENT_DATE)",
+                "(expires_at IS NULL OR expires_at >= CURRENT_DATE)",
+            ]
             params: List[Any] = []
 
             if req.landscapeGroup and not req.includeRegional:

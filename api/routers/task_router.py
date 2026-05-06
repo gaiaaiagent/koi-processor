@@ -11,12 +11,39 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from api.utils import parse_ts, validity_filter_clause
 
 
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+
+# Status/priority constraints — must match DB CHECK constraints on task_registry.
+# Some upstream skills emit Python-enum-style "in_progress"; DB requires
+# "in-progress". Normalize underscore→hyphen at input + reject unknown values
+# with 422 instead of letting them 500 at INSERT.
+ALLOWED_STATUSES = {"inbox", "open", "in-progress", "waiting", "done", "cancelled"}
+ALLOWED_PRIORITIES = {"critical", "high", "medium", "low"}
+
+
+def _normalize_status(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return v
+    v2 = v.replace("_", "-").lower().strip()
+    if v2 not in ALLOWED_STATUSES:
+        raise ValueError(f"status must be one of {sorted(ALLOWED_STATUSES)}")
+    return v2
+
+
+def _normalize_priority(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return v
+    v2 = v.lower().strip()
+    if v2 not in ALLOWED_PRIORITIES:
+        raise ValueError(f"priority must be one of {sorted(ALLOWED_PRIORITIES)}")
+    return v2
 
 class TaskIngestRequest(BaseModel):
     taskKey: str = Field(..., description="Idempotency key (e.g. 'meeting-2026-02-27-slug')")
@@ -29,6 +56,8 @@ class TaskIngestRequest(BaseModel):
     dueDate: Optional[str] = None       # ISO date string YYYY-MM-DD
     startDate: Optional[str] = None
     waitUntil: Optional[str] = None
+    validityStart: Optional[str] = None  # ISO 8601 -> TIMESTAMPTZ
+    validityEnd: Optional[str] = None    # ISO 8601 -> TIMESTAMPTZ
     context: Optional[str] = None
     effort: Optional[str] = None
     ownerWikilink: Optional[str] = None        # "[[People/Name|alias]]" or "Name"
@@ -39,6 +68,16 @@ class TaskIngestRequest(BaseModel):
     sourceType: Optional[str] = None
     vaultPath: Optional[str] = None
     tags: Optional[List[str]] = []
+
+    @field_validator("status")
+    @classmethod
+    def _norm_status(cls, v):
+        return _normalize_status(v)
+
+    @field_validator("priority")
+    @classmethod
+    def _norm_priority(cls, v):
+        return _normalize_priority(v)
 
 
 class TaskIngestResponse(BaseModel):
@@ -72,6 +111,8 @@ class TaskRecord(BaseModel):
     completed_at: Optional[str] = None
     started_at: Optional[str] = None
     triaged_at: Optional[str] = None
+    validity_start: Optional[str] = None
+    validity_end: Optional[str] = None
 
 
 class TaskPatchRequest(BaseModel):
@@ -82,6 +123,8 @@ class TaskPatchRequest(BaseModel):
     dueDate: Optional[str] = None
     startDate: Optional[str] = None
     waitUntil: Optional[str] = None
+    validityStart: Optional[str] = None
+    validityEnd: Optional[str] = None
     context: Optional[str] = None
     effort: Optional[str] = None
     ownerWikilink: Optional[str] = None
@@ -89,6 +132,16 @@ class TaskPatchRequest(BaseModel):
     collaboratorWikilinks: Optional[List[str]] = None
     blockedBy: Optional[List[str]] = None
     tags: Optional[List[str]] = None
+
+    @field_validator("status")
+    @classmethod
+    def _norm_status(cls, v):
+        return _normalize_status(v)
+
+    @field_validator("priority")
+    @classmethod
+    def _norm_priority(cls, v):
+        return _normalize_priority(v)
 
 
 class TaskStatsResponse(BaseModel):
@@ -233,6 +286,8 @@ def create_router(pool, caps) -> APIRouter:
             due_date = _parse_date(req.dueDate)
             start_date = _parse_date(req.startDate)
             wait_until = _parse_date(req.waitUntil)
+            validity_start = parse_ts(req.validityStart)
+            validity_end = parse_ts(req.validityEnd)
 
             row = await conn.fetchrow(
                 """
@@ -241,6 +296,7 @@ def create_router(pool, caps) -> APIRouter:
                     due_date, start_date, wait_until, context, effort,
                     owner_uri, project_uri, collaborator_uris, blocked_by,
                     source_note, source_type, vault_path, tags,
+                    validity_start, validity_end,
                     created_at, updated_at
                 ) VALUES (
                     $1, $2, $3,
@@ -248,6 +304,7 @@ def create_router(pool, caps) -> APIRouter:
                     $6, $7, $8, $9, $10,
                     $11, $12, $13, $14,
                     $15, COALESCE($16, 'meeting'), $17, $18,
+                    $19, $20,
                     NOW(), NOW()
                 )
                 ON CONFLICT (task_key) DO UPDATE SET
@@ -276,6 +333,8 @@ def create_router(pool, caps) -> APIRouter:
                     tags            = CASE WHEN array_length(EXCLUDED.tags, 1) > 0
                                           THEN EXCLUDED.tags
                                           ELSE task_registry.tags END,
+                    validity_start  = COALESCE(EXCLUDED.validity_start, task_registry.validity_start),
+                    validity_end    = COALESCE(EXCLUDED.validity_end,   task_registry.validity_end),
                     updated_at      = NOW()
                 RETURNING id, task_key,
                     (xmax = 0) AS was_inserted
@@ -286,6 +345,7 @@ def create_router(pool, caps) -> APIRouter:
                 owner_uri, project_uri, collab_uris, req.blockedBy or [],
                 req.sourceNote, req.sourceType, req.vaultPath,
                 req.tags or [],
+                validity_start, validity_end,
             )
 
         action = "created" if row["was_inserted"] else "updated"
@@ -298,6 +358,8 @@ def create_router(pool, caps) -> APIRouter:
             "collaborator_uris": collab_uris, "blocked_by": req.blockedBy or [],
             "source_note": req.sourceNote, "source_type": req.sourceType,
             "vault_path": req.vaultPath, "tags": req.tags or [],
+            "validity_start": req.validityStart,
+            "validity_end": req.validityEnd,
         })
         return TaskIngestResponse(task_key=row["task_key"], action=action, id=row["id"])
 
@@ -317,6 +379,18 @@ def create_router(pool, caps) -> APIRouter:
         updated_after: Optional[str] = Query(None, description="ISO date — tasks last updated on or after this date"),
         source_note: Optional[str] = Query(None, description="Substring match on source_note"),
         source_type: Optional[str] = Query(None, description="Exact match on source_type"),
+        t_now: Optional[str] = Query(
+            None,
+            description=(
+                "ISO 8601 timestamp. When set, filters out tasks whose "
+                "[validity_start, validity_end] window does not contain t_now. "
+                "Absent t_now = no filter (default-off, opt-in). Trailing 'Z' "
+                "accepted; naive ISO treated as UTC."
+            ),
+        ),
+        include_out_of_window: bool = Query(
+            False, description="Bypass validity filter when t_now is set."
+        ),
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ):
@@ -395,7 +469,23 @@ def create_router(pool, caps) -> APIRouter:
             if source_type:
                 add("source_type = ?", source_type)
 
+            # Opt-in validity filter — only emits SQL when t_now is set.
+            # See plan AC1.3 / AC1.3a / AC1.7a.
+            t_now_dt = parse_ts(t_now)
+            validity_sql, validity_binds = validity_filter_clause(
+                t_now=t_now_dt,
+                include_out_of_window=include_out_of_window,
+                start_col="validity_start",
+                end_col="validity_end",
+                value_cast="",  # TIMESTAMPTZ — datetime binds cleanly
+                next_param_index=len(params) + 1,
+            )
+            params.extend(validity_binds)
+
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
+            if validity_sql:
+                # validity_sql already starts with ' AND '
+                where = (where or "WHERE 1=1") + validity_sql
 
             params += [limit, offset]
             query = f"""
@@ -469,6 +559,18 @@ def create_router(pool, caps) -> APIRouter:
                         if parsed is not None:
                             updates[col] = parsed    # valid date
                         # else: malformed string — leave unchanged (no update)
+
+            # Same explicit-null pattern for the new TIMESTAMPTZ validity columns.
+            for field, col in (("validityStart", "validity_start"), ("validityEnd", "validity_end")):
+                if field in explicitly_set:
+                    raw = getattr(req, field)
+                    if raw is None:
+                        updates[col] = None          # explicit clear
+                    else:
+                        parsed = parse_ts(raw)
+                        if parsed is not None:
+                            updates[col] = parsed    # valid timestamp
+                        # else: malformed string — leave unchanged
 
             # Resolve owner / project / collaborators
             if req.ownerWikilink is not None:

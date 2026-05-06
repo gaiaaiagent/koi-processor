@@ -11,6 +11,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from api.utils import parse_ts
+
 logger = logging.getLogger(__name__)
 
 
@@ -212,8 +214,8 @@ async def _apply_commitment(conn, rid: str, event_type: str, payload: Dict[str, 
         payload.get("offer_type", "labor"),
         payload.get("quantity"),
         payload.get("unit"),
-        _parse_ts(payload.get("validity_start")),
-        _parse_ts(payload.get("validity_end")),
+        parse_ts(payload.get("validity_start")),
+        parse_ts(payload.get("validity_end")),
         payload.get("state", "PROPOSED"),
         payload.get("evidence_uri"),
         json.dumps(payload.get("metadata", {})),
@@ -272,13 +274,15 @@ async def _apply_task(conn, rid: str, event_type: str, payload: Dict[str, Any], 
             task_key, uuid, title, status, priority,
             due_date, start_date, wait_until, context, effort,
             owner_uri, project_uri, collaborator_uris, blocked_by,
-            source_note, source_type, vault_path, tags
+            source_note, source_type, vault_path, tags,
+            validity_start, validity_end
         ) VALUES (
             $1, $2, $3,
             COALESCE($4, 'inbox'), COALESCE($5, 'medium'),
             $6::date, $7::date, $8::date, $9, $10,
             $11, $12, $13, $14,
-            $15, COALESCE($16, 'meeting'), $17, $18
+            $15, COALESCE($16, 'meeting'), $17, $18,
+            $19, $20
         )
         ON CONFLICT (task_key) DO UPDATE SET
             uuid = COALESCE(EXCLUDED.uuid, task_registry.uuid),
@@ -303,6 +307,8 @@ async def _apply_task(conn, rid: str, event_type: str, payload: Dict[str, Any], 
             vault_path = COALESCE(EXCLUDED.vault_path, task_registry.vault_path),
             tags = CASE WHEN array_length(EXCLUDED.tags, 1) > 0
                         THEN EXCLUDED.tags ELSE task_registry.tags END,
+            validity_start = COALESCE(EXCLUDED.validity_start, task_registry.validity_start),
+            validity_end   = COALESCE(EXCLUDED.validity_end,   task_registry.validity_end),
             updated_at = NOW()
     """,
         task_key,
@@ -323,6 +329,8 @@ async def _apply_task(conn, rid: str, event_type: str, payload: Dict[str, Any], 
         payload.get("source_type"),
         payload.get("vault_path"),
         payload.get("tags", []),
+        parse_ts(payload.get("validity_start")),
+        parse_ts(payload.get("validity_end")),
     )
 
     logger.info(f"domain.task.apply key={task_key}")
@@ -392,16 +400,10 @@ async def _append_state_log(
             """, rid_val, from_state, to_state, actor, reason, meta_json)
 
 
-def _parse_ts(val) -> Optional[datetime]:
-    """Parse an ISO timestamp string or return None."""
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val
-    try:
-        return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
+# _parse_ts() lifted to api.utils.parse_ts so task_router / commitment_router /
+# intent_router can share the same parser. Backward-compat alias preserved for
+# any in-tree callers of the old private name.
+_parse_ts = parse_ts
 
 
 async def _apply_intent(conn, rid: str, event_type: str, payload: Dict[str, Any], source_node: str):

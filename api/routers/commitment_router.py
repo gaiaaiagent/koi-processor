@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from api.utils import parse_ts, validity_filter_clause
+
 logger = logging.getLogger(__name__)
 
 
@@ -309,6 +311,17 @@ def create_router(pool, caps=None):
         state: Optional[str] = Query(None, description="Filter by state"),
         pledger_uri: Optional[str] = Query(None),
         pool_rid: Optional[str] = Query(None),
+        t_now: Optional[str] = Query(
+            None,
+            description=(
+                "ISO 8601 timestamp. When set, filters out commitments whose "
+                "[validity_start, validity_end] window does not contain t_now. "
+                "Absent t_now = no filter (default-off, opt-in)."
+            ),
+        ),
+        include_out_of_window: bool = Query(
+            False, description="Bypass validity filter when t_now is set."
+        ),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
     ):
@@ -330,7 +343,25 @@ def create_router(pool, caps=None):
                 params.append(pool_rid)
                 i += 1
 
+            # Opt-in validity filter on commitments.validity_start/validity_end.
+            # Columns pre-exist (migration 056); migration 099 adds the partial
+            # index on validity_end.
+            t_now_dt = parse_ts(t_now)
+            validity_sql, validity_binds = validity_filter_clause(
+                t_now=t_now_dt,
+                include_out_of_window=include_out_of_window,
+                start_col="c.validity_start",
+                end_col="c.validity_end",
+                value_cast="",  # TIMESTAMPTZ
+                next_param_index=i,
+            )
+            params.extend(validity_binds)
+            i += len(validity_binds)
+
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            if validity_sql:
+                where = (where or "WHERE 1=1") + validity_sql
+
             params.extend([limit, offset])
             rows = await conn.fetch(f"""
                 SELECT c.*, cp.pool_rid AS pool_rid_text
