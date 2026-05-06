@@ -18,7 +18,7 @@ All state transitions are recorded in commitment_state_log (insert-only).
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -166,18 +166,29 @@ class ScoreBreakdown(BaseModel):
     governance_compat: int = 0
 
 
+class RoutingDiagnostic(BaseModel):
+    code: str
+    kind: Literal["input_gap", "hard_exclude", "score_degradation", "review_gap"]
+    severity: Literal["info", "review", "blocker"]
+    message: str
+    suggested_next_step: str
+    review_authority: str = "pool_steward"
+
+
 class PoolSuggestion(BaseModel):
     pool_rid: str
     pool_name: str
     total_score: int
     score_breakdown: ScoreBreakdown
     hard_excludes: List[str]
+    diagnostics: List[RoutingDiagnostic] = Field(default_factory=list)
     recommended: bool
     explanation: str
 
 
 class RoutingSuggestionResponse(BaseModel):
     suggestions: List[PoolSuggestion]
+    diagnostics: List[RoutingDiagnostic] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +351,10 @@ def create_router(pool, caps=None):
         Returns pools ranked by routing score with breakdown and explanations.
         """
         suggestions = await _score_pools(pool, body)
-        return RoutingSuggestionResponse(suggestions=suggestions)
+        return RoutingSuggestionResponse(
+            suggestions=suggestions,
+            diagnostics=_draft_level_routing_diagnostics(body),
+        )
 
     @router.post("/extract-from-transcript", response_model=TranscriptExtractResponse)
     async def extract_commitments_from_transcript(body: TranscriptExtractRequest):
@@ -962,6 +976,77 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj)
 
 
+def _routing_diagnostic(
+    code: str,
+    kind: str,
+    severity: str,
+    message: str,
+    suggested_next_step: str,
+    review_authority: str = "pool_steward",
+) -> RoutingDiagnostic:
+    return RoutingDiagnostic(
+        code=code,
+        kind=kind,
+        severity=severity,
+        message=message,
+        suggested_next_step=suggested_next_step,
+        review_authority=review_authority,
+    )
+
+
+def _draft_level_routing_diagnostics(draft: "RoutingSuggestionRequest") -> List[RoutingDiagnostic]:
+    """Diagnostics that apply to the draft before comparing it to any pool."""
+    meta = draft.metadata or {}
+    diagnostics: List[RoutingDiagnostic] = []
+
+    if not meta.get("bioregion_uri"):
+        diagnostics.append(_routing_diagnostic(
+            code="missing_bioregion_uri",
+            kind="input_gap",
+            severity="review",
+            message="Draft has no bioregion_uri, so bioregional fit cannot be scored.",
+            suggested_next_step="Add the most specific known bioregion URI before steward review.",
+        ))
+
+    if not meta.get("routing_tags"):
+        diagnostics.append(_routing_diagnostic(
+            code="missing_routing_tags",
+            kind="input_gap",
+            severity="review",
+            message="Draft has no routing_tags, so offer/need overlap cannot be scored.",
+            suggested_next_step="Add 2-5 routing tags that describe the offered or needed capacity.",
+        ))
+
+    if not meta.get("estimated_value_usd"):
+        diagnostics.append(_routing_diagnostic(
+            code="missing_estimated_value",
+            kind="score_degradation",
+            severity="info",
+            message="Draft has no estimated_value_usd, so capacity fit cannot be scored.",
+            suggested_next_step="Add an estimated value when useful; leave blank when valuation would distort the commitment.",
+        ))
+
+    if not draft.validity_start or not draft.validity_end:
+        diagnostics.append(_routing_diagnostic(
+            code="missing_timeframe",
+            kind="score_degradation",
+            severity="info",
+            message="Draft has no complete validity window, so timeframe overlap cannot be scored.",
+            suggested_next_step="Add validity_start and validity_end when the commitment has a real delivery window.",
+        ))
+
+    return diagnostics
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Routing scorer v0
 # ---------------------------------------------------------------------------
@@ -980,12 +1065,11 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
     Hard excludes: no remaining capacity, outside timeframe entirely.
     """
     import json as _json
-    from datetime import date
 
     meta = draft.metadata or {}
     draft_bioregion = meta.get("bioregion_uri", "")
     draft_tags = set(meta.get("routing_tags", []))
-    draft_value = meta.get("estimated_value_usd", 0) or 0
+    draft_value = _as_float(meta.get("estimated_value_usd"))
     draft_start = draft.validity_start
     draft_end = draft.validity_end
     draft_governance = meta.get("governance_membrane", "")
@@ -1023,14 +1107,20 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
 
         pool_bioregion = pr["bioregion_uri"] or ""
         pool_need_tags = set(pool_meta.get("need_tags", []))
-        pool_capacity = pool_meta.get("capacity_usd", 0) or 0
-        pool_remaining = pool_meta.get("remaining_capacity_usd", pool_capacity) or pool_capacity
-        pool_threshold = pool_meta.get("activation_threshold_usd", 0) or 0
+        pool_capacity = _as_float(pool_meta.get("capacity_usd"))
+        raw_pool_remaining = pool_meta.get("remaining_capacity_usd")
+        pool_remaining = (
+            pool_capacity
+            if raw_pool_remaining in (None, "")
+            else _as_float(raw_pool_remaining)
+        )
+        pool_threshold = _as_float(pool_meta.get("activation_threshold_usd"))
         pool_governance = pool_meta.get("governance_membrane", "")
         pool_start_str = pool_meta.get("validity_start")
         pool_end_str = pool_meta.get("validity_end")
 
         hard_excludes = []
+        diagnostics: List[RoutingDiagnostic] = []
         breakdown = ScoreBreakdown()
 
         # --- Same bioregion (+30) or umbrella (+15) ---
@@ -1085,6 +1175,13 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
                     breakdown.timeframe_overlap = round(15 * overlap_days / total_days)
                 else:
                     hard_excludes.append("outside_timeframe")
+                    diagnostics.append(_routing_diagnostic(
+                        code="outside_timeframe",
+                        kind="hard_exclude",
+                        severity="blocker",
+                        message="Draft validity window does not overlap this pool's validity window.",
+                        suggested_next_step="Renegotiate the commitment timeframe or route it to a pool with a compatible window.",
+                    ))
             else:
                 # Pool has no date constraints — full overlap assumed
                 breakdown.timeframe_overlap = 15
@@ -1093,6 +1190,13 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
         if draft_value > 0 and pool_remaining > 0:
             if draft_value > pool_remaining:
                 hard_excludes.append("exceeds_capacity")
+                diagnostics.append(_routing_diagnostic(
+                    code="exceeds_capacity",
+                    kind="hard_exclude",
+                    severity="blocker",
+                    message="Draft estimated value exceeds this pool's remaining capacity.",
+                    suggested_next_step="Split the commitment, lower the routed amount, or find/add capacity before pledging.",
+                ))
             else:
                 # Score higher when commitment moves pool closer to threshold
                 if pool_threshold > 0:
@@ -1105,10 +1209,27 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
                     breakdown.capacity_fit = round(20 * max(fit_ratio, 0.3))
         elif draft_value > 0 and pool_remaining <= 0:
             hard_excludes.append("no_capacity")
+            diagnostics.append(_routing_diagnostic(
+                code="no_capacity",
+                kind="hard_exclude",
+                severity="blocker",
+                message="This pool has no remaining capacity for a valued commitment.",
+                suggested_next_step="Route to another pool or update the pool's remaining capacity before pledging.",
+            ))
 
         # --- Governance compatibility (+10, inactive v0) ---
-        # Returns 0 until governance_membrane is populated on both sides
+        # Returns 0 until governance_membrane is populated on both sides.
+        # Only emit a diagnostic when governance fields are actually present;
+        # otherwise this becomes a non-differentiating alert on every result.
         breakdown.governance_compat = 0
+        if draft_governance or pool_governance:
+            diagnostics.append(_routing_diagnostic(
+                code="governance_unscored",
+                kind="review_gap",
+                severity="info",
+                message="Governance fields are present but are not yet computed by routing v0.",
+                suggested_next_step="Use steward review for protocol, legitimacy, and governance fit before final pledging.",
+            ))
 
         # --- Total and recommendation ---
         total_score = (
@@ -1118,6 +1239,14 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
             + breakdown.capacity_fit
             + breakdown.governance_compat
         )
+        if total_score == 0 and not hard_excludes:
+            diagnostics.append(_routing_diagnostic(
+                code="no_score_factors_matched",
+                kind="review_gap",
+                severity="review",
+                message="No scoring factors matched this pool.",
+                suggested_next_step="Check whether the draft is missing routing context or whether this pool is not a good fit.",
+            ))
 
         # Build explanation
         parts = []
@@ -1143,6 +1272,7 @@ async def _score_pools(db_pool, draft: "RoutingSuggestionRequest") -> List[PoolS
             total_score=total_score,
             score_breakdown=breakdown,
             hard_excludes=hard_excludes,
+            diagnostics=diagnostics,
             recommended=total_score >= 60 and not hard_excludes,
             explanation=explanation,
         ))
