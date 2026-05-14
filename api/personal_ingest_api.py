@@ -2751,6 +2751,29 @@ async def resolve_entity_get(
                     f"persist=true: store_new_entity failed for {canonical.uri}: {e}"
                 )
 
+        # Phase G — surface exact-match siblings so callers can detect ambiguity
+        # (e.g., two distinct "Patricia" Person rows preserved as keep_separate).
+        # Skip for is_new (no siblings could exist) and when limit<=1.
+        siblings = []
+        if not is_new and limit > 1:
+            sibling_rows = await conn.fetch(
+                """
+                SELECT fuseki_uri, entity_text, entity_type
+                FROM entity_registry
+                WHERE LOWER(entity_text) = LOWER($1)
+                  AND fuseki_uri != $2
+                  AND COALESCE(node_private, FALSE) = FALSE
+                ORDER BY created_at ASC
+                LIMIT $3
+                """,
+                label, canonical.uri, limit - 1
+            )
+            siblings = [
+                {"name": r["entity_text"], "uri": r["fuseki_uri"],
+                 "type": r["entity_type"], "confidence": 1.0, "merged_with": None}
+                for r in sibling_rows
+            ]
+
     return {
         "candidates": [{
             "name": canonical.name,
@@ -2758,7 +2781,8 @@ async def resolve_entity_get(
             "type": canonical.type,
             "confidence": canonical.confidence,
             "merged_with": canonical.merged_with
-        }],
+        }] + siblings,
+        "ambiguous": len(siblings) > 0,
         "is_new": is_new,
         "persisted": persisted,
     }
@@ -2789,6 +2813,7 @@ async def resolve_entity_post(request: ResolveRequest):
 
     entity = ExtractedEntity(name=request.label, type=request.type_hint or "")
     persisted = False
+    limit = request.limit if hasattr(request, "limit") and request.limit else 5
     async with db_pool.acquire() as conn:
         canonical, is_new = await resolve_entity(conn, entity, request.context)
 
@@ -2826,6 +2851,27 @@ async def resolve_entity_post(request: ResolveRequest):
                     f"persist=true: store_new_entity failed for {canonical.uri}: {e}"
                 )
 
+        # Phase G — surface exact-match siblings so callers can detect ambiguity.
+        siblings = []
+        if not is_new and limit > 1:
+            sibling_rows = await conn.fetch(
+                """
+                SELECT fuseki_uri, entity_text, entity_type
+                FROM entity_registry
+                WHERE LOWER(entity_text) = LOWER($1)
+                  AND fuseki_uri != $2
+                  AND COALESCE(node_private, FALSE) = FALSE
+                ORDER BY created_at ASC
+                LIMIT $3
+                """,
+                request.label, canonical.uri, limit - 1
+            )
+            siblings = [
+                {"name": r["entity_text"], "uri": r["fuseki_uri"],
+                 "type": r["entity_type"], "confidence": 1.0, "merged_with": None}
+                for r in sibling_rows
+            ]
+
     return {
         "candidates": [{
             "name": canonical.name,
@@ -2833,7 +2879,8 @@ async def resolve_entity_post(request: ResolveRequest):
             "type": canonical.type,
             "confidence": canonical.confidence,
             "merged_with": canonical.merged_with
-        }],
+        }] + siblings,
+        "ambiguous": len(siblings) > 0,
         "is_new": is_new,
         "persisted": persisted,
     }
