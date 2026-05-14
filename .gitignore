@@ -45,7 +45,7 @@ build/
 
 # Test files and temporary (except tests/ directory)
 test_*.py
-!tests/test_*.py
+!tests/**/test_*.py
 !scripts/terminusdb/test_*.py
 *_test.py
 *_fixed.py
