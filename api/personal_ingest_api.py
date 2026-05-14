@@ -2346,6 +2346,9 @@ async def ingest_extraction(request: IngestRequest):
     resolved_count = 0
     failed_entities: List[dict] = []
     entity_uri_map: Dict[str, str] = {}  # normalized_name → canonical URI
+    # (document_rid, entity_uri, context) for doclink federation emits — fired
+    # AFTER the transaction below commits (2e rule). Group A site.
+    doclink_emits: List[tuple] = []
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -2405,6 +2408,13 @@ async def ingest_extraction(request: IngestRequest):
                             DO UPDATE SET mention_count = document_entity_links.mention_count + 1
                         """, request.document_rid, canonical.uri, entity.context)
                         logger.info(f"Linked entity to document")
+                        # Group A site: the upsert always moves mention_count by
+                        # 1. Record for post-commit emit (this is the last stmt
+                        # in the per-entity savepoint, so reaching here means it
+                        # committed). Append only — emit happens post-txn below.
+                        doclink_emits.append(
+                            (request.document_rid, canonical.uri, entity.context)
+                        )
 
                 except Exception as e:
                     import traceback
@@ -2478,6 +2488,13 @@ async def ingest_extraction(request: IngestRequest):
                         logger.warning(f"Skipping relationship (FK violation): {e}")
                     except asyncpg.exceptions.CheckViolationError as e:
                         logger.warning(f"Skipping relationship (check violation): {e}")
+
+    # Emit doclink federation events AFTER the transaction above commits (2e
+    # rule — emitting inside the txn would queue events for rows a rollback
+    # could remove). Group A site → mention_delta=1 per successful upsert.
+    from api.federation_events import emit_doclink_event
+    for document_rid, entity_uri, ctx in doclink_emits:
+        await emit_doclink_event(document_rid, entity_uri, 1, context=ctx)
 
     success = len(failed_entities) == 0
     canonical_uris = [ce.uri for ce in canonical_entities]

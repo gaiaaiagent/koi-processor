@@ -25,9 +25,11 @@ affected by the flag. Default off — flip to "true" per node after
 subscriber handlers are deployed.
 """
 
+import hashlib
 import logging
 import os
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -98,3 +100,73 @@ async def emit_domain_event(
         )
     except Exception as e:
         logger.warning(f"federation_events.emit failed domain={domain} rid={rid}: {e}")
+
+
+def doclink_rid(document_rid: str, entity_uri: str) -> str:
+    """Deterministic RID for a document_entity_link federation event.
+
+    Per plan Decision 1: sha256(document_rid + entity_uri), first 16 hex chars.
+    Deterministic so the same (document, entity) pair maps to a stable RID
+    across nodes — but note the subscriber (_apply_doclink) keys the upsert on
+    the payload's (document_rid, entity_uri), not on this RID. The RID is for
+    queue identity / audit.
+    """
+    h = hashlib.sha256(f"{document_rid}{entity_uri}".encode()).hexdigest()[:16]
+    return f"orn:personal-koi.doclink:{h}"
+
+
+def doclink_row_created(execute_status: str) -> bool:
+    """True if an asyncpg `conn.execute()` status string indicates a row was
+    actually inserted.
+
+    Group B doclink sites use `INSERT ... ON CONFLICT DO NOTHING`, which returns
+    "INSERT 0 1" when a row was created and "INSERT 0 0" when the conflict was
+    hit (publisher state unchanged). Only the former should emit a federation
+    event — emitting on a conflict would be a publisher-side double-count.
+    """
+    parts = (execute_status or "").split()
+    return len(parts) >= 3 and parts[-1] == "1"
+
+
+async def emit_doclink_event(
+    document_rid: str,
+    entity_uri: str,
+    mention_delta: int,
+    context: Optional[str] = None,
+    created_at: Optional[str] = None,
+):
+    """Emit a `document_entity_link` NEW federation event.
+
+    `mention_delta` is REQUIRED — the publisher-supplied count delta. It MUST
+    NOT be inferred from a SELECT or a post-insert read of mention_count (that
+    is the exact double-count bug the subscriber's idempotency design exists to
+    prevent — see scripts/lint_mention_delta.py and _apply_doclink).
+
+      - Group A sites (always-+1 upserts: fresh insert sets count to 1, conflict
+        does +1) pass `mention_delta=1` unconditionally after a successful
+        execute.
+      - Group B sites (`ON CONFLICT DO NOTHING`) pass `mention_delta=1` ONLY
+        when a row was actually created (see `doclink_row_created`), and skip
+        this call entirely on a conflict hit.
+
+    Builds the deterministic doclink RID, generates a fresh payload_event_id
+    for subscriber-side idempotency, and delegates to `emit_domain_event` —
+    which gates on KOI_FEDERATE_KNOWLEDGE and never raises.
+    """
+    payload: Dict[str, Any] = {
+        "document_rid": document_rid,
+        "entity_uri": entity_uri,
+        "mention_delta": mention_delta,
+    }
+    if context is not None:
+        payload["context"] = context
+    if created_at is not None:
+        payload["created_at"] = created_at
+
+    await emit_domain_event(
+        "document_entity_link",
+        "NEW",
+        doclink_rid(document_rid, entity_uri),
+        payload,
+        payload_event_id=str(uuid4()),
+    )
