@@ -10,8 +10,12 @@ SSH is the connection mechanism.)
 
 READ-ONLY. SELECT COUNT(*) only. Never writes to either database.
 
-Every run appends exactly one status line to the drift log. When any table's
-row-count drift exceeds 5%, the line is tagged status=DRIFT and
+Every run appends exactly one status line to the drift log. Drift is measured
+as movement of the NUC-vs-MacBook row-count GAP away from the 2026-05-13
+reconciliation baseline — NOT the raw gap itself. Reconciliation was a
+one-directional MacBook->NUC backfill, so NUC is an intentional superset; the
+baseline gap is by design (see BASELINE_GAPS). When any table's gap has moved
+from its baseline by more than 5% OF TABLE SIZE, the line is tagged status=DRIFT and
 dobby/scripts/briefing.sh surfaces a "Federation parity" warning in the next
 morning brief, using the same DATA_WARNINGS mechanism as the PL-5 drift
 sentinel. This is the safety net the federation plan's risk-acceptance for the
@@ -44,6 +48,22 @@ TABLES = (
 )
 
 DRIFT_THRESHOLD_PCT = 5.0
+
+# Per-table baseline gap (NUC count - MacBook count) as of the 2026-05-13
+# reconciliation (see ~/.claude/plans/koi-graph-reconciliation.report.md, Phase H
+# count table). Reconciliation was a one-directional MacBook->NUC backfill, so
+# NUC is an intentional superset — this gap is NOT drift, it is the designed
+# baseline. Drift = how far the *current* gap has moved from these values.
+#
+# RE-SNAPSHOT these after any future reconciliation, or once Phase 5 federation
+# cutover has stabilized the two nodes (federation will converge the gap toward
+# a new steady state). Stale baselines produce false DRIFT alerts.
+BASELINE_GAPS = {
+    "entity_registry": 247,        # NUC 10,439 - MacBook 10,192
+    "knowledge_facts": 3197,       # NUC 17,981 - MacBook 14,784
+    "knowledge_episodes": 159,     # NUC  4,159 - MacBook  4,000
+    "document_entity_links": 1602, # NUC 51,245 - MacBook 49,643
+}
 
 # Local NUC Postgres — same connection string briefing.sh uses (local socket,
 # default user). Works identically on the MacBook side (user = SSH user).
@@ -154,13 +174,30 @@ def main() -> int:
               file=sys.stderr)
         return 0
 
-    # Both sides counted — compute per-table drift.
+    # Both sides counted — compute per-table drift vs the reconciliation baseline.
+    # The raw NUC-MacBook gap is intentionally non-zero (reconciliation made NUC a
+    # superset); drift is how far the *current* gap has moved from BASELINE_GAPS.
+    #
+    # Denominator is TABLE SIZE, not the baseline gap. Using the baseline gap as
+    # the denominator makes a table's alert sensitivity depend on how large its
+    # historical asymmetry happened to be — arbitrary (entity_registry's 247-row
+    # baseline would be ~13x more alert-sensitive than knowledge_facts' 3197).
+    # Table size answers the question that matters: "what fraction of the table
+    # has anomalously diverged." A systematic federation failure shows as a
+    # growing fraction-of-table; normal pre-cutover extraction divergence (tens
+    # of rows/day on 10k-row tables) stays well under threshold.
     parts: list[str] = []
     max_drift = 0.0
     for table, nuc, mb in zip(TABLES, nuc_counts, mb_counts):
-        drift = abs(nuc - mb) / max(mb, 1) * 100
+        current_gap = nuc - mb
+        baseline_gap = BASELINE_GAPS.get(table, 0)
+        gap_delta = current_gap - baseline_gap
+        drift = abs(gap_delta) / max(mb, 1) * 100
         max_drift = max(max_drift, drift)
-        parts.append(f"{table}[nuc={nuc} mb={mb} drift={drift:.2f}%]")
+        parts.append(
+            f"{table}[nuc={nuc} mb={mb} gap={current_gap} "
+            f"baseline_gap={baseline_gap} gap_delta={gap_delta:+d} drift={drift:.2f}%]"
+        )
 
     status = "DRIFT" if max_drift > DRIFT_THRESHOLD_PCT else "OK"
     line = f"{ts} status={status} max_drift_pct={max_drift:.2f} " + " ".join(parts)
