@@ -2032,10 +2032,10 @@ async def embedding_preflight():
     Used by `run_eval.py --preflight` to catch config errors before a full eval run.
     """
     RUNTIME_VECTOR_COLUMNS = [
-        ("entity_registry", "embedding"),
-        ("koi_memory_chunks", "embedding"),
-        ("session_chunks", "embedding"),
-        ("knowledge_facts", "fact_embedding"),
+        ("entity_registry", "embedding_3072"),
+        ("koi_memory_chunks", "embedding_3072"),
+        ("session_chunks", "embedding_3072"),
+        ("knowledge_facts", "fact_embedding_3072"),
     ]
 
     results = {
