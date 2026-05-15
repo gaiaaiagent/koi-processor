@@ -49,7 +49,7 @@ async def main(args):
         where = "WHERE metadata->>'context' IS NOT NULL"
         logger.info("Mode: re-embed B8a-enriched entities (metadata->>'context' IS NOT NULL)")
     else:
-        where = "WHERE embedding IS NULL"
+        where = "WHERE embedding_3072 IS NULL"
     params = []
     if args.entity_type:
         where += f" AND entity_type = ${1}"
@@ -81,7 +81,7 @@ async def main(args):
                 logger.info(f"  With context > 10 chars: {with_ctx}")
             else:
                 with_desc = await conn.fetchval(
-                    "SELECT COUNT(*) FROM entity_registry WHERE embedding IS NULL "
+                    "SELECT COUNT(*) FROM entity_registry WHERE embedding_3072 IS NULL "
                     "AND description IS NOT NULL AND description != ''"
                 )
                 logger.info(f"  With description: {with_desc}, Name-only: {total - with_desc}")
@@ -145,7 +145,7 @@ async def main(args):
             async with conn.transaction():
                 for uri, emb in zip(uris, embeddings):
                     await conn.execute(
-                        "UPDATE entity_registry SET embedding = $1 WHERE fuseki_uri = $2",
+                        "UPDATE entity_registry SET embedding_3072 = $1 WHERE fuseki_uri = $2",
                         str(emb), uri
                     )
 
@@ -172,7 +172,7 @@ async def main(args):
     # Final check
     async with pool.acquire() as conn:
         remaining = await conn.fetchval(
-            "SELECT COUNT(*) FROM entity_registry WHERE embedding IS NULL"
+            "SELECT COUNT(*) FROM entity_registry WHERE embedding_3072 IS NULL"
         )
     logger.info(f"  Remaining without embedding: {remaining}")
     if args.re_embed_enriched:
