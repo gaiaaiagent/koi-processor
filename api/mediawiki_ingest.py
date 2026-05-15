@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
 
+from api.federation_events import doclink_row_created
 from api.mediawiki_parser import PARSER_VERSION
 from api.personal_ingest_api import (
     resolve_entity,
@@ -238,6 +239,10 @@ async def process_entity_bearing_page(
     Returns counters dict with entities_created, entities_matched, edges_promoted.
     """
     counters = {"entities_created": 0, "entities_matched": 0, "edges_promoted": 0}
+    # (document_rid, entity_uri, context) for doclink federation emits. Group B
+    # sites (ON CONFLICT DO NOTHING) — only rows actually inserted are recorded.
+    # Caller emits AFTER its connection block commits (2e rule).
+    counters["doclink_emits"] = []
     title = page["title"]
     source_rid = page.get("source_rid", "")
     bkc_type = page.get("bkc_entity_type", "Concept")
@@ -299,11 +304,14 @@ async def process_entity_bearing_page(
             """, [normalized_alias], subject_uri)
 
     # Upsert document_entity_links for the page entity
-    await conn.execute("""
+    _dl_ctx = f"Primary entity from wiki page: {title}"
+    _dl_status = await conn.execute("""
         INSERT INTO document_entity_links (document_rid, entity_uri, context)
         VALUES ($1, $2, $3)
         ON CONFLICT (document_rid, entity_uri) DO NOTHING
-    """, source_rid, subject_uri, f"Primary entity from wiki page: {title}")
+    """, source_rid, subject_uri, _dl_ctx)
+    if doclink_row_created(_dl_status):
+        counters["doclink_emits"].append((source_rid, subject_uri, _dl_ctx))
 
     # Delete existing mediawiki_import edges for this page (idempotent re-import)
     await conn.execute("""
@@ -367,12 +375,16 @@ async def process_entity_bearing_page(
             AND edge_class = 'structural'
         """, page_state_id, se["target_title"], target_canonical.uri, target_canonical.confidence)
 
-        await conn.execute("""
+        _dl_ctx = f"Referenced via {se['predicate']} from {title}"
+        _dl_status = await conn.execute("""
             INSERT INTO document_entity_links (document_rid, entity_uri, context)
             VALUES ($1, $2, $3)
             ON CONFLICT (document_rid, entity_uri) DO NOTHING
-        """, source_rid, target_canonical.uri,
-            f"Referenced via {se['predicate']} from {title}")
+        """, source_rid, target_canonical.uri, _dl_ctx)
+        if doclink_row_created(_dl_status):
+            counters["doclink_emits"].append(
+                (source_rid, target_canonical.uri, _dl_ctx)
+            )
 
     # Resolve editorial edges (lower confidence, promote if target resolves to existing)
     for ee in page.get("editorial_edges", []):
@@ -427,12 +439,16 @@ async def process_entity_bearing_page(
             AND edge_class = 'editorial'
         """, page_state_id, ee["target_title"], target_canonical.uri, target_canonical.confidence)
 
-        await conn.execute("""
+        _dl_ctx = f"Editorial link from {title}"
+        _dl_status = await conn.execute("""
             INSERT INTO document_entity_links (document_rid, entity_uri, context)
             VALUES ($1, $2, $3)
             ON CONFLICT (document_rid, entity_uri) DO NOTHING
-        """, source_rid, target_canonical.uri,
-            f"Editorial link from {title}")
+        """, source_rid, target_canonical.uri, _dl_ctx)
+        if doclink_row_created(_dl_status):
+            counters["doclink_emits"].append(
+                (source_rid, target_canonical.uri, _dl_ctx)
+            )
 
     # Update page state with results
     await conn.execute("""

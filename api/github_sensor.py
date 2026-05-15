@@ -265,6 +265,7 @@ class GitHubSensor:
                 await sweep_old_entities(conn, repo_name, run_id)
 
         # 7. Store file state + generate vault notes + entity links
+        doclink_emits = []
         async with self.pool.acquire() as conn:
             for fr in file_results:
                 await self._store_file_state(conn, repo_id, fr, head_sha)
@@ -275,7 +276,13 @@ class GitHubSensor:
                         vault_path, repo_id, fr["rel_path"],
                     )
                 # Link entities
-                await self._link_entities(conn, fr, repo_name)
+                doclink_emits.extend(await self._link_entities(conn, fr, repo_name))
+
+        # Emit doclink federation events post-commit (after the connection block
+        # above exits). Group A site → mention_delta=1 per successful upsert.
+        from api.federation_events import emit_doclink_event
+        for document_rid, entity_uri in doclink_emits:
+            await emit_doclink_event(document_rid, entity_uri, 1)
 
         # 8. Store documents in koi_memories + embed + chunk (for RAG)
         if file_results:
@@ -825,10 +832,18 @@ class GitHubSensor:
         )
 
     async def _link_entities(self, conn, fr: dict, repo_name: str):
-        """Scan file content for known entities and create document_entity_links."""
+        """Scan file content for known entities and create document_entity_links.
+
+        Returns a list of (document_rid, entity_uri) pairs for which a doclink
+        upsert succeeded — the caller emits federation events for these AFTER
+        the enclosing connection block exits (post-commit, per the 2e rule).
+        This is a Group A site: the upsert always moves mention_count by 1
+        (fresh insert sets 1, conflict does +1), so the caller emits
+        mention_delta=1 unconditionally per pair.
+        """
         content = fr["content"]
         if len(content) < 50:
-            return
+            return []
 
         # Get all entities for word-boundary matching
         rows = await conn.fetch(
@@ -836,6 +851,7 @@ class GitHubSensor:
         )
 
         document_rid = f"github:{repo_name}:{fr['rel_path']}"
+        doclink_emits = []
 
         for row in rows:
             name = row["entity_text"]
@@ -850,8 +866,14 @@ class GitHubSensor:
                         document_rid,
                         row["fuseki_uri"],
                     )
+                    # Record the successful upsert for post-commit emit. Only a
+                    # list append — must NOT be the emit itself (an emit failure
+                    # inside this swallow-all try would vanish silently).
+                    doclink_emits.append((document_rid, row["fuseki_uri"]))
                 except Exception:
                     pass
+
+        return doclink_emits
 
     # ========== API support ==========
 

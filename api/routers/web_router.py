@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.federation_events import doclink_row_created
 from api.llm_enricher import LLM_BACKEND
 from api import ontology_registry
 from api.entity_schema import type_to_folder
@@ -890,6 +891,10 @@ def create_router(pool, caps):
         entities_resolved = 0
         relationships_created = 0
         quality_stats = None
+        # (document_rid, entity_uri, context) for doclink federation emits.
+        # Group B site (ON CONFLICT DO NOTHING) — only rows actually inserted
+        # are recorded; emitted AFTER the connection block commits (2e rule).
+        doclink_emits = []
 
         async with pool.acquire() as conn:
             # Quality gates on ingest path (skip confidence for agent-curated entities)
@@ -933,11 +938,16 @@ def create_router(pool, caps):
 
                 # Link document to entity
                 if submission and canonical.uri:
-                    await conn.execute("""
+                    _dl_ctx = ent.get("context", "web_ingest")
+                    _dl_status = await conn.execute("""
                         INSERT INTO document_entity_links (document_rid, entity_uri, context)
                         VALUES ($1, $2, $3)
                         ON CONFLICT (document_rid, entity_uri) DO NOTHING
-                    """, submission["rid"], canonical.uri, ent.get("context", "web_ingest"))
+                    """, submission["rid"], canonical.uri, _dl_ctx)
+                    if doclink_row_created(_dl_status):
+                        doclink_emits.append(
+                            (submission["rid"], canonical.uri, _dl_ctx)
+                        )
 
             # Create relationships
             for rel in body.relationships:
@@ -1007,6 +1017,12 @@ def create_router(pool, caps):
             """, body.url, _json_dumps([
                 {"name": e["name"], "type": e.get("type")} for e in entities_raw
             ]))
+
+        # Emit doclink federation events post-commit (after the connection
+        # block above exits). Group B site → already filtered to inserted rows.
+        from api.federation_events import emit_doclink_event
+        for document_rid, entity_uri, ctx in doclink_emits:
+            await emit_doclink_event(document_rid, entity_uri, 1, context=ctx)
 
         # CAT receipt for entity resolution
         async with pool.acquire() as conn:

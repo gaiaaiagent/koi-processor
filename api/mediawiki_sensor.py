@@ -283,6 +283,7 @@ class MediaWikiSensor:
         # Convert to dict for the ingest functions
         page_dict = _parsed_to_dict(parsed)
 
+        doclink_emits = []
         async with self.pool.acquire() as conn:
             # 2. Compare content_hash — upsert_page_state handles skip logic
             page_state_id, was_skipped = await upsert_page_state(
@@ -311,9 +312,10 @@ class MediaWikiSensor:
                 """, page_state_id, run_id)
 
             elif page_class == "entity_bearing" and ingest_confidence >= 0.6:
-                await process_entity_bearing_page(
+                counters = await process_entity_bearing_page(
                     conn, page_dict, page_state_id, wiki_id, run_id
                 )
+                doclink_emits = counters.get("doclink_emits", [])
 
             else:
                 # source_only or below threshold
@@ -322,6 +324,13 @@ class MediaWikiSensor:
                     SET status = 'staged', last_run_id = $2
                     WHERE id = $1
                 """, page_state_id, run_id)
+
+        # Emit doclink federation events post-commit (after the connection
+        # block above exits). Group B sites → already filtered to rows that
+        # were actually inserted; mention_delta=1 each.
+        from api.federation_events import emit_doclink_event
+        for document_rid, entity_uri, ctx in doclink_emits:
+            await emit_doclink_event(document_rid, entity_uri, 1, context=ctx)
 
         # 5. Re-chunk + re-embed (outside the main connection context)
         if parsed.word_count >= 30 and not parsed.is_redirect:

@@ -19,7 +19,7 @@ import time
 import asyncpg
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -261,6 +261,31 @@ def _dt(val: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _fact_embedding_discriminator(
+    *,
+    fact_embedding_3072: Optional[List[float]] = None,
+    fact_embedding: Optional[List[float]] = None,
+) -> tuple:
+    """Return ``(embedding_column, embedding_value)`` for a federated fact payload.
+
+    Federation Phase 1 step 2e — publisher-side embedding-column discriminator.
+    Prefers the 3072-dim column (`fact_embedding_3072`, live primary as of
+    migration 096) over the legacy 1024-dim `fact_embedding`. Returns
+    ``(None, None)`` when neither vector is populated — the subscriber omits the
+    column entirely in that case. ``embedding_value`` is a plain list of floats
+    (JSON-serializable; subscriber's `_format_vector` renders it).
+
+    The `/knowledge/episodes` endpoint only ever writes `fact_embedding_3072`,
+    so the 1024-dim branch is unexercised there today; it exists so the
+    discriminator is correct for any future caller.
+    """
+    if fact_embedding_3072:
+        return "fact_embedding_3072", list(fact_embedding_3072)
+    if fact_embedding:
+        return "fact_embedding", list(fact_embedding)
+    return None, None
+
+
 def _row_to_dict(row) -> Dict[str, Any]:
     """Convert an asyncpg Record to a serializable dict."""
     from datetime import date, datetime as dt_type
@@ -320,6 +345,11 @@ def create_router(
     _doc_embed = generate_document_embedding or generate_embedding
     router = APIRouter(tags=["knowledge"])
 
+    # Federation Phase 1 step 2e: knowledge_episode emit. emit_domain_event is
+    # internally gated by KOI_FEDERATE_KNOWLEDGE — a no-op when the flag is off,
+    # so the call site below is unconditional (no caller-side double-gate).
+    from api.federation_events import emit_domain_event
+
     def _facts_surface_available(request: Request) -> bool:
         return bool(getattr(request.app.state, "facts_surface_available", True))
 
@@ -358,34 +388,69 @@ def create_router(
             # are in `koi_canon_v1` so 0 collisions exist; B3 hardens forward.
             import json as json_mod
             episode_id = None
+            existing_ep = None
             if body.source_document:
-                episode_id = await conn.fetchval("""
-                    SELECT id FROM knowledge_episodes
+                existing_ep = await conn.fetchrow("""
+                    SELECT id, name, content, source_description,
+                           source_document, group_id, valid_at, created_at,
+                           metadata
+                    FROM knowledge_episodes
                     WHERE source_document = $1 AND group_id = $2
                     LIMIT 1
                 """, body.source_document, body.group_id)
+                if existing_ep:
+                    episode_id = existing_ep["id"]
 
             if episode_id:
                 episode_reused = True
                 logger.info(
                     f"Reusing existing episode {episode_id} "
                     f"for source_document: {body.source_document}")
+                # Federation 2e: bundled-emit episode payload — current DB row.
+                episode_payload = {
+                    "id": str(existing_ep["id"]),
+                    "name": existing_ep["name"],
+                    "content": existing_ep["content"],
+                    "source_description": existing_ep["source_description"],
+                    "source_document": existing_ep["source_document"],
+                    "group_id": existing_ep["group_id"],
+                    "valid_at": existing_ep["valid_at"].isoformat()
+                        if existing_ep["valid_at"] else None,
+                    "created_at": existing_ep["created_at"].isoformat()
+                        if existing_ep["created_at"] else None,
+                    "metadata": existing_ep["metadata"],
+                }
             else:
-                episode_id = await conn.fetchval("""
+                new_ep = await conn.fetchrow("""
                     INSERT INTO knowledge_episodes
                         (name, content, source_description, source_document,
                          group_id, valid_at, metadata)
                     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                    RETURNING id
+                    RETURNING id, created_at
                 """, body.name, body.content, body.source_description,
                     body.source_document, body.group_id, valid_at,
                     json_mod.dumps(metadata))
+                episode_id = new_ep["id"]
+                # Federation 2e: bundled-emit episode payload — request values.
+                episode_payload = {
+                    "id": str(episode_id),
+                    "name": body.name,
+                    "content": body.content,
+                    "source_description": body.source_description,
+                    "source_document": body.source_document,
+                    "group_id": body.group_id,
+                    "valid_at": valid_at.isoformat() if valid_at else None,
+                    "created_at": new_ep["created_at"].isoformat()
+                        if new_ep["created_at"] else None,
+                    "metadata": metadata,
+                }
 
             # 2. Process each fact
             facts_created = 0
             facts_skipped = 0
             facts_superseded = 0
             facts_null_embed = 0  # Wave A A2: silent-fail surface
+            emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
             for fact in body.facts:
                 # Resolve subject
                 subject_uri, is_new = await _resolve_or_create(
@@ -512,17 +577,60 @@ def create_router(
                     except Exception:
                         pass
 
-                await conn.execute("""
+                fact_row = await conn.fetchrow("""
                     INSERT INTO knowledge_facts
                         (episode_id, subject_uri, predicate, object_uri,
                          object_literal, fact_text, fact_embedding_3072,
                          valid_from, valid_to, group_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10)
+                    RETURNING id, created_at, source_node_rid
                 """, episode_id, subject_uri, fact.predicate.upper(),
                     object_uri, fact.object_literal, fact.fact_text,
                     str(fact_embedding) if fact_embedding else None,
                     _dt(fact.valid_from), _dt(fact.valid_to), body.group_id)
                 facts_created += 1
+
+                # Federation 2e: accumulate per-fact bundled-emit payload.
+                # Shape pinned by the subscriber contract (_insert_fact in
+                # domain_event_handlers.py). turn_range_* are None — this
+                # endpoint is not the deep-extraction path.
+                emb_col, emb_val = _fact_embedding_discriminator(
+                    fact_embedding_3072=fact_embedding
+                )
+                emit_facts.append({
+                    "id": str(fact_row["id"]),
+                    "subject_uri": subject_uri,
+                    "predicate": fact.predicate.upper(),
+                    "object_uri": object_uri,
+                    "object_literal": fact.object_literal,
+                    "fact_text": fact.fact_text,
+                    "valid_from": fact.valid_from,
+                    "valid_to": fact.valid_to,
+                    "created_at": fact_row["created_at"].isoformat()
+                        if fact_row["created_at"] else None,
+                    "group_id": body.group_id,
+                    "source_node_rid": fact_row["source_node_rid"],
+                    "turn_range_start": None,
+                    "turn_range_end": None,
+                    "embedding_column": emb_col,
+                    "embedding_value": emb_val,
+                })
+
+        # Federation 2e: emit the bundled knowledge_episode event AFTER the
+        # `async with pool.acquire()` block exits — i.e. after every statement
+        # above has auto-committed (asyncpg commits per-statement; this endpoint
+        # opens no explicit transaction). Emitting inside the block would risk
+        # queueing an event for a row a later rollback removed. emit_domain_event
+        # is internally gated by KOI_FEDERATE_KNOWLEDGE and never raises, so a
+        # flag-off run and an emit failure are both perfect no-ops here.
+        bundled_payload = {**episode_payload, "facts": emit_facts}
+        await emit_domain_event(
+            "knowledge_episode",
+            "UPDATE" if episode_reused else "NEW",
+            f"orn:personal-koi.knowledge-episode:{episode_id}",
+            bundled_payload,
+            payload_event_id=str(uuid4()),
+        )
 
         return EpisodeCreateResponse(
             episode_id=str(episode_id),
