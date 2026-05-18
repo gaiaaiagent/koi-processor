@@ -1413,6 +1413,19 @@ async def startup():
             except Exception as e:
                 logger.warning(f"KOI-net federation failed to initialize: {e}")
 
+            # Spore Phase 11a — startup sync sweep (one bounded poll per active peer)
+            try:
+                from api.startup_sweep import StartupSweep
+                from api.koi_net_router import _node_profile
+                if _node_profile is not None and db_pool is not None:
+                    sweep = StartupSweep(db_pool, node_rid=_node_profile.node_rid)
+                    swept = await sweep.run()
+                    logger.info(f"startup_sweep complete: {swept} peers")
+                else:
+                    logger.info("startup_sweep skipped: KOI-net node profile unavailable")
+            except Exception as exc:
+                logger.warning(f"startup_sweep failed (non-fatal): {exc}")
+
         # Initialize TerminusDB adapter (if enabled)
         if TERMINUSDB_ENABLED:
             global terminusdb_adapter
