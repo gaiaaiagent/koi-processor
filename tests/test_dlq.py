@@ -98,3 +98,42 @@ async def test_replay_returns_to_live_queue(pool):
             "SELECT delivery_attempts FROM koi_net_events WHERE id = $1", new_id
         )
         assert re["delivery_attempts"] == 0
+
+
+def _as_dict(v):
+    """asyncpg returns jsonb as str by default; normalize for comparison."""
+    if isinstance(v, str):
+        return json.loads(v)
+    return v
+
+
+@pytest.mark.asyncio
+async def test_replay_preserves_manifest_and_source_node(pool):
+    """DLQ round-trip must not lose manifest or source_node."""
+    dlq = DeadLetterQueue(pool)
+    async with pool.acquire() as conn:
+        evt = await conn.fetchrow(
+            "INSERT INTO koi_net_events"
+            "(rid, event_type, contents, manifest, target_node, source_node, "
+            " expires_at, delivery_attempts) "
+            "VALUES ('test:roundtrip', 'UPDATE', "
+            " $1::jsonb, $2::jsonb, 'peer+1', 'origin+1', "
+            " NOW() + interval '1 hour', 6) RETURNING id",
+            json.dumps({"body": "preserved"}),
+            json.dumps({"hash": "abc123", "share_type": "vault_sync"}),
+        )
+    await dlq.move_event(evt["id"], reason="max_attempts")
+
+    dlq_row = await dlq.fetch_by_original_id(evt["id"])
+    assert _as_dict(dlq_row["manifest"]) == {"hash": "abc123", "share_type": "vault_sync"}
+    assert dlq_row["source_node"] == "origin+1"
+
+    new_id = await dlq.replay(dlq_row["id"])
+    async with pool.acquire() as conn:
+        re = await conn.fetchrow(
+            "SELECT contents, manifest, source_node FROM koi_net_events WHERE id = $1",
+            new_id,
+        )
+        assert _as_dict(re["contents"]) == {"body": "preserved"}
+        assert _as_dict(re["manifest"]) == {"hash": "abc123", "share_type": "vault_sync"}
+        assert re["source_node"] == "origin+1"

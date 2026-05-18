@@ -4,10 +4,11 @@ Moves rows from koi_net_events -> koi_net_events_dead with a reason tag.
 Replay returns a row to the live queue with reset attempts.
 
 Schema notes:
-- koi_net_events has manifest + contents (jsonb), NOT a single payload column.
-- koi_net_events_dead has payload (jsonb NOT NULL).
-- On move, payload = contents (falling back to manifest, then '{}').
-- On replay, the contents field of the new live row is taken from payload.
+- koi_net_events has manifest + contents (jsonb), source_node TEXT (NOT a single payload column).
+- koi_net_events_dead has payload (jsonb NOT NULL) + manifest (jsonb) + source_node (TEXT).
+- On move: payload = contents (fallback manifest, then '{}'); manifest + source_node preserved
+  in their own columns (post-migration 082) for lossless replay.
+- On replay: contents = payload (back to live), manifest + source_node restored.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import logging
 from typing import Optional, Any, Dict, List
 
 import asyncpg
+
+from api.event_queue import DEFAULT_TTL_HOURS
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,15 @@ def _coerce_payload(row: Any) -> str:
     return chosen
 
 
+def _coerce_jsonb(val: Any) -> Optional[str]:
+    """Serialize a jsonb-ish value to a JSON string, or None."""
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        return json.dumps(val)
+    return val
+
+
 class DeadLetterQueue:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
@@ -51,13 +63,17 @@ class DeadLetterQueue:
                 logger.warning("move_event: event %s not found", event_id)
                 return
             payload_json = _coerce_payload(row)
+            manifest_json = _coerce_jsonb(row["manifest"] if "manifest" in row.keys() else None)
+            source_node = row["source_node"] if "source_node" in row.keys() else None
             await conn.execute(
                 "INSERT INTO koi_net_events_dead "
                 "(original_event_id, rid, event_type, target_node, payload, "
-                " delivery_attempts, original_expires_at, dlq_reason) "
-                "VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)",
+                " delivery_attempts, original_expires_at, dlq_reason, "
+                " manifest, source_node) "
+                "VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::jsonb,$10)",
                 row["id"], row["rid"], row["event_type"], row["target_node"],
                 payload_json, row["delivery_attempts"], row["expires_at"], reason,
+                manifest_json, source_node,
             )
             logger.info("moved event %s to DLQ (reason=%s)", event_id, reason)
 
@@ -112,11 +128,16 @@ class DeadLetterQueue:
                 payload_json = "{}"
             else:
                 payload_json = payload
+            manifest_json = _coerce_jsonb(dead["manifest"] if "manifest" in dead.keys() else None)
+            source_node = dead["source_node"] if "source_node" in dead.keys() else None
             new = await conn.fetchrow(
                 "INSERT INTO koi_net_events"
-                "(rid, event_type, contents, target_node, expires_at, delivery_attempts) "
-                "VALUES ($1,$2,$3::jsonb,$4,NOW() + interval '168 hours',0) RETURNING id",
-                dead["rid"], dead["event_type"], payload_json, dead["target_node"],
+                "(rid, event_type, manifest, contents, target_node, source_node, "
+                " expires_at, delivery_attempts) "
+                "VALUES ($1,$2,$3::jsonb,$4::jsonb,$5,$6,"
+                " NOW() + ($7 || ' hours')::interval,0) RETURNING id",
+                dead["rid"], dead["event_type"], manifest_json, payload_json,
+                dead["target_node"], source_node, str(DEFAULT_TTL_HOURS),
             )
             logger.info("replayed DLQ %s -> event %s", dlq_id, new["id"])
             return new["id"]
