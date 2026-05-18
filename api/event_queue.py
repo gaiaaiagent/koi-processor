@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_TTL_HOURS = 168
 REMOTE_TTL_HOURS = 168
 
+# Max delivery attempts before an event is routed to the DLQ.
+MAX_DELIVERY_ATTEMPTS = 5
+
 
 class EventQueue:
     """Database-backed event queue for KOI-net protocol."""
@@ -287,19 +290,51 @@ class EventQueue:
             logger.info(f"Confirmed {count} events from {confirming_node}")
             return count
 
+    async def record_delivery_failure(self, event_id: int) -> None:
+        """Increment delivery_attempts. Move to DLQ if exceeds threshold."""
+        from api.dlq import DeadLetterQueue
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE koi_net_events "
+                "SET delivery_attempts = delivery_attempts + 1, last_attempt_at = NOW() "
+                "WHERE id = $1 RETURNING delivery_attempts",
+                event_id,
+            )
+            if row is None:
+                return
+        if row["delivery_attempts"] > MAX_DELIVERY_ATTEMPTS:
+            dlq = DeadLetterQueue(self.pool)
+            await dlq.move_event(event_id, reason="max_attempts")
+
     async def cleanup(self) -> int:
-        """Delete expired events. Returns count deleted."""
+        """Move expired undelivered events to DLQ (do not silently delete).
+
+        Replaces previous silent DELETE of expired rows. Every dropped event
+        now has a DLQ provenance row. Expired events that *were* delivered
+        (delivered_to non-empty) are still hard-deleted, since their fan-out
+        is complete and DLQ provenance would just be noise.
+        """
+        from api.dlq import DeadLetterQueue
+        dlq = DeadLetterQueue(self.pool)
+        moved = await dlq.sweep_expired()
+        # Hard-delete expired-and-delivered events (their job is done).
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 """
                 DELETE FROM koi_net_events
                 WHERE expires_at < NOW()
+                  AND delivered_to IS NOT NULL
+                  AND cardinality(delivered_to) > 0
                 """
             )
-            count = int(result.split()[-1])
-            if count > 0:
-                logger.info(f"Cleaned up {count} expired events")
-            return count
+            deleted = int(result.split()[-1])
+        total = moved + deleted
+        if total > 0:
+            logger.info(
+                f"cleanup: moved {moved} expired-undelivered events to DLQ, "
+                f"deleted {deleted} expired-delivered events"
+            )
+        return total
 
     async def get_queue_size(self) -> int:
         """Get current number of active (non-expired) events."""
