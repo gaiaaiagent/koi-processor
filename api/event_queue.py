@@ -19,8 +19,9 @@ from api.koi_protocol import EventType, WireEvent, WireManifest, timestamp_to_z_
 logger = logging.getLogger(__name__)
 
 # Default TTL for events (hours)
-DEFAULT_TTL_HOURS = 24
-REMOTE_TTL_HOURS = 72
+# Spore canon (docs/protocols/store-and-forward-relay.md): 168h wall-clock TTL.
+DEFAULT_TTL_HOURS = 168
+REMOTE_TTL_HOURS = 168
 
 
 class EventQueue:
