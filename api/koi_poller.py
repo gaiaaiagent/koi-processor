@@ -341,6 +341,11 @@ class KOIPoller:
                     node_name = EXCLUDED.node_name,
                     node_type = EXCLUDED.node_type,
                     base_url = EXCLUDED.base_url,
+                    -- public_key: key-rotation guard at line ~325 blocks any non-NULL→different-non-NULL
+                    -- transition before we get here. COALESCE preserves existing non-NULL key when caller
+                    -- passes NULL, and writes the new key when existing was NULL (fixes infinite relearn
+                    -- loop where public_key was never persisted on conflict).
+                    public_key = COALESCE(EXCLUDED.public_key, koi_net_nodes.public_key),
                     encryption_key = COALESCE(EXCLUDED.encryption_key, koi_net_nodes.encryption_key),
                     ontology_uri = COALESCE(EXCLUDED.ontology_uri, koi_net_nodes.ontology_uri),
                     ontology_version = COALESCE(EXCLUDED.ontology_version, koi_net_nodes.ontology_version),
