@@ -1503,6 +1503,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Knowledge router not mounted: {e}")
 
+            # Admin router (entity merge / redirect — always on, service-token gated)
+            try:
+                from api.routers.admin_router import create_router as create_admin_router
+                app.include_router(create_admin_router(db_pool), prefix="/entities")
+                logger.info("Admin router mounted (/entities)")
+            except Exception as e:
+                logger.warning(f"Admin router not mounted: {e}")
+
             # Project briefing router (always on, no capability gate)
             try:
                 from api.routers.project_router import create_router as create_project_router
