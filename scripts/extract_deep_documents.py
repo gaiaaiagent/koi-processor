@@ -404,6 +404,27 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             for tm in mismatches:
                 await file_type_mismatch_task(http, conn, document_rid, tm)
 
+            # Post-resolution fact dedup (merge-core correctness). The name-based
+            # pre-merge AND /episodes' (predicate, object_uri) dedup both miss facts
+            # that resolve to the same triple: distinct extracted names resolving to
+            # one URI, and literal-object facts entirely (object_uri is NULL, so the
+            # (predicate, object_uri) check never fires). Collapse by the RESOLVED key,
+            # keeping the earliest row per (subject_uri, predicate, object|literal).
+            episode_id = ep.get("episode_id")
+            dedup_tag = await conn.execute(
+                """
+                WITH ranked AS (
+                  SELECT id, row_number() OVER (
+                    PARTITION BY subject_uri, predicate, COALESCE(object_uri, object_literal)
+                    ORDER BY created_at ASC, id ASC) AS rn
+                  FROM knowledge_facts WHERE episode_id = $1)
+                DELETE FROM knowledge_facts f USING ranked r
+                WHERE f.id = r.id AND r.rn > 1
+                """, episode_id)
+            dup_deleted = int(dedup_tag.split()[-1]) if dedup_tag.startswith("DELETE") else 0
+            if dup_deleted:
+                logger.info("post-resolution dedup: removed %d duplicate triple(s)", dup_deleted)
+
             for w in windows:
                 await conn.execute(
                     "UPDATE document_window_extractions SET status='imported', updated_at=NOW() "
@@ -421,6 +442,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "windows_total": len(windows), "windows_processed": sum(1 for d in per_window if d),
                 "merged_entities": len(merged["entities"]), "merged_facts": len(merged["facts"]),
                 "facts_created": ep.get("facts_created"), "facts_skipped": ep.get("facts_skipped"),
+                "facts_dup_removed": dup_deleted,
                 "entities_created": ep.get("entities_created"), "entities_resolved": ep.get("entities_resolved"),
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,
                 "episode_id": ep.get("episode_id"),
