@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -34,6 +34,7 @@ from api.embedding_provider import (
     reset_fallback_fired,
     was_fallback_fired,
 )
+from api.auth_deps import make_service_token_auth
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +321,26 @@ def _parse_jsonb(value) -> Dict:
     return {}
 
 
+class FactRetractRequest(BaseModel):
+    reason: Optional[str] = Field(
+        None,
+        description="Optional human-readable reason for the retraction. Recorded "
+                    "in the server log for audit; not persisted on the fact row "
+                    "(knowledge_facts has no retraction_reason column).",
+    )
+
+
+class FactRetractResponse(BaseModel):
+    fact_id: str
+    retracted: bool          # True if THIS call set valid_to
+    already_retracted: bool  # True if the fact was already expired before this call
+    valid_to: Optional[str] = None
+    subject_uri: Optional[str] = None
+    predicate: Optional[str] = None
+    object_uri: Optional[str] = None
+    reason: Optional[str] = None
+
+
 def create_router(
     pool,
     generate_embedding: Optional[EmbedFn] = None,
@@ -349,6 +370,11 @@ def create_router(
     # internally gated by KOI_FEDERATE_KNOWLEDGE — a no-op when the flag is off,
     # so the call site below is unconditional (no caller-side double-gate).
     from api.federation_events import emit_domain_event
+
+    # Service-token gate for mutating endpoints (retract). Accepts the
+    # KOI_CLAIMS_SERVICE_TOKEN service token OR a valid session token; see
+    # api/auth_deps.py. Mirrors claims_router's `require_auth` construction.
+    require_service_auth = make_service_token_auth(pool)
 
     def _facts_surface_available(request: Request) -> bool:
         return bool(getattr(request.app.state, "facts_surface_available", True))
@@ -1770,6 +1796,87 @@ def create_router(
         if null_answer is not None:
             resp["null_answer"] = null_answer
         return resp
+
+    # -------------------------------------------------------------------
+    # POST /facts/{fact_id}/retract — soft-expire a fact (set valid_to=NOW)
+    # -------------------------------------------------------------------
+    # Service-token gated. The sanctioned, reversible verb for retiring a
+    # wrong fact: sets `valid_to = NOW()` (the same UPDATE the predicate-
+    # supersession path uses at create_episode) rather than hard-DELETEing the
+    # row, so the retraction is auditable and recoverable (clear valid_to to
+    # undo). Unlike the supersede path it needs neither a replacement fact nor
+    # a SUPERSEDE-class predicate, so it can retire facts that path structurally
+    # cannot — e.g. a null-object AUTHORED fact.
+    @router.post("/facts/{fact_id}/retract", response_model=FactRetractResponse)
+    async def retract_fact(
+        fact_id: str,
+        body: Optional[FactRetractRequest] = None,
+        _identity: str = Depends(require_service_auth),
+    ):
+        try:
+            fid = UUID(fact_id)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"fact_id is not a valid UUID: {fact_id!r}",
+            )
+
+        reason = body.reason if body else None
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, valid_to, subject_uri, predicate, object_uri, fact_text
+                FROM knowledge_facts
+                WHERE id = $1
+            """, fid)
+
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Fact not found: {fact_id}")
+
+            # Idempotent: already expired → 200 no-op, report current valid_to.
+            if row["valid_to"] is not None:
+                logger.info(
+                    "retract_fact no-op (already expired) fact=%s valid_to=%s by=%s",
+                    fact_id, row["valid_to"], _identity,
+                )
+                return FactRetractResponse(
+                    fact_id=fact_id, retracted=False, already_retracted=True,
+                    valid_to=row["valid_to"].isoformat(),
+                    subject_uri=row["subject_uri"], predicate=row["predicate"],
+                    object_uri=row["object_uri"], reason=reason,
+                )
+
+            updated = await conn.fetchrow("""
+                UPDATE knowledge_facts
+                SET valid_to = NOW()
+                WHERE id = $1 AND valid_to IS NULL
+                RETURNING valid_to
+            """, fid)
+
+            # A concurrent retract could have set valid_to between SELECT and
+            # UPDATE; treat the empty RETURNING as already-done (still 200).
+            if updated is None:
+                refetched = await conn.fetchval(
+                    "SELECT valid_to FROM knowledge_facts WHERE id = $1", fid)
+                return FactRetractResponse(
+                    fact_id=fact_id, retracted=False, already_retracted=True,
+                    valid_to=refetched.isoformat() if refetched else None,
+                    subject_uri=row["subject_uri"], predicate=row["predicate"],
+                    object_uri=row["object_uri"], reason=reason,
+                )
+
+            logger.info(
+                "retract_fact fact=%s subject=%s predicate=%s object=%s "
+                "valid_to=%s reason=%r by=%s text=%r",
+                fact_id, row["subject_uri"], row["predicate"], row["object_uri"],
+                updated["valid_to"], reason, _identity, row["fact_text"],
+            )
+            return FactRetractResponse(
+                fact_id=fact_id, retracted=True, already_retracted=False,
+                valid_to=updated["valid_to"].isoformat(),
+                subject_uri=row["subject_uri"], predicate=row["predicate"],
+                object_uri=row["object_uri"], reason=reason,
+            )
 
     # -------------------------------------------------------------------
     # Shared helper
