@@ -585,7 +585,20 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     tokens2 = text2.lower().split()
     if len(tokens1) == 1 or len(tokens2) == 1:
         jw = jaro_winkler_similarity(text1.lower(), text2.lower())
-        return jw >= 0.95
+        if jw < 0.95:
+            return False
+        # Strict-prefix-extension guard: when one input is a strict prefix of
+        # the other AND they differ by ≥2 characters, the longer one's suffix
+        # is a distinctive token (e.g. "MOVE37" → "MOVE37XR" — XR is a product
+        # variant, not the same entity; "Regen" → "RegenOS" — OS denotes a
+        # different software product). Without this guard, JW peaks at 0.95+
+        # for prefix-extension pairs and the merge fires.
+        s1, s2 = text1.lower(), text2.lower()
+        if len(s1) != len(s2):
+            shorter, longer = (s1, s2) if len(s1) < len(s2) else (s2, s1)
+            if longer.startswith(shorter) and len(longer) - len(shorter) >= 2:
+                return False
+        return True
 
     # Get schema-driven config for multi-word token overlap
     schema = get_schema_for_type(entity_type)
@@ -2941,7 +2954,7 @@ class MentionedInDocument(BaseModel):
     document_rid: str
     mention_count: int
     doc_date: Optional[str] = None
-    first_seen: str
+    first_seen: Optional[str] = None  # NULL for rows backfilled before created_at column existed
 
 
 class MentionedInResponse(BaseModel):
@@ -3011,11 +3024,23 @@ async def get_entity_mentioned_in(
         if is_private:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        # Query document_entity_links for documents mentioning this entity
+        # Query document_entity_links for documents mentioning this entity.
+        # Filter to vault-file RIDs only (orn:obsidian.entity:..., vault:..., or bare
+        # vault paths). Sensor RIDs (claude-session:, email-message:, telegram:, slack:,
+        # discourse:, gh-*:, etc.) are not vault files and would render as dangling
+        # wikilinks if written into mentionedIn frontmatter — they belong in the
+        # knowledge graph but not in entity-note backlinks. Filter is applied in SQL
+        # rather than in Python so the LIMIT applies to vault rows, not sensor rows.
         rows = await conn.fetch("""
             SELECT del.document_rid, del.mention_count, del.created_at
             FROM document_entity_links del
             WHERE del.entity_uri = $1
+              AND (
+                del.document_rid LIKE 'orn:obsidian.entity:%'
+                OR del.document_rid LIKE 'orn:obsidian.document:%'
+                OR del.document_rid LIKE 'vault:%'
+                OR del.document_rid NOT LIKE '%:%'
+              )
             ORDER BY del.document_rid ASC
             LIMIT $2
         """, entity_uri, limit + 1)  # Fetch limit+1 to detect truncation
@@ -3034,6 +3059,12 @@ async def get_entity_mentioned_in(
             # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:
             if doc_rid.startswith('orn:obsidian.entity:Notes/'):
                 vault_path = doc_rid.replace('orn:obsidian.entity:Notes/', '')
+            elif doc_rid.startswith('orn:obsidian.entity:'):
+                vault_path = doc_rid.replace('orn:obsidian.entity:', '')
+            elif doc_rid.startswith('orn:obsidian.document:Notes/'):
+                vault_path = doc_rid.replace('orn:obsidian.document:Notes/', '')
+            elif doc_rid.startswith('orn:obsidian.document:'):
+                vault_path = doc_rid.replace('orn:obsidian.document:', '')
             elif doc_rid.startswith('vault:notes/'):
                 vault_path = doc_rid.replace('vault:notes/', '')
             elif doc_rid.startswith('vault:'):
@@ -3100,11 +3131,18 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
         for entity_uri in request.uris:
             if entity_uri in private_uris:
                 continue
-            # Query for each entity
+            # Vault-RID-only filter — see comment on get_entity_mentioned_in above.
+            # Sensor RIDs are excluded so this endpoint is safe to use for
+            # mentionedIn frontmatter population.
             rows = await conn.fetch("""
                 SELECT del.document_rid, del.mention_count, del.created_at
                 FROM document_entity_links del
                 WHERE del.entity_uri = $1
+                  AND (
+                    del.document_rid LIKE 'orn:obsidian.entity:%'
+                    OR del.document_rid LIKE 'vault:%'
+                    OR del.document_rid NOT LIKE '%:%'
+                  )
                 ORDER BY del.document_rid ASC
                 LIMIT $2
             """, entity_uri, request.limit_per_entity + 1)
@@ -3121,6 +3159,8 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
                 # Handles various formats: orn:obsidian.entity:Notes/, vault:notes/, vault:
                 if doc_rid.startswith('orn:obsidian.entity:Notes/'):
                     vault_path = doc_rid.replace('orn:obsidian.entity:Notes/', '')
+                elif doc_rid.startswith('orn:obsidian.entity:'):
+                    vault_path = doc_rid.replace('orn:obsidian.entity:', '')
                 elif doc_rid.startswith('vault:notes/'):
                     vault_path = doc_rid.replace('vault:notes/', '')
                 elif doc_rid.startswith('vault:'):

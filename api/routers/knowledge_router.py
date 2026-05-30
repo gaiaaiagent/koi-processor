@@ -136,8 +136,22 @@ def _resolve_supersession_policy(predicate_upper: str, request_flag: bool) -> bo
 
 class FactInput(BaseModel):
     subject: str = Field(..., description="Entity name for the subject")
+    subject_type: Optional[str] = Field(
+        None,
+        description="Optional type hint for the subject (Person, Organization, Place, "
+                    "Project, Concept, etc.). Used only when the entity must be CREATED "
+                    "(does not exist in registry). When the entity is resolved against "
+                    "an existing registry row, the existing type is preserved. Defaults "
+                    "to 'Concept' when omitted. Use this for facts whose subject is "
+                    "clearly typed (e.g. a Person predicate like SIBLING_OF) so newly "
+                    "created entities get the right type."
+    )
     predicate: str = Field(..., description="Relationship type (UPPER_CASE)")
     object: Optional[str] = Field(None, description="Entity name for the object (if entity)")
+    object_type: Optional[str] = Field(
+        None,
+        description="Optional type hint for the object (parallels subject_type — see above)."
+    )
     object_literal: Optional[str] = Field(None, description="Free text value (if not entity)")
     fact_text: str = Field(..., description="Natural language sentence")
     valid_from: Optional[str] = Field(None, description="ISO datetime when fact became true")
@@ -187,6 +201,23 @@ class FactRecord(BaseModel):
     similarity: Optional[float] = None
 
 
+class TypeMismatch(BaseModel):
+    """Type-hint divergence between caller and resolved entity.
+
+    Surfaced in EpisodeCreateResponse.type_mismatches when a fact provides
+    subject_type/object_type but the entity resolved to an existing registry
+    row with a different entity_type. Resolution preserves the existing type
+    (per the contract — type_hint is create-time-only), but callers may want
+    to know about the mismatch so they can flag it as a Guard-class issue
+    (e.g. "this name exists as a Concept but we believe it's a Person").
+    """
+    name: str
+    role: str  # "subject" | "object"
+    requested_type: str  # caller's type_hint
+    resolved_type: str   # existing registry row's entity_type
+    resolved_uri: str
+
+
 class EpisodeCreateResponse(BaseModel):
     episode_id: str
     episode_reused: bool = False
@@ -201,6 +232,9 @@ class EpisodeCreateResponse(BaseModel):
     # facts BYPASS future cosine dedup, so this count surfaces silent-fail
     # episodes immediately at write-time.
     facts_null_embed: int = 0
+    # Type-hint divergence list — empty unless caller provided subject_type
+    # or object_type that conflicted with an existing entity. See TypeMismatch.
+    type_mismatches: List[TypeMismatch] = Field(default_factory=list)
 
 
 class EpisodeRecord(BaseModel):
@@ -477,28 +511,51 @@ def create_router(
             facts_superseded = 0
             facts_null_embed = 0  # Wave A A2: silent-fail surface
             emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
+            # Collect type mismatches across all facts in this request
+            type_mismatches: List[TypeMismatch] = []
+
             for fact in body.facts:
                 # Resolve subject
-                subject_uri, is_new = await _resolve_or_create(
+                subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
                     conn, fact.subject, body.create_entities,
-                    _doc_embed, seen_uris)
+                    _doc_embed, seen_uris,
+                    type_hint=fact.subject_type)
                 if not subject_uri:
                     logger.warning(f"Could not resolve subject: {fact.subject}")
                     continue
                 entities_resolved += 1
                 if is_new:
                     entities_created += 1
+                # Flag type mismatch (caller provided hint, resolved type differs,
+                # and this wasn't a cache hit which returns None for resolved_type)
+                if (fact.subject_type and subj_resolved_type
+                        and fact.subject_type != subj_resolved_type):
+                    type_mismatches.append(TypeMismatch(
+                        name=fact.subject, role="subject",
+                        requested_type=fact.subject_type,
+                        resolved_type=subj_resolved_type,
+                        resolved_uri=subject_uri,
+                    ))
 
                 # Resolve object (if entity name provided)
                 object_uri = None
                 if fact.object:
-                    object_uri, obj_new = await _resolve_or_create(
+                    object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
                         conn, fact.object, body.create_entities,
-                        _doc_embed, seen_uris)
+                        _doc_embed, seen_uris,
+                        type_hint=fact.object_type)
                     if object_uri:
                         entities_resolved += 1
                         if obj_new:
                             entities_created += 1
+                        if (fact.object_type and obj_resolved_type
+                                and fact.object_type != obj_resolved_type):
+                            type_mismatches.append(TypeMismatch(
+                                name=fact.object, role="object",
+                                requested_type=fact.object_type,
+                                resolved_type=obj_resolved_type,
+                                resolved_uri=object_uri,
+                            ))
 
                 # Generate fact embedding
                 fact_embedding = None
@@ -667,49 +724,102 @@ def create_router(
             entities_resolved=entities_resolved,
             entities_created=entities_created,
             facts_null_embed=facts_null_embed,
+            type_mismatches=type_mismatches,
         )
 
     async def _resolve_or_create(
         conn, name: str, create_if_missing: bool,
         embed_fn: Optional[EmbedFn],
         seen: dict,
-    ) -> tuple[Optional[str], bool]:
-        """Resolve entity name → (uri, is_new). Uses per-request cache."""
+        type_hint: Optional[str] = None,
+    ) -> tuple[Optional[str], bool, Optional[str]]:
+        """Resolve entity name → (uri, is_new, resolved_type). Uses per-request cache.
+
+        `type_hint` is consulted ONLY when a new entity must be created — existing
+        registry rows are resolved by name/alias regardless of the caller's type.
+        This prevents a Person fact whose subject already exists as a Concept from
+        being upgraded silently.
+
+        Returns the resolved entity's `entity_type` so the caller can detect
+        `type_hint != resolved_type` and surface it as a Guard-class issue.
+        For Tier-3 creates, resolved_type == (type_hint or "Concept").
+        For cache hits (seen[]), resolved_type is None — the caller already saw
+        the type on the first resolution of that name; subsequent hits reuse it.
+        """
         from api.personal_ingest_api import (
             normalize_entity_text, generate_entity_uri
         )
 
         normalized = normalize_entity_text(name)
 
-        # Per-request cache hit
+        # Per-request cache hit — type already surfaced on first lookup of this
+        # name in this request, so we return None for resolved_type here.
         if normalized in seen:
-            return seen[normalized], False
+            return seen[normalized], False, None
 
         # Tier 1: exact match on normalized_text
-        uri = await conn.fetchval("""
-            SELECT fuseki_uri FROM entity_registry
+        row = await conn.fetchrow("""
+            SELECT fuseki_uri, entity_type FROM entity_registry
             WHERE normalized_text = $1
             LIMIT 1
         """, normalized)
-        if uri:
-            seen[normalized] = uri
-            return uri, False
+        if row:
+            seen[normalized] = row["fuseki_uri"]
+            return row["fuseki_uri"], False, row["entity_type"]
 
         # Tier 1b: case-insensitive alias match
-        uri = await conn.fetchval("""
-            SELECT fuseki_uri FROM entity_registry
+        row = await conn.fetchrow("""
+            SELECT fuseki_uri, entity_type FROM entity_registry
             WHERE $1 = ANY(SELECT LOWER(unnest(aliases)))
             LIMIT 1
         """, normalized)
-        if uri:
-            seen[normalized] = uri
-            return uri, False
+        if row:
+            seen[normalized] = row["fuseki_uri"]
+            return row["fuseki_uri"], False, row["entity_type"]
+
+        # Tier 2: fuzzy + semantic match against same-type entities.
+        # 2026-05-19 root-cause fix: previously knowledge-add only ran Tier 1
+        # exact + Tier 1.1 alias, then jumped straight to Tier 3 create_new.
+        # This bypassed the multi-tier resolver and created sibling rows for
+        # name variants ("Carol Anne" alongside "Carol Anne Hilton";
+        # "Indigenomics AI" alongside "IndigenomicsAI"). Always run multi-tier
+        # before considering create_new — same type-filter as the resolver, so
+        # we still won't bleed across types unintentionally.
+        if type_hint:
+            try:
+                from api.resolution_primitives import resolve_entity_multi_tier
+                mode = "semantic" if embed_fn else "fuzzy"
+                resolved_uri, confidence, _rel = await resolve_entity_multi_tier(
+                    conn, name, type_hint, mode=mode, embed_fn=embed_fn,
+                )
+                if resolved_uri and confidence >= 0.85:
+                    # Fetch resolved_type for return contract
+                    rtype_row = await conn.fetchrow(
+                        "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1",
+                        resolved_uri,
+                    )
+                    rtype = rtype_row["entity_type"] if rtype_row else type_hint
+                    seen[normalized] = resolved_uri
+                    logger.info(
+                        f"knowledge-add multi-tier resolved {name!r} -> {resolved_uri} "
+                        f"(confidence={confidence:.2f}, mode={mode}); skipped create_new"
+                    )
+                    return resolved_uri, False, rtype
+            except Exception as e:
+                # Resolver failure must not block ingestion — fall through to
+                # legacy Tier-3 create_new path. Log loudly so the failure is
+                # visible in the receipt logs.
+                logger.warning(
+                    f"knowledge-add multi-tier resolver failed for {name!r}: {e}; "
+                    f"falling back to create_new"
+                )
 
         if not create_if_missing:
-            return None, False
+            return None, False, None
 
-        # Tier 3: create new entity (minimal — name + type guess)
-        entity_type = "Concept"  # default; caller can enrich later
+        # Tier 3: create new entity. Use type_hint when provided; default to
+        # "Concept" only when caller has no idea (matches legacy behavior).
+        entity_type = type_hint if type_hint else "Concept"
         new_uri = generate_entity_uri(name, entity_type)
 
         embedding = None
@@ -729,7 +839,7 @@ def create_router(
 
         seen[normalized] = new_uri
         logger.info(f"Created new entity: {name} -> {new_uri}")
-        return new_uri, True
+        return new_uri, True, entity_type
 
     # -------------------------------------------------------------------
     # GET /facts/search — semantic search over facts
