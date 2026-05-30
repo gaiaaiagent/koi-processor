@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Arbitrary-document ingestion into KOI (de-gated RAG core).
+Arbitrary-document ingestion into KOI — unified depth-dial orchestrator.
 
-Phase 0 of the unified "thorough content ingestion" capability
+The unified "thorough content ingestion" capability
 (`~/.claude/plans/plan-a-unified-thorough-wiggly-plum.md`).
 
 Unlike `doc_scanner.py` (which is scoped to governed-repo markdown — requires
@@ -14,8 +14,12 @@ reuses `TextChunker` + `OpenAIEmbeddingProvider` verbatim and writes the same
 
 `doc_scanner.py` and its `is_governed()` gate are intentionally left untouched.
 
-Phase 0 implements `--tier rag` only (chunk + embed → RAG-searchable full text).
-`standard` (facts) and `thorough` (discourse + claims) arrive in later phases.
+Tiers (depth dial): `rag` = chunk + embed → RAG-searchable full text; `standard`
+= rag + facts (deep-extract) + impact claims; `thorough` = standard + discourse
+moves (Phase 3, written to session_discourse_moves source_type='document'). Every
+stage is idempotent and content-addressed by `document_rid`. The run emits a flat
+gate-evidence `response_summary` (`--gate-evidence-out`) the document-ingest
+completion gate asserts on.
 
 Usage:
     cd /path/to/koi-processor
@@ -321,6 +325,39 @@ def _load_extractor():
     return mod
 
 
+def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten the nested ingest result into the gate's response_summary — the flat
+    set of counts the document-ingest completion gate asserts on. `embeds_ok`/`dups_ok`
+    are pre-derived booleans (1=ok) so the gate can express the "must be zero" checks
+    as plain floors (a gate evaluator with only >= is enough)."""
+    rag = result.get("rag") or {}
+    ext = result.get("extract") or {}
+    cl = result.get("claims") or {}
+    rag_null = int(rag.get("null_embeds") or 0)
+    facts_null = int(ext.get("facts_null_embed") or 0)
+    dups = int(ext.get("facts_dup_removed") or 0)
+    ent_created = int(ext.get("entities_created") or 0)
+    ent_resolved = int(ext.get("entities_resolved") or 0)
+    return {
+        "tier": result.get("tier"),
+        "document_rid": result.get("document_rid"),
+        "chunks_written": int(rag.get("chunks_written") or 0),
+        "chunks_total": int(rag.get("chunks_total") or 0),
+        "rag_null_embeds": rag_null,
+        "facts_created": int(ext.get("facts_created") or 0),
+        "facts_dup_removed": dups,
+        "facts_null_embed": facts_null,
+        "entities_created": ent_created,
+        "entities_resolved": ent_resolved,
+        "entities_total": ent_created + ent_resolved,
+        "type_mismatches": int(ext.get("type_mismatches") or 0),
+        "discourse_moves_created": int(ext.get("discourse_moves_created") or 0),
+        "claims_created": int(cl.get("claims_created") or 0),
+        "embeds_ok": 1 if (rag_null == 0 and facts_null == 0) else 0,
+        "dups_ok": 1 if dups == 0 else 0,
+    }
+
+
 async def ingest_path(
     *,
     source_path: str,
@@ -375,6 +412,7 @@ async def ingest_path(
             pool, document_rid=document_rid, markdown=markdown, source_meta=source_meta,
             embedder=embedder, chunker=chunker, dry_run=dry_run)
         if dry_run or tier == "rag":
+            result["gate_evidence"] = build_gate_evidence(result)
             return result
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
@@ -390,6 +428,7 @@ async def ingest_path(
                     http, document_text=markdown, source_document=source_document)
     finally:
         await pool.close()
+    result["gate_evidence"] = build_gate_evidence(result)
     return result
 
 
@@ -406,6 +445,8 @@ def main():
     parser.add_argument("--no-claims", action="store_true", help="Skip the claims stage (standard/thorough)")
     parser.add_argument("--force", action="store_true", help="Re-extract all windows (ignore cache)")
     parser.add_argument("--dry-run", action="store_true", help="Chunk + report without writing/embedding")
+    parser.add_argument("--gate-evidence-out",
+                        help="Write the flat gate-evidence JSON (response_summary) to this path for the gate")
     args = parser.parse_args()
 
     claims = (args.tier != "rag") and not args.no_claims
@@ -432,8 +473,14 @@ def main():
               f"dup_removed {ext.get('facts_dup_removed')})")
         print(f"  entities:       {ext.get('entities_created')} created / {ext.get('entities_resolved')} resolved")
         print(f"  type_mismatch:  {ext.get('type_mismatches')}  | windows {ext.get('windows_processed')}/{ext.get('windows_total')}")
+        if result.get("tier") == "thorough":
+            print(f"  discourse_moves:{ext.get('discourse_moves_created')}")
     if cl:
         print(f"  claims_created: {cl.get('claims_created')}")
+    if args.gate_evidence_out:
+        ev = result.get("gate_evidence") or build_gate_evidence(result)
+        Path(args.gate_evidence_out).write_text(json.dumps(ev, indent=2))
+        print(f"  gate-evidence:  {args.gate_evidence_out}")
 
 
 if __name__ == "__main__":
