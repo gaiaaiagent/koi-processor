@@ -391,3 +391,152 @@ class TestKnowledgeEpisodeEmit:
 
         # Flag off → no emit.
         assert len(fake_queue.added) == 0
+
+
+# ---------------------------------------------------------------------------
+# Type-hint divergence (subject_type/object_type → type_mismatches)
+# ---------------------------------------------------------------------------
+
+class TestTypeMismatch:
+    """Coverage for the entity-type-hint feature: subject_type/object_type on
+    fact ingest, and the type_mismatches surfaced when a hint conflicts with an
+    existing registry row's entity_type. type_hint is create-time-only —
+    resolution against an existing row preserves the existing type and reports
+    the divergence rather than mutating it.
+    """
+
+    def _typed_body(self, subject, *, subject_type=None, object_type=None):
+        tag = uuid.uuid4().hex[:10]
+        fact = {
+            "subject": subject,
+            "predicate": "TEST_PREDICATE",
+            "object_literal": "some literal value",
+            "fact_text": f"Type-hint test fact {tag} — {uuid.uuid4()}.",
+            "valid_from": "2026-05-13T00:00:00+00:00",
+        }
+        if subject_type is not None:
+            fact["subject_type"] = subject_type
+        if object_type is not None:
+            fact["object_type"] = object_type
+        return {
+            "name": f"TypeHint Episode {tag}",
+            "content": f"content {tag}",
+            "source_description": "unit-test",
+            "source_document": f"test-doc-{tag}.md",
+            "group_id": f"test-{tag}",
+            "valid_at": "2026-05-13T00:00:00+00:00",
+            "metadata": {"test": True, "tag": tag},
+            "facts": [fact],
+            "create_entities": True,
+        }
+
+    @pytest.mark.anyio
+    async def test_mismatch_surfaced_when_hint_conflicts_with_existing(
+        self, harness, monkeypatch
+    ):
+        """Subject already exists as Concept; fact asserts subject_type=Person.
+        Resolution keeps Concept and surfaces a single type_mismatch entry.
+        """
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, fake_queue, pool = harness
+        from api.personal_ingest_api import (
+            normalize_entity_text, generate_entity_uri,
+        )
+
+        tag = uuid.uuid4().hex[:10]
+        name = f"TypeProbe {tag}"
+        normalized = normalize_entity_text(name)
+        seeded_uri = generate_entity_uri(name, "Concept")
+
+        # Seed an existing Concept row inside the rolled-back txn.
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, normalized_text, entity_type, source)
+            VALUES ($1, $2, $3, 'Concept', 'unit-test')
+            ON CONFLICT (fuseki_uri) DO NOTHING
+            """,
+            seeded_uri, name, normalized,
+        )
+
+        resp = await client.post(
+            "/knowledge/episodes",
+            json=self._typed_body(name, subject_type="Person"),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+
+        mismatches = data["type_mismatches"]
+        assert len(mismatches) == 1
+        m = mismatches[0]
+        assert m["role"] == "subject"
+        assert m["requested_type"] == "Person"
+        assert m["resolved_type"] == "Concept"
+        assert m["resolved_uri"] == seeded_uri
+        assert m["name"] == name
+
+        # Contract: the existing entity's type is preserved, not mutated.
+        still_concept = await conn.fetchval(
+            "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1",
+            seeded_uri,
+        )
+        assert still_concept == "Concept"
+
+    @pytest.mark.anyio
+    async def test_no_mismatch_when_entity_created_with_hint(
+        self, harness, monkeypatch
+    ):
+        """Fresh subject + subject_type=Person → created as Person (Tier-3),
+        resolved type equals the hint → no mismatch reported.
+        """
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, fake_queue, pool = harness
+        from api.personal_ingest_api import normalize_entity_text
+
+        tag = uuid.uuid4().hex[:10]
+        name = f"FreshPerson {tag}"
+
+        resp = await client.post(
+            "/knowledge/episodes",
+            json=self._typed_body(name, subject_type="Person"),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["type_mismatches"] == []
+
+        # The new entity was created with the hinted type.
+        created_type = await conn.fetchval(
+            "SELECT entity_type FROM entity_registry WHERE normalized_text = $1",
+            normalize_entity_text(name),
+        )
+        assert created_type == "Person"
+
+    @pytest.mark.anyio
+    async def test_no_mismatch_when_no_hint_provided(self, harness, monkeypatch):
+        """Backward-compat: a fact with no subject_type never produces a
+        type_mismatch, even when the subject resolves to an existing row.
+        """
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, fake_queue, pool = harness
+        from api.personal_ingest_api import (
+            normalize_entity_text, generate_entity_uri,
+        )
+
+        tag = uuid.uuid4().hex[:10]
+        name = f"NoHintProbe {tag}"
+        seeded_uri = generate_entity_uri(name, "Concept")
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, normalized_text, entity_type, source)
+            VALUES ($1, $2, $3, 'Concept', 'unit-test')
+            ON CONFLICT (fuseki_uri) DO NOTHING
+            """,
+            seeded_uri, name, normalize_entity_text(name),
+        )
+
+        resp = await client.post(
+            "/knowledge/episodes", json=self._typed_body(name),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["type_mismatches"] == []
