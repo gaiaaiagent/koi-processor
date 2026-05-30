@@ -28,6 +28,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -950,6 +951,8 @@ async def main():
             project_key = "pm"
         elif "bioregional-coordination" in str(note_path):
             project_key = "bioregional-coordination"
+        elif "bioregional-mapping" in str(note_path):
+            project_key = "bioregional-mapping"
         else:
             project_key = "spore"
         note_paths = [(note_path, project_key)]
@@ -1021,7 +1024,12 @@ async def main():
     batch_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log.info(f"  Projection batch: {batch_ts}")
 
-    async with httpx.AsyncClient() as client:
+    # Write path on POST /claims/ requires auth (make_service_token_auth).
+    # Send the service token from the env (sourced from config/personal.env);
+    # never hardcode it. Falls back to no header if unset (read-only/dry-run).
+    _svc_token = os.getenv("KOI_CLAIMS_SERVICE_TOKEN", "")
+    _auth_headers = {"Authorization": f"Bearer {_svc_token}"} if _svc_token else {}
+    async with httpx.AsyncClient(headers=_auth_headers) as client:
         for note in change_notes + nochange_notes:
             stats = await project_bridge_note(
                 note, conn, client,
