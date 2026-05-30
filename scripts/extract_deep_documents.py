@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Document deep-extraction (Phase 1: entities + facts), chunk-wise + cross-window merge.
+Document deep-extraction, chunk-wise + cross-window merge.
+  standard tier (Phase 1): entities + facts (v1 prompt/schema).
+  thorough tier (Phase 3): + discourse moves (v2 prompt/schema) written to the
+    generalized session_discourse_moves table (source_type='document', migration 103).
 
-Phase 1 of the unified thorough content-ingestion plan
+Part of the unified thorough content-ingestion plan
 (~/.claude/plans/plan-a-unified-thorough-wiggly-plum.md).
 
 Reads a document's RAG chunks (koi_memory_chunks, written by ingest_document.py),
@@ -57,10 +60,24 @@ KOI_BASE_URL = os.getenv("DOC_INGEST_KOI_URL", "http://localhost:8351")
 CLAUDE_P_MODEL = os.getenv("CLAUDE_P_MODEL", "claude-sonnet-4-6")
 KOI_INGEST_SERVICE_TOKEN = os.getenv("KOI_INGEST_SERVICE_TOKEN") or os.getenv("KOI_CLAIMS_SERVICE_TOKEN")
 
-PROMPT_PATH = Path(os.getenv(
+# Tier selects the extractor contract: standard = entities+facts (v1); thorough =
+# entities+facts+discourse (v2). Env overrides win if set.
+PROMPT_V1 = Path(os.getenv(
     "DOC_EXTRACTOR_PROMPT_FILE", str(REPO_ROOT / "scripts/prompts/deep_extraction_doc_v1.md")))
-SCHEMA_PATH = Path(os.getenv(
+SCHEMA_V1 = Path(os.getenv(
     "DOC_EXTRACTOR_SCHEMA_FILE", str(REPO_ROOT / "scripts/schemas/deep_extraction_doc_v1.schema.json")))
+PROMPT_V2 = Path(os.getenv(
+    "DOC_EXTRACTOR_PROMPT_V2_FILE", str(REPO_ROOT / "scripts/prompts/deep_extraction_doc_v2.md")))
+SCHEMA_V2 = Path(os.getenv(
+    "DOC_EXTRACTOR_SCHEMA_V2_FILE", str(REPO_ROOT / "scripts/schemas/deep_extraction_doc_v2.schema.json")))
+
+# Deterministic namespace for document discourse-move ids (uuid5 → idempotent upsert).
+DISCOURSE_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "discourse.document.koi")
+
+
+def prompt_schema_for_tier(tier: str) -> Tuple[Path, Path]:
+    """thorough → v2 (adds discourse); standard → v1 (entities+facts)."""
+    return (PROMPT_V2, SCHEMA_V2) if tier == "thorough" else (PROMPT_V1, SCHEMA_V1)
 
 WINDOW_CHARS = int(os.getenv("DOC_WINDOW_CHARS", "45000"))   # proper window size — the Anthropic API is fast,
                                                              # so no need to shrink windows to beat a CLI timeout
@@ -260,6 +277,105 @@ def merge_extractions(per_window: List[dict], windows: List[Window]) -> Dict[str
     return {"entities": list(ent.values()), "facts": list(facts.values()), "type_map": type_map}
 
 
+# ── Discourse merge + write (thorough tier only) ───────────────────────────────────
+
+VALID_MOVE_TYPES = {"decision", "problem", "question", "resolution",
+                    "observation", "next_step", "learning"}
+VALID_MOVE_STATUS = {"open", "resolved", "superseded", "deferred", "made",
+                     "reverted", "pending", "done", "cancelled"}
+
+
+def merge_discourse(per_window: List[dict]) -> List[Dict[str, Any]]:
+    """Dedup discourse moves across windows by (move_type, normalized title).
+    Widen chunk_range; backfill a missing detail/status/resolves_title from a later
+    window. Deterministic order (insertion) so uuid5 ids are stable across re-runs."""
+    out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for ex in per_window:
+        for m in ex.get("discourse", []) or []:
+            title = (m.get("title") or "").strip()
+            if not title:
+                continue
+            key = (m.get("move_type"), _norm(title))
+            cr = m.get("chunk_range") or [0, 0]
+            if key not in out:
+                out[key] = {**m, "title": title[:200], "chunk_range": list(cr)}
+            else:
+                prev = out[key]
+                prev["chunk_range"] = [min(prev["chunk_range"][0], cr[0]),
+                                       max(prev["chunk_range"][1], cr[1])]
+                if not prev.get("detail") and m.get("detail"):
+                    prev["detail"] = m["detail"]
+                if not prev.get("status") and m.get("status"):
+                    prev["status"] = m["status"]
+                if not prev.get("resolves_title") and m.get("resolves_title"):
+                    prev["resolves_title"] = m["resolves_title"]
+    return list(out.values())
+
+
+async def write_discourse_moves(conn, *, document_rid: str, episode_id,
+                                moves: List[Dict[str, Any]]) -> int:
+    """Write document discourse moves into the generalized session_discourse_moves
+    table (source_type='document', migration 103). Deterministic uuid5 ids →
+    idempotent upsert. Two passes: insert all moves, then link resolutions
+    (resolves_title → the resolved move's id). Document moves carry no embedding in
+    v1 (the column is 1024-dim/session-scoped); the chunk range lands in the
+    turn_range_* columns per migration 103's documented dual semantics. Invalid
+    moves are dead-lettered, never silently dropped."""
+    if not moves:
+        return 0
+
+    def move_id(mt: str, title: str):
+        return uuid.uuid5(DISCOURSE_NAMESPACE, f"{document_rid}:{mt}:{_norm(title)}")
+
+    title_to_id: Dict[str, Any] = {}
+    inserted = 0
+    for m in moves:
+        mt = m.get("move_type")
+        title = (m.get("title") or "").strip()[:200]
+        if mt not in VALID_MOVE_TYPES or not title:
+            with contextlib.suppress(Exception):
+                await conn.execute(
+                    "INSERT INTO document_extraction_item_errors (document_rid, item_type, payload, error) "
+                    "VALUES ($1,'discourse_move',$2::jsonb,$3)",
+                    document_rid, json.dumps(m), f"invalid move_type/title: move_type={mt!r}")
+            continue
+        status = m.get("status") if m.get("status") in VALID_MOVE_STATUS else None
+        cr = m.get("chunk_range") or [None, None]
+        a = cr[0] if isinstance(cr[0], int) else None
+        b = cr[1] if isinstance(cr[1], int) else None
+        mid = move_id(mt, title)
+        await conn.execute(
+            """INSERT INTO session_discourse_moves
+                 (id, episode_id, source_type, source_rid, session_id, move_type, title,
+                  detail, status, turn_range_start, turn_range_end, embedding)
+               VALUES ($1,$2,'document',$3,NULL,$4,$5,$6,$7,$8,$9,NULL)
+               ON CONFLICT (id) DO UPDATE SET
+                 detail=EXCLUDED.detail, status=EXCLUDED.status,
+                 turn_range_start=EXCLUDED.turn_range_start,
+                 turn_range_end=EXCLUDED.turn_range_end,
+                 episode_id=EXCLUDED.episode_id""",
+            mid, episode_id, document_rid, mt, title, m.get("detail"), status, a, b)
+        title_to_id[_norm(title)] = mid
+        inserted += 1
+
+    # Second pass: link resolution moves to the problem/question they resolve.
+    for m in moves:
+        rt = m.get("resolves_title")
+        title = (m.get("title") or "").strip()[:200]
+        mt = m.get("move_type")
+        if not rt or mt not in VALID_MOVE_TYPES or not title:
+            continue
+        target = title_to_id.get(_norm(rt))
+        if not target:
+            continue
+        with contextlib.suppress(Exception):
+            await conn.execute(
+                "UPDATE session_discourse_moves SET resolves_move_id=$2 "
+                "WHERE id=$1 AND source_rid=$3",
+                move_id(mt, title), target, document_rid)
+    return inserted
+
+
 def facts_to_episode_payload(merged: dict, *, name: str, summary: str, source_document: str,
                              group_id: str) -> dict:
     type_map = merged["type_map"]
@@ -322,8 +438,10 @@ async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: s
 async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                                 document_rid: str, tier: str, group_id: Optional[str],
                                 run_id: str, force: bool) -> Dict[str, Any]:
-    template = PROMPT_PATH.read_text(encoding="utf-8")
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    prompt_path, schema_path = prompt_schema_for_tier(tier)
+    template = prompt_path.read_text(encoding="utf-8")
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    want_discourse = (tier == "thorough")
 
     async with pool.acquire() as conn:
         locked = await conn.fetchval(
@@ -429,6 +547,16 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             if dup_deleted:
                 logger.info("post-resolution dedup: removed %d duplicate triple(s)", dup_deleted)
 
+            # Discourse (argument) layer — thorough tier only. Writes moves into the
+            # generalized session_discourse_moves table (source_type='document').
+            discourse_created = 0
+            if want_discourse:
+                merged_moves = merge_discourse([d for d in per_window if d])
+                discourse_created = await write_discourse_moves(
+                    conn, document_rid=document_rid, episode_id=episode_id, moves=merged_moves)
+                logger.info("discourse: merged %d move(s) → wrote %d (source_type=document)",
+                            len(merged_moves), discourse_created)
+
             for w in windows:
                 await conn.execute(
                     "UPDATE document_window_extractions SET status='imported', updated_at=NOW() "
@@ -446,8 +574,9 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "windows_total": len(windows), "windows_processed": sum(1 for d in per_window if d),
                 "merged_entities": len(merged["entities"]), "merged_facts": len(merged["facts"]),
                 "facts_created": ep.get("facts_created"), "facts_skipped": ep.get("facts_skipped"),
-                "facts_dup_removed": dup_deleted,
+                "facts_dup_removed": dup_deleted, "facts_null_embed": ep.get("facts_null_embed"),
                 "entities_created": ep.get("entities_created"), "entities_resolved": ep.get("entities_resolved"),
+                "discourse_moves_created": discourse_created,
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,
                 "episode_id": ep.get("episode_id"),
             }
@@ -456,12 +585,9 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
 
 
 async def amain(args) -> int:
-    if not PROMPT_PATH.exists() or not SCHEMA_PATH.exists():
-        print(f"Error: prompt/schema missing ({PROMPT_PATH}, {SCHEMA_PATH})", file=sys.stderr)
-        return 1
-    if args.tier != "standard":
-        print(f"Error: Phase 1 implements --tier standard (entities+facts) only; got {args.tier!r}. "
-              f"thorough (discourse+claims) arrives in Phase 3.", file=sys.stderr)
+    pp, sp = prompt_schema_for_tier(args.tier)
+    if not pp.exists() or not sp.exists():
+        print(f"Error: prompt/schema missing ({pp}, {sp})", file=sys.stderr)
         return 1
 
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
@@ -496,7 +622,7 @@ def main() -> int:
     g.add_argument("--document-rid", help="document:<sha256> RID")
     g.add_argument("--slug", help="resolve the RID from koi_memories metadata slug")
     parser.add_argument("--tier", default="standard", choices=["standard", "thorough"],
-                        help="Phase 1 implements 'standard' (entities+facts)")
+                        help="standard = entities+facts (v1 prompt); thorough = +discourse (v2 prompt)")
     parser.add_argument("--group-id", help="override learning field (default: the document's group_id)")
     parser.add_argument("--force", action="store_true", help="re-extract all windows (ignore cache)")
     args = parser.parse_args()
