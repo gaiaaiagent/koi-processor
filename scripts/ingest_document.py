@@ -285,34 +285,64 @@ def _claims_service_token() -> Optional[str]:
     return None
 
 
+# /claims/extract caps its input at ~10K chars (api/claim_extractor.py), so a single
+# call on a long document only sees the intro. Window the text so the WHOLE document
+# is covered; server-side content_hash dedup collapses overlap. Windows run with
+# bounded concurrency. Auth failures (401/403) are raised LOUDLY — a silent auth fail
+# is the 0-claims failure mode that bit project_bridge_notes.py; a per-window blip is
+# logged and counted 0 so one transient error never kills the claims stage.
+CLAIMS_WINDOW_CHARS = int(os.getenv("DOC_CLAIMS_WINDOW_CHARS", "9000"))
+CLAIMS_WINDOW_OVERLAP = int(os.getenv("DOC_CLAIMS_WINDOW_OVERLAP", "500"))
+CLAIMS_MAX_CONCURRENCY = int(os.getenv("DOC_CLAIMS_MAX_CONCURRENCY", "4"))
+
+
 async def extract_document_claims(
     http: httpx.AsyncClient, *, document_text: str, source_document: str,
     confidence_threshold: float = 0.7,
 ) -> Dict[str, Any]:
-    """POST /claims/extract (auth-gated). SURFACES a non-OK response loudly — a silent
-    401/403 would yield 'standard' runs with 0 claims and no error, the exact failure
-    mode that bit project_bridge_notes.py. The future completion gate asserts
-    claims_created >= 1 for standard/thorough."""
+    """Extract impact claims over the FULL document via windowed POSTs to
+    /claims/extract (auth-gated). The endpoint truncates to ~10K chars internally, so
+    we window the text ourselves (overlap + server content_hash dedup) — otherwise only
+    the first 10K (the intro) is ever seen. The completion gate asserts claims_created
+    >= 1 for standard/thorough; the windowing is what makes that count reflect the
+    whole document."""
     token = _claims_service_token()
     if not token:
         raise RuntimeError(
             "KOI_CLAIMS_SERVICE_TOKEN not found (env or "
             "~/.config/personal-koi/koi-state/claims_service_token) — /claims/extract is auth-gated.")
     headers = {"Authorization": f"Bearer {token}"}
-    payload = {"document_text": document_text, "source_document": source_document,
-               "auto_create": True, "confidence_threshold": confidence_threshold}
-    r = await http.post(f"{KOI_BASE_URL}/claims/extract", json=payload, headers=headers, timeout=240.0)
-    if r.status_code in (401, 403):
-        raise RuntimeError(
-            f"/claims/extract auth failed ({r.status_code}); token rejected. NOT swallowing — "
-            f"a silent {r.status_code} yields 0 claims with no error.")
-    r.raise_for_status()
-    data = r.json()
-    created = data.get("auto_created")
-    if created is None:
-        created = data.get("claims_created", [])
-    count = len(created) if isinstance(created, list) else int(created or 0)
-    return {"claims_created": count}
+
+    stride = max(1, CLAIMS_WINDOW_CHARS - CLAIMS_WINDOW_OVERLAP)
+    windows = [document_text[i:i + CLAIMS_WINDOW_CHARS]
+               for i in range(0, len(document_text), stride)] or [document_text]
+    sem = asyncio.Semaphore(CLAIMS_MAX_CONCURRENCY)
+
+    async def _one(chunk: str) -> int:
+        async with sem:
+            payload = {"document_text": chunk, "source_document": source_document,
+                       "auto_create": True, "confidence_threshold": confidence_threshold}
+            try:
+                r = await http.post(f"{KOI_BASE_URL}/claims/extract", json=payload,
+                                    headers=headers, timeout=240.0)
+            except Exception as e:  # noqa: BLE001 — a transient blip on one window != stage failure
+                logger.warning("claims window error (counted 0): %s", e)
+                return 0
+            if r.status_code in (401, 403):
+                raise RuntimeError(
+                    f"/claims/extract auth failed ({r.status_code}); token rejected. NOT swallowing — "
+                    f"a silent {r.status_code} yields 0 claims with no error.")
+            if r.status_code >= 400:
+                logger.warning("claims window non-2xx %s (counted 0): %s", r.status_code, r.text[:120])
+                return 0
+            data = r.json()
+            created = data.get("auto_created")
+            if created is None:
+                created = data.get("claims_created", [])
+            return len(created) if isinstance(created, list) else int(created or 0)
+
+    counts = await asyncio.gather(*(_one(w) for w in windows))
+    return {"claims_created": sum(counts), "claims_windows": len(windows)}
 
 
 def _load_extractor():
