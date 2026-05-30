@@ -49,7 +49,11 @@ REPO_ROOT = Path(__file__).parent.parent
 
 # ── Config ───────────────────────────────────────────────────────────────────────
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
-KOI_BASE_URL = os.getenv("KOI_BASE_URL", "http://localhost:8351")
+# Pin deterministically to the CO-LOCATED KOI backend (:8351 on whatever host the
+# pipeline runs — laptop or NUC). Use a dedicated var so it does NOT inherit
+# personal.env's general KOI_BASE_URL, which points at a WireGuard peer
+# (10.100.0.2) unreachable from the host running the ingest. (Plan Phase-2 note.)
+KOI_BASE_URL = os.getenv("DOC_INGEST_KOI_URL", "http://localhost:8351")
 CLAUDE_P_MODEL = os.getenv("CLAUDE_P_MODEL", "claude-sonnet-4-6")
 KOI_INGEST_SERVICE_TOKEN = os.getenv("KOI_INGEST_SERVICE_TOKEN") or os.getenv("KOI_CLAIMS_SERVICE_TOKEN")
 
