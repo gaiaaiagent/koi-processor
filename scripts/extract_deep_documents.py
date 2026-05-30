@@ -58,12 +58,20 @@ PROMPT_PATH = Path(os.getenv(
 SCHEMA_PATH = Path(os.getenv(
     "DOC_EXTRACTOR_SCHEMA_FILE", str(REPO_ROOT / "scripts/schemas/deep_extraction_doc_v1.schema.json")))
 
-WINDOW_CHARS = int(os.getenv("DOC_WINDOW_CHARS", "32000"))   # well under CLAUDE_P_CHAR_CAP; sized so a
-                                                             # dense window finishes within the claude -p timeout
+WINDOW_CHARS = int(os.getenv("DOC_WINDOW_CHARS", "45000"))   # proper window size — the Anthropic API is fast,
+                                                             # so no need to shrink windows to beat a CLI timeout
 WINDOW_OVERLAP_CHUNKS = int(os.getenv("DOC_WINDOW_OVERLAP_CHUNKS", "2"))
-CLAUDE_P_TIMEOUT = int(os.getenv("DOC_CLAUDE_P_TIMEOUT", "280"))
 MAX_WINDOWS = int(os.getenv("DOC_MAX_WINDOWS", "12"))        # per-invocation budget cap (plan §Q3)
-CLAUDE_FAILURE_MARKERS = ("invalid api key", "usage limit", "overloaded", "rate limit")
+
+# Per-window extraction transport: the direct Anthropic Messages API (DOCUMENT path
+# only — the session pipeline keeps its own `claude -p` on the subscription). The API
+# is ~4-5x faster than the claude -p CLI (which adds harness/MCP overhead) and is the
+# correct headless backend transport. Bills per-token against ANTHROPIC_API_KEY.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("DOC_EXTRACTOR_MODEL", CLAUDE_P_MODEL)
+ANTHROPIC_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_MAX_TOKENS", "24000"))
+ANTHROPIC_TIMEOUT = int(os.getenv("DOC_EXTRACTOR_TIMEOUT", "300"))
+ANTHROPIC_RETRYABLE = {429, 500, 502, 503, 529}
 
 # Type-priority coercion (plan §23): highest wins on cross-window conflict.
 TYPE_PRIORITY = {"Person": 7, "Organization": 6, "Project": 5, "Location": 4,
@@ -89,31 +97,46 @@ def compute_next_retry(attempts: int) -> Optional[datetime]:
 
 # ── claude -p + validation (cloned from extract_deep_sessions.py) ─────────────────
 
-async def _call_claude_p(prompt: str, model: str, timeout: int = 180) -> str:
-    process = await asyncio.create_subprocess_exec(
-        "claude", "-p", "--model", model, "--print",
-        # Run lean: extraction is a pure text->JSON completion needing no tools.
-        # --strict-mcp-config + an empty MCP config stops the (possibly nested)
-        # CLI from loading the caller's MCP servers/hooks, which otherwise hangs
-        # the invocation for minutes. Verified: cuts a window from >280s to ~seconds.
-        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout_b, stderr_b = await asyncio.wait_for(process.communicate(prompt.encode()), timeout=timeout)
-    except asyncio.TimeoutError as e:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        with contextlib.suppress(Exception):
-            await process.wait()
-        raise ExtractionError("extract_timeout", f"claude_p hung past {timeout}s (killed)") from e
-    stdout = (stdout_b or b"").decode("utf-8", errors="replace")
-    stderr = (stderr_b or b"").decode("utf-8", errors="replace")
-    silent = next((m for m in CLAUDE_FAILURE_MARKERS if m in stdout.lower()), None)
-    if process.returncode != 0 or silent:
-        raise ExtractionError("extract_http_error",
-                              f"claude_p rc={process.returncode} silent={silent} stderr={stderr[:200]}")
-    return stdout
+async def _call_anthropic(prompt: str, http: httpx.AsyncClient, *, model: str,
+                          max_tokens: int = ANTHROPIC_MAX_TOKENS, timeout: int = ANTHROPIC_TIMEOUT,
+                          max_retries: int = 3) -> str:
+    """Direct Anthropic Messages API call — the document-extraction transport.
+
+    Same model/prompt/schema as the session path's claude -p; just a faster, headless
+    transport. Retries transient errors (429/5xx/connection) with backoff so a blip
+    never silently drops a window — on exhaustion (or max_tokens truncation) it RAISES,
+    marking the window failed/resumable rather than producing a partial merge.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise ExtractionError("no_api_key", "ANTHROPIC_API_KEY not set (document extraction transport)",
+                              terminal=True)
+    headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+               "content-type": "application/json"}
+    body = {"model": model, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}]}
+    last = None
+    for attempt in range(max_retries):
+        try:
+            r = await http.post("https://api.anthropic.com/v1/messages",
+                                headers=headers, json=body, timeout=timeout)
+            if r.status_code in ANTHROPIC_RETRYABLE:
+                last = f"http {r.status_code}: {r.text[:200]}"
+                await asyncio.sleep(2 ** attempt)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            if data.get("stop_reason") == "max_tokens":
+                raise ExtractionError("extract_truncated",
+                                      f"hit max_tokens={max_tokens}; raise DOC_EXTRACTOR_MAX_TOKENS "
+                                      f"or lower DOC_WINDOW_CHARS")
+            text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+            if not text.strip():
+                raise ExtractionError("empty_completion", f"no text content: {str(data)[:200]}")
+            return text
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError) as e:
+            last = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(2 ** attempt)
+    raise ExtractionError("extract_http_error", f"anthropic api failed after {max_retries} attempts: {last}")
 
 
 def parse_and_validate(raw: str, schema: dict) -> dict:
@@ -356,14 +379,14 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                     logger.info("window %d/%d cached — skip", w.index + 1, len(windows))
                     continue
                 logger.info("window %d/%d: extracting (%d chunks, %d chars) via %s",
-                            w.index + 1, len(windows), len(w.chunk_indices), len(w.text), CLAUDE_P_MODEL)
+                            w.index + 1, len(windows), len(w.chunk_indices), len(w.text), ANTHROPIC_MODEL)
                 prompt = build_prompt(template, w, len(windows))
-                raw = await _call_claude_p(prompt, CLAUDE_P_MODEL, timeout=CLAUDE_P_TIMEOUT)
+                raw = await _call_anthropic(prompt, http, model=ANTHROPIC_MODEL)
                 data = parse_and_validate(raw, schema)
                 per_window[w.index] = data
                 await conn.execute(
                     """UPDATE document_window_extractions
-                       SET status='extracted', route_used='claude_p', raw_json=$3::jsonb, updated_at=NOW()
+                       SET status='extracted', route_used='anthropic_api', raw_json=$3::jsonb, updated_at=NOW()
                        WHERE document_rid=$1 AND window_index=$2""",
                     document_rid, w.index, json.dumps(data))
 
