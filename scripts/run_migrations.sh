@@ -49,6 +49,28 @@ fi
 echo -e "${GREEN}✓ Database connection successful${NC}"
 echo ""
 
+# --- Safety guard (added 2026-05-29) ----------------------------------------
+# Refuse to run on a DB that uses the koi_migrations baseline system. This
+# legacy runner tracks applied state in the DEPRECATED schema_migrations ledger,
+# which is stale on baseline-system DBs — so it would RE-RUN already-applied
+# migrations against the live database. New migrations are tracked in
+# koi_migrations + baseline manifests (scripts/stamp_baseline.py); apply scoped:
+#   psql "$DATABASE_URL" -f migrations/NNN_x.sql   # then record in koi_migrations
+# Override (expert / genuinely-fresh DB only): KOI_ALLOW_LEGACY_RUNNER=1
+if [ "${KOI_ALLOW_LEGACY_RUNNER:-0}" != "1" ]; then
+    USES_KOI_MIGRATIONS=$(psql "$DB_URL" -t -c "SELECT to_regclass('public.koi_migrations') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')
+    if [ "$USES_KOI_MIGRATIONS" = "t" ]; then
+        echo -e "${RED}ABORT: this database uses the koi_migrations baseline system.${NC}"
+        echo "This legacy schema_migrations-based runner is UNSAFE here: its ledger is"
+        echo "stale, so it would re-run already-applied migrations against the live DB."
+        echo "Apply a new migration scoped instead:  psql \"\$DATABASE_URL\" -f migrations/NNN_name.sql"
+        echo "(then record it in koi_migrations; baseline: scripts/stamp_baseline.py)"
+        echo "Override (fresh/empty DB only): KOI_ALLOW_LEGACY_RUNNER=1 $0"
+        exit 1
+    fi
+fi
+# ---------------------------------------------------------------------------
+
 # Check for pgvector extension
 echo -e "${YELLOW}Checking for required extensions...${NC}"
 EXTENSIONS_SQL="
@@ -92,8 +114,9 @@ fi
 echo -e "${GREEN}✓ Migration tracking ready${NC}"
 echo ""
 
-# Get list of migration files
-MIGRATIONS=($(ls -1 "$MIGRATION_DIR"/*.sql 2>/dev/null | sort))
+# Get list of migration files. Exclude down/rollback files (*_down.sql,
+# *.rollback.sql, *.down.sql) — a forward runner must NEVER auto-execute them.
+MIGRATIONS=($(ls -1 "$MIGRATION_DIR"/*.sql 2>/dev/null | grep -viE '(\.rollback|_down|\.down)\.sql$' | sort))
 
 if [ ${#MIGRATIONS[@]} -eq 0 ]; then
     echo -e "${RED}Error: No migration files found in $MIGRATION_DIR${NC}"

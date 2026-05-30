@@ -64,6 +64,32 @@ fi
 echo -e "${GREEN}✓ Database connection successful${NC}"
 echo ""
 
+# --- Safety guard (added 2026-05-29) ----------------------------------------
+# Refuse to run on a DB that uses the koi_migrations baseline system. This
+# legacy runner tracks applied state in schema_migrations, which is DEPRECATED
+# and stale on baseline-system DBs (e.g. personal_koi records only ~16 of 120+
+# migrations) — so it would RE-RUN already-applied migrations against the live
+# database. New migrations are tracked in koi_migrations + per-node baseline
+# manifests (scripts/stamp_baseline.py). Apply a new migration scoped instead:
+#   psql "$DATABASE_URL" -f migrations/NNN_x.sql   # then record in koi_migrations
+# Override (expert / genuinely-fresh DB only): KOI_ALLOW_LEGACY_RUNNER=1
+if [ "${KOI_ALLOW_LEGACY_RUNNER:-0}" != "1" ]; then
+    USES_KOI_MIGRATIONS=$(PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -c "SELECT to_regclass('public.koi_migrations') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')
+    if [ "$USES_KOI_MIGRATIONS" = "t" ]; then
+        echo -e "${RED}ABORT: '$DB_NAME' uses the koi_migrations baseline system.${NC}"
+        echo "This legacy schema_migrations-based runner is UNSAFE here: its ledger is"
+        echo "stale, so it would re-run already-applied migrations against the live DB."
+        echo ""
+        echo "Apply a new migration scoped instead, then record it in koi_migrations:"
+        echo "  psql \"\$DATABASE_URL\" -f migrations/NNN_name.sql"
+        echo "  (baseline stamping: scripts/stamp_baseline.py)"
+        echo ""
+        echo "If you REALLY mean to use this runner (fresh/empty DB): KOI_ALLOW_LEGACY_RUNNER=1 $0"
+        exit 1
+    fi
+fi
+# ---------------------------------------------------------------------------
+
 # Create backup directory if it doesn't exist
 mkdir -p "$BACKUP_DIR"
 
@@ -151,8 +177,9 @@ fi
 echo -e "${GREEN}✓ Migration tracking ready${NC}"
 echo ""
 
-# Get list of migration files
-MIGRATIONS=($(ls -1 "$MIGRATION_DIR"/*.sql 2>/dev/null | sort))
+# Get list of migration files. Exclude down/rollback files (*_down.sql,
+# *.rollback.sql, *.down.sql) — a forward runner must NEVER auto-execute them.
+MIGRATIONS=($(ls -1 "$MIGRATION_DIR"/*.sql 2>/dev/null | grep -viE '(\.rollback|_down|\.down)\.sql$' | sort))
 
 if [ ${#MIGRATIONS[@]} -eq 0 ]; then
     echo -e "${RED}Error: No migration files found in $MIGRATION_DIR${NC}"
