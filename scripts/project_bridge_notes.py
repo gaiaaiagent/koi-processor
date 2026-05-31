@@ -319,10 +319,14 @@ _CCLAIM_SECTION_NEW = re.compile(
 # inline list-bullet form (- **C-1** [anchor] "...") AND the header form
 # (**C-1 [pdf-p1]** — label, statement in a following blockquote). Table rows (lines
 # starting with "|") never match. Anchor + statement are parsed from the remainder.
-_CLAIM_HEAD = re.compile(r'^(?:-\s+)?\*\*(C-?\d+[a-z]?)\b(.*)$')      # bold / list-bullet form
+_CLAIM_HEAD = re.compile(r'^(?:-\s+)?\*\*(C-?\d+[a-z]?)\b(.*)$')      # bold form (any **C-N ...); spurious `**C5 Label:**` headers are dropped by the no-anchor post-filter in parse_claims_new, NOT by tightening this regex (which would clip real citation-/punctuation-bearing forms)
 _CLAIM_HEAD_H = re.compile(r'^#{2,4}\s+(C-?\d+[a-z]?)\b(.*)$')        # markdown-header form (### C-1 ...)
 _ANCHOR_MARKER = re.compile(r'(?:anchor:|html-section:|pdf-p|§)', re.IGNORECASE)
 _BRACKET = re.compile(r'\[([^\]]*)\]')
+# Leading run of **/LOAD-BEARING/[anchor] tokens that PRECEDE the statement. Stripping
+# only this leading run (not all brackets) removes the anchor bracket — and any stray
+# quote inside it — without mangling editorial brackets ([Sen's], [is]) inside the statement.
+_LEAD = re.compile(r'^(?:\s|\*\*|LOAD-BEARING|\[[^\]]*\])*')
 
 
 def _claim_head(line: str):
@@ -391,7 +395,7 @@ def parse_claims_new(text: str) -> list[BridgeClaim]:
         rest = hm.group(2)
         load_bearing = "LOAD-BEARING" in rest
         blob = ""
-        qm = re.search(r'"(.+)"', rest)
+        qm = re.search(r'"(.+)"', _LEAD.sub("", rest))  # strip ONLY the leading anchor/bold run (kills the in-anchor quote, BLOCKER 1) then GREEDY first..last — preserves editorial brackets + inner quotes inside the statement
         if qm:
             statement = qm.group(1).strip()
         else:
@@ -408,7 +412,7 @@ def parse_claims_new(text: str) -> list[BridgeClaim]:
                         qlines.append(lines[j].strip().lstrip(">").strip())
                         j += 1
                     blob = " ".join(qlines)
-                    qq = re.search(r'"(.+)"', blob)
+                    qq = re.search(r'"(.+)"', _LEAD.sub("", blob))  # strip leading anchor/bold run, then greedy (keep inner quotes + editorial brackets)
                     statement = qq.group(1).strip() if qq else blob.strip().strip('"').strip()
                     break
                 j += 1
@@ -417,6 +421,14 @@ def parse_claims_new(text: str) -> list[BridgeClaim]:
                 tail = _BRACKET.sub('', rest.replace("**", ""))
                 statement = re.sub(r'\s+', ' ', tail).strip(" —-:*").strip()
         anchor = _pick_anchor(rest, blob)
+        if not anchor.strip():
+            # HARDENING (a): no evidence anchor -> a bold/header **C<n> ...** with no
+            # [anchor]/(page)/§ is a subsection label (e.g. **C5 Label:**), not a real
+            # evidence-anchored claim. Drop it. Form-agnostic (doesn't clip citation/
+            # punctuation head forms the way a tightened head regex did). 0 occurrences in
+            # the current Sahely corpus -> no-op now; forward-proofing for other corpora.
+            i += 1
+            continue
         if c_id in seen:
             i += 1
             continue
@@ -782,28 +794,37 @@ async def create_review_claim(
     """
     change_slug = f"{disposition_slug}-{concept_name}"
     target_spec_uri = f"spec:{target_spec_doc}"
-    governance_cluster_key = f"{target_spec_doc}:{concept_name}"
+    # New-dialect clusters are disposition-keyed so an OLD-dialect (target:concept)
+    # find_review_claim lookup can never collide with them. Old-dialect path unchanged.
+    if disposition is not None:
+        governance_cluster_key = f"{target_spec_doc}:{concept_name}:{disposition_slug}"
+    else:
+        governance_cluster_key = f"{target_spec_doc}:{concept_name}"
     statement = (
         f"Canon review: {disposition_slug.replace('-', ' ')} — "
         f"{concept_name.replace('-', ' ')} in {target_spec_doc}"
     )
+
+    metadata = {
+        "claim_layer": "review",
+        "target_spec_doc": target_spec_doc,
+        "target_section": concept_name,
+        "change_slug": change_slug,
+        "target_spec_uri": target_spec_uri,
+        "governance_cluster_key": governance_cluster_key,
+        "project_uri": project_uri,
+        "source": "learning_field",
+    }
+    # Emit disposition only for new-dialect clusters; old-dialect metadata stays byte-identical.
+    if disposition is not None:
+        metadata["disposition"] = disposition
 
     payload = {
         "claimant_uri": claimant_uri,
         "statement": statement,
         "claim_type": "governance",
         "about_uri": about_uri,
-        "metadata": {
-            "claim_layer": "review",
-            "target_spec_doc": target_spec_doc,
-            "target_section": concept_name,
-            "change_slug": change_slug,
-            "target_spec_uri": target_spec_uri,
-            "governance_cluster_key": governance_cluster_key,
-            "disposition": disposition,
-            "project_uri": project_uri,
-            "source": "learning_field",
-        },
+        "metadata": metadata,
         "created_by": "darren",
     }
 
