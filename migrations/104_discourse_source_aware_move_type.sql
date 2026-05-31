@@ -37,6 +37,22 @@ BEGIN
   END IF;
 END$$;
 
+-- Precondition guard: any document row under the OLD session move_types would fail the
+-- new document CHECK below and hang the ADD CONSTRAINT. Fail fast with an actionable
+-- message instead (delete / re-extract those rows first — see the header). A fresh DB
+-- (NUC) and a DB whose document rows already use the argument taxonomy both pass with 0.
+DO $$
+DECLARE bad INT;
+BEGIN
+  SELECT count(*) INTO bad FROM session_discourse_moves
+   WHERE source_type = 'document' AND move_type NOT IN
+     ('thesis','premise','evidence','claim','counterpoint','open_question','definition','implication');
+  IF bad > 0 THEN
+    RAISE EXCEPTION 'Refusing migration 104: % document discourse row(s) use a non-argument move_type. '
+      'Delete or re-extract them under the argument taxonomy first (header lines 12-17).', bad;
+  END IF;
+END$$;
+
 -- ── 1. move_type: replace the flat session CHECK with a source-aware one ────────────
 ALTER TABLE session_discourse_moves DROP CONSTRAINT IF EXISTS session_discourse_moves_move_type_check;
 DO $$ BEGIN

@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import asyncpg
 from asyncpg.pool import Pool
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -129,11 +130,17 @@ def create_router(db_pool: Pool) -> APIRouter:
     async def status(document_rid: str, identity: str = Depends(require_service)):
         sp = _state_path(document_rid)
         state = json.loads(sp.read_text()) if sp.exists() else {"status": "unknown"}
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT tier, chunk_count, window_count, rag_chunked_at, deep_extracted_at, "
-                "claims_extracted_at, deep_extraction_last_error, last_ingested_at "
-                "FROM document_ingestion_log WHERE document_rid = $1", document_rid)
+        try:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT tier, chunk_count, window_count, rag_chunked_at, deep_extracted_at, "
+                    "claims_extracted_at, deep_extraction_last_error, last_ingested_at "
+                    "FROM document_ingestion_log WHERE document_rid = $1", document_rid)
+        except asyncpg.exceptions.UndefinedTableError:
+            # document-ingest migrations (102+) not applied on this DB → the feature is
+            # unavailable here. Degrade to 503 rather than 500-ing the recovery-polling path.
+            raise HTTPException(
+                503, "document-ingest unavailable: tracking tables absent (apply migrations 102-104)")
         return {"document_rid": document_rid, "state": state, "log": dict(row) if row else None}
 
     return router

@@ -562,16 +562,24 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
 
             # Semantic dedup (paraphrase tail) — the exact-triple sweep above misses
             # re-extraction paraphrases (fresh phrasing → distinct triple). Soft-retract
-            # the LATER of any same-subject + same-predicate pair whose fact_text 3072
-            # embeddings exceed the cosine threshold (keep the earliest). Conservative
-            # (predicate match + high bar) so re-runs self-converge without losing
-            # genuinely-distinct facts. Reversible (valid_to).
+            # the LATER of a same-subject + same-predicate + same-OBJECT pair whose
+            # fact_text embeddings exceed the threshold (keep earliest). OBJECT-AWARE so it
+            # never merges genuinely-distinct facts (PR-#28 review): entity objects must
+            # share object_uri (so "uses solar" vs "uses wind" never collapse), and literal
+            # objects must be containment-related — one a more-detailed form of the other
+            # ("152 initiatives" ⊂ "152 initiatives across 44 countries") — NOT merely
+            # text-similar (so "$30 fee" vs "$40 fee" never collapse). Reversible (valid_to).
             sem_tag = await conn.execute(
                 """
                 WITH pairs AS (
                   SELECT a.id a_id, b.id b_id, a.created_at a_ct, b.created_at b_ct
                   FROM knowledge_facts a JOIN knowledge_facts b
-                    ON a.subject_uri = b.subject_uri AND a.predicate = b.predicate AND a.id < b.id
+                    ON a.subject_uri = b.subject_uri AND a.predicate = b.predicate
+                   AND a.object_uri IS NOT DISTINCT FROM b.object_uri
+                   AND (a.object_literal IS NULL OR b.object_literal IS NULL
+                        OR position(b.object_literal IN a.object_literal) > 0
+                        OR position(a.object_literal IN b.object_literal) > 0)
+                   AND a.id < b.id
                    AND a.episode_id = $1 AND b.episode_id = $1
                    AND a.valid_to IS NULL AND b.valid_to IS NULL
                    AND a.fact_embedding_3072 IS NOT NULL AND b.fact_embedding_3072 IS NOT NULL
