@@ -1540,6 +1540,14 @@ async def startup():
             except Exception as e:
                 logger.warning(f"Claims router not mounted: {e}")
 
+            # Document ingestion router (unified doc-ingest; background job; service-token gated)
+            try:
+                from api.routers.documents_router import create_router as create_documents_router
+                app.include_router(create_documents_router(db_pool), prefix="/documents")
+                logger.info("Documents router mounted (/documents)")
+            except Exception as e:
+                logger.warning(f"Documents router not mounted: {e}")
+
             # Calendar router — ICS-event date-range lookups (personal only)
             try:
                 from api.routers.calendar_router import (

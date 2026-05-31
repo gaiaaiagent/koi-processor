@@ -147,10 +147,15 @@ async def extract_claims_from_text(
     if len(cleaned) < 50:
         return []
 
-    # Build prompt
+    # Build prompt.
+    # NOTE: input is HARD-CAPPED at 10K chars — only the first ~10K of a long document
+    # is ever seen here. A caller that needs whole-document coverage MUST window the text
+    # itself and aggregate (see ingest_document.py:extract_document_claims, which windows
+    # at 9K with overlap; server-side content_hash dedup collapses the overlaps). Raising
+    # this cap affects every caller's token cost, so it's left to the caller to window.
     prompt = _EXTRACTION_PROMPT.format(
         few_shot=_FEW_SHOT_EXAMPLES,
-        document_text=cleaned[:10000],  # Limit input size
+        document_text=cleaned[:10000],  # hard cap — callers window for full coverage (see note above)
     )
 
     # Call Claude via Anthropic API
