@@ -375,6 +375,7 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         "chunks_total": int(rag.get("chunks_total") or 0),
         "rag_null_embeds": rag_null,
         "facts_created": int(ext.get("facts_created") or 0),
+        "facts_skipped": int(ext.get("facts_skipped") or 0),
         "facts_dup_removed": dups,
         "facts_null_embed": facts_null,
         "entities_created": ent_created,
