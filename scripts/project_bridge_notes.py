@@ -85,7 +85,28 @@ DISPOSITION_SLUG = {
     "implementation hypothesis": "hypothesize",
     "unresolved tension": "resolve-tension",
     "no change": "no-change",
+    # New-dialect (Sahely Phase-3+) disposition controlled vocab (DG2=b). These
+    # are already slug-shaped; map to themselves. "n/a" -> "n-a" (slug-safe).
+    "canon-pressure-decision-brief": "canon-pressure-decision-brief",
+    "framing-note-only": "framing-note-only",
+    "decline-with-trigger": "decline-with-trigger",
+    "not-present": "not-present",
+    "n/a": "n-a",
 }
+
+# New-dialect R-claim disposition controlled vocab (DG2=b). Every R-row becomes a
+# queryable governance cluster; only canon-pressure-decision-brief proposes change
+# (carries the supports stance). The rest are descriptive "no change proposed"
+# but still get a cluster so the convergence board can answer concept × target →
+# disposition (note). Ordered most-specific-first for prefix normalization.
+NEW_DISPOSITIONS = (
+    "canon-pressure-decision-brief",
+    "framing-note-only",
+    "decline-with-trigger",
+    "not-present",
+    "n/a",
+)
+PROPOSE_DISPOSITIONS = {"canon-pressure-decision-brief"}
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +128,14 @@ class OpenQuestion:
 
 @dataclass
 class ReviewDirective:
-    """Explicit review claim parsed from ## Review Claims section."""
-    r_id: str                  # e.g. "R1"
+    """Explicit review claim parsed from ## Review Claims (old dialect) or from
+    a ## R-claim disposition table row (new dialect)."""
+    r_id: str                  # e.g. "R1" / "R-LifeValue" / synthesized "Rrow3"
     target_doc: str            # primary target doc (first if "or")
     concept: str               # explicit concept slug
     statement: str             # claim text
     supported_by: list         # list of C-IDs (e.g. ["C1", "C2"])
+    disposition: Optional[str] = None  # new-dialect per-row disposition; None for old dialect
 
 @dataclass
 class BridgeNote:
@@ -280,6 +303,242 @@ def parse_review_directives(text: str) -> list[ReviewDirective]:
     return directives
 
 
+# ---------------------------------------------------------------------------
+# NEW-DIALECT parsers (Sahely Phase-3+): "## C-claims" list-bullet blockquotes
+# + "## R-claim disposition table". The old-dialect parsers above are preserved
+# unchanged so the ~1,289 P2P-wiki-era claims project identically (AC2).
+# ---------------------------------------------------------------------------
+
+_CCLAIM_SECTION_NEW = re.compile(
+    # Any H2 header containing "C-claims" (tolerates "## 2. C-claims", "## §2 Verbatim
+    # C-claims", "## C-claims"); body runs to the next H2 (### sub-headers don't terminate).
+    r'^## [^\n]*?\bC-?claims?\b[^\n]*\n(.*?)(?=\n## |\Z)',
+    re.DOTALL | re.IGNORECASE | re.MULTILINE,
+)
+# C-claim head: optional "- " bullet, then **C<n> at line start. Matches BOTH the
+# inline list-bullet form (- **C-1** [anchor] "...") AND the header form
+# (**C-1 [pdf-p1]** — label, statement in a following blockquote). Table rows (lines
+# starting with "|") never match. Anchor + statement are parsed from the remainder.
+_CLAIM_HEAD = re.compile(r'^(?:-\s+)?\*\*(C-?\d+[a-z]?)\b(.*)$')      # bold / list-bullet form
+_CLAIM_HEAD_H = re.compile(r'^#{2,4}\s+(C-?\d+[a-z]?)\b(.*)$')        # markdown-header form (### C-1 ...)
+_ANCHOR_MARKER = re.compile(r'(?:anchor:|html-section:|pdf-p|§)', re.IGNORECASE)
+_BRACKET = re.compile(r'\[([^\]]*)\]')
+
+
+def _claim_head(line: str):
+    """Match a C-claim head in either form (bold-bullet or markdown-header)."""
+    return _CLAIM_HEAD.match(line) or _CLAIM_HEAD_H.match(line)
+
+
+def _pick_anchor(*sources: str) -> str:
+    """Anchor = first anchor-marker bracket; else a page-like parenthetical; else the
+    first non-LOAD-BEARING bracket; else ''. (Anchor is evidence metadata, not load-bearing.)"""
+    brackets = [b for s in sources for b in _BRACKET.findall(s)]
+    am = next((b for b in brackets if _ANCHOR_MARKER.search(b)), None)
+    if am:
+        return am.strip()
+    for s in sources:
+        pm = re.search(r'\(([^)]*?(?:pdf-p\d|p\.?\s*\d|§|Abstract|Summary|TOC|Cover)[^)]*)\)', s)
+        if pm:
+            return pm.group(1).strip()
+    nb = next((b for b in brackets if "LOAD-BEARING" not in b.upper()), None)
+    return nb.strip() if nb else ""
+
+
+def _merge_claims(*lists) -> list[BridgeClaim]:
+    """Concatenate claim lists, deduping by c_id (first wins)."""
+    out, seen = [], set()
+    for lst in lists:
+        for c in lst:
+            if c.c_id not in seen:
+                seen.add(c.c_id)
+                out.append(c)
+    return out
+
+
+def parse_claims_new(text: str) -> list[BridgeClaim]:
+    """Parse the new-dialect ``## C-claims`` section.
+
+    Two layouts occur; both handled:
+      * inline list-bullet — ``- **C-1** [anchor] "statement"`` (4 catalogued variants:
+        hyphen-optional id, citation-parenthetical-in-bold, [anchor:]/[html-section:]/
+        [pdf-pN] labels, separate **LOAD-BEARING** token).
+      * header + blockquote — ``**C-1 [pdf-p1]** — label`` (no bullet, anchor inside the
+        bold) optionally followed by ``> "verbatim statement"`` blockquote line(s) (the
+        life-value-manifesto / ethics-as-science-of-viability layout).
+    Three head layouts occur and all are handled:
+      * inline list-bullet — ``- **C-1** [anchor] "statement"`` (4 catalogued variants).
+      * header-in-bold + blockquote — ``**C-1 [pdf-p1]** — label`` then ``> "..."``.
+      * markdown-header + blockquote — ``### C-1 (p3, Abstract) — label [LOAD-BEARING]``
+        then ``> "..." [pdf-pN]`` (ethics-as-science / money-growth layout).
+    Anchor via _pick_anchor (head brackets + parenthetical + blockquote); load_bearing if
+    'LOAD-BEARING' appears on the head line or its blockquote. Table rows (lines starting
+    with '|') never match — heads require '**C', '- **C', or '## C'/'### C'.
+    """
+    m = _CCLAIM_SECTION_NEW.search(text)
+    if not m:
+        return []
+    lines = m.group(1).splitlines()
+    claims: list[BridgeClaim] = []
+    seen: set = set()
+    i = 0
+    while i < len(lines):
+        hm = _claim_head(lines[i].strip())
+        if not hm:
+            i += 1
+            continue
+        c_id = hm.group(1).replace("-", "")        # "C-1" -> "C1"
+        rest = hm.group(2)
+        load_bearing = "LOAD-BEARING" in rest
+        blob = ""
+        qm = re.search(r'"(.+)"', rest)
+        if qm:
+            statement = qm.group(1).strip()
+        else:
+            # No inline quote: scan forward for a blockquote statement before the next
+            # C-head (the header + ``> "..."`` layout); accumulate consecutive > lines.
+            statement = ""
+            j = i + 1
+            while j < len(lines) and not _claim_head(lines[j].strip()):
+                if lines[j].strip().startswith(">"):
+                    qlines = []
+                    while j < len(lines) and lines[j].strip().startswith(">"):
+                        if "LOAD-BEARING" in lines[j]:
+                            load_bearing = True
+                        qlines.append(lines[j].strip().lstrip(">").strip())
+                        j += 1
+                    blob = " ".join(qlines)
+                    qq = re.search(r'"(.+)"', blob)
+                    statement = qq.group(1).strip() if qq else blob.strip().strip('"').strip()
+                    break
+                j += 1
+            if not statement:
+                # one-liner label: drop bold + the anchor bracket(s), keep the prose label
+                tail = _BRACKET.sub('', rest.replace("**", ""))
+                statement = re.sub(r'\s+', ' ', tail).strip(" —-:*").strip()
+        anchor = _pick_anchor(rest, blob)
+        if c_id in seen:
+            i += 1
+            continue
+        seen.add(c_id)
+        claims.append(BridgeClaim(
+            c_id=c_id,
+            confidence="high" if load_bearing else "medium",
+            anchor=anchor,
+            statement=re.sub(r'\s+', ' ', statement),
+        ))
+        i += 1
+    return claims
+
+
+_RTABLE_SECTION = re.compile(
+    # Any H2 header containing "R-claim disposition table" (tolerates "## 3. ...",
+    # "## §3 ... (Wave-4 ...)"); body runs to the next H2.
+    r'^## [^\n]*?R-claim disposition table[^\n]*\n(.*?)(?=\n## |\Z)',
+    re.DOTALL | re.IGNORECASE | re.MULTILINE,
+)
+_TABLE_ROW_SEP = re.compile(r'^\s*\|?[\s:|\-]+\|?\s*$')
+_SPORE_DOCID = re.compile(r'(spore\.[a-z0-9][a-z0-9.\-]+)')
+_BACKTICK_SPAN = re.compile(r'`([^`]+)`')
+_CID_REF = re.compile(r'\bC-?\d+[a-z]?\b')
+
+
+def _clean_cell(cell: str) -> str:
+    # Remove ALL backticks + bold markers (not just edges): a `**`token`**`` cell would
+    # otherwise leave stray backticks after **-removal and break disposition normalization.
+    return cell.replace("**", "").replace("`", "").strip()
+
+
+def _extract_target(cell: str) -> str:
+    """Canonical target: spore.* doc_id > first backtick span > cleaned prose (parens stripped)."""
+    md = _SPORE_DOCID.search(cell)
+    if md:
+        return md.group(1)
+    bm = _BACKTICK_SPAN.search(cell)
+    if bm:
+        return bm.group(1).strip()
+    return re.sub(r'\([^)]*\)', '', _clean_cell(cell)).strip()
+
+
+def _normalize_disposition(cell: str) -> str:
+    d = _clean_cell(cell).lower().lstrip("*").strip()
+    for v in NEW_DISPOSITIONS:
+        if d.startswith(v):
+            return v
+    return d
+
+
+def parse_disposition_table(text: str) -> list[ReviewDirective]:
+    """Parse the new-dialect ``## R-claim disposition table`` into ReviewDirectives.
+
+    Columns vary (optional leading #/R-id, Target, Concept, Disposition, One-line);
+    located by header name. Emits one ReviewDirective per (row x concept); a row's
+    one-line cell C-IDs populate ``supported_by`` (precise C->R edges), with a
+    concept-match fallback applied in the apply path when a row names no C-IDs.
+    Rows with no resolvable target (e.g. routing-completeness "(none)") are skipped
+    with a warning.
+    """
+    m = _RTABLE_SECTION.search(text)
+    if not m:
+        return []
+    rows = [ln for ln in m.group(1).splitlines() if ln.strip().startswith("|")]
+    if len(rows) < 2:
+        return []
+    header = [h.strip().lower() for h in rows[0].strip().strip("|").split("|")]
+
+    def col(*names):
+        for i, h in enumerate(header):
+            if any(n in h for n in names):
+                return i
+        return None
+
+    ti, ci, di = col("target"), col("concept"), col("disposition")
+    idi = col("#", "r-id", "r-claim")
+    if ci is not None and ci == ti:
+        # merged "Target + concept" column (money-growth schema): keep it as target,
+        # generalize concept to 'unspecified' rather than duplicating the merged text.
+        ci = None
+    if ti is None or di is None:
+        # No "Target"/"Concept" column (e.g. failure-of-economics' Resonance /
+        # Resolved-state-citation prose schema): leave unparsed + surfaced, rather than
+        # mapping prose into messy cluster keys. Operator can normalize that note's header.
+        return []
+    out: list[ReviewDirective] = []
+    for ri, ln in enumerate(rows[1:]):
+        if _TABLE_ROW_SEP.match(ln):
+            continue
+        cells = ln.strip().strip("|").split("|")
+        if len(cells) <= max(x for x in (ti, ci, di) if x is not None):
+            continue
+        target = _extract_target(cells[ti])
+        tlow = _clean_cell(cells[ti]).lower()
+        if not target or tlow.startswith("none") or tlow in ("—", "-", "n/a", ""):
+            log.warning(f"  disposition-table row {ri + 1}: no resolvable target "
+                        f"({cells[ti].strip()!r}) — skipped")
+            continue
+        disposition = _normalize_disposition(cells[di])
+        r_id = (_clean_cell(cells[idi]) if idi is not None and idi < len(cells) else "") or f"Rrow{ri + 1}"
+        oneline = cells[-1].strip() if (len(cells) - 1) > di else ""
+        supported_by = sorted({c.replace("-", "") for c in _CID_REF.findall(oneline)})
+        concepts: list = []
+        if ci is not None and ci < len(cells):
+            craw = re.sub(r'^\((.*)\)$', r'\1', _clean_cell(cells[ci])).strip()
+            if craw and craw not in ("—", "-"):
+                concepts = [c.strip() for c in craw.split(",") if c.strip()]
+        if not concepts:
+            concepts = ["unspecified"]
+        for concept in concepts:
+            out.append(ReviewDirective(
+                r_id=r_id,
+                target_doc=target,
+                concept=concept,
+                statement=re.sub(r'\s+', ' ', _clean_cell(oneline)),
+                supported_by=supported_by,
+                disposition=disposition,
+            ))
+    return out
+
+
 def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
     """Parse a bridge note file into structured data."""
     text = path.read_text()
@@ -295,9 +554,9 @@ def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
         concepts=fm.get("concepts") or [],
         depends_on=fm.get("depends_on") or [],
         relates_to=fm.get("relates_to") or [],
-        claims=parse_claims(text),
+        claims=_merge_claims(parse_claims(text), parse_claims_new(text)),
         questions=parse_questions(text),
-        review_directives=parse_review_directives(text),
+        review_directives=parse_review_directives(text) + parse_disposition_table(text),
         project_key=project_key,
     )
 
@@ -504,6 +763,7 @@ async def create_review_claim(
     disposition_slug: str,
     project_uri: str,
     projection_batch: str,
+    disposition: Optional[str] = None,
 ) -> dict:
     """Create a review claim via POST /claims/. Deterministic from target+concept.
 
@@ -540,6 +800,7 @@ async def create_review_claim(
             "change_slug": change_slug,
             "target_spec_uri": target_spec_uri,
             "governance_cluster_key": governance_cluster_key,
+            "disposition": disposition,
             "project_uri": project_uri,
             "source": "learning_field",
         },
@@ -567,18 +828,37 @@ async def find_review_claim(
     conn: asyncpg.Connection,
     target_spec_doc: str,
     concept_name: str,
+    change_slug: Optional[str] = None,
 ) -> Optional[str]:
-    """Find an existing review claim by target + concept in metadata."""
-    row = await conn.fetchrow(
-        "SELECT entity_uri FROM claims "
-        "WHERE metadata->>'claim_layer' = 'review' "
-        "  AND metadata->>'source' = 'learning_field' "
-        "  AND metadata->>'target_spec_doc' = $1 "
-        "  AND metadata->>'governance_cluster_key' = $2 "
-        "LIMIT 1",
-        target_spec_doc,
-        f"{target_spec_doc}:{concept_name}",
-    )
+    """Find an existing review claim.
+
+    Old dialect: dedup by (target_spec_doc, governance_cluster_key=target:concept).
+    New dialect (change_slug given): dedup by (target_spec_doc, change_slug=
+    disposition-concept) so a framing-note-only cluster never shadows a
+    canon-pressure-decision-brief cluster for the same (target, concept).
+    """
+    if change_slug is not None:
+        row = await conn.fetchrow(
+            "SELECT entity_uri FROM claims "
+            "WHERE metadata->>'claim_layer' = 'review' "
+            "  AND metadata->>'source' = 'learning_field' "
+            "  AND metadata->>'target_spec_doc' = $1 "
+            "  AND metadata->>'change_slug' = $2 "
+            "LIMIT 1",
+            target_spec_doc,
+            change_slug,
+        )
+    else:
+        row = await conn.fetchrow(
+            "SELECT entity_uri FROM claims "
+            "WHERE metadata->>'claim_layer' = 'review' "
+            "  AND metadata->>'source' = 'learning_field' "
+            "  AND metadata->>'target_spec_doc' = $1 "
+            "  AND metadata->>'governance_cluster_key' = $2 "
+            "LIMIT 1",
+            target_spec_doc,
+            f"{target_spec_doc}:{concept_name}",
+        )
     return row["entity_uri"] if row else None
 
 
@@ -717,27 +997,44 @@ async def project_bridge_note(
 
     if has_review_directives:
         for rd in note.review_directives:
-            cache_key = (rd.target_doc, rd.concept)
+            # Per-directive disposition (new-dialect table rows) or note-level (old dialect).
+            if rd.disposition is not None:
+                rd_slug = DISPOSITION_SLUG.get(rd.disposition, "unclassified")
+                rd_proposes = rd.disposition in PROPOSE_DISPOSITIONS
+                rd_change_slug = f"{rd_slug}-{rd.concept}"
+            else:
+                rd_slug = disp_slug
+                rd_proposes = proposes_change
+                rd_change_slug = None
+            cache_key = (rd.target_doc, rd.concept, rd.disposition)
             if cache_key not in review_claim_cache:
                 about_uri = concept_uris.get(rd.concept)
                 if not about_uri:
                     log.warning(f"  Skipping {rd.r_id}: concept '{rd.concept}' not resolved")
                     continue
-                # Fix 2: always check for existing review claim first
-                existing = await find_review_claim(conn, rd.target_doc, rd.concept)
+                # Always check for an existing cluster first (global dedup). For
+                # new-dialect rows dedup by change_slug (disposition+concept) so a
+                # framing-note-only cluster never shadows a canon-pressure one.
+                existing = await find_review_claim(
+                    conn, rd.target_doc, rd.concept, change_slug=rd_change_slug)
                 if existing:
                     review_claim_cache[cache_key] = existing
-                    log.info(f"  {rd.r_id}: reusing existing review claim ({rd.target_doc} × {rd.concept})")
-                elif proposes_change:
+                    log.info(f"  {rd.r_id}: reusing existing review claim "
+                             f"({rd.target_doc} × {rd.concept} / {rd.disposition or note.disposition})")
+                elif (rd.disposition is not None) or rd_proposes:
+                    # DG2=(b): every new-dialect R-row gets a governance cluster
+                    # (incl. framing-note-only / decline-with-trigger). Old dialect
+                    # keeps the proposes_change gate.
                     review_data = await create_review_claim(
                         client, conn,
                         claimant_uri=claimant_uri,
                         concept_name=rd.concept,
                         about_uri=about_uri,
                         target_spec_doc=rd.target_doc,
-                        disposition_slug=disp_slug,
+                        disposition_slug=rd_slug,
                         project_uri=project_uri,
                         projection_batch=projection_batch,
+                        disposition=rd.disposition,
                     )
                     if review_data and review_data.get("entity_uri"):
                         review_claim_cache[cache_key] = review_data["entity_uri"]
@@ -783,20 +1080,32 @@ async def project_bridge_note(
         source_claim_uris[claim.c_id] = source_entity_uri
 
         if has_review_directives:
-            # Link source claims to review claims via supported_by from R-directives
+            # Link source claims to review claims. New dialect: each R-row names its
+            # supporting C-IDs in the one-line cell (supported_by); fall back to
+            # concept-match only when the row named none. Old dialect: explicit
+            # supported_by only (unchanged). Stance is per-directive.
             for rd in note.review_directives:
-                if claim.c_id in rd.supported_by:
-                    review_uri = review_claim_cache.get((rd.target_doc, rd.concept))
-                    if review_uri:
-                        inserted = await insert_edge(
-                            conn, source_entity_uri, default_stance, review_uri,
-                            source_rid=f"projection:{note.doc_id}",
-                        )
-                        if inserted:
-                            if default_stance == "supports":
-                                stats["supports_edges"] += 1
-                            else:
-                                stats["opposes_edges"] += 1
+                rd_stance = "supports" if (
+                    (rd.disposition in PROPOSE_DISPOSITIONS)
+                    if rd.disposition is not None else proposes_change
+                ) else "opposes"
+                linked = claim.c_id in rd.supported_by
+                if (not linked and rd.disposition is not None
+                        and not rd.supported_by and primary_concept == rd.concept):
+                    linked = True
+                if not linked:
+                    continue
+                review_uri = review_claim_cache.get((rd.target_doc, rd.concept, rd.disposition))
+                if review_uri:
+                    inserted = await insert_edge(
+                        conn, source_entity_uri, rd_stance, review_uri,
+                        source_rid=f"projection:{note.doc_id}",
+                    )
+                    if inserted:
+                        if rd_stance == "supports":
+                            stats["supports_edges"] += 1
+                        else:
+                            stats["opposes_edges"] += 1
         else:
             # Fallback (Fix 3): use depends_on targets only
             if not fallback_targets or not primary_concept:
@@ -915,7 +1224,13 @@ def discover_bridge_notes() -> list[tuple[Path, str]]:
                 continue  # no frontmatter — not a bridge note
             except Exception:
                 continue
-            if isinstance(fm, dict) and fm.get("research_subkind") == "bridge_note":
+            # Tolerant predicate (DG1): old-dialect bridge_note OR new-dialect
+            # connection note. Synthesis docs (zero claims) are caught by the
+            # per-note zero-claim warning, not excluded here.
+            if isinstance(fm, dict) and (
+                fm.get("research_subkind") == "bridge_note"
+                or fm.get("doc_kind") == "connection"
+            ):
                 notes.append((md_path, project_key))
 
     return notes
@@ -930,6 +1245,10 @@ async def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--apply", action="store_true", help="Write to KOI graph")
     parser.add_argument("--note", type=str, help="Project a single note by path")
+    parser.add_argument("--match", type=str, default=None,
+                        help="Only project notes whose filename contains this substring (e.g. 'sahely-')")
+    parser.add_argument("--project", type=str, default=None,
+                        help="Only project notes from this PROJECTS key (e.g. 'spore')")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -958,6 +1277,11 @@ async def main():
         note_paths = [(note_path, project_key)]
     else:
         note_paths = discover_bridge_notes()
+        # Scoping (DG5 Sahely-first): --project <key> and/or --match <substr>.
+        if args.project:
+            note_paths = [(p, k) for (p, k) in note_paths if k == args.project]
+        if args.match:
+            note_paths = [(p, k) for (p, k) in note_paths if args.match in p.name]
 
     log.info(f"Found {len(note_paths)} bridge notes")
 
@@ -970,9 +1294,11 @@ async def main():
 
     active_project_keys = {project_key for _, project_key in note_paths}
 
-    # Verify claimant orgs exist for projects participating in this run.
-    # Optional configured projects may not have KOI seed entities until they
-    # first author bridge notes.
+    # Verify claimant orgs + project URIs resolve for participating projects.
+    # Unregistered-project guard: a project that is configured but not yet
+    # ingested into the KB (e.g. 'fc') is SKIPPED with a warning rather than
+    # halting the whole run; its notes are dropped from this run.
+    skip_projects: set = set()
     for project_key in sorted(active_project_keys):
         cfg = PROJECTS[project_key]
         exists = await conn.fetchval(
@@ -980,17 +1306,22 @@ async def main():
             cfg["claimant_uri"],
         )
         if not exists:
-            log.error(f"Claimant entity missing: {cfg['claimant_uri']}")
-            sys.exit(1)
-
-    # Verify project URIs resolve for projects participating in this run.
-    for project_key in sorted(active_project_keys):
-        cfg = PROJECTS[project_key]
+            log.warning(f"Skipping project '{project_key}': claimant entity "
+                        f"missing ({cfg['claimant_uri']})")
+            skip_projects.add(project_key)
+            continue
         try:
             uri = await resolve_project_uri(conn, cfg["project_id"])
             log.info(f"Project {cfg['project_id']} → {uri}")
         except RuntimeError as e:
-            log.error(str(e))
+            log.warning(f"Skipping project '{project_key}': {e}")
+            skip_projects.add(project_key)
+
+    if skip_projects:
+        note_paths = [(p, k) for (p, k) in note_paths if k not in skip_projects]
+        if not note_paths:
+            log.error("No projectable notes remain after unregistered-project skip")
+            await conn.close()
             sys.exit(1)
 
     totals = {
@@ -1010,11 +1341,21 @@ async def main():
     # Pass 1: change-proposing notes (creates review claims + supports edges)
     # Pass 2: "no change" notes (links to existing review claims with opposes)
     parsed_notes = []
+    zero_claim_notes = []
     for note_path, project_key in note_paths:
         try:
-            parsed_notes.append(parse_bridge_note(note_path, project_key))
+            n = parse_bridge_note(note_path, project_key)
         except Exception as e:
             log.error(f"Failed to parse {note_path}: {e}")
+            continue
+        parsed_notes.append(n)
+        # Silent-data-loss guard: a discovered note that yields no claims AND no
+        # review directives is logged so partial coverage is never mistaken for
+        # complete (synthesis docs / capstones land here correctly).
+        if not n.claims and not n.review_directives:
+            zero_claim_notes.append(n.doc_id or str(note_path))
+            log.warning(f"  ZERO-CLAIM: {n.doc_id or note_path} discovered but "
+                        f"yielded 0 claims + 0 review directives")
 
     change_notes = [n for n in parsed_notes if n.disposition != "no change"]
     nochange_notes = [n for n in parsed_notes if n.disposition == "no change"]
@@ -1054,6 +1395,20 @@ async def main():
     log.info(f"  Opposes edges:   {totals.get('opposes_edges', 0)}")
     log.info(f"  About edges:     {totals['about_edges']}")
     log.info(f"  Related_to edges:{totals['related_to_edges']}")
+
+    # New-dialect convergence visibility: R-row count, disposition histogram,
+    # zero-claim notes (DG2=b + silent-data-loss guard).
+    disp_hist: dict = {}
+    rrow_total = 0
+    for n in parsed_notes:
+        for rd in n.review_directives:
+            rrow_total += 1
+            key = rd.disposition or "(old-dialect/no-disposition)"
+            disp_hist[key] = disp_hist.get(key, 0) + 1
+    log.info(f"  R-rows / review directives parsed: {rrow_total}")
+    log.info(f"  Disposition histogram: {dict(sorted(disp_hist.items(), key=lambda kv: -kv[1]))}")
+    log.info(f"  Zero-claim discovered notes: {len(zero_claim_notes)}"
+             + (f" → {zero_claim_notes}" if zero_claim_notes and len(zero_claim_notes) <= 25 else ""))
 
 
 if __name__ == "__main__":
