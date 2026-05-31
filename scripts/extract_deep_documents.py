@@ -141,7 +141,7 @@ async def _call_anthropic(prompt: str, http: httpx.AsyncClient, *, model: str,
             r = await http.post("https://api.anthropic.com/v1/messages",
                                 headers=headers, json=body, timeout=timeout)
             if r.status_code in ANTHROPIC_RETRYABLE:
-                last = f"http {r.status_code}: {r.text[:200]}"
+                last = f"http {r.status_code}: {r.text[:400]}"
                 await asyncio.sleep(2 ** attempt)
                 continue
             r.raise_for_status()
@@ -152,7 +152,7 @@ async def _call_anthropic(prompt: str, http: httpx.AsyncClient, *, model: str,
                                       f"or lower DOC_WINDOW_CHARS")
             text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
             if not text.strip():
-                raise ExtractionError("empty_completion", f"no text content: {str(data)[:200]}")
+                raise ExtractionError("empty_completion", f"no text content: {str(data)[:400]}")
             return text
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError) as e:
             last = f"{type(e).__name__}: {e}"
@@ -279,15 +279,17 @@ def merge_extractions(per_window: List[dict], windows: List[Window]) -> Dict[str
 
 # ── Discourse merge + write (thorough tier only) ───────────────────────────────────
 
-VALID_MOVE_TYPES = {"decision", "problem", "question", "resolution",
-                    "observation", "next_step", "learning"}
-VALID_MOVE_STATUS = {"open", "resolved", "superseded", "deferred", "made",
-                     "reverted", "pending", "done", "cancelled"}
+# Document ARGUMENT taxonomy (plan §Q2; enforced by migration 104's source-aware CHECK).
+# Session discourse keeps its own enums (session_discourse_moves rows with
+# source_type='session'); document moves use these.
+VALID_MOVE_TYPES = {"thesis", "claim", "evidence", "premise",
+                    "counterpoint", "open_question", "definition", "implication"}
+VALID_MOVE_STATUS = {"asserted", "supported", "contested", "speculative", "open", "deferred"}
 
 
 def merge_discourse(per_window: List[dict]) -> List[Dict[str, Any]]:
     """Dedup discourse moves across windows by (move_type, normalized title).
-    Widen chunk_range; backfill a missing detail/status/resolves_title from a later
+    Widen chunk_range; backfill a missing detail/status/supports from a later
     window. Deterministic order (insertion) so uuid5 ids are stable across re-runs."""
     out: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for ex in per_window:
@@ -298,7 +300,7 @@ def merge_discourse(per_window: List[dict]) -> List[Dict[str, Any]]:
             key = (m.get("move_type"), _norm(title))
             cr = m.get("chunk_range") or [0, 0]
             if key not in out:
-                out[key] = {**m, "title": title[:200], "chunk_range": list(cr)}
+                out[key] = {**m, "title": title[:400], "chunk_range": list(cr)}
             else:
                 prev = out[key]
                 prev["chunk_range"] = [min(prev["chunk_range"][0], cr[0]),
@@ -307,8 +309,8 @@ def merge_discourse(per_window: List[dict]) -> List[Dict[str, Any]]:
                     prev["detail"] = m["detail"]
                 if not prev.get("status") and m.get("status"):
                     prev["status"] = m["status"]
-                if not prev.get("resolves_title") and m.get("resolves_title"):
-                    prev["resolves_title"] = m["resolves_title"]
+                if not prev.get("supports") and m.get("supports"):
+                    prev["supports"] = m["supports"]
     return list(out.values())
 
 
@@ -316,22 +318,24 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
                                 moves: List[Dict[str, Any]]) -> int:
     """Write document discourse moves into the generalized session_discourse_moves
     table (source_type='document', migration 103). Deterministic uuid5 ids →
-    idempotent upsert. Two passes: insert all moves, then link resolutions
-    (resolves_title → the resolved move's id). Document moves carry no embedding in
-    v1 (the column is 1024-dim/session-scoped); the chunk range lands in the
-    turn_range_* columns per migration 103's documented dual semantics. Invalid
+    idempotent upsert. Two passes: insert all moves, then link argument edges
+    (supports → the claim/thesis's id, via resolves_move_id). Document moves carry no
+    embedding in v1 (the column is 1024-dim/session-scoped); the chunk range lands in
+    the turn_range_* columns per migration 103's documented dual semantics. Invalid
     moves are dead-lettered, never silently dropped."""
     if not moves:
         return 0
 
-    def move_id(mt: str, title: str):
-        return uuid.uuid5(DISCOURSE_NAMESPACE, f"{document_rid}:{mt}:{_norm(title)}")
+    def move_id(mt: str, title: str, chunk_start: int):
+        # chunk_start (global RAG-chunk index) keeps two same-type/same-title moves at
+        # different locations distinct (plan §163).
+        return uuid.uuid5(DISCOURSE_NAMESPACE, f"{document_rid}:{mt}:{_norm(title)}:{chunk_start}")
 
     title_to_id: Dict[str, Any] = {}
     inserted = 0
     for m in moves:
         mt = m.get("move_type")
-        title = (m.get("title") or "").strip()[:200]
+        title = (m.get("title") or "").strip()[:400]
         if mt not in VALID_MOVE_TYPES or not title:
             with contextlib.suppress(Exception):
                 await conn.execute(
@@ -343,7 +347,7 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
         cr = m.get("chunk_range") or [None, None]
         a = cr[0] if isinstance(cr[0], int) else None
         b = cr[1] if isinstance(cr[1], int) else None
-        mid = move_id(mt, title)
+        mid = move_id(mt, title, a if a is not None else 0)
         await conn.execute(
             """INSERT INTO session_discourse_moves
                  (id, episode_id, source_type, source_rid, session_id, move_type, title,
@@ -358,21 +362,24 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
         title_to_id[_norm(title)] = mid
         inserted += 1
 
-    # Second pass: link resolution moves to the problem/question they resolve.
+    # Second pass: link argument edges — a premise/evidence/counterpoint `supports`
+    # the claim/thesis whose title it names → resolves_move_id self-FK.
     for m in moves:
-        rt = m.get("resolves_title")
-        title = (m.get("title") or "").strip()[:200]
+        sup = m.get("supports")
+        title = (m.get("title") or "").strip()[:400]
         mt = m.get("move_type")
-        if not rt or mt not in VALID_MOVE_TYPES or not title:
+        if not sup or mt not in VALID_MOVE_TYPES or not title:
             continue
-        target = title_to_id.get(_norm(rt))
+        target = title_to_id.get(_norm(sup))
         if not target:
             continue
+        cr = m.get("chunk_range") or [None, None]
+        cs = cr[0] if isinstance(cr[0], int) else 0
         with contextlib.suppress(Exception):
             await conn.execute(
                 "UPDATE session_discourse_moves SET resolves_move_id=$2 "
                 "WHERE id=$1 AND source_rid=$3",
-                move_id(mt, title), target, document_rid)
+                move_id(mt, title, cs), target, document_rid)
     return inserted
 
 

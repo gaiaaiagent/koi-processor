@@ -76,34 +76,41 @@ window's text.
 ### Discourse (argument layer) — NEW in v2
 
 Extract the document's **argument structure** — the load-bearing moves that make up
-its reasoning, NOT a summary. Capture the theses it asserts, the tensions it names,
-the questions it leaves open, the answers it offers, the framework decisions it
-commits to, and the actions it recommends. A substantial whitepaper window typically
-yields **2–6 moves**; do not pad, do not invent moves the window's text does not
-support.
+its reasoning, NOT a summary. Capture its theses and claims, the evidence and premises
+that support them, the counterpoints it acknowledges, the questions it leaves open, the
+terms it defines, and the implications it draws. A substantial whitepaper window
+typically yields **2–6 moves**; do not pad, do not invent moves the window's text does
+not support.
 
-**Type each move as exactly one of these 7 `move_type`s** (document-argument senses):
+**Type each move as exactly one of these 8 `move_type`s** — the document's ARGUMENT
+structure:
 
-- `observation` — a key finding, evidence-backed claim, or central thesis the
-  document asserts (e.g. "BioHubs function as acupuncture points for regeneration").
-- `problem` — a tension, gap, obstacle, or systemic challenge the document names.
-- `question` — an open question or unresolved issue the document raises.
-- `resolution` — an answer or approach the document offers to a specific problem or
-  question. Set `resolves_title` to the EXACT `title` of that problem/question move.
-- `decision` — a definitional commitment or framework choice the document makes
-  (e.g. "defines four critical outcomes", "structures finance in three layers").
-- `next_step` — a recommendation, call to action, or proposed future work.
-- `learning` — a generalizable principle, lesson, or design insight.
+- `thesis` — the document's central position or overarching argument.
+- `claim` — a specific assertion or proposition the document advances.
+- `evidence` — data, an example, a case study, or a finding that backs a claim (e.g.
+  "152 initiatives across 44 countries"). Set `supports` to the claim/thesis it backs.
+- `premise` — a foundational assumption the argument rests on. Set `supports` to the
+  claim/thesis it underpins.
+- `counterpoint` — a tension, objection, limitation, or competing consideration the
+  document acknowledges. Set `supports` to the claim/thesis it qualifies or contests.
+- `open_question` — an unresolved question the document raises but does not answer.
+- `definition` — a key term, framework, or concept the document defines (e.g. "defines
+  a BioHub as a physically-anchored project…").
+- `implication` — a consequence, recommendation, or call to action the document draws.
 
 Fields per move:
-- `title`: a concise (≤200 char) imperative/declarative statement of the move.
+- `title`: a single declarative sentence stating the move (for a `claim`/`thesis`, the
+  claim itself); keep it to one sentence and put any elaboration in `detail`.
 - `detail`: 1–3 sentences of substance, or `null`.
-- `status`: one of `open` (an unresolved problem/question), `resolved` (a problem the
-  document answers, or a resolution), `made` (a decision the document commits to),
-  `pending` (a recommended next_step), or `null` when no status applies (most
-  observations/learnings). Use `null` rather than forcing a status.
-- `resolves_title`: for a `resolution` move, the exact `title` of the problem/question
-  it addresses (must match another move's title in the document); else `null`.
+- `status`: one of `asserted` (stated as fact), `supported` (a claim backed by
+  evidence), `contested` (marked as debated), `speculative` (a tentative implication),
+  `open` (an unresolved open_question/counterpoint), `deferred` (pushed to future work),
+  or `null`. Per-type guidance: thesis→asserted; premise→asserted|contested;
+  evidence→asserted; claim→asserted|supported|contested; counterpoint→open|contested;
+  open_question→open|deferred; definition→asserted; implication→speculative|asserted.
+- `supports`: for `premise`/`evidence`/`counterpoint` (any move that backs or contests
+  another), the EXACT `title` of the `claim`/`thesis` it supports — this builds the
+  argument edge. `null` for standalone moves.
 - `chunk_range`: `[first, last]` global chunk index supporting the move.
 
 Do NOT duplicate a fact as a discourse move — facts are atomic triples; moves are
@@ -167,13 +174,13 @@ argument steps. A move may summarize several facts.
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["move_type","title","detail","status","resolves_title","chunk_range"],
+        "required": ["move_type","title","detail","status","supports","chunk_range"],
         "properties": {
-          "move_type": {"enum": ["decision","problem","question","resolution","observation","next_step","learning"]},
-          "title": {"type": "string", "minLength": 1, "maxLength": 200},
+          "move_type": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
           "detail": {"type": ["string","null"]},
-          "status": {"type": ["string","null"], "enum": ["open","resolved","superseded","deferred","made","reverted","pending","done","cancelled",null]},
-          "resolves_title": {"type": ["string","null"]},
+          "status": {"type": ["string","null"]},
+          "supports": {"type": ["string","null"]},
           "chunk_range": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2}
         }
       }
