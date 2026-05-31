@@ -538,7 +538,9 @@ def parse_disposition_table(text: str) -> list[ReviewDirective]:
             if craw and craw not in ("—", "-"):
                 concepts = [c.strip() for c in craw.split(",") if c.strip()]
         if not concepts:
-            concepts = ["unspecified"]
+            # DG(c)=(ii): blank concept -> a target-level cluster (no concept node). concept=None
+            # is handled in the apply path (about_uri=spec:target, gck=target:disposition).
+            concepts = [None]
         for concept in concepts:
             out.append(ReviewDirective(
                 r_id=r_id,
@@ -792,18 +794,27 @@ async def create_review_claim(
     by a bridge note, traverse ``supports`` edges from its source claims
     (or filter on ``metadata->>'projection_batch'`` for batch-level audits).
     """
-    change_slug = f"{disposition_slug}-{concept_name}"
     target_spec_uri = f"spec:{target_spec_doc}"
-    # New-dialect clusters are disposition-keyed so an OLD-dialect (target:concept)
-    # find_review_claim lookup can never collide with them. Old-dialect path unchanged.
-    if disposition is not None:
-        governance_cluster_key = f"{target_spec_doc}:{concept_name}:{disposition_slug}"
+    if concept_name is None:
+        # DG(c)=(ii) target-level cluster (blank concept): keyed by target:disposition, no concept node.
+        change_slug = disposition_slug
+        governance_cluster_key = f"{target_spec_doc}:{disposition_slug}"
+        statement = (
+            f"Canon review: {disposition_slug.replace('-', ' ')} — "
+            f"target-level (no concept) in {target_spec_doc}"
+        )
     else:
-        governance_cluster_key = f"{target_spec_doc}:{concept_name}"
-    statement = (
-        f"Canon review: {disposition_slug.replace('-', ' ')} — "
-        f"{concept_name.replace('-', ' ')} in {target_spec_doc}"
-    )
+        change_slug = f"{disposition_slug}-{concept_name}"
+        # New-dialect clusters are disposition-keyed so an OLD-dialect (target:concept)
+        # find_review_claim lookup can never collide with them. Old-dialect path unchanged.
+        if disposition is not None:
+            governance_cluster_key = f"{target_spec_doc}:{concept_name}:{disposition_slug}"
+        else:
+            governance_cluster_key = f"{target_spec_doc}:{concept_name}"
+        statement = (
+            f"Canon review: {disposition_slug.replace('-', ' ')} — "
+            f"{concept_name.replace('-', ' ')} in {target_spec_doc}"
+        )
 
     metadata = {
         "claim_layer": "review",
@@ -990,7 +1001,8 @@ async def project_bridge_note(
     concept_uris = {}
     all_concept_names = set(note.concepts)
     for rd in note.review_directives:
-        all_concept_names.add(rd.concept)
+        if rd.concept is not None:        # (ii) blank-concept rows are target-level — no concept node
+            all_concept_names.add(rd.concept)
     for concept_name in all_concept_names:
         uri = await resolve_or_create_concept(conn, concept_name)
         concept_uris[concept_name] = uri
@@ -1022,17 +1034,25 @@ async def project_bridge_note(
             if rd.disposition is not None:
                 rd_slug = DISPOSITION_SLUG.get(rd.disposition, "unclassified")
                 rd_proposes = rd.disposition in PROPOSE_DISPOSITIONS
-                rd_change_slug = f"{rd_slug}-{rd.concept}"
+                # (ii) blank-concept rows dedup by (target, disposition); concept'd by (target, disposition, concept)
+                rd_change_slug = rd_slug if rd.concept is None else f"{rd_slug}-{rd.concept}"
             else:
                 rd_slug = disp_slug
                 rd_proposes = proposes_change
                 rd_change_slug = None
             cache_key = (rd.target_doc, rd.concept, rd.disposition)
             if cache_key not in review_claim_cache:
-                about_uri = concept_uris.get(rd.concept)
-                if not about_uri:
-                    log.warning(f"  Skipping {rd.r_id}: concept '{rd.concept}' not resolved")
-                    continue
+                if rd.concept is None:
+                    # (ii) target-level cluster, no concept node. about_uri must be a valid
+                    # 'about' type (concept/pattern/project/...); a spec:<target> SpecDoc is
+                    # rejected by /claims/, so anchor on the project. Target traversability is
+                    # preserved via metadata.target_spec_doc + the supports/opposes edges.
+                    about_uri = project_uri
+                else:
+                    about_uri = concept_uris.get(rd.concept)
+                    if not about_uri:
+                        log.warning(f"  Skipping {rd.r_id}: concept '{rd.concept}' not resolved")
+                        continue
                 # Always check for an existing cluster first (global dedup). For
                 # new-dialect rows dedup by change_slug (disposition+concept) so a
                 # framing-note-only cluster never shadows a canon-pressure one.
