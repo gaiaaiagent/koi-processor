@@ -83,6 +83,12 @@ WINDOW_CHARS = int(os.getenv("DOC_WINDOW_CHARS", "45000"))   # proper window siz
                                                              # so no need to shrink windows to beat a CLI timeout
 WINDOW_OVERLAP_CHUNKS = int(os.getenv("DOC_WINDOW_OVERLAP_CHUNKS", "2"))
 MAX_WINDOWS = int(os.getenv("DOC_MAX_WINDOWS", "12"))        # per-invocation budget cap (plan §Q3)
+# Semantic dedup threshold: the exact-triple sweep misses PARAPHRASES (a re-extraction's
+# fresh phrasings resolve to distinct triples). After it, retract the later of any
+# same-subject + same-predicate fact pair whose fact_text embeddings exceed this cosine
+# — conservative (predicate match + high bar) so re-extractions self-converge without
+# false-retracting genuinely-distinct facts.
+SEMANTIC_DEDUP_THRESHOLD = float(os.getenv("DOC_SEMANTIC_DEDUP_THRESHOLD", "0.95"))
 
 # Per-window extraction transport: the direct Anthropic Messages API (DOCUMENT path
 # only — the session pipeline keeps its own `claude -p` on the subscription). The API
@@ -554,6 +560,68 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             if dup_deleted:
                 logger.info("post-resolution dedup: removed %d duplicate triple(s)", dup_deleted)
 
+            # Semantic dedup (paraphrase tail) — the exact-triple sweep above misses
+            # re-extraction paraphrases (fresh phrasing → distinct triple). Soft-retract
+            # the LATER of any same-subject + same-predicate pair whose fact_text 3072
+            # embeddings exceed the cosine threshold (keep the earliest). Conservative
+            # (predicate match + high bar) so re-runs self-converge without losing
+            # genuinely-distinct facts. Reversible (valid_to).
+            sem_tag = await conn.execute(
+                """
+                WITH pairs AS (
+                  SELECT a.id a_id, b.id b_id, a.created_at a_ct, b.created_at b_ct
+                  FROM knowledge_facts a JOIN knowledge_facts b
+                    ON a.subject_uri = b.subject_uri AND a.predicate = b.predicate AND a.id < b.id
+                   AND a.episode_id = $1 AND b.episode_id = $1
+                   AND a.valid_to IS NULL AND b.valid_to IS NULL
+                   AND a.fact_embedding_3072 IS NOT NULL AND b.fact_embedding_3072 IS NOT NULL
+                   AND (1 - (a.fact_embedding_3072::halfvec(3072) <=> b.fact_embedding_3072::halfvec(3072))) > $2
+                )
+                UPDATE knowledge_facts SET valid_to = NOW()
+                WHERE id IN (SELECT CASE WHEN a_ct <= b_ct THEN b_id ELSE a_id END FROM pairs)
+                  AND valid_to IS NULL
+                """, episode_id, SEMANTIC_DEDUP_THRESHOLD)
+            sem_retracted = int(sem_tag.split()[-1]) if sem_tag.startswith("UPDATE") else 0
+            if sem_retracted:
+                logger.info("semantic dedup: retracted %d paraphrase-duplicate fact(s) (>%.2f)",
+                            sem_retracted, SEMANTIC_DEDUP_THRESHOLD)
+
+            # Flag 3 (plan §25): stamp source_node_rid = document_rid so a document purge
+            # can key on it, not only episode_id.
+            await conn.execute(
+                "UPDATE knowledge_facts SET source_node_rid = $2 "
+                "WHERE episode_id = $1 AND source_node_rid IS DISTINCT FROM $2",
+                episode_id, document_rid)
+
+            # Flag 2: populate the doc→entity bridge from the episode's resolved entity
+            # URIs — /episodes writes facts but never document_entity_links, so
+            # mentioned-in / get_entity_documents wouldn't surface this doc's entities.
+            await conn.execute(
+                """
+                INSERT INTO document_entity_links (document_rid, entity_uri, mention_count, context)
+                SELECT $2, uri, sum(n)::int, $3 FROM (
+                  SELECT subject_uri AS uri, count(*) n FROM knowledge_facts
+                    WHERE episode_id = $1 AND valid_to IS NULL GROUP BY subject_uri
+                  UNION ALL
+                  SELECT object_uri, count(*) FROM knowledge_facts
+                    WHERE episode_id = $1 AND object_uri IS NOT NULL AND valid_to IS NULL GROUP BY object_uri
+                ) u WHERE uri IS NOT NULL GROUP BY uri
+                ON CONFLICT (document_rid, entity_uri) DO UPDATE SET mention_count = EXCLUDED.mention_count
+                """, episode_id, document_rid, doc_title)
+            entity_links = await conn.fetchval(
+                "SELECT count(*) FROM document_entity_links WHERE document_rid = $1", document_rid)
+
+            # no_residual_dups (gate regression guard): after both sweeps, assert 0 dup
+            # triples REMAIN. Always 1 on a healthy run (the sweeps guarantee it); 0 only
+            # if a sweep was skipped/broken — the gate floors this (the right "0 residual
+            # dups" invariant, vs the old dups_ok which wrongly failed on healthy dedup).
+            residual = await conn.fetchval(
+                """SELECT count(*) FROM (
+                     SELECT 1 FROM knowledge_facts WHERE episode_id = $1 AND valid_to IS NULL
+                     GROUP BY subject_uri, predicate, COALESCE(object_uri, object_literal)
+                     HAVING count(*) > 1) d""", episode_id)
+            no_residual_dups = 1 if (residual or 0) == 0 else 0
+
             # Discourse (argument) layer — thorough tier only. Writes moves into the
             # generalized session_discourse_moves table (source_type='document').
             discourse_created = 0
@@ -582,6 +650,8 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "merged_entities": len(merged["entities"]), "merged_facts": len(merged["facts"]),
                 "facts_created": ep.get("facts_created"), "facts_skipped": ep.get("facts_skipped"),
                 "facts_dup_removed": dup_deleted, "facts_null_embed": ep.get("facts_null_embed"),
+                "semantic_dups_retracted": sem_retracted, "no_residual_dups": no_residual_dups,
+                "entity_links": entity_links,
                 "entities_created": ep.get("entities_created"), "entities_resolved": ep.get("entities_resolved"),
                 "discourse_moves_created": discourse_created,
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,

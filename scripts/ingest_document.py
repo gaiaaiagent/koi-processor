@@ -377,15 +377,20 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         "facts_created": int(ext.get("facts_created") or 0),
         "facts_skipped": int(ext.get("facts_skipped") or 0),
         "facts_dup_removed": dups,
+        "semantic_dups_retracted": int(ext.get("semantic_dups_retracted") or 0),
         "facts_null_embed": facts_null,
         "entities_created": ent_created,
         "entities_resolved": ent_resolved,
         "entities_total": ent_created + ent_resolved,
+        "entity_links": int(ext.get("entity_links") or 0),
         "type_mismatches": int(ext.get("type_mismatches") or 0),
         "discourse_moves_created": int(ext.get("discourse_moves_created") or 0),
         "claims_created": int(cl.get("claims_created") or 0),
         "embeds_ok": 1 if (rag_null == 0 and facts_null == 0) else 0,
         "dups_ok": 1 if dups == 0 else 0,
+        # End-state invariant (the right "0 residual dups" gate floor): 1 = no duplicate
+        # triples remain after the sweeps; 0 only if a sweep was skipped/broken.
+        "no_residual_dups": int(ext.get("no_residual_dups") if ext.get("no_residual_dups") is not None else 1),
     }
 
 
