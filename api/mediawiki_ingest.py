@@ -26,6 +26,7 @@ from api.personal_ingest_api import (
     ExtractedEntity,
     CanonicalEntity,
     normalize_entity_text,
+    normalize_alias,
 )
 
 logger = logging.getLogger(__name__)
@@ -202,7 +203,7 @@ async def register_redirect_alias(
     target_title: str,
 ) -> None:
     """If the redirect target resolves to an existing entity, add this title as alias."""
-    normalized_alias = normalize_entity_text(redirect_title)
+    normalized_alias = normalize_alias(redirect_title)
     normalized_target = normalize_entity_text(target_title)
 
     target_entity = await conn.fetchrow("""
@@ -289,7 +290,7 @@ async def process_entity_bearing_page(
 
     # Register aliases from the page
     for alias in page.get("aliases", []):
-        normalized_alias = normalize_entity_text(alias)
+        normalized_alias = normalize_alias(alias)
         if normalized_alias:
             await conn.execute("""
                 UPDATE entity_registry

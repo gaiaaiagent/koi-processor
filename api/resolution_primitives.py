@@ -47,6 +47,31 @@ def normalize_alias(alias: Any) -> str:
     return alias
 
 
+def normalize_alias_list(values: Any) -> list:
+    """Normalize a list of alias strings to the canonical matchable form.
+
+    Applies normalize_alias() to each value, drops empties, and dedupes while
+    preserving first-seen order. Use this at EVERY alias-write path so stored
+    aliases stay in the same form the resolver queries with
+    (WHERE $2 = ANY(aliases), $2 = normalize_alias(input)). See plan
+    alias-normalization-fix.
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    out: list = []
+    seen = set()
+    for v in values:
+        if v is None:
+            continue  # skip before normalize_alias (str(None) -> "none")
+        n = normalize_alias(v)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def jaro_winkler_similarity(s1: str, s2: str) -> float:
     """Calculate Jaro-Winkler similarity between two strings."""
     if s1 == s2:

@@ -27,6 +27,7 @@ from typing import Any, Dict, Mapping, Optional
 import asyncpg
 
 from api.utils import parse_ts
+from api.resolution_primitives import normalize_alias_list
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ async def _apply_entity(conn, rid: str, event_type: str, payload: Dict[str, Any]
     entity_text = payload.get("entity_text", "")
     entity_type = payload.get("entity_type", "")
     normalized_text = payload.get("normalized_text", entity_text.lower().strip())
-    aliases = payload.get("aliases", [])
+    aliases = normalize_alias_list(payload.get("aliases", []))
     metadata = payload.get("metadata", {})
 
     await conn.execute("""
