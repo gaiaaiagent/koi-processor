@@ -38,7 +38,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import logging
 import uuid
+from pathlib import Path as _VaultPath
 from metaphone import doublemetaphone
+
+# --- Vault filesystem awareness (phantom-path guard) ------------------------
+# entity_rid_mappings.vault_path is stored at register time and historically
+# returned without verifying the note still exists on disk. Deleting /
+# relocating / never-creating a note leaves an orphaned row that resolves to a
+# dangling wikilink (~113 orphans observed 2026-06-02). These helpers let the
+# vault-path-returning endpoints check existence before emitting a wikilink.
+_VAULT_ROOT = _VaultPath(os.path.expanduser(
+    os.environ.get("OBSIDIAN_VAULT_PATH", "~/Documents/Notes")
+))
+
+
+def _vault_note_exists(rel_path: Optional[str]) -> bool:
+    """True if a vault note exists for `rel_path` (with or without .md).
+
+    Best-effort: if the configured vault root is not present on this host
+    (e.g. a headless deploy that doesn't mount the vault), returns True so we
+    never strip legitimate links just because the FS isn't visible here.
+    """
+    if not rel_path:
+        return False
+    if not _VAULT_ROOT.is_dir():
+        return True  # vault not mounted here — don't second-guess stored paths
+    rel = rel_path[:-3] if rel_path.endswith(".md") else rel_path
+    return (_VAULT_ROOT / f"{rel}.md").exists() or (_VAULT_ROOT / rel).exists()
+
 
 # Import CAT receipt chain
 from api.cat_receipts import create_receipt, generate_receipt_id, get_receipt_chain
@@ -669,12 +696,14 @@ async def resolve_entity_to_uri(
         return await conn.fetchval("""
             SELECT fuseki_uri FROM entity_registry
             WHERE normalized_text = $1 AND entity_type = $2
+            AND merged_into IS NULL
             LIMIT 1
         """, normalized, entity_type)
     else:
         return await conn.fetchval("""
             SELECT fuseki_uri FROM entity_registry
             WHERE normalized_text = $1
+            AND merged_into IS NULL
             LIMIT 1
         """, normalized)
 
@@ -848,6 +877,7 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE normalized_text = $1 AND entity_type = $2
+            AND merged_into IS NULL
             LIMIT 1
             """,
             normalized,
@@ -859,6 +889,7 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE normalized_text = $1
+            AND merged_into IS NULL
             LIMIT 1
             """,
             normalized,
@@ -873,6 +904,7 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE entity_type = $1 AND $2 = ANY(aliases)
+            AND merged_into IS NULL
             LIMIT 1
             """,
             entity_type,
@@ -884,6 +916,7 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE $1 = ANY(aliases)
+            AND merged_into IS NULL
             LIMIT 1
             """,
             normalized_alias,
@@ -929,6 +962,7 @@ async def resolve_entity(
             FROM entity_registry
             WHERE normalized_text = $1
             AND entity_type = $2
+            AND merged_into IS NULL
             LIMIT 1
         """, normalized, entity.type)
     else:
@@ -936,6 +970,7 @@ async def resolve_entity(
             SELECT id, fuseki_uri, entity_text, entity_type, normalized_text
             FROM entity_registry
             WHERE normalized_text = $1
+            AND merged_into IS NULL
             LIMIT 1
         """, normalized)
 
@@ -970,6 +1005,7 @@ async def resolve_entity(
             FROM entity_registry
             WHERE entity_type = $1
             AND $2 = ANY(aliases)
+            AND merged_into IS NULL
             LIMIT 1
         """, entity.type, normalized_name)
     else:
@@ -980,6 +1016,7 @@ async def resolve_entity(
             SELECT fuseki_uri, entity_text, entity_type, normalized_text
             FROM entity_registry
             WHERE $1 = ANY(aliases)
+            AND merged_into IS NULL
             LIMIT 1
         """, normalized_name)
 
@@ -1060,11 +1097,13 @@ async def resolve_entity(
             SELECT id, fuseki_uri, entity_text, entity_type, normalized_text
             FROM entity_registry
             WHERE entity_type = $1
+            AND merged_into IS NULL
         """, entity.type)
     else:
         candidates = await conn.fetch("""
             SELECT id, fuseki_uri, entity_text, entity_type, normalized_text
             FROM entity_registry
+            WHERE merged_into IS NULL
         """)
 
     best_match = None
@@ -1121,6 +1160,7 @@ async def resolve_entity(
                     FROM entity_registry
                     WHERE embedding_3072 IS NOT NULL
                       AND entity_type = $2
+                      AND merged_into IS NULL
                       AND 1 - (embedding_3072::halfvec(3072)
                                <=> $1::halfvec(3072)) > $3
                     ORDER BY similarity DESC
@@ -1133,6 +1173,7 @@ async def resolve_entity(
                                 <=> $1::halfvec(3072)) AS similarity
                     FROM entity_registry
                     WHERE embedding_3072 IS NOT NULL
+                      AND merged_into IS NULL
                       AND 1 - (embedding_3072::halfvec(3072)
                                <=> $1::halfvec(3072)) > $2
                     ORDER BY similarity DESC
@@ -2466,7 +2507,7 @@ async def ingest_extraction(request: IngestRequest):
                     # Fallback: look up pre-existing entities by exact normalized_text
                     if not subj_uri:
                         rows = await conn.fetch(
-                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 AND merged_into IS NULL LIMIT 2",
                             subj_key)
                         if len(rows) == 1:
                             subj_uri = rows[0]["fuseki_uri"]
@@ -2477,7 +2518,7 @@ async def ingest_extraction(request: IngestRequest):
                                 f"{len(rows)}+ matches, skipping")
                     if not obj_uri:
                         rows = await conn.fetch(
-                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 AND merged_into IS NULL LIMIT 2",
                             obj_key)
                         if len(rows) == 1:
                             obj_uri = rows[0]["fuseki_uri"]
@@ -2689,7 +2730,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2 AND entity_type = $3 AND NOT node_private
+                WHERE normalized_text ILIKE $2 AND entity_type = $3 AND NOT node_private AND merged_into IS NULL
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -2702,7 +2743,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2 AND NOT node_private
+                WHERE normalized_text ILIKE $2 AND NOT node_private AND merged_into IS NULL
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -2810,6 +2851,7 @@ async def resolve_entity_get(
                 WHERE LOWER(entity_text) = LOWER($1)
                   AND fuseki_uri != $2
                   AND COALESCE(node_private, FALSE) = FALSE
+                  AND merged_into IS NULL
                 ORDER BY created_at ASC
                 LIMIT $3
                 """,
@@ -2908,6 +2950,7 @@ async def resolve_entity_post(request: ResolveRequest):
                 WHERE LOWER(entity_text) = LOWER($1)
                   AND fuseki_uri != $2
                   AND COALESCE(node_private, FALSE) = FALSE
+                  AND merged_into IS NULL
                 ORDER BY created_at ASC
                 LIMIT $3
                 """,
@@ -2964,6 +3007,10 @@ class MentionedInDocument(BaseModel):
     mention_count: int
     doc_date: Optional[str] = None
     first_seen: Optional[str] = None  # NULL for rows backfilled before created_at column existed
+    # Informational: whether the backlinked note currently exists on disk.
+    # NOT used to drop rows (a relocated note keeps its backlink under the old
+    # path); clients that build mentionedIn arrays should filter on this.
+    vault_note_exists: bool = True
 
 
 class MentionedInResponse(BaseModel):
@@ -3093,7 +3140,8 @@ async def get_entity_mentioned_in(
                 document_rid=doc_rid,
                 mention_count=row['mention_count'] or 1,
                 doc_date=doc_date,
-                first_seen=row['created_at'].isoformat() if row['created_at'] else None
+                first_seen=row['created_at'].isoformat() if row['created_at'] else None,
+                vault_note_exists=_vault_note_exists(vault_path),
             ))
 
         return MentionedInResponse(
@@ -3187,7 +3235,8 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
                     document_rid=doc_rid,
                     mention_count=row['mention_count'] or 1,
                     doc_date=doc_date,
-                    first_seen=row['created_at'].isoformat() if row['created_at'] else None
+                    first_seen=row['created_at'].isoformat() if row['created_at'] else None,
+                    vault_note_exists=_vault_note_exists(vault_path),
                 ))
 
             results[entity_uri] = MentionedInResponse(
@@ -3814,6 +3863,7 @@ async def resolve_canonical_to_vault(uris: List[str]):
 
     mappings = []
     not_found = []
+    orphaned = []  # registry row exists but its vault note is gone (phantom path)
 
     async with db_pool.acquire() as conn:
         for uri in uris:
@@ -3825,26 +3875,40 @@ async def resolve_canonical_to_vault(uris: List[str]):
                 LIMIT 1
             """, uri)
 
-            if row:
-                # Generate wikilink from vault path
-                vault_path = row['vault_path']
-                # Remove .md extension and use as wikilink
-                wikilink_path = vault_path.replace('.md', '') if vault_path.endswith('.md') else vault_path
+            if not row:
+                not_found.append(uri)
+                continue
 
-                mappings.append({
+            vault_path = row['vault_path']
+            # Phantom-path guard: never emit a wikilink to a note that no longer
+            # exists on disk. Such rows resolve to dangling links downstream.
+            if not _vault_note_exists(vault_path):
+                orphaned.append({
                     "canonical_uri": row['canonical_uri'],
-                    "vault_path": row['vault_path'],
+                    "vault_path": vault_path,
                     "name": row['name'],
                     "entity_type": row['entity_type'],
-                    "wikilink": f"[[{wikilink_path}]]"
+                    "reason": "vault note missing on disk (orphaned entity_rid_mappings row)",
                 })
-            else:
-                not_found.append(uri)
+                continue
+
+            # Remove .md extension and use as wikilink
+            wikilink_path = vault_path.replace('.md', '') if vault_path.endswith('.md') else vault_path
+            mappings.append({
+                "canonical_uri": row['canonical_uri'],
+                "vault_path": row['vault_path'],
+                "name": row['name'],
+                "entity_type": row['entity_type'],
+                "wikilink": f"[[{wikilink_path}]]",
+                "vault_note_exists": True,
+            })
 
     return {
         "mappings": mappings,
         "not_found": not_found,
+        "orphaned": orphaned,
         "resolved": len(mappings),
+        "orphaned_count": len(orphaned),
         "total": len(uris)
     }
 
@@ -4070,6 +4134,7 @@ async def get_contextual_entity_candidates(
         rows = await conn.fetch("""
             SELECT fuseki_uri FROM entity_registry
             WHERE entity_type = 'Person' AND normalized_text = $1
+            AND merged_into IS NULL
         """, normalize_entity_text(person))
 
         if len(people) == 1:
