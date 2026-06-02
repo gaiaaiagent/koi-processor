@@ -2,10 +2,12 @@
 """
 Learning Field Graph Projection — Phase 1, Step 7
 
-Projects bridge notes from Spore, Intelligence Commons (IC), Flow Coding (FC),
-Poietic Match (PM), and bioregional-coordination into the KOI knowledge graph
-as structured Claim, Concept, and Question entities with argumentative edges
-(supports/opposes).
+Projects bridge notes from the canon-bearing repos registered in your projects
+config (config/projects.json — see config/projects.example.json) into the KOI
+knowledge graph as structured Claim, Concept, and Question entities with
+argumentative edges (supports/opposes). Project keys, learning-field claimant
+URIs, and bridge-note directories are operator-specific and are NOT baked into
+this tool — see _load_projects() below.
 
 Within Spore's graph-projections architecture (spore:ADR-0058 / spore:ADR-0070),
 this script operates as one infrastructure surface inside the Epistemic primary's
@@ -45,38 +47,43 @@ log = logging.getLogger("project_bridge_notes")
 
 KOI_BASE = "http://localhost:8351"
 
-PROJECTS = {
-    "spore": {
-        "project_id": "spore",
-        "claimant_uri": "org:spore-learning-field",
-        "bridge_dir": Path.home() / "projects/spore/docs/research/connections",
-    },
-    "ic": {
-        "project_id": "ic",
-        "claimant_uri": "org:ic-learning-field",
-        "bridge_dir": Path.home() / "projects/intelligence-commons/docs/research",
-    },
-    "fc": {
-        "project_id": "fc",
-        "claimant_uri": "org:flow-coding-learning-field",
-        "bridge_dir": Path.home() / "projects/flowcoding/docs/research/connections",
-    },
-    "pm": {
-        "project_id": "pm",
-        "claimant_uri": "org:poietic-match-learning-field",
-        "bridge_dir": Path.home() / "projects/poietic-match/docs/research/connections",
-    },
-    "bioregional-coordination": {
-        "project_id": "bioregional-coordination",
-        "claimant_uri": "org:bioregional-coordination-learning-field",
-        "bridge_dir": Path.home() / "projects/bioregional-coordination/docs/research/connections",
-    },
-    "bioregional-mapping": {
-        "project_id": "bioregional-mapping",
-        "claimant_uri": "org:bioregional-mapping-learning-field",
-        "bridge_dir": Path.home() / "projects/bioregional-mapping/docs/research/connections",
-    },
-}
+def _load_projects() -> dict:
+    """Load the operator-local project registry.
+
+    koi-processor ships with NO baked-in projects: project keys, learning-field
+    claimant URIs, and bridge-note directories are operator-specific. Register
+    your own by copying config/projects.example.json to config/projects.json
+    (gitignored), or point KOI_PROJECTS_CONFIG at a JSON file. Per-key schema:
+
+        {"project_id": str, "claimant_uri": str, "bridge_dir": str}
+
+    where bridge_dir is a filesystem path with ~ and $VARS expanded.
+    """
+    candidates = []
+    if os.getenv("KOI_PROJECTS_CONFIG"):
+        candidates.append(Path(os.environ["KOI_PROJECTS_CONFIG"]).expanduser())
+    candidates.append(Path(__file__).resolve().parent.parent / "config" / "projects.json")
+    for cfg_path in candidates:
+        if cfg_path.is_file():
+            raw = json.loads(cfg_path.read_text())
+            return {
+                key: {
+                    "project_id": entry["project_id"],
+                    "claimant_uri": entry["claimant_uri"],
+                    "bridge_dir": Path(os.path.expandvars(entry["bridge_dir"])).expanduser(),
+                }
+                for key, entry in raw.items()
+                if not key.startswith("_")  # skip _comment-style keys
+            }
+    log.warning(
+        "No projects config found (looked for $KOI_PROJECTS_CONFIG and "
+        "config/projects.json). Copy config/projects.example.json to "
+        "config/projects.json to register your canon repos."
+    )
+    return {}
+
+
+PROJECTS = _load_projects()
 
 DISPOSITION_SLUG = {
     "clarify existing term": "clarify",
@@ -1302,19 +1309,19 @@ async def main():
     # Discover notes
     if args.note:
         note_path = Path(args.note).expanduser().resolve()
-        # Determine project key from path
-        if "intelligence-commons" in str(note_path):
-            project_key = "ic"
-        elif "flowcoding" in str(note_path):
-            project_key = "fc"
-        elif "poietic-match" in str(note_path):
-            project_key = "pm"
-        elif "bioregional-coordination" in str(note_path):
-            project_key = "bioregional-coordination"
-        elif "bioregional-mapping" in str(note_path):
-            project_key = "bioregional-mapping"
-        else:
-            project_key = "spore"
+        # Determine project key by matching the note path against each configured
+        # bridge_dir (config-driven; no hardcoded per-project paths).
+        project_key = None
+        for key, cfg in PROJECTS.items():
+            bridge_dir = cfg["bridge_dir"].expanduser().resolve()
+            if note_path == bridge_dir or bridge_dir in note_path.parents:
+                project_key = key
+                break
+        if project_key is None:
+            parser.error(
+                f"could not match note path to any configured project bridge_dir: {note_path}\n"
+                "Register the project in config/projects.json (or $KOI_PROJECTS_CONFIG)."
+            )
         note_paths = [(note_path, project_key)]
     else:
         note_paths = discover_bridge_notes()

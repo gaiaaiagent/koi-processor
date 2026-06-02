@@ -92,6 +92,7 @@ exports/
 *.log.*
 *.gz
 config/personal.env
+config/projects.json
 
 # TerminusDB phase artifacts
 scripts/terminusdb/artifacts/
