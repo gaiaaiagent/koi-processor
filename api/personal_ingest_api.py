@@ -185,6 +185,7 @@ SOURCE_TO_FILTER = {
         " AND (m.metadata->>'status' IS NULL OR m.metadata->>'status' != 'cancelled')"
     ),
     'vault': "AND m.source_sensor = 'obsidian-sensor'",
+    'substack': "AND m.source_sensor IN ('substack-corpus-backfill', 'substack-sensor')",
 }
 
 from api.embedding_provider import EmbeddingProvider, create_embedding_provider
@@ -4853,8 +4854,12 @@ async def search_knowledge_base(request: SearchRequest):
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Generate query embedding using BGE
-    query_embedding = await get_bge_embedding(request.query)
+    # Generate query embedding using the active provider (OpenAI 3072 via
+    # generate_query_embedding — the same path unified_search/entity search use).
+    # Was get_bge_embedding (dim_1024), but the BGE server is not running so it
+    # returned None and forced a text-only fallback; and dim_1024 doc embeddings
+    # are not populated for newer sources (substack). Fix 2026-06-01.
+    query_embedding = await generate_query_embedding(request.query)
 
     results = []
     search_type = "text"  # fallback
@@ -4872,21 +4877,32 @@ async def search_knowledge_base(request: SearchRequest):
                 )
             source_filter = SOURCE_TO_FILTER.get(request.source or '', "")
 
-            # Search doc-level embeddings
+            # Search chunk-level embedding_3072 (the live OpenAI 3072 surface,
+            # populated for ALL sources incl. substack/email; dim_1024 doc-level
+            # is legacy BGE and missing for newer sources). Pipeline: HNSW finds
+            # the top candidate chunks by vector distance (fast), dedup keeps the
+            # best chunk per document, then re-sort by similarity for the page.
             query = f"""
-                SELECT
-                    m.rid,
-                    m.content->>'title' as title,
-                    LEFT(m.content->>'text', 500) as content_preview,
-                    1 - (e.dim_1024 <=> $1::vector) as similarity,
-                    m.source_sensor,
-                    m.metadata,
-                    m.created_at
-                FROM koi_memories m
-                JOIN koi_embeddings e ON e.memory_id = m.id
-                WHERE e.dim_1024 IS NOT NULL
-                {source_filter}
-                ORDER BY e.dim_1024 <=> $1::vector
+                SELECT * FROM (
+                    SELECT DISTINCT ON (document_rid)
+                        document_rid as rid, title, content_preview,
+                        similarity, source_sensor, metadata, created_at
+                    FROM (
+                        SELECT c.document_rid,
+                               m.content->>'title' as title,
+                               LEFT(c.content->>'text', 500) as content_preview,
+                               1 - (c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) as similarity,
+                               m.source_sensor, m.metadata, m.created_at
+                        FROM koi_memory_chunks c
+                        JOIN koi_memories m ON m.rid = c.document_rid
+                        WHERE c.embedding_3072 IS NOT NULL
+                        {source_filter}
+                        ORDER BY c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                        LIMIT 200
+                    ) cand
+                    ORDER BY document_rid, similarity DESC
+                ) ded
+                ORDER BY similarity DESC
                 LIMIT $2
             """
 

@@ -1023,8 +1023,8 @@ def create_router(
         query: str = Query(..., description="Search query"),
         limit: int = Query(10, ge=1, le=50),
         include: str = Query(
-            "entities,facts,sessions,wiki,vault",
-            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki,vault"),
+            "entities,facts,sessions,wiki,vault,memories",
+            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki,vault,memories. 'memories' = koi_memory_chunks for email/substack/calendar/other sensors (everything not wiki- or repo-doc-scoped)."),
         doc_kind: Optional[str] = Query(None, description="Filter docs by doc_kind (e.g. architecture, spec, operations)"),
         status: Optional[str] = Query(None, description="Filter docs by status (e.g. active, draft)"),
         is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
@@ -1481,6 +1481,46 @@ def create_router(
                             "section_title": row["section_title"],
                             "wiki_url": row["wiki_url"],
                             "document_rid": row["document_rid"],
+                            "chunk_rid": row["chunk_rid"],
+                            "metadata": {"vector_score": float(row["score"])},
+                        })
+
+                # Memories (vector similarity on koi_memory_chunks for every
+                # source NOT covered by the mediawiki-scoped 'wiki' surface or
+                # the repo-scoped 'docs' surface — i.e. email/orn, substack,
+                # calendar/ics, and any future sensor. These chunks have
+                # embedding_3072 populated by the chunk-embedder but had no read
+                # path before (fix 2026-06-01: retrieval-chunk-surfaces).
+                if "memories" in surfaces:
+                    rows = await conn.fetch("""
+                        SELECT mc.chunk_rid,
+                               mc.document_rid,
+                               mc.content->>'text' AS chunk_text,
+                               mc.content->>'title' AS title,
+                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
+                        FROM koi_memory_chunks mc
+                        WHERE mc.embedding_3072 IS NOT NULL
+                          AND mc.document_rid NOT LIKE 'mediawiki:%'
+                          AND mc.document_rid NOT LIKE 'doc-scanner:%'
+                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                        LIMIT 20
+                    """, emb_str)
+                    for rank, row in enumerate(rows):
+                        drid = row["document_rid"] or ""
+                        if drid.startswith("orn:gmail"):
+                            _src = "email"
+                        elif drid.startswith("substack-corpus") or drid.startswith("orn:substack"):
+                            _src = "substack"
+                        elif drid.startswith("orn:ics") or "ics-event" in drid:
+                            _src = "calendar"
+                        else:
+                            _src = "memory"
+                        all_results.append({
+                            "text": (row["chunk_text"] or "")[:500],
+                            "score": 1.0 / (k + rank + 1),
+                            "source": _src,
+                            "title": row["title"],
+                            "document_rid": drid,
                             "chunk_rid": row["chunk_rid"],
                             "metadata": {"vector_score": float(row["score"])},
                         })
