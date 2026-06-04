@@ -1032,6 +1032,43 @@ async def resolve_entity(
             confidence=1.0,
         ), False
 
+    # Tier 1.1b: Type-agnostic exact/alias fallback (cross-type dedup guard).
+    # The type-gated Tier 1 + Tier 1.1 above can MISS a live survivor of a
+    # DIFFERENT type that carries this name as its canonical text OR a registered
+    # alias — e.g. an LLM extractor labels "Polis" as Concept/Project while the
+    # survivor is schema:SoftwareApplication with alias "polis". Without this,
+    # the type-gated tiers all miss and Tier 3 mints a fresh same-typed duplicate
+    # on every ingest (observed recurring for Polis / Pol.is / Talk to the City /
+    # Notion). Fall back to a TYPE-AGNOSTIC exact-or-alias lookup, but accept it
+    # ONLY when EXACTLY ONE live (non-tombstoned) entity matches — otherwise the
+    # name/alias is ambiguous across types (genuine polysemy) and we must NOT
+    # guess; we fall through to fuzzy/semantic/create as before. This is no looser
+    # than the pre-existing type-agnostic branch used when type_hint is absent
+    # (lines above), and is strictly tighter (exactly-one + merged_into IS NULL).
+    if entity.type:
+        cross_type_rows = await conn.fetch("""
+            SELECT fuseki_uri, entity_text, entity_type
+            FROM entity_registry
+            WHERE merged_into IS NULL
+              AND (normalized_text = $1 OR $2 = ANY(aliases))
+            LIMIT 2
+        """, normalized, normalized_name)
+
+        if len(cross_type_rows) == 1:
+            row = cross_type_rows[0]
+            logger.info(
+                "Tier 1.1b cross-type match: '%s' (hint=%s) → '%s' (%s)",
+                entity.name, entity.type, row["entity_text"], row["entity_type"],
+            )
+            return CanonicalEntity(
+                name=row["entity_text"],
+                uri=row["fuseki_uri"],
+                type=row["entity_type"] or entity.type,
+                is_new=False,
+                merged_with=entity.name if row["entity_text"] != entity.name else None,
+                confidence=1.0,
+            ), False
+
     # Tier 1.5: Contextual co-occurrence match (ALL entity types, with phonetic boost)
     # Requirements:
     # - min_context_people from schema (default: Person=1, others=2)
