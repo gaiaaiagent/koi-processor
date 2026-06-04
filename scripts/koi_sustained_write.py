@@ -71,6 +71,10 @@ DEFAULT_DOC_KINDS = (
 
 DB_URL = "dbname=personal_koi"
 KOI_BASE_URL = os.environ.get("KOI_API_ENDPOINT", "http://localhost:8351")
+# /knowledge/episodes auth: the CLAIMS service token (server-side require_service_auth
+# checks KOI_CLAIMS_SERVICE_TOKEN). Must be present in this script's env post-gate;
+# sending it is a harmless no-op until the :8351 episodes-gate lands.
+KOI_CLAIMS_SERVICE_TOKEN = os.environ.get("KOI_CLAIMS_SERVICE_TOKEN", "")
 
 # --- Strand-D session map (Spore canon-rebuild parent orchestrators) ---
 SESSION_BC = "bc5c284d-2d1b-4ba0-9730-d83006480c52"
@@ -580,8 +584,14 @@ def main() -> int:
         log_f.write(json.dumps(rec, default=str) + "\n")
         log_f.flush()
 
-    # Pre-flight (httpx client reused for all calls)
-    client = httpx.Client()
+    # Pre-flight (httpx client reused for all calls). Bearer the CLAIMS token on
+    # every request so the gated /knowledge/episodes write authenticates (harmless
+    # on the open read/health endpoints).
+    _auth_headers = (
+        {"Authorization": f"Bearer {KOI_CLAIMS_SERVICE_TOKEN}"}
+        if KOI_CLAIMS_SERVICE_TOKEN else {}
+    )
+    client = httpx.Client(headers=_auth_headers)
     health = preflight_health(client)
     log_fn({"event": "preflight_ok", "health": health})
     print(f"preflight ok: {health.get('embedding_model')}@{health.get('embedding_dimension')}")

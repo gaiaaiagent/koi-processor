@@ -58,7 +58,11 @@ POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432
 # (10.100.0.2) unreachable from the host running the ingest. (Plan Phase-2 note.)
 KOI_BASE_URL = os.getenv("DOC_INGEST_KOI_URL", "http://localhost:8351")
 CLAUDE_P_MODEL = os.getenv("CLAUDE_P_MODEL", "claude-sonnet-4-6")
-KOI_INGEST_SERVICE_TOKEN = os.getenv("KOI_INGEST_SERVICE_TOKEN") or os.getenv("KOI_CLAIMS_SERVICE_TOKEN")
+# /knowledge/episodes authenticates with the CLAIMS service token (server-side
+# require_service_auth checks KOI_CLAIMS_SERVICE_TOKEN). Prefer it; fall back to the
+# legacy INGEST var only for envs that haven't split the two tokens. (:8351 episodes-
+# gate readiness — sending the token is a harmless no-op until the gate lands.)
+KOI_EPISODES_SERVICE_TOKEN = os.getenv("KOI_CLAIMS_SERVICE_TOKEN") or os.getenv("KOI_INGEST_SERVICE_TOKEN")
 
 # Tier selects the extractor contract: standard = entities+facts (v1); thorough =
 # entities+facts+discourse (v2). Env overrides win if set.
@@ -414,8 +418,8 @@ def facts_to_episode_payload(merged: dict, *, name: str, summary: str, source_do
 
 async def post_episode(http: httpx.AsyncClient, payload: dict) -> dict:
     headers = {}
-    if KOI_INGEST_SERVICE_TOKEN:
-        headers["Authorization"] = f"Bearer {KOI_INGEST_SERVICE_TOKEN}"
+    if KOI_EPISODES_SERVICE_TOKEN:
+        headers["Authorization"] = f"Bearer {KOI_EPISODES_SERVICE_TOKEN}"
     r = await http.post(f"{KOI_BASE_URL}/knowledge/episodes", json=payload, headers=headers, timeout=180.0)
     r.raise_for_status()
     return r.json()
