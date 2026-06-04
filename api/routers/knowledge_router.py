@@ -735,10 +735,11 @@ def create_router(
     ) -> tuple[Optional[str], bool, Optional[str]]:
         """Resolve entity name → (uri, is_new, resolved_type). Uses per-request cache.
 
-        `type_hint` is consulted ONLY when a new entity must be created — existing
-        registry rows are resolved by name/alias regardless of the caller's type.
-        This prevents a Person fact whose subject already exists as a Concept from
-        being upgraded silently.
+        `type_hint` is consulted first for same-type exact matches, and at
+        create-time for new entities. Existing cross-type registry rows are still
+        preserved and surfaced as mismatches, except Concept hints may bypass
+        cross-type exact matches so scientific terms don't collapse into
+        homonymous organizations/products.
 
         Returns the resolved entity's `entity_type` so the caller can detect
         `type_hint != resolved_type` and surface it as a Guard-class issue.
@@ -757,25 +758,55 @@ def create_router(
         if normalized in seen:
             return seen[normalized], False, None
 
-        # Tier 1: exact match on normalized_text
+        # Tier 1: exact match on normalized_text. When the caller supplies a type
+        # hint, prefer same-type exact matches before considering cross-type
+        # rows; this avoids resolving paper-local concepts such as "discord" to
+        # unrelated organizations with the same normalized name.
+        if type_hint:
+            row = await conn.fetchrow("""
+                SELECT fuseki_uri, entity_type FROM entity_registry
+                WHERE normalized_text = $1 AND entity_type = $2
+                LIMIT 1
+            """, normalized, type_hint)
+            if row:
+                seen[normalized] = row["fuseki_uri"]
+                return row["fuseki_uri"], False, row["entity_type"]
+
         row = await conn.fetchrow("""
             SELECT fuseki_uri, entity_type FROM entity_registry
             WHERE normalized_text = $1
             LIMIT 1
         """, normalized)
         if row:
-            seen[normalized] = row["fuseki_uri"]
-            return row["fuseki_uri"], False, row["entity_type"]
+            if type_hint == "Concept" and row["entity_type"] != "Concept":
+                row = None
+            else:
+                seen[normalized] = row["fuseki_uri"]
+                return row["fuseki_uri"], False, row["entity_type"]
 
         # Tier 1b: case-insensitive alias match
+        if type_hint:
+            row = await conn.fetchrow("""
+                SELECT fuseki_uri, entity_type FROM entity_registry
+                WHERE entity_type = $2
+                  AND $1 = ANY(SELECT LOWER(unnest(aliases)))
+                LIMIT 1
+            """, normalized, type_hint)
+            if row:
+                seen[normalized] = row["fuseki_uri"]
+                return row["fuseki_uri"], False, row["entity_type"]
+
         row = await conn.fetchrow("""
             SELECT fuseki_uri, entity_type FROM entity_registry
             WHERE $1 = ANY(SELECT LOWER(unnest(aliases)))
             LIMIT 1
         """, normalized)
         if row:
-            seen[normalized] = row["fuseki_uri"]
-            return row["fuseki_uri"], False, row["entity_type"]
+            if type_hint == "Concept" and row["entity_type"] != "Concept":
+                row = None
+            else:
+                seen[normalized] = row["fuseki_uri"]
+                return row["fuseki_uri"], False, row["entity_type"]
 
         # Tier 2: fuzzy + semantic match against same-type entities.
         # 2026-05-19 root-cause fix: previously knowledge-add only ran Tier 1

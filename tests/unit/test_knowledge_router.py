@@ -512,6 +512,57 @@ class TestTypeMismatch:
         assert created_type == "Person"
 
     @pytest.mark.anyio
+    async def test_concept_hint_bypasses_cross_type_exact_homonym(
+        self, harness, monkeypatch
+    ):
+        """Scientific concepts may share names with organizations/products.
+
+        A Concept hint should prefer a same-type create over an exact cross-type
+        organization row, avoiding document-ingest collisions like mathematical
+        "discord" resolving to the Discord organization.
+        """
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, fake_queue, pool = harness
+        from api.personal_ingest_api import (
+            normalize_entity_text, generate_entity_uri,
+        )
+
+        tag = uuid.uuid4().hex[:10]
+        name = f"HomonymProbe {tag}"
+        normalized = normalize_entity_text(name)
+        org_uri = generate_entity_uri(name, "Organization")
+
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, normalized_text, entity_type, source)
+            VALUES ($1, $2, $3, 'Organization', 'unit-test')
+            ON CONFLICT (fuseki_uri) DO NOTHING
+            """,
+            org_uri, name, normalized,
+        )
+
+        resp = await client.post(
+            "/knowledge/episodes",
+            json=self._typed_body(name, subject_type="Concept"),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+
+        assert data["type_mismatches"] == []
+
+        subject_uri = await conn.fetchval(
+            "SELECT subject_uri FROM knowledge_facts WHERE episode_id = $1::uuid",
+            data["episode_id"],
+        )
+        subject_type = await conn.fetchval(
+            "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1",
+            subject_uri,
+        )
+        assert subject_uri != org_uri
+        assert subject_type == "Concept"
+
+    @pytest.mark.anyio
     async def test_no_mismatch_when_no_hint_provided(self, harness, monkeypatch):
         """Backward-compat: a fact with no subject_type never produces a
         type_mismatch, even when the subject resolves to an existing row.

@@ -58,6 +58,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth_deps import make_service_token_auth
+from api.resolution_primitives import normalize_alias_list
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ def create_router(pool) -> APIRouter:
             "FROM entity_registry WHERE fuseki_uri = $1", loser)
         loser_text = loser_row["entity_text"] if loser_row else None
         loser_aliases = list(loser_row["aliases"]) if loser_row else []
-        add_aliases = [a for a in ([loser_text] + loser_aliases) if a]
+        add_aliases = normalize_alias_list([loser_text] + loser_aliases)
         await conn.execute("""
             UPDATE entity_registry
             SET aliases = (
