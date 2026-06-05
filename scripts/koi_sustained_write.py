@@ -332,6 +332,24 @@ def post_episode(
             )
         if r.status_code in (200, 201):
             return r.json()
+        if r.status_code in (401, 403):
+            # Loud on auth failure — do NOT silently skip. This script reads
+            # KOI_CLAIMS_SERVICE_TOKEN from the AMBIENT shell env (no dotenv), so
+            # post-:8351-gate a forgot-to-export run would otherwise silently DROP
+            # Spore-canon writes. Fail fast instead.
+            log_fn(
+                {
+                    "event": "episode_auth_error",
+                    "status": r.status_code,
+                    "body": r.text[:300],
+                }
+            )
+            raise SystemExit(
+                f"FATAL: /knowledge/episodes returned {r.status_code} (auth). "
+                f"Export KOI_CLAIMS_SERVICE_TOKEN before running koi_sustained_write "
+                f"(it reads the ambient shell env, not a dotenv).\n"
+                f"  error_code: auth_required"
+            )
         if 400 <= r.status_code < 500:
             log_fn(
                 {

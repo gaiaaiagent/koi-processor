@@ -63,6 +63,11 @@ CLAUDE_P_MODEL = os.getenv("CLAUDE_P_MODEL", "claude-sonnet-4-6")
 # legacy INGEST var only for envs that haven't split the two tokens. (:8351 episodes-
 # gate readiness — sending the token is a harmless no-op until the gate lands.)
 KOI_EPISODES_SERVICE_TOKEN = os.getenv("KOI_CLAIMS_SERVICE_TOKEN") or os.getenv("KOI_INGEST_SERVICE_TOKEN")
+if not os.getenv("KOI_CLAIMS_SERVICE_TOKEN") and os.getenv("KOI_INGEST_SERVICE_TOKEN"):
+    logger.warning(
+        "KOI_CLAIMS_SERVICE_TOKEN unset — /knowledge/episodes will be sent with the legacy "
+        "INGEST token, which the :8351 auth gate REJECTS (401). Set KOI_CLAIMS_SERVICE_TOKEN."
+    )
 
 # Tier selects the extractor contract: standard = entities+facts (v1); thorough =
 # entities+facts+discourse (v2). Env overrides win if set.
