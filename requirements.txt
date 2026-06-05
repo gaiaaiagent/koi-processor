@@ -102,3 +102,10 @@ scrapling>=0.4
 tldextract>=5.0
 tiktoken>=0.7
 feedparser>=6.0.10
+
+# =============================================================================
+# SHACL claim validation (OFF by default — VALIDATE_CLAIMS_SHACL; see
+# docs/claims/shacl-alignment-gap.md). pyshacl pulls rdflib.
+# =============================================================================
+pyshacl>=0.27
+rdflib>=7.0
