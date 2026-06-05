@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -32,6 +33,10 @@ from pathlib import Path
 
 BASE_URL = "http://localhost:8351"
 
+# Claims write endpoints require auth (require_auth -> KOI_CLAIMS_SERVICE_TOKEN).
+# Fetched once at import; main() fails fast with a clear message if it's unset.
+_SERVICE_TOKEN = os.getenv("KOI_CLAIMS_SERVICE_TOKEN", "")
+
 
 # ── HTTP helper (copied from test_claims_api.py — stdlib only) ────────
 
@@ -41,9 +46,13 @@ def _req(method: str, path: str, body=None):
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if _SERVICE_TOKEN:
+        req.add_header("Authorization", f"Bearer {_SERVICE_TOKEN}")
 
     try:
-        with urllib.request.urlopen(req) as resp:
+        # Explicit timeout (< asyncpg command_timeout=60) so a slow/hung backend
+        # can't make the harness hold connections open indefinitely (single-worker).
+        with urllib.request.urlopen(req, timeout=50) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -382,6 +391,13 @@ def main():
     except Exception as e:
         print(f"ERROR: Server not reachable — {e}")
         print("Start with: ~/.config/personal-koi/start.sh")
+        sys.exit(1)
+
+    # Fail fast if the auth token is missing — every write step would 401 otherwise.
+    if not _SERVICE_TOKEN:
+        print("ERROR: KOI_CLAIMS_SERVICE_TOKEN not set — claims write endpoints require auth.")
+        print("  Set it from config/personal.env and re-run, e.g.:")
+        print("    export KOI_CLAIMS_SERVICE_TOKEN=$(grep '^KOI_CLAIMS_SERVICE_TOKEN=' config/personal.env | cut -d= -f2-)")
         sys.exit(1)
 
     # Fetch chain info
