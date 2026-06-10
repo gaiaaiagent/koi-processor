@@ -14,11 +14,81 @@ Use these source IDs consistently:
 
 - `email-sensor`
 - `claude-sessions-sensor`
+- `research-paper-sensor`
 
 Notes:
 
 - Email documents are stored in `koi_memories` with `source_sensor='email-sensor'`.
 - Claude sessions are stored in dedicated `session_ingestion_log`, `session_chunks`, and `session_tool_usage` tables.
+- Research paper detections are stored in `koi_memories` with `source_sensor='research-paper-sensor'`.
+
+## Research Paper Sensor
+
+The local research author sensor monitors configured publication sources and queues new papers into the shared research corpus before deeper scientific-discourse extraction.
+
+Current config:
+
+- Config file: `config/research_author_sensors.yaml`
+- Robert Ghrist sources: official UPenn preprints page and arXiv API query `au:"Robert Ghrist"`
+- Corpus root: `/Users/darrenzal/Documents/Research/Papers`
+- LaunchAgent label: `com.personal-koi.research-author-sensor`
+- Schedule: daily at 07:35 local time
+
+Behavior:
+
+- Normalizes title, year, authors, URLs, arXiv IDs, and abstracts when available.
+- Deduplicates against `manifest.jsonl`, existing author folders, and legacy `[year]` title formats.
+- Scores project relevance for sheaves, discourse, lattices, network coordination, robotics, sensor networks, persistence, geometry, and topology.
+- Writes queued paper folders with `metadata.yaml`, `abstract.md`, and `notes.md`.
+- Downloads public PDFs when available.
+- Emits idempotent personal-KOI events for newly queued papers.
+
+### Agent-First Scientific Extraction
+
+Scientific discourse extraction should default to an agent workflow, not unattended paid LLM API calls. This applies to both Codex and Claude Code: the agent reads exported prompt windows, writes validated JSON window outputs, and the backend still performs the canonical merge, entity resolution, fact writing, discourse move writing, quality review, and local artifact export.
+
+Headless extraction transports are disabled by default. To run them intentionally, set `DOC_EXTRACTOR_ALLOW_HEADLESS_LLM=1`; optional fallbacks such as `DOC_EXTRACTOR_CLAUDE_P_FALLBACK=1` and `DOC_EXTRACTOR_OPENAI_FALLBACK=1` must also be explicitly enabled. This policy covers LLM extraction; embeddings still use the configured embedding provider.
+
+Agent workflow:
+
+```bash
+# 1. RAG-index a converted paper without deep extraction.
+python scripts/ingest_document.py \
+  --source-path /Users/darrenzal/Documents/Research/Papers/authors/ghrist-robert/<paper>/extracted.md \
+  --tier rag \
+  --slug <paper> \
+  --name "<paper title>" \
+  --group-id sheaf-explorer
+
+# 2. Export prompt windows for Codex/Claude Code agents.
+python scripts/extract_deep_documents.py \
+  --document-rid document:<sha> \
+  --tier thorough \
+  --export-window-prompts /tmp/paper-windows/<paper>
+
+# 3. In Codex or Claude Code, assign one or more agents/subagents to read
+#    window-NNN.prompt.md and write valid extractor JSON to window-NNN.json.
+
+# 4. Import agent-produced JSON and run the canonical backend merge/write path.
+DOC_EXTRACTOR_AGENT_WINDOW_DIR=/tmp/paper-windows/<paper> \
+python scripts/extract_deep_documents.py \
+  --document-rid document:<sha> \
+  --tier thorough \
+  --group-id sheaf-explorer
+```
+
+The corpus wrapper can use the same agent output directory when a paper folder is already selected:
+
+```bash
+DOC_EXTRACTOR_AGENT_WINDOW_DIR=/tmp/paper-windows/<paper> \
+python scripts/ingest_research_papers.py \
+  --corpus-root /Users/darrenzal/Documents/Research/Papers \
+  --author ghrist-robert \
+  --paper-id ghrist-robert/<paper> \
+  --limit 1
+```
+
+Expected outputs remain `discourse-elements.json`, `triples.jsonl`, `quality-review.json`, and `ingest-result.json` in the paper folder, plus facts/entities/episodes/discourse rows in personal KOI.
 
 ## Required Migration for Email Metadata
 

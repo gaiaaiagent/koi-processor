@@ -21,7 +21,10 @@ Usage:
   python scripts/project_bridge_notes.py --dry-run          # preview what would be created
   python scripts/project_bridge_notes.py --apply            # create entities and edges
   python scripts/project_bridge_notes.py --apply --note <path>  # single note
+  python scripts/project_bridge_notes.py --parse-report --note <path>  # parse only, no DB
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -36,14 +39,52 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import asyncpg
-import httpx
 import yaml
+
+try:
+    import asyncpg
+except ImportError:  # pragma: no cover - exercised by pure parser environments
+    asyncpg = None
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - exercised by pure parser environments
+    httpx = None
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("project_bridge_notes")
 
 KOI_BASE = "http://localhost:8351"
+
+
+def _claims_service_token() -> Optional[str]:
+    """Token for the auth-gated /claims/ write path."""
+    tok = os.getenv("KOI_CLAIMS_SERVICE_TOKEN")
+    if tok:
+        return tok.strip()
+    p = Path.home() / ".config/personal-koi/koi-state/claims_service_token"
+    if p.exists():
+        return p.read_text().strip()
+    return None
+
+
+def _http_error_snippet(text: str, limit: int = 500) -> str:
+    return text[:limit].replace("\n", " ")
+
+
+async def verify_claims_auth(client: httpx.AsyncClient) -> None:
+    """Fail before direct SQL writes if the claims API token is missing/rejected."""
+    resp = await client.get(f"{KOI_BASE}/claims/identity", timeout=10)
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"/claims auth failed ({resp.status_code}); token missing or rejected. "
+            "Source config/personal.env or provide KOI_CLAIMS_SERVICE_TOKEN."
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"/claims auth preflight failed: {resp.status_code} "
+            f"{_http_error_snippet(resp.text)}"
+        )
 
 PROJECTS = {
     "spore": {
@@ -82,7 +123,9 @@ DISPOSITION_SLUG = {
     "clarify existing term": "clarify",
     "candidate primitive": "propose-primitive",
     "candidate pattern": "propose-pattern",
+    "candidate protocol": "propose-protocol",
     "implementation hypothesis": "hypothesize",
+    "novel synthesis": "synthesize",
     "unresolved tension": "resolve-tension",
     "no change": "no-change",
 }
@@ -130,6 +173,23 @@ class BridgeNote:
     review_directives: list  # list of ReviewDirective (may be empty)
     project_key: str    # "spore" or "ic"
 
+@dataclass
+class ParseIssue:
+    severity: str       # error | warning
+    code: str
+    message: str
+    line: int | None = None
+
+@dataclass
+class ParseReport:
+    path: Path
+    doc_id: str
+    project_key: str
+    c_ids: list[str]
+    r_ids: list[str]
+    raw_r_ids: list[str]
+    issues: list[ParseIssue]
+
 
 # ---------------------------------------------------------------------------
 # Parsers
@@ -158,7 +218,7 @@ def parse_claims(text: str) -> list[BridgeClaim]:
         r'\*\*(C\d+)\*\*\s+'
         r'\[confidence:\s*(high|medium|low)\]\s+'
         r'\[anchor:\s*(.+?)\]\s*\n'
-        r'(.*?)(?=\n\*\*C\d+\*\*|\Z)',
+        r'(.*?)(?=\n\*\*C\d+\*\*|\n(?:-\s*)?\*\*R\d+\*\*|\Z)',
         re.DOTALL
     )
 
@@ -209,73 +269,128 @@ def parse_questions(text: str) -> list[OpenQuestion]:
     return questions
 
 
+def _extract_review_sections(text: str) -> list[tuple[str, int]]:
+    """Return sections that may contain R-claim directives with start lines."""
+    sections = []
+    for header in [r'Review Claims', r'Claim Register']:
+        pattern = re.compile(
+            rf'## (?:\d+\.\s+)?{header}\s*\n(.*?)(?=\n## |\Z)',
+            re.DOTALL,
+        )
+        for match in pattern.finditer(text):
+            section = match.group(1)
+            if re.search(r'(?:^|\n)(?:-\s*)?\*\*R\d+\*\*', section):
+                start_line = text.count("\n", 0, match.start(1)) + 1
+                sections.append((section, start_line))
+    return sections
+
+
+def _primary_target(target_str: str, r_id: str) -> str:
+    """Return the first target from a possibly 'a or b' target expression."""
+    targets = [t.strip() for t in re.split(r'\s+or\s+', target_str.strip())]
+    primary_target = targets[0]
+    if len(targets) > 1:
+        log.info(f"  {r_id}: target '{target_str}' → primary: {primary_target}")
+    return primary_target
+
+
+def _parse_supported_by(text: str) -> list[str]:
+    """Extract C IDs from legacy or v2 supported_by syntax."""
+    return re.findall(r'\bC\d+\b', text)
+
+
+def _clean_review_statement(text: str) -> str:
+    """Remove directive metadata from review-claim statement text."""
+    text = re.sub(r'^\s*-\s*', '', text.strip())
+    text = re.sub(r'^\*\*R\d+\*\*:\s*', '', text)
+    text = re.sub(r'\*\*R\d+\*\*\s+\[review claim\]\s*', '', text)
+    text = re.sub(r'\[target:\s*[^\]]+\]', '', text)
+    text = re.sub(r'\[concept:\s*[^\]]+\]', '', text)
+    text = text.replace("TODO: slug-deferred", "")
+    text = re.sub(r'\n\s+supported_by:.*', '', text)
+    text = re.sub(r'\n?\*R\d+\s+is supported by[^*]*\*', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def parse_review_directives(text: str) -> list[ReviewDirective]:
     """Parse R-claim directives with explicit target + concept.
 
     Searches both '## Review Claims' and '## Claim Register' sections,
     since R-claims may appear alongside C-claims in the Claim Register.
     """
-    # Try dedicated section first, then Claim Register, then full text
-    section = None
-    for header in [r'Review Claims', r'Claim Register']:
-        m = re.search(rf'## (?:\d+\.\s+)?{header}\s*\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
-        if m:
-            section = m.group(1)
-            # Check if this section actually contains R-claims
-            if re.search(r'\*\*R\d+\*\*\s+\[review claim\]', section):
-                break
-            section = None
-
-    if not section:
-        return []
     directives = []
+    sections = _extract_review_sections(text)
+    if not sections:
+        return directives
 
     # Pattern: **R1** [review claim] [target: doc.id] [concept: slug]
     # Statement text
     # *R1 is supported by C1, C2, C3.*
-    pattern = re.compile(
+    legacy_pattern = re.compile(
         r'\*\*(R\d+)\*\*\s+'
         r'\[review claim\]\s+'
         r'\[target:\s*([^\]]+)\]\s+'
         r'\[concept:\s*([^\]]+)\]\s*\n'
-        r'(.*?)(?=\n\*\*R\d+\*\*|\Z)',
+        r'(.*?)(?=\n(?:-\s*)?\*\*R\d+\*\*|\Z)',
         re.DOTALL
     )
 
-    for match in pattern.finditer(section):
-        r_id = match.group(1)
+    # Pattern: - **R1**: Claim text. [target: doc.id] [concept: slug]
+    #   supported_by: C1, C2.
+    v2_pattern = re.compile(
+        r'^\s*-\s+\*\*(R\d+)\*\*:\s*'
+        r'(.*?)(?=^\s*-\s+\*\*R\d+\*\*:|^\s*\*\*R\d+\*\*\s+\[review claim\]|\Z)',
+        re.DOTALL | re.MULTILINE,
+    )
 
-        # Parse target: "a or b" → primary is first, alternatives ignored
-        target_str = match.group(2).strip()
-        targets = [t.strip() for t in re.split(r'\s+or\s+', target_str)]
-        primary_target = targets[0]
-        if len(targets) > 1:
-            log.info(f"  {r_id}: target '{target_str}' → primary: {primary_target}")
+    seen = set()
+    for section, _start_line in sections:
+        for match in legacy_pattern.finditer(section):
+            r_id = match.group(1)
+            if r_id in seen:
+                continue
+            seen.add(r_id)
 
-        concept = match.group(3).strip()
+            primary_target = _primary_target(match.group(2), r_id)
+            concept = match.group(3).strip()
+            body = match.group(4).strip()
 
-        body = match.group(4).strip()
+            # Extract supported_by from italic line: *R1 is supported by C1, C2, C3.*
+            sup_match = re.search(r'\*R\d+\s+is supported by\s+([^*]+)\*', body)
+            supported_by = _parse_supported_by(sup_match.group(1)) if sup_match else []
+            statement = _clean_review_statement(body)
 
-        # Extract supported_by from italic line: *R1 is supported by C1, C2, C3.*
-        supported_by = []
-        sup_match = re.search(r'\*R\d+\s+is supported by\s+([^*]+)\*', body)
-        if sup_match:
-            sup_text = sup_match.group(1)
-            # Extract C-IDs, ignoring "Relates to..." suffix
-            sup_text = re.split(r'\.\s*Relates to', sup_text)[0]
-            supported_by = [c.strip().rstrip('.') for c in re.split(r',\s*', sup_text) if c.strip()]
-            # Remove the support line from statement
-            body = re.sub(r'\n?\*R\d+\s+is supported by[^*]*\*', '', body).strip()
+            directives.append(ReviewDirective(
+                r_id=r_id,
+                target_doc=primary_target,
+                concept=concept,
+                statement=statement,
+                supported_by=supported_by,
+            ))
 
-        statement = re.sub(r'\s+', ' ', body)
+        for match in v2_pattern.finditer(section):
+            r_id = match.group(1)
+            if r_id in seen:
+                continue
 
-        directives.append(ReviewDirective(
-            r_id=r_id,
-            target_doc=primary_target,
-            concept=concept,
-            statement=statement,
-            supported_by=supported_by,
-        ))
+            body = match.group(2).strip()
+            target_match = re.search(r'\[target:\s*([^\]]+)\]', body)
+            concept_match = re.search(r'\[concept:\s*([^\]]+)\]', body)
+            if not target_match or not concept_match:
+                continue
+
+            seen.add(r_id)
+            support_match = re.search(r'^\s+supported_by:\s*(.+)$', body, re.MULTILINE)
+            supported_by = _parse_supported_by(support_match.group(1)) if support_match else []
+            statement = _clean_review_statement(body)
+
+            directives.append(ReviewDirective(
+                r_id=r_id,
+                target_doc=_primary_target(target_match.group(1), r_id),
+                concept=concept_match.group(1).strip(),
+                statement=statement,
+                supported_by=supported_by,
+            ))
 
     return directives
 
@@ -300,6 +415,114 @@ def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
         review_directives=parse_review_directives(text),
         project_key=project_key,
     )
+
+
+def _iter_raw_review_blocks(text: str) -> list[dict]:
+    """Return raw R-claim-like blocks from review-capable sections."""
+    blocks = []
+    pattern = re.compile(
+        r'(?ms)^(?:-\s*)?\*\*(R\d+)\*\*.*?'
+        r'(?=^(?:-\s*)?\*\*R\d+\*\*|\Z)'
+    )
+    for section, start_line in _extract_review_sections(text):
+        for match in pattern.finditer(section):
+            line = start_line + section.count("\n", 0, match.start())
+            blocks.append({
+                "r_id": match.group(1),
+                "line": line,
+                "text": match.group(0).strip(),
+            })
+    return blocks
+
+
+def build_parse_report(note: BridgeNote, text: str) -> ParseReport:
+    """Build a parse-only validation report for a bridge note."""
+    issues: list[ParseIssue] = []
+    c_ids = [claim.c_id for claim in note.claims]
+    c_id_set = set(c_ids)
+    r_ids = [directive.r_id for directive in note.review_directives]
+    parsed_r_ids = set(r_ids)
+    raw_blocks = _iter_raw_review_blocks(text)
+    raw_r_ids = [block["r_id"] for block in raw_blocks]
+
+    for claim in note.claims:
+        if re.search(r'(?:^|\s)(?:-\s*)?\*\*R\d+\*\*', claim.statement):
+            issues.append(ParseIssue(
+                "error",
+                "claim_contains_review_directive",
+                f"{claim.c_id} statement appears to include R-claim text",
+            ))
+
+    for block in raw_blocks:
+        r_id = block["r_id"]
+        body = block["text"]
+        if not re.search(r'\[target:\s*[^\]]+\]', body):
+            issues.append(ParseIssue(
+                "error", "missing_target",
+                f"{r_id} is missing [target: ...]",
+                block["line"],
+            ))
+        if not re.search(r'\[concept:\s*[^\]]+\]', body):
+            issues.append(ParseIssue(
+                "error", "missing_concept",
+                f"{r_id} is missing [concept: ...]",
+                block["line"],
+            ))
+        if not re.search(r'\bsupported_by:\s*|\*R\d+\s+is supported by\s+', body):
+            issues.append(ParseIssue(
+                "warning", "missing_supported_by",
+                f"{r_id} has no supported_by line",
+                block["line"],
+            ))
+        if r_id not in parsed_r_ids and re.search(r'\[target:\s*[^\]]+\]', body) and re.search(r'\[concept:\s*[^\]]+\]', body):
+            issues.append(ParseIssue(
+                "error", "unparsed_review_directive",
+                f"{r_id} has target and concept metadata but was not parsed",
+                block["line"],
+            ))
+
+    for directive in note.review_directives:
+        if not directive.supported_by:
+            issues.append(ParseIssue(
+                "warning", "missing_supported_by",
+                f"{directive.r_id} parsed with no source-claim support refs",
+            ))
+        for c_id in directive.supported_by:
+            if c_id not in c_id_set:
+                issues.append(ParseIssue(
+                    "error", "unknown_support_ref",
+                    f"{directive.r_id} supported_by references unknown {c_id}",
+                ))
+
+    return ParseReport(
+        path=note.path,
+        doc_id=note.doc_id,
+        project_key=note.project_key,
+        c_ids=c_ids,
+        r_ids=r_ids,
+        raw_r_ids=raw_r_ids,
+        issues=issues,
+    )
+
+
+def format_parse_report(report: ParseReport) -> str:
+    """Format a parse report for CLI output."""
+    lines = [
+        f"Parse report: {report.path}",
+        f"  doc_id: {report.doc_id or '(missing)'}",
+        f"  project: {report.project_key}",
+        f"  C-claims parsed: {len(report.c_ids)} {report.c_ids}",
+        f"  R-claims parsed: {len(report.r_ids)} {report.r_ids}",
+        f"  Raw R-like blocks: {len(report.raw_r_ids)} {report.raw_r_ids}",
+    ]
+    if report.issues:
+        lines.append("  Issues:")
+        for issue in report.issues:
+            loc = f" line {issue.line}:" if issue.line is not None else ":"
+            lines.append(f"    {issue.severity.upper()} {issue.code}{loc} {issue.message}")
+    else:
+        lines.append("  Issues: none")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -478,8 +701,15 @@ async def create_source_claim(
 
     resp = await client.post(f"{KOI_BASE}/claims/", json=payload, timeout=30)
     if resp.status_code not in (200, 201):
-        log.error(f"  Failed to create source claim {c_id}: {resp.status_code} {resp.text}")
-        return {}
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"/claims auth failed ({resp.status_code}) while creating source claim {c_id}; "
+                "token missing or rejected."
+            )
+        raise RuntimeError(
+            f"Failed to create source claim {c_id}: {resp.status_code} "
+            f"{_http_error_snippet(resp.text)}"
+        )
     data = resp.json()
     claim_rid = data.get("claim_rid", "?")
     log.info(f"  Source claim {c_id}: {claim_rid}")
@@ -548,8 +778,15 @@ async def create_review_claim(
 
     resp = await client.post(f"{KOI_BASE}/claims/", json=payload, timeout=30)
     if resp.status_code not in (200, 201):
-        log.error(f"  Failed to create review claim: {resp.status_code} {resp.text}")
-        return {}
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"/claims auth failed ({resp.status_code}) while creating review claim "
+                f"({target_spec_doc} x {concept_name}); token missing or rejected."
+            )
+        raise RuntimeError(
+            f"Failed to create review claim ({target_spec_doc} x {concept_name}): "
+            f"{resp.status_code} {_http_error_snippet(resp.text)}"
+        )
     data = resp.json()
     claim_rid = data.get("claim_rid", "?")
     log.info(f"  Review claim ({target_spec_doc} × {concept_name}): {claim_rid}")
@@ -927,14 +1164,15 @@ def discover_bridge_notes() -> list[tuple[Path, str]]:
 
 async def main():
     parser = argparse.ArgumentParser(description="Project bridge notes into KOI graph")
+    parser.add_argument("--parse-report", action="store_true", help="Parse notes and report issues without DB access")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--apply", action="store_true", help="Write to KOI graph")
     parser.add_argument("--note", type=str, help="Project a single note by path")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    if not args.dry_run and not args.apply:
-        parser.error("Specify --dry-run or --apply")
+    if not args.parse_report and not args.dry_run and not args.apply:
+        parser.error("Specify --parse-report, --dry-run, or --apply")
 
     if args.verbose:
         log.setLevel(logging.DEBUG)
@@ -963,6 +1201,50 @@ async def main():
 
     if not note_paths:
         log.error("No bridge notes found")
+        sys.exit(1)
+
+    if args.parse_report:
+        had_errors = False
+        for note_path, project_key in note_paths:
+            try:
+                text = note_path.read_text()
+                note = parse_bridge_note(note_path, project_key)
+                report = build_parse_report(note, text)
+                print(format_parse_report(report))
+                if any(issue.severity == "error" for issue in report.issues):
+                    had_errors = True
+            except Exception as e:
+                had_errors = True
+                print(f"Parse report: {note_path}")
+                print(f"  ERROR parse_failed: {e}")
+        sys.exit(1 if had_errors else 0)
+
+    if asyncpg is None or httpx is None:
+        parser.error("asyncpg and httpx are required for --dry-run/--apply; use --parse-report for parser-only checks")
+
+    # Parse and validate all notes before touching KOI. This prevents malformed
+    # review-claim syntax from silently falling back to source-claim-only behavior.
+    parsed_notes = []
+    had_parse_errors = False
+    for note_path, project_key in note_paths:
+        try:
+            text = note_path.read_text()
+            note = parse_bridge_note(note_path, project_key)
+            report = build_parse_report(note, text)
+            if any(issue.severity == "error" for issue in report.issues):
+                had_parse_errors = True
+                log.error("\n" + format_parse_report(report))
+            parsed_notes.append(note)
+        except Exception as e:
+            had_parse_errors = True
+            log.error(f"Failed to parse {note_path}: {e}")
+
+    if had_parse_errors:
+        log.error("Bridge-note parse validation failed; aborting before KOI access")
+        sys.exit(1)
+
+    if not parsed_notes:
+        log.error("No parseable bridge notes found")
         sys.exit(1)
 
     # Connect to KOI
@@ -1006,16 +1288,9 @@ async def main():
         "related_to_edges": 0,
     }
 
-    # Parse all notes first, then process in two passes:
+    # Process in two passes:
     # Pass 1: change-proposing notes (creates review claims + supports edges)
     # Pass 2: "no change" notes (links to existing review claims with opposes)
-    parsed_notes = []
-    for note_path, project_key in note_paths:
-        try:
-            parsed_notes.append(parse_bridge_note(note_path, project_key))
-        except Exception as e:
-            log.error(f"Failed to parse {note_path}: {e}")
-
     change_notes = [n for n in parsed_notes if n.disposition != "no change"]
     nochange_notes = [n for n in parsed_notes if n.disposition == "no change"]
     log.info(f"  Pass 1: {len(change_notes)} change-proposing notes")
@@ -1025,11 +1300,19 @@ async def main():
     log.info(f"  Projection batch: {batch_ts}")
 
     # Write path on POST /claims/ requires auth (make_service_token_auth).
-    # Send the service token from the env (sourced from config/personal.env);
-    # never hardcode it. Falls back to no header if unset (read-only/dry-run).
-    _svc_token = os.getenv("KOI_CLAIMS_SERVICE_TOKEN", "")
+    # Send the service token from the env or local koi-state file; never
+    # hardcode it. Dry-run stays read-only and can run without auth.
+    _svc_token = _claims_service_token() if args.apply else None
+    if args.apply and not _svc_token:
+        log.error(
+            "KOI_CLAIMS_SERVICE_TOKEN not found (env or "
+            "~/.config/personal-koi/koi-state/claims_service_token); aborting before writes"
+        )
+        sys.exit(1)
     _auth_headers = {"Authorization": f"Bearer {_svc_token}"} if _svc_token else {}
     async with httpx.AsyncClient(headers=_auth_headers) as client:
+        if args.apply:
+            await verify_claims_auth(client)
         for note in change_notes + nochange_notes:
             stats = await project_bridge_note(
                 note, conn, client,

@@ -137,6 +137,8 @@ def _episode_body(n_facts=2, *, group_id=None, source_document=None):
             "object": f"TestObj_{tag}_{i}",
             "fact_text": f"Test fact {i} for {tag} — unique sentence {uuid.uuid4()}.",
             "valid_from": "2026-05-13T00:00:00+00:00",
+            "turn_range_start": i,
+            "turn_range_end": i + 10,
         })
     return {
         "name": f"Test Episode {tag}",
@@ -312,15 +314,19 @@ class TestKnowledgeEpisodeEmit:
 
         facts = await conn.fetch(
             "SELECT id, subject_uri, predicate, fact_text, group_id, "
-            "fact_embedding_3072 IS NOT NULL AS has_embed "
-            "FROM knowledge_facts WHERE episode_id = $1::uuid",
+            "fact_embedding_3072 IS NOT NULL AS has_embed, "
+            "turn_range_start, turn_range_end "
+            "FROM knowledge_facts WHERE episode_id = $1::uuid "
+            "ORDER BY turn_range_start",
             ep_id,
         )
         assert len(facts) == 3
-        for f in facts:
+        for index, f in enumerate(facts):
             assert f["predicate"] == "TEST_PREDICATE"
             assert f["has_embed"] is True
             assert f["group_id"] == payload["group_id"]
+            assert f["turn_range_start"] == index
+            assert f["turn_range_end"] == index + 10
 
         # idempotency row recorded by the subscriber
         applied = await conn.fetchval(
@@ -388,6 +394,26 @@ class TestKnowledgeEpisodeEmit:
             data["episode_id"],
         )
         assert fact_count == 2
+
+    @pytest.mark.anyio
+    async def test_fact_turn_ranges_are_stored(self, harness, monkeypatch):
+        """Document-ingest provenance coordinates must survive the endpoint."""
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, fake_queue, pool = harness
+
+        resp = await client.post("/knowledge/episodes", json=_episode_body(3))
+        assert resp.status_code == 201
+
+        rows = await conn.fetch(
+            "SELECT turn_range_start, turn_range_end FROM knowledge_facts "
+            "WHERE episode_id = $1::uuid ORDER BY turn_range_start",
+            resp.json()["episode_id"],
+        )
+        assert [(r["turn_range_start"], r["turn_range_end"]) for r in rows] == [
+            (0, 10),
+            (1, 11),
+            (2, 12),
+        ]
 
         # Flag off → no emit.
         assert len(fake_queue.added) == 0
@@ -510,6 +536,57 @@ class TestTypeMismatch:
             normalize_entity_text(name),
         )
         assert created_type == "Person"
+
+    @pytest.mark.anyio
+    async def test_concept_hint_bypasses_cross_type_exact_homonym(
+        self, harness, monkeypatch
+    ):
+        """Scientific concepts may share names with organizations/products.
+
+        A Concept hint should prefer a same-type create over an exact cross-type
+        organization row, avoiding document-ingest collisions like mathematical
+        "discord" resolving to the Discord organization.
+        """
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, fake_queue, pool = harness
+        from api.personal_ingest_api import (
+            normalize_entity_text, generate_entity_uri,
+        )
+
+        tag = uuid.uuid4().hex[:10]
+        name = f"HomonymProbe {tag}"
+        normalized = normalize_entity_text(name)
+        org_uri = generate_entity_uri(name, "Organization")
+
+        await conn.execute(
+            """
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, normalized_text, entity_type, source)
+            VALUES ($1, $2, $3, 'Organization', 'unit-test')
+            ON CONFLICT (fuseki_uri) DO NOTHING
+            """,
+            org_uri, name, normalized,
+        )
+
+        resp = await client.post(
+            "/knowledge/episodes",
+            json=self._typed_body(name, subject_type="Concept"),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+
+        assert data["type_mismatches"] == []
+
+        subject_uri = await conn.fetchval(
+            "SELECT subject_uri FROM knowledge_facts WHERE episode_id = $1::uuid",
+            data["episode_id"],
+        )
+        subject_type = await conn.fetchval(
+            "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1",
+            subject_uri,
+        )
+        assert subject_uri != org_uri
+        assert subject_type == "Concept"
 
     @pytest.mark.anyio
     async def test_no_mismatch_when_no_hint_provided(self, harness, monkeypatch):

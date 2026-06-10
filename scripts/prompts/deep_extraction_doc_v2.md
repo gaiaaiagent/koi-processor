@@ -57,12 +57,34 @@ window's text.
   - **Entity predicates** (object is an entity): `AUTHORED_BY`, `PUBLISHED_BY`,
     `FOUNDED_BY`, `PARTNERS_WITH`, `MEMBER_OF`, `LOCATED_IN`, `PART_OF`,
     `INSTANCE_OF`, `DEFINES`, `PROPOSES`, `EXEMPLIFIED_BY`, `DERIVES_FROM`,
-    `SUPPORTS`, `CONTRASTS_WITH`, `COLLABORATES_WITH`, `RELATES_TO`.
+    `SUPPORTS`, `CONTRASTS_WITH`, `COLLABORATES_WITH`, `RELATES_TO`,
+    `INTRODUCES`, `GENERALIZES`, `USES_METHOD`, `PROVES`, `FORMALIZES`,
+    `COMPUTES`, `APPLIES_TO`, `EQUIVALENT_TO`.
   - **Literal predicates** (use `object_literal`, set `object` = null):
     `HAS_QUANTITY`, `HAS_TARGET`, `HAS_METRIC`, `HAS_TIMEFRAME`, `HAS_LOCATION`,
-    `HAS_DATE`, `HAS_COUNT`, `HAS_STATUS`, `HAS_DESCRIPTION`, `HAS_URL`.
+    `HAS_DATE`, `HAS_COUNT`, `HAS_STATUS`, `HAS_FORMULA`, `HAS_BOUND`,
+    `HAS_PARAMETER`, `HAS_DESCRIPTION`, `HAS_URL`.
 - For entity predicates: set `object` (string), `object_literal` = null.
   For literal predicates: set `object` = null, `object_literal` = the value.
+- `HAS_DESCRIPTION` is a last-resort literal predicate for short definitional
+  glosses only. Prefer specific scientific predicates above (`PROVES`,
+  `INTRODUCES`, `GENERALIZES`, `FORMALIZES`, `APPLIES_TO`, etc.) whenever the
+  text states a result, construction, method, relation, or application.
+- Entity predicates must never point to `object_literal`. For example,
+  `AUTHORED_BY` requires an author entity as `object`; do not put arXiv IDs,
+  categories, dates, headers, or citation strings in `object_literal` for an
+  entity predicate.
+- Do not extract bibliography entries, citation attributions, arXiv headers,
+  copyright lines, grant acknowledgements, or author affiliation boilerplate as
+  core scientific facts unless the fact is essential document metadata for the
+  paper itself. `AUTHORED_BY` should normally have the paper/publication as
+  `subject`, not a theorem, method, or concept.
+- Do not convert funding acknowledgements into `Person SUPPORTS Organization`.
+  If funding is central enough to preserve, use the funded paper/project as the
+  subject and the funder organization as the object; otherwise skip it.
+- Never emit a self-relation fact where `subject` and `object` are the same
+  entity; these are uninformative even if the text uses phrasing like
+  "generalizes the classical theorem".
 - **Emit quantified claims as facts** — numbers, percentages, dollar amounts,
   counts, hectares, dates — using a literal predicate with the number/string in
   `object_literal` (e.g. subject="BioHubs research base", predicate="HAS_COUNT",
@@ -115,6 +137,16 @@ Fields per move:
 
 Do NOT duplicate a fact as a discourse move — facts are atomic triples; moves are
 argument steps. A move may summarize several facts.
+
+For scientific papers, preserve scientific discourse inside this argument taxonomy:
+research questions become `open_question`; hypotheses/conjectures become `claim` with
+`status: speculative`; methods, constructions, algorithms, and assumptions become
+`premise` or `definition`; theorems, proofs, examples, simulations, measurements, and
+case studies become `evidence`; limitations become `counterpoint`; future work becomes
+`open_question` or `implication`; and named results become `claim` or `thesis` only
+when the paper asks the reader to accept them as part of its argument. Mention the
+scientific subtype explicitly in `detail` when it matters, e.g. "Subtype: experiment"
+or "Subtype: theorem".
 
 ### Document object
 
