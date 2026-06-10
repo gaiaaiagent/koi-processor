@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-koi.research-author-sensor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/darrenzal/projects/RegenAI/koi-processor/scripts/run_research_author_sensor.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/darrenzal/projects/RegenAI/koi-processor</string>
+
+    <!-- Daily at 07:35 local; queues only author papers not already in the research corpus -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>7</integer>
+            <key>Minute</key>
+            <integer>35</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/darrenzal</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/darrenzal/projects/RegenAI/koi-processor/logs/research-author-sensor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/darrenzal/projects/RegenAI/koi-processor/logs/research-author-sensor.error.log</string>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
