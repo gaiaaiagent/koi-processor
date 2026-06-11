@@ -78,7 +78,12 @@ POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432
 # (10.100.0.2) unreachable from the host running the ingest. (Plan Phase-2 note.)
 KOI_BASE_URL = os.getenv("DOC_INGEST_KOI_URL", "http://localhost:8351")
 CLAUDE_P_MODEL = os.getenv("CLAUDE_P_MODEL", "claude-sonnet-4-6")
-KOI_INGEST_SERVICE_TOKEN = os.getenv("KOI_INGEST_SERVICE_TOKEN") or os.getenv("KOI_CLAIMS_SERVICE_TOKEN")
+# The only consumer of this token is post_episode() -> POST /knowledge/episodes, which is gated by
+# KOI_CLAIMS_SERVICE_TOKEN (make_service_token_auth default; knowledge_router.py). Prefer CLAIMS so the
+# episode write authenticates; fall back to the ingest-specific token. (Preferring INGEST when the two
+# differ sends a token the route does not check -> fall-through to session_tokens -> 500.)
+# /tasks/ingest is called without auth (always-on registry), so it is unaffected by this choice.
+KOI_INGEST_SERVICE_TOKEN = os.getenv("KOI_CLAIMS_SERVICE_TOKEN") or os.getenv("KOI_INGEST_SERVICE_TOKEN")
 
 # Tier selects the extractor contract: standard = entities+facts (v1); thorough =
 # entities+facts+discourse (v2). Env overrides win if set.
