@@ -75,9 +75,7 @@ SELECT
   count(*) FILTER (WHERE stance = 'supports') AS total_supports,
   count(*) FILTER (WHERE stance = 'opposes') AS total_opposes,
   count(DISTINCT source_document) AS distinct_sources,
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%%') > 0
-       THEN true ELSE false END AS cross_project,
+  count(DISTINCT split_part(source_document, '.', 1)) >= 2 AS cross_project,
   CASE
     WHEN count(DISTINCT source_document) >= 2 AND count(*) FILTER (WHERE stance = 'opposes') > 0
       THEN 'ready_with_tension'
@@ -131,16 +129,12 @@ SELECT
   count(*) FILTER (WHERE stance = 'supports') AS support_count,
   count(*) FILTER (WHERE stance = 'opposes') AS oppose_count,
   count(DISTINCT source_document) AS distinct_sources,
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%%') > 0
-       THEN true ELSE false END AS cross_project,
+  count(DISTINCT split_part(source_document, '.', 1)) >= 2 AS cross_project,
   string_agg(DISTINCT source_document, ', ' ORDER BY source_document) AS source_notes
 FROM cluster_members
 GROUP BY cluster_key, target_doc, concept_slug, review_rid, review_statement, target_section, change_slug
 ORDER BY
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%%') > 0
-       THEN 0 ELSE 1 END,
+  CASE WHEN count(DISTINCT split_part(source_document, '.', 1)) >= 2 THEN 0 ELSE 1 END,
   count(DISTINCT source_document) DESC,
   count(*) FILTER (WHERE stance = 'opposes') ASC,
   cluster_key
