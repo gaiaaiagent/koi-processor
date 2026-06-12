@@ -117,6 +117,11 @@ PROJECTS = {
         "claimant_uri": "org:bioregional-mapping-learning-field",
         "bridge_dir": Path.home() / "projects/bioregional-mapping/docs/research/connections",
     },
+    "bioregional-economics": {
+        "project_id": "bioregional-economics",
+        "claimant_uri": "org:bioregional-economics-learning-field",
+        "bridge_dir": Path.home() / "projects/bioregional-economics/docs/research/connections",
+    },
 }
 
 DISPOSITION_SLUG = {
@@ -1191,6 +1196,8 @@ async def main():
             project_key = "bioregional-coordination"
         elif "bioregional-mapping" in str(note_path):
             project_key = "bioregional-mapping"
+        elif "bioregional-economics" in str(note_path):
+            project_key = "bioregional-economics"
         else:
             project_key = "spore"
         note_paths = [(note_path, project_key)]
