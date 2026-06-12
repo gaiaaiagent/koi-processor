@@ -459,7 +459,8 @@ async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: s
 
 async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                                 document_rid: str, tier: str, group_id: Optional[str],
-                                run_id: str, force: bool) -> Dict[str, Any]:
+                                run_id: str, force: bool,
+                                source_sensor: str = "document-ingest") -> Dict[str, Any]:
     prompt_path, schema_path = prompt_schema_for_tier(tier)
     template = prompt_path.read_text(encoding="utf-8")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -472,12 +473,14 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             return {"status": "skipped_locked", "document_rid": document_rid}
         try:
             mem = await conn.fetchrow(
-                "SELECT content->>'title' AS title, metadata->>'source_url' AS url, "
+                "SELECT content->>'title' AS title, "
+                "COALESCE(metadata->>'source_url', metadata->>'url') AS url, "
                 "metadata->>'slug' AS slug, metadata->>'group_id' AS group_id "
-                "FROM koi_memories WHERE rid = $1 AND source_sensor = 'document-ingest'", document_rid)
+                "FROM koi_memories WHERE rid = $1 AND source_sensor = $2", document_rid, source_sensor)
             if mem is None:
-                raise ExtractionError("no_rag", f"no document-ingest koi_memories row for {document_rid} "
-                                                f"(run the RAG step first)", terminal=True)
+                raise ExtractionError("no_rag", f"no koi_memories row for {document_rid} "
+                                                f"with source_sensor={source_sensor!r} (run the RAG step first)",
+                                      terminal=True)
             group_id = group_id or mem["group_id"] or "personal"
             source_document = mem["url"] or document_rid
             doc_title = mem["title"] or mem["slug"] or document_rid
@@ -690,8 +693,9 @@ async def amain(args) -> int:
         if not document_rid and args.slug:
             async with pool.acquire() as conn:
                 document_rid = await conn.fetchval(
-                    "SELECT rid FROM koi_memories WHERE source_sensor='document-ingest' "
-                    "AND metadata->>'slug' = $1 ORDER BY updated_at DESC LIMIT 1", args.slug)
+                    "SELECT rid FROM koi_memories WHERE source_sensor=$1 "
+                    "AND metadata->>'slug' = $2 ORDER BY updated_at DESC LIMIT 1",
+                    args.source_sensor, args.slug)
         if not document_rid:
             print("Error: provide --document-rid or a --slug that resolves to one", file=sys.stderr)
             return 1
@@ -700,7 +704,8 @@ async def amain(args) -> int:
         async with httpx.AsyncClient() as http:
             result = await extract_deep_document(
                 pool, http, document_rid=document_rid, tier=args.tier,
-                group_id=args.group_id, run_id=run_id, force=args.force)
+                group_id=args.group_id, run_id=run_id, force=args.force,
+                source_sensor=args.source_sensor)
     finally:
         await pool.close()
 
@@ -719,6 +724,9 @@ def main() -> int:
                         help="standard = entities+facts (v1 prompt); thorough = +discourse (v2 prompt)")
     parser.add_argument("--group-id", help="override learning field (default: the document's group_id)")
     parser.add_argument("--force", action="store_true", help="re-extract all windows (ignore cache)")
+    parser.add_argument("--source-sensor", default="document-ingest",
+                        help="koi_memories.source_sensor to read RAG rows from "
+                             "(default: document-ingest; e.g. substack-corpus-backfill for Substack posts)")
     args = parser.parse_args()
     try:
         return asyncio.run(amain(args))
