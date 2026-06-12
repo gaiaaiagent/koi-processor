@@ -307,8 +307,13 @@ class IngestResponse(BaseModel):
 
 class RegisterEntityRequest(BaseModel):
     """Request to register a vault entity"""
-    vault_rid: str  # e.g., "orn:obsidian.entity:Notes/Person/clare-attwell"
-    vault_path: str  # e.g., "People/Clare Attwell.md"
+    # vault_rid / vault_path are optional to support alias-only updates to an
+    # existing entity (e.g. process-note alias auto-learning POSTs only
+    # {name, entity_type, frontmatter.aliases}). When omitted, the handler
+    # backfills them from the existing entity_rid_mappings row so the RID
+    # mapping is updated in place rather than 422-rejected.
+    vault_rid: Optional[str] = None  # e.g., "orn:obsidian.entity:Notes/Person/clare-attwell"
+    vault_path: Optional[str] = None  # e.g., "People/Clare Attwell.md"
     entity_type: str  # Person, Organization, etc.
     name: str
     properties: Dict[str, Any] = {}
@@ -3563,23 +3568,39 @@ async def register_vault_entity(request: RegisterEntityRequest):
             # Resolve against existing entities
             canonical, is_new = await resolve_entity(conn, entity)
 
+            # Backfill vault_rid / vault_path for alias-only updates.
+            # When the caller omits them (e.g. alias auto-learning), reuse the
+            # existing mapping so we update-in-place instead of 422-rejecting.
+            eff_vault_rid = request.vault_rid
+            eff_vault_path = request.vault_path
+            if (eff_vault_rid is None or eff_vault_path is None) and not is_new:
+                existing_rid_row = await conn.fetchrow("""
+                    SELECT vault_rid, vault_path FROM entity_rid_mappings
+                    WHERE canonical_uri = $1
+                    ORDER BY last_synced DESC NULLS LAST
+                    LIMIT 1
+                """, canonical.uri)
+                if existing_rid_row:
+                    eff_vault_rid = eff_vault_rid or existing_rid_row["vault_rid"]
+                    eff_vault_path = eff_vault_path or existing_rid_row["vault_path"]
+
             # Check for URI collision with different vault file
             collision_warning = None
             suppress_types = {'Meeting', 'Task'}
             suppress_paths = {'Tests/'}
             is_suppressed = (
                 request.entity_type in suppress_types
-                or any(request.vault_path.startswith(p) for p in suppress_paths)
+                or (eff_vault_path is not None and any(eff_vault_path.startswith(p) for p in suppress_paths))
             )
-            if not is_new:
+            if not is_new and eff_vault_path is not None:
                 existing_mapping = await conn.fetchrow("""
                     SELECT vault_path, name FROM entity_rid_mappings
                     WHERE canonical_uri = $1 AND vault_path != $2
-                """, canonical.uri, request.vault_path)
+                """, canonical.uri, eff_vault_path)
 
                 if existing_mapping and not is_suppressed:
                     collision_warning = (
-                        f"URI collision: '{request.name}' ({request.vault_path}) "
+                        f"URI collision: '{request.name}' ({eff_vault_path}) "
                         f"shares URI with '{existing_mapping['name']}' ({existing_mapping['vault_path']})"
                     )
                     logger.warning(collision_warning)
@@ -3606,43 +3627,50 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     logger.warning(cross_type_warning)
 
             if is_new:
-                # Store new entity
-                await store_new_entity(conn, entity, canonical, request.vault_rid)
+                # Store new entity. first_seen_rid is informational; fall back to
+                # a sentinel when the caller didn't supply a vault_rid.
+                await store_new_entity(
+                    conn, entity, canonical,
+                    eff_vault_rid or "orn:personal-koi.source:register-entity"
+                )
                 logger.info(f"Registered new entity: {canonical.uri}")
             else:
                 logger.info(f"Linked to existing entity: {canonical.uri}")
 
-            # Store or update RID mapping
-            await conn.execute("""
-                INSERT INTO entity_rid_mappings (
-                    vault_rid, vault_path, canonical_uri, entity_type,
-                    name, content_hash, sync_status, last_synced, visibility_scope
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW(), $7)
-                ON CONFLICT (vault_rid) DO UPDATE SET
-                    vault_path = EXCLUDED.vault_path,
-                    canonical_uri = EXCLUDED.canonical_uri,
-                    entity_type = EXCLUDED.entity_type,
-                    name = EXCLUDED.name,
-                    content_hash = EXCLUDED.content_hash,
-                    sync_status = 'linked',
-                    last_synced = NOW(),
-                    visibility_scope = EXCLUDED.visibility_scope
-            """,
-                request.vault_rid,
-                request.vault_path,
-                canonical.uri,
-                request.entity_type,
-                request.name,
-                request.content_hash,
-                request.visibility_scope or "public"
-            )
+            # Store or update RID mapping — only when we have an actual vault RID
+            # + path. Alias-only updates (no rid/path, no existing mapping to
+            # backfill from) skip this and just merge aliases below.
+            if eff_vault_rid and eff_vault_path:
+                await conn.execute("""
+                    INSERT INTO entity_rid_mappings (
+                        vault_rid, vault_path, canonical_uri, entity_type,
+                        name, content_hash, sync_status, last_synced, visibility_scope
+                    ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW(), $7)
+                    ON CONFLICT (vault_rid) DO UPDATE SET
+                        vault_path = EXCLUDED.vault_path,
+                        canonical_uri = EXCLUDED.canonical_uri,
+                        entity_type = EXCLUDED.entity_type,
+                        name = EXCLUDED.name,
+                        content_hash = EXCLUDED.content_hash,
+                        sync_status = 'linked',
+                        last_synced = NOW(),
+                        visibility_scope = EXCLUDED.visibility_scope
+                """,
+                    eff_vault_rid,
+                    eff_vault_path,
+                    canonical.uri,
+                    request.entity_type,
+                    request.name,
+                    request.content_hash,
+                    request.visibility_scope or "public"
+                )
 
-            # Update entity_registry with vault_rid if not set
-            await conn.execute("""
-                UPDATE entity_registry
-                SET vault_rid = $1
-                WHERE fuseki_uri = $2 AND vault_rid IS NULL
-            """, request.vault_rid, canonical.uri)
+                # Update entity_registry with vault_rid if not set
+                await conn.execute("""
+                    UPDATE entity_registry
+                    SET vault_rid = $1
+                    WHERE fuseki_uri = $2 AND vault_rid IS NULL
+                """, eff_vault_rid, canonical.uri)
 
             # Auto-assign koi_rid for federated publication scope
             final_koi_rid = None
@@ -3674,21 +3702,23 @@ async def register_vault_entity(request: RegisterEntityRequest):
             rel_stats = None
             frontmatter_data = request.frontmatter or request.properties
             if frontmatter_data:
-                try:
-                    rel_stats = await sync_vault_relationships(
-                        conn,
-                        request.vault_path,
-                        canonical.uri,
-                        frontmatter_data
-                    )
-                    logger.info(f"Synced relationships: {rel_stats}")
+                # Relationship sync needs a vault_path; alias merge (below) does not.
+                if eff_vault_path:
+                    try:
+                        rel_stats = await sync_vault_relationships(
+                            conn,
+                            eff_vault_path,
+                            canonical.uri,
+                            frontmatter_data
+                        )
+                        logger.info(f"Synced relationships: {rel_stats}")
 
-                    # Enqueue relationship changes to TerminusDB outbox
-                    if rel_stats and TERMINUSDB_ENABLED:
-                        await _enqueue_relationship_outbox(
-                            conn, canonical.uri, request.vault_path)
-                except Exception as e:
-                    logger.warning(f"Failed to sync relationships: {e}")
+                        # Enqueue relationship changes to TerminusDB outbox
+                        if rel_stats and TERMINUSDB_ENABLED:
+                            await _enqueue_relationship_outbox(
+                                conn, canonical.uri, eff_vault_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to sync relationships: {e}")
 
                 # Update aliases in entity_registry if provided in frontmatter
                 raw_aliases = frontmatter_data.get('aliases', [])
@@ -3734,7 +3764,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 success=True,
                 canonical_uri=canonical.uri,
                 is_new=is_new,
-                vault_rid=request.vault_rid,
+                vault_rid=eff_vault_rid or "",
                 merged_with=canonical.merged_with,
                 collision_warning=collision_warning,
                 cross_type_warning=cross_type_warning,
