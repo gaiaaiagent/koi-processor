@@ -183,6 +183,19 @@ def parse_and_validate(raw: str, schema: dict) -> dict:
         data = json.loads(raw[first:last + 1])
     except json.JSONDecodeError as e:
         raise ExtractionError("extract_parse_error", f"json decode: {e}") from e
+    # Robustness: the extractor occasionally emits a fact object missing the required
+    # fact_text. Rather than fail (and discard) the whole window, synthesize fact_text
+    # from the triple (subject / predicate / object|object_literal) so no fact is lost
+    # and schema validation passes. Only fires when fact_text is absent/blank — the
+    # normal path (model-written fact_text) is untouched.
+    if isinstance(data.get("facts"), list):
+        for f in data["facts"]:
+            if isinstance(f, dict) and not str(f.get("fact_text") or "").strip():
+                obj = f.get("object") or f.get("object_literal") or ""
+                synth = " ".join(str(x).strip() for x in (f.get("subject"), f.get("predicate"), obj)
+                                 if x and str(x).strip())
+                if synth:
+                    f["fact_text"] = synth
     errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda e: list(e.path))
     if errors:
         msgs = [f"{list(e.path)}: {e.message}" for e in errors[:5]]
