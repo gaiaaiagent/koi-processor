@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-koi.substack-deep-extract</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/darrenzal/projects/koi-processor-service/scripts/deep_extract_substack_corpus.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/darrenzal/projects/koi-processor-service</string>
+
+    <!-- Daily at 07:45 local — 30 min after the substack sensor's 07:15 ingest, so new
+         posts are chunked/embedded before this deep-extracts them. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>7</integer>
+            <key>Minute</key>
+            <integer>45</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/darrenzal/projects/koi-processor-service/logs/substack-deep-extract.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/darrenzal/projects/koi-processor-service/logs/substack-deep-extract.err.log</string>
+</dict>
+</plist>
