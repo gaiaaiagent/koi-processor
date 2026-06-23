@@ -40,7 +40,7 @@ SCOPES = [
 ]
 
 # Lifetimes
-SESSION_TOKEN_LIFETIME_SECONDS = 3600  # 1 hour
+SESSION_TOKEN_LIFETIME_SECONDS = 31536000  # 1 year (365 days)
 DEVICE_CODE_LIFETIME_SECONDS = 600     # 10 minutes
 POLL_INTERVAL_SECONDS = 5              # Recommended poll interval
 
