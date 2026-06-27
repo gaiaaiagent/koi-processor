@@ -232,13 +232,38 @@ async def text_search(
     generate_embedding_fn: Callable | None = None,
     expand_queries_fn: Callable | None = None,
     rerank_fn: Callable | None = None,
+    fields: list[str] | None = None,
 ) -> list[EvidenceBundle]:
     """Hybrid BM25+vector RRF fusion + FlashRank reranking.
 
     Wraps the chunk retrieval block from chat_endpoint (lines 5326-5456).
     Returns EvidenceBundles with source_type=LOCAL_DOCUMENT.
+
+    Option B field scoping: when `fields` is a non-empty list, results are scoped
+    to documents that are members of those learning fields (via
+    document_field_membership). When None/empty (default), behavior is UNCHANGED —
+    retrieval is globally visible across all documents.
     """
     code_filter = "" if include_code else "AND c.content->>'entity_name' IS NULL"
+
+    # Option B: optional field-membership scoping. The main hybrid query binds
+    # $1=embedding, $2=query_text, so fields go in $3; the BM25-only fallback binds
+    # $1=query_text, so fields go in $2. When fields is empty these are no-ops and
+    # no extra parameter is passed (fully backward compatible).
+    if fields:
+        field_join_main = (
+            "JOIN document_field_membership fm "
+            "ON fm.document_rid = c.document_rid AND fm.field_id = ANY($3::text[])"
+        )
+        field_join_bm25 = (
+            "JOIN document_field_membership fm "
+            "ON fm.document_rid = c.document_rid AND fm.field_id = ANY($2::text[])"
+        )
+        field_args = [list(fields)]
+    else:
+        field_join_main = ""
+        field_join_bm25 = ""
+        field_args = []
 
     # B8b: determine query variants
     if multi_query and expand_queries_fn:
@@ -283,6 +308,7 @@ async def text_search(
                                ) AS vrank
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
+                        {field_join_main}
                         WHERE c.embedding_3072 IS NOT NULL {code_filter}
                         ORDER BY c.embedding_3072::halfvec(3072)
                                  <=> $1::halfvec(3072) LIMIT 40
@@ -298,6 +324,7 @@ async def text_search(
                                ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC) AS brank
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
+                        {field_join_main}
                         WHERE c.tsv @@ plainto_tsquery('english', $2) {code_filter}
                         ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $2)) DESC LIMIT 40
                     )
@@ -314,7 +341,7 @@ async def text_search(
                     FULL OUTER JOIN bm25_results b ON v.id = b.id
                     ORDER BY rrf_score DESC
                     LIMIT {max_rrf_candidates}
-                """, q_embedding_str, q_text)
+                """, q_embedding_str, q_text, *field_args)
                 for cr in chunk_rows:
                     dedup_key = str(cr['id']) if cr['id'] is not None else cr['document_rid']
                     if dedup_key in all_chunk_rows:
@@ -338,10 +365,11 @@ async def text_search(
                                ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
                         FROM koi_memory_chunks c
                         JOIN koi_memories m ON m.rid = c.document_rid
+                        {field_join_bm25}
                         WHERE c.tsv @@ plainto_tsquery('english', $1) {code_filter}
                         ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
                         LIMIT {max_rrf_candidates}
-                    """, q_text)
+                    """, q_text, *field_args)
                     for cr in chunk_rows:
                         dedup_key = str(cr['id']) if cr.get('id') is not None else cr['document_rid']
                         if dedup_key in all_chunk_rows:

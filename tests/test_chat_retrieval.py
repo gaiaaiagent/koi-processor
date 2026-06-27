@@ -283,6 +283,157 @@ class TestTextSearch:
 
 
 # ---------------------------------------------------------------------------
+# Option B: field-membership scoping (document_field_membership)
+# ---------------------------------------------------------------------------
+
+class TestTextSearchFieldScoping:
+
+    @pytest.mark.asyncio
+    async def test_fields_none_no_membership_join(self):
+        """Default (fields=None) is globally visible: no membership JOIN, and
+        only the two base positional params (embedding_str, query_text)."""
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[])
+
+        await text_search("test", [0.1] * 1536, conn, fields=None)
+
+        sql, params = conn.fetch.call_args[0][0], conn.fetch.call_args[0][1:]
+        assert "document_field_membership" not in sql
+        # main hybrid query binds exactly $1 embedding + $2 query_text
+        assert len(params) == 2
+
+    @pytest.mark.asyncio
+    async def test_fields_empty_list_no_membership_join(self):
+        """An empty list is treated like None (unchanged behavior)."""
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[])
+
+        await text_search("test", [0.1] * 1536, conn, fields=[])
+
+        sql, params = conn.fetch.call_args[0][0], conn.fetch.call_args[0][1:]
+        assert "document_field_membership" not in sql
+        assert len(params) == 2
+
+    @pytest.mark.asyncio
+    async def test_fields_set_adds_membership_join_and_param(self):
+        """Non-empty fields scopes via a membership JOIN bound to $3=field list."""
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[
+            _make_chunk_row(chunk_id=1, doc_rid="doc:sheaf", title="Sheaf",
+                            chunk_text="sheaf content", rrf_score=0.04),
+        ])
+
+        bundles = await text_search(
+            "sheaf", [0.1] * 1536, conn, fields=["sheaf-explorer"],
+        )
+
+        sql, params = conn.fetch.call_args[0][0], conn.fetch.call_args[0][1:]
+        assert "document_field_membership" in sql
+        assert "fm.field_id = ANY($3::text[])" in sql
+        # $3 carries the field list
+        assert params[2] == ["sheaf-explorer"]
+        assert len(bundles) == 1
+        assert bundles[0].source_uri == "doc:sheaf"
+
+    @pytest.mark.asyncio
+    async def test_fields_set_bm25_fallback_binds_param_2(self):
+        """On the BM25-only fallback path query_text is $1, so the membership
+        filter must bind to $2 (not $3)."""
+        import asyncpg.exceptions
+
+        call_count = 0
+        async def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise asyncpg.exceptions.DataError("dimension mismatch")
+            return [_make_chunk_row(chunk_id=7, doc_rid="doc:bm25",
+                                    title="BM25", rrf_score=0.5)]
+
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(side_effect=_side_effect)
+
+        bundles = await text_search(
+            "sheaf", [0.1] * 1536, conn, fields=["sheaf-explorer"],
+        )
+
+        assert call_count == 2
+        # inspect the fallback (2nd) call
+        fallback_sql = conn.fetch.call_args_list[1][0][0]
+        fallback_params = conn.fetch.call_args_list[1][0][1:]
+        assert "document_field_membership" in fallback_sql
+        assert "fm.field_id = ANY($2::text[])" in fallback_sql
+        assert fallback_params[1] == ["sheaf-explorer"]
+        assert len(bundles) == 1
+        assert bundles[0].source_uri == "doc:bm25"
+
+
+# ---------------------------------------------------------------------------
+# Option B: ingest membership upsert (additive, idempotent)
+# ---------------------------------------------------------------------------
+
+class _FakePKConn:
+    """Minimal asyncpg-like conn enforcing PRIMARY KEY (document_rid, field_id)
+    with ON CONFLICT DO NOTHING semantics, for the membership upsert."""
+
+    def __init__(self):
+        self.rows: set[tuple[str, str]] = set()
+        self.execute_sqls: list[str] = []
+
+    async def execute(self, sql, *args):
+        self.execute_sqls.append(sql)
+        # upsert_field_membership passes (document_rid, field_id)
+        document_rid, field_id = args[0], args[1]
+        key = (document_rid, field_id)
+        if key in self.rows:
+            return "INSERT 0 0"  # ON CONFLICT DO NOTHING
+        self.rows.add(key)
+        return "INSERT 0 1"
+
+
+class TestFieldMembershipUpsert:
+
+    @pytest.mark.asyncio
+    async def test_upsert_idempotent_same_field(self):
+        from scripts.ingest_document import upsert_field_membership
+        conn = _FakePKConn()
+        meta = {"group_id": "sheaf-explorer"}
+
+        f1 = await upsert_field_membership(conn, "document:abc", meta)
+        f2 = await upsert_field_membership(conn, "document:abc", meta)
+
+        assert f1 == "sheaf-explorer"
+        assert f2 == "sheaf-explorer"
+        # second call is a no-op: still exactly one row
+        assert conn.rows == {("document:abc", "sheaf-explorer")}
+        assert "ON CONFLICT DO NOTHING" in conn.execute_sqls[0]
+
+    @pytest.mark.asyncio
+    async def test_reingest_into_second_field_keeps_first(self):
+        """A doc re-ingested into field B must KEEP its field-A membership."""
+        from scripts.ingest_document import upsert_field_membership
+        conn = _FakePKConn()
+
+        await upsert_field_membership(conn, "document:abc", {"group_id": "field-a"})
+        await upsert_field_membership(conn, "document:abc", {"group_id": "field-b"})
+
+        assert conn.rows == {
+            ("document:abc", "field-a"),
+            ("document:abc", "field-b"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_default_group_id_personal(self):
+        from scripts.ingest_document import upsert_field_membership
+        conn = _FakePKConn()
+
+        field = await upsert_field_membership(conn, "document:abc", {})
+
+        assert field == "personal"
+        assert ("document:abc", "personal") in conn.rows
+
+
+# ---------------------------------------------------------------------------
 # web_source_lookup tests
 # ---------------------------------------------------------------------------
 
@@ -589,3 +740,261 @@ class TestDebugPromptGating:
         assert "user_prompt" in response["_debug_prompt"]
         assert len(response["_debug_prompt"]["system_prompt"]) > 0
         assert len(response["_debug_prompt"]["user_prompt"]) > 0
+
+
+# ===========================================================================
+# Piece C — source-link surfacing (derive_source_url) + Piece B (--fields)
+# (added by the ingestion-governor / retrieval-source-link plan, 2026-06-27)
+# ===========================================================================
+
+from api.routers.knowledge_router import (  # noqa: E402
+    derive_source_url,
+    create_router,
+)
+from scripts.ingest_document import (  # noqa: E402
+    effective_field_membership,
+    upsert_field_membership,
+)
+
+
+class TestDeriveSourceUrl:
+    """AC4 precedence: document-rid url_map > http(s) in metadata > bare arXiv id > None.
+    Never fabricates; non-document source_node_rids skip url_map entirely."""
+
+    def test_document_rid_uses_url_map_over_conflicting_metadata(self):
+        url_map = {"document:abc": "https://arxiv.org/abs/2005.12798"}
+        meta = {"source_url": "https://wrong.example/other"}
+        # url_map (authoritative) wins for a document: rid.
+        assert derive_source_url("document:abc", "sources/x.md", meta, url_map) \
+            == "https://arxiv.org/abs/2005.12798"
+
+    def test_http_in_metadata_when_no_url_map_hit(self):
+        meta = {"source_url": "https://golem.ph.utexas.edu/x.html"}
+        assert derive_source_url("document:missing", "sources/x.md", meta, {}) \
+            == "https://golem.ph.utexas.edu/x.html"
+
+    def test_http_scanned_from_arbitrary_metadata_value(self):
+        meta = {"note": "see https://example.org/paper for details"}
+        assert derive_source_url(None, None, meta, None) == "https://example.org/paper"
+
+    def test_bare_arxiv_id_extracted(self):
+        assert derive_source_url(None, "arXiv:2605.15778v1 preprint", {}, None) \
+            == "https://arxiv.org/abs/2605.15778v1"
+
+    def test_non_document_rid_skips_url_map_returns_null(self):
+        # A session-sourced fact: never looked up in url_map, no fabrication.
+        url_map = {"document:abc": "https://arxiv.org/abs/1"}
+        assert derive_source_url("claude-session:123", "session-123", {}, url_map) is None
+
+    def test_all_null_returns_none(self):
+        assert derive_source_url(None, None, {}, None) is None
+        assert derive_source_url("substack-corpus:42", None, {}, {}) is None
+
+
+class TestEffectiveFieldMembership:
+    """AC3: dedup(union([group_id] + fields)); group_id always primary/first."""
+
+    def test_no_fields_is_single_membership(self):
+        assert effective_field_membership("sheaf-explorer", None) == ["sheaf-explorer"]
+        assert effective_field_membership("sheaf-explorer", []) == ["sheaf-explorer"]
+
+    def test_union_dedup_keeps_group_id_first(self):
+        assert effective_field_membership(
+            "X", ["X", "Y", "Z"]) == ["X", "Y", "Z"]
+        assert effective_field_membership(
+            "personal", ["spore", "spore", "personal", "sheaf"]) \
+            == ["personal", "spore", "sheaf"]
+
+    def test_empty_tokens_filtered(self):
+        assert effective_field_membership("X", ["", "  ", "Y"]) == ["X", "Y"]
+
+
+class TestUpsertFieldMembership:
+    """The additive INSERT loop runs once per effective field (idempotent)."""
+
+    @pytest.mark.asyncio
+    async def test_multi_field_inserts_union(self):
+        conn = AsyncMock()
+        conn.execute = AsyncMock()
+        # Returns the PRIMARY (group_id) str; inserts the full deduped union.
+        primary = await upsert_field_membership(
+            conn, "document:rid1",
+            {"group_id": "sheaf-explorer", "fields": ["spore", "sheaf-explorer", "bkc"]})
+        assert primary == "sheaf-explorer"
+        inserted = [call.args[2] for call in conn.execute.call_args_list]
+        assert inserted == ["sheaf-explorer", "spore", "bkc"]
+
+    @pytest.mark.asyncio
+    async def test_no_fields_single_insert(self):
+        conn = AsyncMock()
+        conn.execute = AsyncMock()
+        primary = await upsert_field_membership(
+            conn, "document:rid2", {"group_id": "personal"})
+        assert primary == "personal"
+        assert conn.execute.call_count == 1
+
+
+# --- Endpoint-shaping: search_facts + unified_search emit AC4 fields ---------
+
+def _route(router, name):
+    for r in router.routes:
+        if getattr(r, "name", None) == name:
+            return r.endpoint
+    raise KeyError(name)
+
+
+class _AcquireCtx:
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakePool:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        return _AcquireCtx(self._conn)
+
+
+def _fake_request():
+    req = MagicMock()
+    req.app.state.facts_surface_available = True
+    return req
+
+
+async def _embed(_q):
+    return [0.1] * 16
+
+
+class _FactsConn:
+    def __init__(self, fact_rows, url_rows):
+        self._facts = fact_rows
+        self._urls = url_rows
+
+    async def fetch(self, sql, *a):
+        if "document_ingestion_log" in sql:
+            return self._urls
+        if "knowledge_facts" in sql:
+            return self._facts
+        return []
+
+    async def fetchval(self, sql, *a):
+        return "EntityName"
+
+
+class TestSearchFactsSourceLinks:
+
+    @pytest.mark.asyncio
+    async def test_search_facts_emits_source_document_and_source_url(self):
+        fact_rows = [
+            {"id": "1", "episode_id": "e1", "episode_name": "Ep1",
+             "subject_uri": "urn:s", "predicate": "p", "object_uri": "urn:o",
+             "object_literal": None, "fact_text": "f1",
+             "valid_from": None, "valid_to": None, "created_at": None,
+             "source_node_rid": "document:abc", "source_document": "sources/x.md",
+             "ep_metadata": {}, "similarity": 0.9},
+            {"id": "2", "episode_id": "e2", "episode_name": "Ep2",
+             "subject_uri": "urn:s2", "predicate": "p", "object_uri": None,
+             "object_literal": "lit", "fact_text": "f2",
+             "valid_from": None, "valid_to": None, "created_at": None,
+             "source_node_rid": "claude-session:9", "source_document": "session-9",
+             "ep_metadata": {}, "similarity": 0.8},
+        ]
+        url_rows = [{"document_rid": "document:abc",
+                     "source_url": "https://arxiv.org/abs/2005.12798"}]
+        router = create_router(_FakePool(_FactsConn(fact_rows, url_rows)),
+                               generate_embedding=_embed)
+        handler = _route(router, "search_facts")
+        out = await handler(_fake_request(), query="sheaf", limit=10,
+                            group_id=None, include_expired=False)
+        facts = out["facts"]
+        # AC4: both keys always present.
+        for f in facts:
+            assert "source_document" in f and "source_url" in f
+        # Document-sourced fact derives a real URL; session-sourced is null.
+        assert facts[0]["source_document"] == "sources/x.md"
+        assert facts[0]["source_url"] == "https://arxiv.org/abs/2005.12798"
+        assert facts[1]["source_url"] is None
+        assert facts[1]["source_document"] == "session-9"
+
+
+class _UnifiedConn:
+    def __init__(self, entity_rows, fact_rows, url_rows):
+        self._entities = entity_rows
+        self._facts = fact_rows
+        self._urls = url_rows
+
+    async def execute(self, sql, *a):
+        return None  # SET ivfflat.probes
+
+    async def fetch(self, sql, *a):
+        if "document_ingestion_log" in sql:
+            return self._urls
+        if "entity_registry" in sql:
+            return self._entities
+        if "knowledge_facts" in sql:
+            return self._facts
+        return []
+
+    async def fetchval(self, sql, *a):
+        return False  # session_chunks table_exists → skip sessions surface
+
+
+class TestUnifiedSearchSourceLinks:
+
+    @pytest.mark.asyncio
+    async def test_unified_search_entities_and_facts_carry_links(self):
+        from fastapi import Response
+        entity_rows = [
+            {"fuseki_uri": "urn:e1", "entity_text": "Sheaf Theory",
+             "entity_type": "Concept", "vault_path": "Concepts/Sheaf Theory.md",
+             "score": 0.91},
+        ]
+        fact_rows = [
+            {"id": "1", "subject_uri": "urn:s", "predicate": "p",
+             "object_uri": "urn:o", "fact_text": "f1",
+             "source_node_rid": "document:abc", "episode_name": "Ep1",
+             "source_document": "sources/x.md", "ep_metadata": {}, "score": 0.88},
+        ]
+        url_rows = [{"document_rid": "document:abc",
+                     "source_url": "https://arxiv.org/abs/2005.12798"}]
+        router = create_router(_FakePool(_UnifiedConn(entity_rows, fact_rows, url_rows)),
+                               generate_embedding=_embed)
+        handler = _route(router, "unified_search")
+        out = await handler(_fake_request(), Response(), query="sheaf",
+                            limit=10, include="entities,facts", doc_kind=None,
+                            status=None, is_governed=None, repo=None,
+                            rerank="rrf", mmr_lambda=0.5)
+        ents = [r for r in out["results"] if r["source"] == "entity"]
+        facts = out["facts"]
+        # AC4: entity items gain vault_path + quartz_url (str|null), keys present.
+        assert ents and "vault_path" in ents[0] and "quartz_url" in ents[0]
+        assert ents[0]["vault_path"] == "Concepts/Sheaf Theory.md"
+        # AC4: fact items gain source_document + source_url.
+        assert facts and facts[0]["source_document"] == "sources/x.md"
+        assert facts[0]["source_url"] == "https://arxiv.org/abs/2005.12798"
+
+    @pytest.mark.asyncio
+    async def test_recall_inherits_unified_search_fields(self):
+        """`recall` forwards the unified-search response verbatim, so asserting the
+        unified-search output shape IS the recall-inheritance guarantee."""
+        from fastapi import Response
+        entity_rows = [
+            {"fuseki_uri": "urn:e1", "entity_text": "X", "entity_type": "Concept",
+             "vault_path": None, "score": 0.5},
+        ]
+        router = create_router(_FakePool(_UnifiedConn(entity_rows, [], [])),
+                               generate_embedding=_embed)
+        handler = _route(router, "unified_search")
+        out = await handler(_fake_request(), Response(), query="x",
+                            limit=5, include="entities", doc_kind=None,
+                            status=None, is_governed=None, repo=None,
+                            rerank="rrf", mmr_lambda=0.5)
+        ents = [r for r in out["results"] if r["source"] == "entity"]
+        assert ents and "vault_path" in ents[0] and "quartz_url" in ents[0]

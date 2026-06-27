@@ -217,6 +217,57 @@ async def upsert_document_chunks(
     return written
 
 
+def effective_field_membership(group_id: str, fields: Optional[List[str]]) -> List[str]:
+    """Compute the dedup(union([group_id] + fields)) membership set (Piece B / G2).
+
+    Contract: `group_id` is ALWAYS the primary membership row (first, never
+    dropped); `--fields` only ADDS rows. Order-preserving dedup keeps group_id
+    first. Empty/whitespace tokens are filtered. When `fields` is None/empty the
+    result is exactly `[group_id]` — byte-identical to the pre-`--fields` behavior.
+    Unknown field IDs are valid by design (fields are created-by-use; no registry).
+    """
+    primary = (group_id or "personal").strip() or "personal"
+    effective: List[str] = [primary]
+    for raw in (fields or []):
+        fid = (raw or "").strip()
+        if fid and fid not in effective:
+            effective.append(fid)
+    return effective
+
+
+async def upsert_field_membership(
+    conn: asyncpg.Connection,
+    document_rid: str,
+    source_meta: Dict[str, Any],
+) -> str:
+    """Record this document's membership in the run's learning field(s).
+
+    Option B multi-field membership: chunk rows are content-addressed and
+    field-agnostic (the chunk DELETE+reinsert-by-rid is harmless), so field
+    membership lives in this separate, ADDITIVE, authoritative layer. Re-ingesting
+    a doc into field B must NOT drop its field-A membership — hence INSERT ...
+    ON CONFLICT DO NOTHING and NEVER a delete-by-rid here.
+
+    Piece B (`--fields`): the effective set = dedup(union([group_id] + fields)).
+    With no `--fields` this collapses to exactly `{group_id}` (unchanged). Each
+    field is inserted additively; duplicates collapse via the dedup + ON CONFLICT.
+    """
+    effective = effective_field_membership(
+        source_meta.get("group_id", "personal"), source_meta.get("fields"))
+    for field_id in effective:
+        await conn.execute(
+            """
+            INSERT INTO document_field_membership (document_rid, field_id, added_by)
+            VALUES ($1, $2, 'ingest')
+            ON CONFLICT DO NOTHING
+            """,
+            document_rid, field_id,
+        )
+    # Return the PRIMARY field (group_id) — stable, backward-compatible str
+    # contract. The full effective set is `effective` (all rows were inserted).
+    return effective[0]
+
+
 # ── RAG core ─────────────────────────────────────────────────────────────────────
 
 async def ingest_document_rag(
@@ -259,6 +310,8 @@ async def ingest_document_rag(
         async with conn.transaction():
             await upsert_document_memory(conn, document_rid, markdown, source_meta)
             written = await upsert_document_chunks(conn, document_rid, chunks, embeddings, source_meta)
+            # Additive field membership (Option B): never deletes other fields' rows.
+            await upsert_field_membership(conn, document_rid, source_meta)
 
     logger.info(
         "Ingested %s: %d chunks written (%d null embeds)",
@@ -403,9 +456,10 @@ async def ingest_path(
     source_url: Optional[str],
     retrieval_method: Optional[str],
     group_id: str,
-    claims: bool,
-    force: bool,
-    dry_run: bool,
+    fields: Optional[List[str]] = None,
+    claims: bool = True,
+    force: bool = False,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Unified document-ingest orchestrator: rag -> (standard/thorough) extract -> claims.
 
@@ -427,6 +481,7 @@ async def ingest_path(
         "retrieval_method": retrieval_method,
         "retrieved_at": datetime.now(timezone.utc).isoformat(),
         "content_hash": content_hash, "group_id": group_id,
+        "fields": list(fields) if fields else [],
         "source_path": str(path), "tier": tier,
     }
     source_document = source_url or document_rid
@@ -477,7 +532,12 @@ def main():
     parser.add_argument("--name", help="Human-readable document title")
     parser.add_argument("--source-url", help="Canonical source URL (provenance)")
     parser.add_argument("--retrieval-method", help="How it was acquired (download.php|playwright|operator-drop)")
-    parser.add_argument("--group-id", default="personal", help="Learning field / group_id")
+    parser.add_argument("--group-id", default="personal", help="Learning field / group_id (always the primary membership)")
+    parser.add_argument("--fields",
+                        help="Comma-separated ADDITIONAL field IDs for multi-field membership "
+                             "(Option B). Effective membership = dedup(union of --group-id + these). "
+                             "--group-id is always primary; omit to keep single-membership behavior. "
+                             "Unknown field IDs are valid (fields are created-by-use).")
     parser.add_argument("--no-claims", action="store_true", help="Skip the claims stage (standard/thorough)")
     parser.add_argument("--force", action="store_true", help="Re-extract all windows (ignore cache)")
     parser.add_argument("--dry-run", action="store_true", help="Chunk + report without writing/embedding")
@@ -486,11 +546,12 @@ def main():
     args = parser.parse_args()
 
     claims = (args.tier != "rag") and not args.no_claims
+    fields = [t.strip() for t in (args.fields or "").split(",") if t.strip()]
     try:
         result = asyncio.run(ingest_path(
             source_path=args.source_path, tier=args.tier, slug=args.slug, name=args.name,
             source_url=args.source_url, retrieval_method=args.retrieval_method,
-            group_id=args.group_id, claims=claims, force=args.force, dry_run=args.dry_run,
+            group_id=args.group_id, fields=fields, claims=claims, force=args.force, dry_run=args.dry_run,
         ))
     except (ValueError, NotImplementedError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
