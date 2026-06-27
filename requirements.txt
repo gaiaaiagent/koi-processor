@@ -102,3 +102,11 @@ scrapling>=0.4
 tldextract>=5.0
 tiktoken>=0.7
 feedparser>=6.0.10
+
+# =============================================================================
+# Document ingestion governor (scripts/classify_document.py)
+# =============================================================================
+# PDF → markdown conversion for the optional PDF input path. Markdown/txt inputs
+# need no extra dependency (classify_document errors cleanly if a PDF is passed
+# without this installed).
+pymupdf4llm>=0.0.17

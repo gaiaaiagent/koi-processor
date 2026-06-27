@@ -126,6 +126,11 @@ ANTHROPIC_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_MAX_TOKENS", "24000"))
 ANTHROPIC_TIMEOUT = int(os.getenv("DOC_EXTRACTOR_TIMEOUT", "300"))
 CLAUDE_P_TIMEOUT = int(os.getenv("DOC_CLAUDE_P_TIMEOUT", "300"))
 CLAUDE_P_FALLBACK = env_flag("DOC_EXTRACTOR_CLAUDE_P_FALLBACK", False)
+# When set, `claude -p` (Claude Code subscription / OAuth) is the PRIMARY transport and
+# the metered Anthropic API becomes the fallback. Preferred when the subscription is
+# flat-rate / the API key is capped. Implies the claude -p transport regardless of
+# CLAUDE_P_FALLBACK.
+CLAUDE_P_PRIMARY = env_flag("DOC_EXTRACTOR_CLAUDE_P_PRIMARY", False)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_MODEL = os.getenv("DOC_EXTRACTOR_OPENAI_MODEL", "gpt-4.1")
@@ -417,6 +422,12 @@ async def _call_anthropic(prompt: str, http: httpx.AsyncClient, *, model: str,
 
 
 async def _call_claude_p(prompt: str, *, model: str, timeout: int = CLAUDE_P_TIMEOUT) -> str:
+    # Force the Claude Code subscription (stored OAuth) rather than the metered API key:
+    # `claude` prefers ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the env when present,
+    # so scrub them from the child env. This is the whole point of the claude_p transport
+    # (the anthropic_api transport already covers the metered-key path).
+    child_env = {k: v for k, v in os.environ.items()
+                 if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     process = await asyncio.create_subprocess_exec(
         "claude",
         "-p",
@@ -426,6 +437,7 @@ async def _call_claude_p(prompt: str, *, model: str, timeout: int = CLAUDE_P_TIM
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=child_env,
     )
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -497,29 +509,47 @@ async def call_extractor(prompt: str, http: httpx.AsyncClient, *, model: str) ->
             "DOC_EXTRACTOR_ALLOW_HEADLESS_LLM=1 for unattended API/CLI extraction.",
         )
 
-    errors: list[str] = []
-    try:
-        return await _call_anthropic(prompt, http, model=model), "anthropic_api"
-    except ExtractionError as e:
-        if e.reason not in {"extract_http_error", "no_api_key"}:
-            raise
-        errors.append(f"anthropic:{e.detail[:400]}")
+    # Transport order. Default: Anthropic Messages API primary, `claude -p` an opt-in
+    # fallback (DOC_EXTRACTOR_CLAUDE_P_FALLBACK=1). With DOC_EXTRACTOR_CLAUDE_P_PRIMARY=1
+    # the order flips — `claude -p` (Claude Code subscription / OAuth) is primary and the
+    # metered Anthropic API becomes the fallback. OpenAI stays an optional last resort.
+    def _t_anthropic(label):
+        async def run():
+            return await _call_anthropic(prompt, http, model=model), label
+        return ("anthropic", run)
 
-    if CLAUDE_P_FALLBACK:
-        logger.warning("anthropic document transport unavailable; falling back to claude -p")
-        try:
-            return await _call_claude_p(prompt, model=model), "claude_p_fallback"
-        except ExtractionError as cli_error:
-            if cli_error.reason not in {"extract_http_error", "no_api_key"}:
-                raise
-            errors.append(f"claude_p:{cli_error.detail[:400]}")
+    def _t_claude_p(label):
+        async def run():
+            return await _call_claude_p(prompt, model=model), label
+        return ("claude_p", run)
 
-    if OPENAI_FALLBACK:
-        logger.warning("anthropic/claude document transports unavailable; falling back to OpenAI %s", OPENAI_MODEL)
-        try:
+    def _t_openai():
+        async def run():
             return await _call_openai(prompt, http, model=OPENAI_MODEL), "openai_fallback"
-        except ExtractionError as openai_error:
-            errors.append(f"openai:{openai_error.detail[:400]}")
+        return ("openai", run)
+
+    transports: List[Tuple[str, Any]] = []
+    if CLAUDE_P_PRIMARY:
+        transports.append(_t_claude_p("claude_p_primary"))
+        transports.append(_t_anthropic("anthropic_fallback"))
+    else:
+        transports.append(_t_anthropic("anthropic_api"))
+        if CLAUDE_P_FALLBACK:
+            transports.append(_t_claude_p("claude_p_fallback"))
+    if OPENAI_FALLBACK:
+        transports.append(_t_openai())
+
+    errors: list[str] = []
+    for idx, (name, run) in enumerate(transports):
+        if idx > 0:
+            logger.warning("document transport %s unavailable; falling back to %s",
+                           transports[idx - 1][0], name)
+        try:
+            return await run()
+        except ExtractionError as e:
+            if e.reason not in {"extract_http_error", "no_api_key"}:
+                raise
+            errors.append(f"{name}:{e.detail[:400]}")
 
     raise ExtractionError("extract_http_error", "all document extraction transports failed: " + " | ".join(errors))
 
