@@ -39,6 +39,14 @@ from api.auth_deps import make_service_token_auth
 logger = logging.getLogger(__name__)
 
 
+def _unified_search_surface_timeout_s() -> float:
+    raw = os.environ.get("KOI_UNIFIED_SEARCH_SURFACE_TIMEOUT_S", "8.0")
+    try:
+        return max(0.1, float(raw))
+    except (TypeError, ValueError):
+        return 8.0
+
+
 # ---------------------------------------------------------------------------
 # B1 (2026-04-30): Predicate-aware default supersession policy.
 #
@@ -361,6 +369,255 @@ def _parse_jsonb(value) -> Dict:
         except (json.JSONDecodeError, ValueError):
             return {}
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Source-link surfacing (Piece C / G3): make every retrieval row citable.
+# ---------------------------------------------------------------------------
+
+_HTTP_URL_RE = re.compile(r"https?://\S+")
+# Bare arXiv id (post-2007 scheme): 2005.12798 or 2605.15778v1.
+_ARXIV_ID_RE = re.compile(r"\b(\d{4}\.\d{4,5})(v\d+)?\b")
+
+
+def derive_source_url(
+    source_node_rid: Optional[str],
+    source_document: Optional[str],
+    metadata: Optional[Dict[str, Any]],
+    url_map: Optional[Dict[str, str]],
+) -> Optional[str]:
+    """Pure helper — derive a citable URL for a fact/row. NEVER fabricates; does
+    NO DB I/O (the caller preloads `url_map` in one batch query).
+
+    Precedence:
+      1. ONLY if `source_node_rid` is a `document:` rid → `url_map.get(it)`
+         (authoritative `document_ingestion_log.source_url`, PK 1-row/rid).
+         Non-document rids (session/episode/entity) SKIP this step entirely —
+         they are never looked up in url_map.
+      2. else the first `http(s)://` URL found in `metadata`
+         (prefers an explicit `source_url` key).
+      3. else a bare arXiv id in `source_document`/`metadata`
+         → `https://arxiv.org/abs/<id>`.
+      4. else None.
+    """
+    # 1. document-rid authoritative lookup (only for document: rids).
+    if isinstance(source_node_rid, str) and source_node_rid.startswith("document:"):
+        if url_map:
+            u = url_map.get(source_node_rid)
+            if u:
+                return u
+
+    # 2. http(s):// in metadata (explicit source_url key first, then any value).
+    meta = metadata if isinstance(metadata, dict) else _parse_jsonb(metadata)
+    str_values: List[str] = []
+    if isinstance(meta, dict):
+        explicit = meta.get("source_url")
+        if isinstance(explicit, str) and _HTTP_URL_RE.match(explicit):
+            return explicit
+        for v in meta.values():
+            if isinstance(v, str):
+                str_values.append(v)
+    blob = " ".join(str_values)
+    m = _HTTP_URL_RE.search(blob)
+    if m:
+        return m.group(0).rstrip(").,;>\"'")
+
+    # 3. bare arXiv id in source_document / metadata.
+    hay_parts = [p for p in ([source_document] + str_values) if isinstance(p, str)]
+    am = _ARXIV_ID_RE.search(" ".join(hay_parts))
+    if am:
+        return f"https://arxiv.org/abs/{am.group(1)}{am.group(2) or ''}"
+
+    # 4. underivable — never fabricate.
+    return None
+
+
+def _quartz_url(entity_type: Optional[str], name: Optional[str]) -> Optional[str]:
+    """Lazily reuse personal_ingest_api.quartz_url (deferred import avoids the
+    knowledge_router <-> personal_ingest_api circular import at module load).
+    Returns None when QUARTZ_BASE_URL is unset or the type has no Quartz path."""
+    if not entity_type or not name:
+        return None
+    try:
+        from api.personal_ingest_api import quartz_url as _q
+        return _q(entity_type, name)
+    except Exception:  # noqa: BLE001 — a quartz miss must never break retrieval
+        return None
+
+
+async def _build_source_url_map(conn, source_node_rids) -> Dict[str, str]:
+    """Batch-load {document_rid: source_url} for the `document:` rids in a result
+    set, in ONE query (avoids N+1 / hidden globals in `derive_source_url`)."""
+    doc_rids = sorted({
+        r for r in (source_node_rids or [])
+        if isinstance(r, str) and r.startswith("document:")
+    })
+    if not doc_rids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT document_rid, source_url FROM document_ingestion_log "
+        "WHERE document_rid = ANY($1::text[])",
+        doc_rids,
+    )
+    return {r["document_rid"]: r["source_url"] for r in rows if r["source_url"]}
+
+
+# ---------------------------------------------------------------------------
+# Discourse-move search (Piece A / G1): make session_discourse_moves queryable.
+# READ-ONLY — every function below issues only SELECTs (conn.fetch).
+# ---------------------------------------------------------------------------
+
+def _normalize_move_types(move_type: Optional[List[str]]) -> List[str]:
+    """Normalize repeated and/or comma-joined ``move_type`` params into a deduped,
+    order-preserving list. Both ``?move_type=a&move_type=b`` (FastAPI-native
+    repeated) and ``?move_type=a,b`` (convenience comma form) → ``['a','b']``;
+    empty / None / all-blank → ``[]`` (no move_type filter)."""
+    if not move_type:
+        return []
+    out: List[str] = []
+    seen: set = set()
+    for raw in move_type:
+        if raw is None:
+            continue
+        for tok in str(raw).split(","):
+            t = tok.strip()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+async def _build_source_title_map(conn, source_rids) -> Dict[str, str]:
+    """Batch-load ``{document_rid: title}`` for the ``document:`` rids in a result
+    set, in ONE query (mirrors ``_build_source_url_map``; used for ``source.title``)."""
+    doc_rids = sorted({
+        r for r in (source_rids or [])
+        if isinstance(r, str) and r.startswith("document:")
+    })
+    if not doc_rids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT document_rid, title FROM document_ingestion_log "
+        "WHERE document_rid = ANY($1::text[])",
+        doc_rids,
+    )
+    return {r["document_rid"]: r["title"] for r in rows if r["title"]}
+
+
+async def _discourse_search(
+    conn,
+    *,
+    query: Optional[str] = None,
+    move_types: Optional[List[str]] = None,
+    source_rid: Optional[str] = None,
+    status: Optional[str] = None,
+    source_type: str = "document",
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """Read-only executor for ``GET /knowledge/discourse-search``. Issues ONLY
+    SELECTs (``conn.fetch``).
+
+    Lexical full-text match over ``title``+``detail`` (``to_tsvector`` /
+    ``plainto_tsquery``) when ``query`` is non-blank, ordered by ``ts_rank`` then
+    recency; when ``query`` is blank, skips the FTS predicate and orders by
+    ``created_at DESC`` (most-recent first). Each returned move is enriched with
+    its **source** (``{rid, title, source_url}`` via ``document_ingestion_log`` +
+    the reused ``derive_source_url`` — ``source_url`` is ``null``, never
+    fabricated, for non-document rids) and its **one-hop ``resolves`` parent**
+    (``{id, move_type, title}`` | ``null``). The source + parent enrichments are
+    each ONE batch query (no N+1)."""
+    move_types = move_types or []
+    q = (query or "").strip()
+
+    conditions = ["source_type = $1"]
+    params: List[Any] = [source_type]
+    idx = 2
+
+    use_fts = bool(q)
+    if use_fts:
+        # query is ALWAYS bound at $2 (added immediately after source_type=$1),
+        # so the ts_rank ORDER BY below can reference $2 directly.
+        conditions.append(
+            "to_tsvector('english', coalesce(title,'')||' '||coalesce(detail,'')) "
+            f"@@ plainto_tsquery('english', ${idx})"
+        )
+        params.append(q)
+        idx += 1
+    if move_types:
+        conditions.append(f"move_type = ANY(${idx}::text[])")
+        params.append(move_types)
+        idx += 1
+    if source_rid:
+        conditions.append(f"source_rid = ${idx}")
+        params.append(source_rid)
+        idx += 1
+    if status:
+        conditions.append(f"status = ${idx}")
+        params.append(status)
+        idx += 1
+
+    where = " AND ".join(conditions)
+    if use_fts:
+        order_by = (
+            "ts_rank(to_tsvector('english', coalesce(title,'')||' '||coalesce(detail,'')), "
+            "plainto_tsquery('english', $2)) DESC, created_at DESC"
+        )
+    else:
+        order_by = "created_at DESC"
+
+    params.append(limit)
+    sql = (
+        "SELECT id, move_type, title, detail, status, resolves_move_id, source_rid "
+        f"FROM session_discourse_moves WHERE {where} "
+        f"ORDER BY {order_by} LIMIT ${idx}"
+    )
+    rows = await conn.fetch(sql, *params)
+
+    # Batch-enrich source: {rid: source_url} (reuse helper) + {rid: title}.
+    result_rids = [r["source_rid"] for r in rows]
+    url_map = await _build_source_url_map(conn, result_rids)
+    title_map = await _build_source_title_map(conn, result_rids)
+
+    # Batch-resolve the one-hop `resolves` parents in ONE query (no N+1).
+    parent_ids = sorted(
+        {r["resolves_move_id"] for r in rows if r["resolves_move_id"] is not None},
+        key=str,
+    )
+    parent_map: Dict[Any, Dict[str, Any]] = {}
+    if parent_ids:
+        prows = await conn.fetch(
+            "SELECT id, move_type, title FROM session_discourse_moves "
+            "WHERE id = ANY($1::uuid[])",
+            parent_ids,
+        )
+        for pr in prows:
+            parent_map[pr["id"]] = {
+                "id": str(pr["id"]),
+                "move_type": pr["move_type"],
+                "title": pr["title"],
+            }
+
+    moves: List[Dict[str, Any]] = []
+    for r in rows:
+        rid = r["source_rid"]
+        moves.append({
+            "id": str(r["id"]),
+            "move_type": r["move_type"],
+            "title": r["title"],
+            "detail": r["detail"],
+            "status": r["status"],
+            "source": {
+                "rid": rid,
+                "title": title_map.get(rid) or rid,
+                # derive_source_url never fabricates: document rid w/ url_map hit
+                # → URL; everything else → None.
+                "source_url": derive_source_url(rid, None, None, url_map),
+            },
+            # LEFT-join semantics: None resolves_move_id OR orphan parent → null.
+            "resolves": parent_map.get(r["resolves_move_id"]),
+        })
+
+    return {"moves": moves, "count": len(moves), "query_mode": "lexical"}
 
 
 class FactRetractRequest(BaseModel):
@@ -923,6 +1180,8 @@ def create_router(
                        f.subject_uri, f.predicate, f.object_uri,
                        f.object_literal, f.fact_text,
                        f.valid_from, f.valid_to, f.created_at,
+                       f.source_node_rid,
+                       e.source_document, e.metadata AS ep_metadata,
                        1 - (f.fact_embedding_3072::halfvec(3072)
                             <=> $1::halfvec(3072)) AS similarity
                 FROM knowledge_facts f
@@ -935,9 +1194,18 @@ def create_router(
                 LIMIT $2
             """, *params)
 
+            # Piece C: batch-load source_url for document-sourced facts (one query).
+            url_map = await _build_source_url_map(
+                conn, [r.get("source_node_rid") for r in rows])
+
             results = []
             for row in rows:
                 d = _row_to_dict(row)
+                ep_meta = _parse_jsonb(d.pop("ep_metadata", None))
+                # Source-link surfacing: always-present source_document + source_url.
+                d['source_document'] = row.get('source_document')
+                d['source_url'] = derive_source_url(
+                    row.get('source_node_rid'), row.get('source_document'), ep_meta, url_map)
                 # Resolve entity names for display
                 d['subject_name'] = await _get_entity_name(conn, d.get('subject_uri'))
                 d['object_name'] = await _get_entity_name(conn, d.get('object_uri'))
@@ -1139,10 +1407,16 @@ def create_router(
                             for i in range(len(words)))
                         e_params: list = [f"%{w}%" for w in words] + [20]
                         rows = await conn.fetch(f"""
-                            SELECT fuseki_uri, entity_text, entity_type
-                            FROM entity_registry
-                            WHERE ({conditions}) AND NOT node_private
-                            ORDER BY LENGTH(entity_text)
+                            SELECT er.fuseki_uri, er.entity_text, er.entity_type,
+                                   erm.vault_path
+                            FROM entity_registry er
+                            LEFT JOIN LATERAL (
+                                SELECT vault_path FROM entity_rid_mappings
+                                WHERE canonical_uri = er.fuseki_uri
+                                ORDER BY last_synced DESC NULLS LAST LIMIT 1
+                            ) erm ON true
+                            WHERE ({conditions}) AND NOT er.node_private
+                            ORDER BY LENGTH(er.entity_text)
                             LIMIT ${len(words) + 1}
                         """, *e_params)
                         for rank, row in enumerate(rows):
@@ -1152,6 +1426,9 @@ def create_router(
                                 "source": "entity",
                                 "type": row["entity_type"],
                                 "uri": row["fuseki_uri"],
+                                # Piece C: openable entity locators (vault + quartz).
+                                "vault_path": row.get("vault_path"),
+                                "quartz_url": _quartz_url(row["entity_type"], row["entity_text"]),
                                 "metadata": {"match_mode": "text"},
                             })
 
@@ -1164,7 +1441,9 @@ def create_router(
                         rows = await conn.fetch(f"""
                             SELECT f.id, f.subject_uri, f.predicate,
                                    f.object_uri, f.fact_text,
-                                   e.name AS episode_name
+                                   f.source_node_rid,
+                                   e.name AS episode_name,
+                                   e.source_document, e.metadata AS ep_metadata
                             FROM knowledge_facts f
                             LEFT JOIN knowledge_episodes e
                                    ON f.episode_id = e.id
@@ -1172,12 +1451,19 @@ def create_router(
                             ORDER BY f.created_at DESC
                             LIMIT ${len(words) + 1}
                         """, *f_params)
+                        f_url_map = await _build_source_url_map(
+                            conn, [r.get("source_node_rid") for r in rows])
                         for rank, row in enumerate(rows):
                             fact_result = {
                                 "text": row["fact_text"],
                                 "score": 1.0 / (k + 20 + rank + 1),
                                 "source": "fact",
                                 "episode": row["episode_name"],
+                                # Piece C: citable + openable.
+                                "source_document": row.get("source_document"),
+                                "source_url": derive_source_url(
+                                    row.get("source_node_rid"), row.get("source_document"),
+                                    _parse_jsonb(row.get("ep_metadata")), f_url_map),
                                 "metadata": {
                                     "subject": row["subject_uri"],
                                     "predicate": row["predicate"],
@@ -1259,6 +1545,9 @@ def create_router(
                                 "doc_id": meta.get("doc_id"),
                                 "doc_kind": meta.get("doc_kind"),
                                 "repo": meta.get("repo"),
+                                # Piece C: citable doc surface.
+                                "title": meta.get("title"),
+                                "source_url": derive_source_url(None, None, meta, None),
                                 "metadata": meta,
                             })
 
@@ -1279,11 +1568,17 @@ def create_router(
                 facts_results = []
                 if "entities" in surfaces:
                     rows = await conn.fetch("""
-                        SELECT fuseki_uri, entity_text, entity_type,
-                               1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
-                        FROM entity_registry
-                        WHERE embedding_3072 IS NOT NULL AND NOT node_private
-                        ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                        SELECT er.fuseki_uri, er.entity_text, er.entity_type,
+                               erm.vault_path,
+                               1 - (er.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
+                        FROM entity_registry er
+                        LEFT JOIN LATERAL (
+                            SELECT vault_path FROM entity_rid_mappings
+                            WHERE canonical_uri = er.fuseki_uri
+                            ORDER BY last_synced DESC NULLS LAST LIMIT 1
+                        ) erm ON true
+                        WHERE er.embedding_3072 IS NOT NULL AND NOT er.node_private
+                        ORDER BY er.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):
@@ -1293,6 +1588,9 @@ def create_router(
                             "source": "entity",
                             "type": row["entity_type"],
                             "uri": row["fuseki_uri"],
+                            # Piece C: openable entity locators (vault + quartz).
+                            "vault_path": row.get("vault_path"),
+                            "quartz_url": _quartz_url(row["entity_type"], row["entity_text"]),
                             "metadata": {"vector_score": float(row["score"])},
                         })
 
@@ -1305,7 +1603,8 @@ def create_router(
                     try:
                         rows = await conn.fetch("""
                             SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
-                                   f.fact_text, e.name AS episode_name,
+                                   f.fact_text, f.source_node_rid, e.name AS episode_name,
+                                   e.source_document, e.metadata AS ep_metadata,
                                    1 - (f.fact_embedding_3072::halfvec(3072)
                                         <=> $1::halfvec(3072)) AS score
                             FROM knowledge_facts f
@@ -1319,12 +1618,19 @@ def create_router(
                     except asyncpg.exceptions.DataError as e:
                         logger.warning("facts surface vector query skipped: %s", e)
                         rows = []
+                    f_url_map = await _build_source_url_map(
+                        conn, [r.get("source_node_rid") for r in rows])
                     for rank, row in enumerate(rows):
                         fact_result = {
                             "text": row["fact_text"],
                             "score": 1.0 / (k + rank + 1),
                             "source": "fact",
                             "episode": row["episode_name"],
+                            # Piece C: citable + openable.
+                            "source_document": row.get("source_document"),
+                            "source_url": derive_source_url(
+                                row.get("source_node_rid"), row.get("source_document"),
+                                _parse_jsonb(row.get("ep_metadata")), f_url_map),
                             "metadata": {
                                 "subject": row["subject_uri"],
                                 "predicate": row["predicate"],
@@ -1494,6 +1800,9 @@ def create_router(
                             "doc_id": meta.get("doc_id"),
                             "doc_kind": meta.get("doc_kind"),
                             "repo": meta.get("repo"),
+                            # Piece C: citable doc surface.
+                            "title": meta.get("title"),
+                            "source_url": derive_source_url(None, None, meta, None),
                             "metadata": meta,
                         })
 
@@ -2027,6 +2336,70 @@ def create_router(
                 valid_to=updated["valid_to"].isoformat(),
                 subject_uri=row["subject_uri"], predicate=row["predicate"],
                 object_uri=row["object_uri"], reason=reason,
+            )
+
+    # -------------------------------------------------------------------
+    # GET /discourse-search — lexical search over scientific discourse moves
+    # (Piece A / G1). READ-ONLY. Reuses derive_source_url / _build_source_url_map.
+    # -------------------------------------------------------------------
+    @router.get("/discourse-search")
+    async def discourse_search(
+        request: Request,
+        query: Optional[str] = Query(
+            None,
+            description="Lexical full-text query over move title+detail "
+                        "(plainto_tsquery/english). Omit to browse most-recent moves.",
+        ),
+        move_type: Optional[List[str]] = Query(
+            None,
+            description="Filter by discourse move_type (claim/evidence/thesis/"
+                        "counterpoint/premise/implication/definition/open_question). "
+                        "Repeatable (?move_type=claim&move_type=evidence) and/or "
+                        "comma-joined (?move_type=claim,evidence).",
+        ),
+        document_rid: Optional[str] = Query(
+            None,
+            description="Friendly alias for source_rid — a document:<sha> rid; "
+                        "returns only that document's moves.",
+        ),
+        source_rid: Optional[str] = Query(
+            None,
+            description="Filter by source_rid (document:<sha>). HTTP 400 if it "
+                        "differs from a supplied document_rid.",
+        ),
+        status: Optional[str] = Query(
+            None,
+            description="Filter by move status (e.g. asserted, contested, open, "
+                        "deferred, supported, speculative).",
+        ),
+        source_type: str = Query(
+            "document",
+            description="Provenance class; defaults to 'document' (v1 scope).",
+        ),
+        limit: int = Query(20, ge=1, le=100),
+    ):
+        # document_rid is a friendly alias for source_rid (document moves' source_rid
+        # IS the document:<sha>). Reconcile: equal → fine; differ → HTTP 400.
+        eff_source_rid = source_rid
+        if document_rid is not None:
+            if source_rid is not None and source_rid != document_rid:
+                raise HTTPException(
+                    status_code=400,
+                    detail="document_rid and source_rid conflict",
+                )
+            eff_source_rid = document_rid
+
+        move_types = _normalize_move_types(move_type)
+
+        async with pool.acquire() as conn:
+            return await _discourse_search(
+                conn,
+                query=query,
+                move_types=move_types,
+                source_rid=eff_source_rid,
+                status=status,
+                source_type=source_type,
+                limit=limit,
             )
 
     # -------------------------------------------------------------------
