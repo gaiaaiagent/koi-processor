@@ -47,6 +47,23 @@ def _unified_search_surface_timeout_s() -> float:
         return 8.0
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.1f", name, raw, default)
+        return default
+
+
+UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS = _float_env(
+    "UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS",
+    8.0,
+)
+
+
 # ---------------------------------------------------------------------------
 # B1 (2026-04-30): Predicate-aware default supersession policy.
 #
@@ -1388,6 +1405,31 @@ def create_router(
 
         all_results: list[dict] = []
         facts_results: list[dict] = []
+        surface_errors: Dict[str, str] = {}
+
+        async def _bounded_surface(
+            surface: str,
+            coro: Coroutine[Any, Any, Any],
+            timeout_seconds: float,
+        ) -> Any:
+            try:
+                return await asyncio.wait_for(coro, timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                surface_errors[surface] = "timeout"
+                logger.warning(
+                    "unified-search %s surface timed out after %.1fs",
+                    surface,
+                    timeout_seconds,
+                )
+                return None
+            except Exception as exc:
+                surface_errors[surface] = type(exc).__name__
+                logger.warning(
+                    "unified-search %s surface failed: %s",
+                    surface,
+                    exc,
+                )
+                return None
 
         async with pool.acquire() as conn:
             if degraded:
@@ -1472,24 +1514,35 @@ def create_router(
 
                     # Sessions: ILIKE on chunk_text (lowest priority)
                     if "sessions" in surfaces:
-                        table_exists = await conn.fetchval("""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.tables
-                                WHERE table_name = 'session_chunks'
-                            )
-                        """)
-                        if table_exists:
-                            conditions = " OR ".join(
-                                f"chunk_text ILIKE ${i + 1}"
-                                for i in range(len(words)))
-                            s_params: list = [f"%{w}%" for w in words] + [20]
-                            rows = await conn.fetch(f"""
-                                SELECT sc.id, sc.session_id, sc.chunk_text
-                                FROM session_chunks sc
-                                WHERE ({conditions})
-                                ORDER BY sc.created_at DESC
-                                LIMIT ${len(words) + 1}
-                            """, *s_params)
+                        async def _fetch_text_session_rows():
+                            async with pool.acquire() as session_conn:
+                                table_exists = await session_conn.fetchval("""
+                                    SELECT EXISTS (
+                                        SELECT FROM information_schema.tables
+                                        WHERE table_name = 'session_chunks'
+                                    )
+                                """)
+                                if not table_exists:
+                                    return []
+
+                                conditions = " OR ".join(
+                                    f"chunk_text ILIKE ${i + 1}"
+                                    for i in range(len(words)))
+                                s_params: list = [f"%{w}%" for w in words] + [20]
+                                return await session_conn.fetch(f"""
+                                    SELECT sc.id, sc.session_id, sc.chunk_text
+                                    FROM session_chunks sc
+                                    WHERE ({conditions})
+                                    ORDER BY sc.created_at DESC
+                                    LIMIT ${len(words) + 1}
+                                """, *s_params)
+
+                        rows = await _bounded_surface(
+                            "sessions",
+                            _fetch_text_session_rows(),
+                            UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS,
+                        ) or []
+                        if rows:
                             for rank, row in enumerate(rows):
                                 all_results.append({
                                     "text": row["chunk_text"][:500],
@@ -1657,36 +1710,39 @@ def create_router(
                 # AND-conjunctive plainto_tsquery is too restrictive for the
                 # benchmark's recall-shape.
                 if "sessions" in surfaces:
-                    table_exists = await conn.fetchval("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables
-                            WHERE table_name = 'session_chunks'
-                        )
-                    """)
-                    rows = []
-                    if table_exists:
-                        # Build OR-disjunctive tsquery string from user query.
-                        # Hyphens preserved (websearch handles ADR-0080 etc).
-                        # Stopwords filtered to reduce 0-recall on natural-
-                        # language phrasings.
-                        _stopwords = {
-                            "the", "what", "when", "where", "how", "why",
-                            "which", "who", "is", "are", "was", "were", "be",
-                            "been", "being", "do", "did", "does", "done",
-                            "can", "could", "should", "would", "may", "might",
-                            "must", "shall", "will", "or", "and", "but",
-                            "not", "of", "to", "for", "on", "at", "in", "by",
-                            "with", "from", "as", "into", "that", "this",
-                            "these", "those", "there", "here", "then", "than",
-                            "such", "also", "very", "more", "most", "just",
-                            "only", "over", "under", "have", "has", "had",
-                        }
-                        _toks = re.findall(r"[A-Za-z0-9_-]{2,}", query.lower())
-                        _toks = [t for t in _toks if t not in _stopwords]
-                        ts_query_str = " OR ".join(_toks) if _toks else query
+                    async def _fetch_semantic_session_rows():
+                        async with pool.acquire() as session_conn:
+                            await session_conn.execute("SET ivfflat.probes = 10")
+                            table_exists = await session_conn.fetchval("""
+                                SELECT EXISTS (
+                                    SELECT FROM information_schema.tables
+                                    WHERE table_name = 'session_chunks'
+                                )
+                            """)
+                            if not table_exists:
+                                return []
 
-                        try:
-                            rows = await conn.fetch("""
+                            # Build OR-disjunctive tsquery string from user query.
+                            # Hyphens preserved (websearch handles ADR-0080 etc).
+                            # Stopwords filtered to reduce 0-recall on natural-
+                            # language phrasings.
+                            _stopwords = {
+                                "the", "what", "when", "where", "how", "why",
+                                "which", "who", "is", "are", "was", "were", "be",
+                                "been", "being", "do", "did", "does", "done",
+                                "can", "could", "should", "would", "may", "might",
+                                "must", "shall", "will", "or", "and", "but",
+                                "not", "of", "to", "for", "on", "at", "in", "by",
+                                "with", "from", "as", "into", "that", "this",
+                                "these", "those", "there", "here", "then", "than",
+                                "such", "also", "very", "more", "most", "just",
+                                "only", "over", "under", "have", "has", "had",
+                            }
+                            _toks = re.findall(r"[A-Za-z0-9_-]{2,}", query.lower())
+                            _toks = [t for t in _toks if t not in _stopwords]
+                            ts_query_str = " OR ".join(_toks) if _toks else query
+
+                            return await session_conn.fetch("""
                                 WITH vec_ranked AS (
                                     SELECT id, session_id, chunk_text,
                                            ROW_NUMBER() OVER (
@@ -1738,23 +1794,26 @@ def create_router(
                                 ORDER BY rrf_score DESC
                                 LIMIT 20
                             """, emb_str, ts_query_str)
-                        except asyncpg.exceptions.DataError as e:
-                            logger.warning("sessions surface hybrid query skipped: %s", e)
-                            rows = []
-                        for rank, row in enumerate(rows):
-                            all_results.append({
-                                "text": (row["chunk_text"] or "")[:500],
-                                "score": 1.0 / (k + rank + 1),
-                                "source": "session",
-                                "session_id": row["session_id"],
-                                "metadata": {
-                                    "vec_score": float(row["vec_score"]) if row["vec_score"] is not None else None,
-                                    "lex_score": float(row["lex_score"]) if row["lex_score"] is not None else None,
-                                    "vec_rank": int(row["vec_rank"]) if row["vec_rank"] is not None else None,
-                                    "lex_rank": int(row["lex_rank"]) if row["lex_rank"] is not None else None,
-                                    "rrf_score": float(row["rrf_score"]),
-                                },
-                            })
+
+                    rows = await _bounded_surface(
+                        "sessions",
+                        _fetch_semantic_session_rows(),
+                        UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS,
+                    ) or []
+                    for rank, row in enumerate(rows):
+                        all_results.append({
+                            "text": (row["chunk_text"] or "")[:500],
+                            "score": 1.0 / (k + rank + 1),
+                            "source": "session",
+                            "session_id": row["session_id"],
+                            "metadata": {
+                                "vec_score": float(row["vec_score"]) if row["vec_score"] is not None else None,
+                                "lex_score": float(row["lex_score"]) if row["lex_score"] is not None else None,
+                                "vec_rank": int(row["vec_rank"]) if row["vec_rank"] is not None else None,
+                                "lex_rank": int(row["lex_rank"]) if row["lex_rank"] is not None else None,
+                                "rrf_score": float(row["rrf_score"]),
+                            },
+                        })
 
                 # Docs (vector similarity on koi_memory_chunks from doc-scanner)
                 if "docs" in surfaces:
@@ -2002,6 +2061,8 @@ def create_router(
         if degraded:
             response["degraded"] = True
             response["degraded_reason"] = degraded_reason
+        if surface_errors:
+            response["surface_errors"] = surface_errors
         # Pack 2.2: surface fallback-fired-but-recovered case at request
         # scope. Distinct from `degraded` (embedding unavailable / None);
         # this signals "read succeeded on the secondary provider, quality
