@@ -1,0 +1,280 @@
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rfs: <https://framework.regen.network/schema/> .
+@prefix rft: <https://framework.regen.network/taxonomy/> .
+@prefix schema1: <http://schema.org/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+rfs:Claim a sh:NodeShape ;
+    sh:closed true ;
+    sh:description "A verifiable claim about ecological, social, or financial outcomes associated with a place, practice, or project. Claims are the atomic unit of the regenerative claims engine, linking a claimant's assertion to a subject entity with typed impact and temporal bounds." ;
+    sh:ignoredProperties ( rdf:type ) ;
+    sh:property [ sh:datatype xsd:string ;
+            sh:description "Description of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 1 ;
+            sh:path schema1:description ],
+        [ sh:datatype xsd:anyURI ;
+            sh:description "IRI or RID of a previous claim that this claim supersedes, forming a version chain." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 18 ;
+            sh:path rfs:supersedes ],
+        [ sh:description "Current verification state of the claim, from self-reported through ledger-anchored." ;
+            sh:in ( rft:SelfReported rft:PeerReviewed rft:Verified rft:LedgerAnchored rft:Withdrawn ) ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:order 9 ;
+            sh:path rfs:verificationStatus ],
+        [ sh:datatype xsd:anyURI ;
+            sh:description "Regen Data Module IRI derived from the content hash. Bridges the off-chain claim to its on-chain anchor." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 17 ;
+            sh:path rfs:dataIri ],
+        [ sh:datatype xsd:date ;
+            sh:description "The end date of the period covered by this claim." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 11 ;
+            sh:path schema1:endDate ],
+        [ sh:class rfs:Impact ;
+            sh:description "Secondary impacts or co-benefits associated with the claim." ;
+            sh:nodeKind sh:BlankNodeOrIRI ;
+            sh:order 8 ;
+            sh:path rfs:hasCoBenefits ],
+        [ sh:datatype xsd:date ;
+            sh:description "The start date of the period covered by this claim." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 10 ;
+            sh:path schema1:startDate ],
+        [ sh:class rfs:Entity ;
+            sh:description "The entity making the claim. May be an individual, organization, or community." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:BlankNodeOrIRI ;
+            sh:order 4 ;
+            sh:path rfs:hasClaimant ],
+        [ sh:datatype xsd:float ;
+            sh:description "Numeric quantity associated with the claim (e.g., tonnes CO2e, hectares restored)." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 12 ;
+            sh:path rfs:quantity ],
+        [ sh:description "The primary category of the claim, drawn from the FWG ClaimType taxonomy. Determines which verification pathways apply." ;
+            sh:in ( rft:Ecological rft:Social rft:Financial rft:Governance rft:Biocultural ) ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:order 3 ;
+            sh:path rfs:hasClaimType ],
+        [ sh:class rfs:Methodology ;
+            sh:description "The methodology used to measure or verify the claimed outcome." ;
+            sh:nodeKind sh:BlankNodeOrIRI ;
+            sh:order 14 ;
+            sh:path rfs:usesMethodology ],
+        [ sh:class rfs:Impact ;
+            sh:description "The primary impact claimed." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:BlankNodeOrIRI ;
+            sh:order 7 ;
+            sh:path rfs:hasPrimaryImpact ],
+        [ sh:datatype xsd:string ;
+            sh:description "Human-readable title of the claim." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 0 ;
+            sh:path schema1:name ],
+        [ sh:datatype xsd:string ;
+            sh:description "BLAKE2b-256 content hash of the canonical claim representation, used for on-chain anchoring via Regen Data Module." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 16 ;
+            sh:path rfs:contentHash ],
+        [ sh:datatype xsd:string ;
+            sh:description "Unit of measurement for the quantity (e.g., unit:TON, unit:HA)." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 13 ;
+            sh:path qudt:unit ],
+        [ sh:datatype xsd:string ;
+            sh:description "Credit class identifier (e.g., C01, C06) linking this claim to a registered credit class on Regen Ledger." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 15 ;
+            sh:path rfs:hasCreditClass ],
+        [ sh:class rfs:Entity ;
+            sh:description "The entity or place about which the claim is made. Often a project, land steward, or community." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:BlankNodeOrIRI ;
+            sh:order 5 ;
+            sh:path rfs:hasSubject ],
+        [ sh:class rfs:Entity ;
+            sh:description "The entity responsible for operations that produced the claimed outcome, if different from the claimant." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:BlankNodeOrIRI ;
+            sh:order 6 ;
+            sh:path rfs:hasOperator ],
+        [ sh:datatype xsd:anyURI ;
+            sh:description "Link to a valid URL where more information can be found about the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 2 ;
+            sh:path schema1:url ] ;
+    sh:targetClass rfs:Claim .
+
+rfs:Link a sh:NodeShape ;
+    sh:closed true ;
+    sh:ignoredProperties ( schema1:version rdf:type ) ;
+    sh:property [ sh:datatype xsd:anyURI ;
+            sh:description "Link to a valid URL where more information can be found about the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 1 ;
+            sh:path schema1:url ],
+        [ sh:datatype xsd:string ;
+            sh:description "Name of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 0 ;
+            sh:path schema1:name ],
+        [ sh:datatype xsd:string ;
+            sh:description "Description of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 2 ;
+            sh:path schema1:description ] ;
+    sh:targetClass rfs:Link .
+
+rfs:VersionedLink a sh:NodeShape ;
+    sh:closed true ;
+    sh:ignoredProperties ( rdf:type ) ;
+    sh:property [ sh:datatype xsd:string ;
+            sh:description "Name of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 1 ;
+            sh:path schema1:name ],
+        [ sh:datatype xsd:string ;
+            sh:description "Description of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 3 ;
+            sh:path schema1:description ],
+        [ sh:datatype xsd:string ;
+            sh:description "Version number of the resource / entity." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 0 ;
+            sh:path schema1:version ],
+        [ sh:datatype xsd:anyURI ;
+            sh:description "Link to a valid URL where more information can be found about the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 2 ;
+            sh:path schema1:url ] ;
+    sh:targetClass rfs:VersionedLink .
+
+rfs:Methodology a sh:NodeShape ;
+    sh:closed true ;
+    sh:description "Details about a specific methodology." ;
+    sh:ignoredProperties ( rdf:type ) ;
+    sh:property [ sh:datatype xsd:string ;
+            sh:description "Version number of the resource / entity." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 2 ;
+            sh:path schema1:version ],
+        [ sh:datatype xsd:string ;
+            sh:description "Unique identifier for the resource / entity." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 3 ;
+            sh:path schema1:identifier ],
+        [ sh:datatype xsd:string ;
+            sh:description "Name of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 0 ;
+            sh:path schema1:name ],
+        [ sh:datatype xsd:anyURI ;
+            sh:description "Link to a valid URL where more information can be found about the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 1 ;
+            sh:path schema1:url ] ;
+    sh:targetClass rfs:Methodology .
+
+rfs:Impact a sh:NodeShape ;
+    sh:closed true ;
+    sh:description "Represents an ecological, social, or broader impact or benefit usually in the context of a project's activities. Impacts can be measurable or qualitative." ;
+    sh:ignoredProperties ( rdf:type ) ;
+    sh:property [ sh:datatype xsd:string ;
+            sh:description "Name is optional and will be inferred from the ImpactType if not provided." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 0 ;
+            sh:path schema1:name ],
+        [ sh:description "List of relevant Sustainable Development Goals that this impact supports." ;
+            sh:in ( <https://sdgs.un.org/goals/goal1> <https://sdgs.un.org/goals/goal2> <https://sdgs.un.org/goals/goal3> <https://sdgs.un.org/goals/goal4> <https://sdgs.un.org/goals/goal5> <https://sdgs.un.org/goals/goal6> <https://sdgs.un.org/goals/goal7> <https://sdgs.un.org/goals/goal8> <https://sdgs.un.org/goals/goal9> <https://sdgs.un.org/goals/goal10> <https://sdgs.un.org/goals/goal11> <https://sdgs.un.org/goals/goal12> <https://sdgs.un.org/goals/goal13> <https://sdgs.un.org/goals/goal14> <https://sdgs.un.org/goals/goal15> <https://sdgs.un.org/goals/goal16> <https://sdgs.un.org/goals/goal17> ) ;
+            sh:order 2 ;
+            sh:path rfs:supportsSDG ],
+        [ sh:description "Type of impact, such as ecological, social, or economic." ;
+            sh:in ( rft:ReducedFertilizerAmendments rft:AvoidedDeforestationDegradation rft:ImprovedCulturalHeritageAwareness rft:ImprovedBiodiversity rft:ImprovedEnvironmentalEducationOutreach rft:ReducedSoilErosion rft:ReducedHerbicideAmendments rft:ImprovedForestHealth rft:ImprovedCommunityHealth rft:ImprovedWildlifeHabitat rft:ImprovedSoilHealth rft:IncreasedForestCover rft:ReducedPesticideAmendments rft:ImprovedWaterInfiltration rft:ImprovedWaterHoldingCapacity rft:IncreasedCarbonSequestrationStorage rft:ReducedIrrigation rft:ImprovedSoilStructure rft:ImprovedNutrientCycling "UNKNOWN" ) ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:order 1 ;
+            sh:path rfs:hasImpactType ] ;
+    sh:targetClass rfs:Impact .
+
+rfs:Entity a sh:NodeShape ;
+    sh:closed true ;
+    sh:ignoredProperties ( rdf:type ) ;
+    sh:property [ sh:datatype xsd:string ;
+            sh:description "On-chain wallet address (bech32 or hex) bridging semantic identity to signing capability. Used by the identity bridge to link KOI entity URIs to on-chain accounts for CLAMS and EAS interop." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 5 ;
+            sh:path rfs:walletAddress ],
+        [ sh:datatype xsd:anyURI ;
+            sh:description "Link to a valid URL where more information can be found about the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 2 ;
+            sh:path schema1:url ],
+        [ sh:datatype xsd:string ;
+            sh:description "Description of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 1 ;
+            sh:path schema1:description ],
+        [ sh:in ( rfs:Individual rfs:Organization rfs:Community ) ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:order 4 ;
+            sh:path rfs:type ],
+        [ sh:datatype xsd:string ;
+            sh:description "Name of the entity / resource." ;
+            sh:maxCount 1 ;
+            sh:minCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 0 ;
+            sh:path schema1:name ],
+        [ sh:datatype xsd:string ;
+            sh:maxCount 1 ;
+            sh:nodeKind sh:Literal ;
+            sh:order 3 ;
+            sh:path schema1:image ] ;
+    sh:targetClass rfs:Entity .
+
