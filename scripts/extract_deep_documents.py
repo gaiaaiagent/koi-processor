@@ -431,6 +431,11 @@ async def _call_claude_p(prompt: str, *, model: str, timeout: int = CLAUDE_P_TIM
     process = await asyncio.create_subprocess_exec(
         "claude",
         "-p",
+        # Skip loading the user's MCP servers/hooks — a headless extraction call needs no
+        # tools, and cold-starting the full MCP fleet was blowing past CLAUDE_P_TIMEOUT
+        # (300s) on larger windows (small docs squeaked under, big ones timed out). With
+        # this, each window returns in ~20s. (Confirmed 2026-07-03.)
+        "--strict-mcp-config",
         "--model",
         model,
         "--print",
