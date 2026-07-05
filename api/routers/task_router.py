@@ -468,6 +468,11 @@ def create_router(pool, caps) -> APIRouter:
                 add("LOWER(source_note) LIKE LOWER(?)", f"%{source_note}%")
             if source_type:
                 add("source_type = ?", source_type)
+            else:
+                # Comms outbox (source_type='outbound-comm') is a distinct category, not a
+                # personal to-do — hidden from the default task view like done/cancelled are.
+                # Query it explicitly with ?source_type=outbound-comm. (comms-outbox MVP 2026-07-04)
+                conditions.append("source_type IS DISTINCT FROM 'outbound-comm'")
 
             # Opt-in validity filter — only emits SQL when t_now is set.
             # See plan AC1.3 / AC1.3a / AC1.7a.
@@ -626,7 +631,7 @@ def create_router(pool, caps) -> APIRouter:
             by_status_rows = await conn.fetch(
                 """
                 SELECT status, COUNT(*) AS cnt FROM task_registry
-                WHERE source_type IS DISTINCT FROM 'test'
+                WHERE source_type IS DISTINCT FROM 'test' AND source_type IS DISTINCT FROM 'outbound-comm'
                 GROUP BY status
                 """
             )
@@ -643,7 +648,7 @@ def create_router(pool, caps) -> APIRouter:
                 SELECT COUNT(*) FROM task_registry
                 WHERE due_date < $1
                   AND status NOT IN ('done', 'cancelled')
-                  AND source_type IS DISTINCT FROM 'test'
+                  AND source_type IS DISTINCT FROM 'test' AND source_type IS DISTINCT FROM 'outbound-comm'
                 """,
                 today
             )
@@ -652,7 +657,7 @@ def create_router(pool, caps) -> APIRouter:
                 SELECT COUNT(*) FROM task_registry
                 WHERE due_date = $1
                   AND status NOT IN ('done', 'cancelled')
-                  AND source_type IS DISTINCT FROM 'test'
+                  AND source_type IS DISTINCT FROM 'test' AND source_type IS DISTINCT FROM 'outbound-comm'
                 """,
                 today
             )
@@ -661,7 +666,7 @@ def create_router(pool, caps) -> APIRouter:
                 SELECT COUNT(*) FROM task_registry
                 WHERE due_date BETWEEN $1 AND $1 + INTERVAL '7 days'
                   AND status NOT IN ('done', 'cancelled')
-                  AND source_type IS DISTINCT FROM 'test'
+                  AND source_type IS DISTINCT FROM 'test' AND source_type IS DISTINCT FROM 'outbound-comm'
                 """,
                 today
             )
