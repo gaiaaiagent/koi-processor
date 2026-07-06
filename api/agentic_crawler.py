@@ -51,6 +51,7 @@ WORLD_MODEL_MAX_TOKENS = 2_000
 PHASE1_SYNC_PAGE_CAP = 20
 
 CONSECUTIVE_SKIP_TERMINATE = 3
+MIN_PAGES_BEFORE_SUFFICIENT = 3  # don't honor an early LLM "sufficient" until we've expanded past a thin landing page
 
 
 class CrawlBudgetExceeded(Exception):
@@ -557,11 +558,43 @@ async def agentic_crawl(
             )
             seq_counter += 1
 
+        # Thin/SPA landing pages: the LLM often returns few/no next_links (it is
+        # told to only suggest URLs present in the page), which starves the frontier
+        # and stops the crawl at one page. If we're about to run dry on the start
+        # page, seed from the same-domain links compact_page already extracted from
+        # the rendered HTML — this is what surfaces /our-work, /guardians, /grants.
+        if is_start_page and not candidates:
+            seeded = 0
+            for _l in page.links:
+                _lu = (_l.get("url") or "").strip()
+                if not _lu or _lu in visited_set or not same_domain(_lu, start_url):
+                    continue
+                heapq.heappush(candidates, (-0.4, seq_counter, _lu, "seed:page-link"))
+                seq_counter += 1
+                seeded += 1
+                if seeded >= 12:
+                    break
+            if seeded:
+                logger.info("seeded %d same-domain links on thin start page %s", seeded, url)
+
         await _emit_progress("fetching", url, analysis.judgment)
 
         if analysis.judgment == "sufficient":
-            logger.info("crawl judged sufficient at %s", url)
-            break
+            # Don't honor an early "sufficient" (a soft LLM call with no mechanical
+            # floor) on a thin landing page: keep expanding until we've visited a few
+            # pages AND gathered real entity signal, as long as the frontier isn't
+            # empty. Once there's genuinely nothing left to crawl, honor it.
+            enough_pages = len(visited) >= MIN_PAGES_BEFORE_SUFFICIENT
+            have_signal = len(world.entities) > 1  # more than just the root org
+            if candidates and not (enough_pages and have_signal):
+                logger.info(
+                    "crawl judged sufficient at %s but only %d page(s)/%d entities; "
+                    "overriding to keep expanding",
+                    url, len(visited), len(world.entities),
+                )
+            else:
+                logger.info("crawl judged sufficient at %s", url)
+                break
 
     if lookup_fn is not None:
         for ent in world.entities:
