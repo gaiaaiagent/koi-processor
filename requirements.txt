@@ -107,3 +107,4 @@ scrapling>=0.4
 tldextract>=5.0
 tiktoken>=0.7
 feedparser>=6.0.10
+playwright==1.61.0
