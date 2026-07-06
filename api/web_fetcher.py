@@ -688,7 +688,17 @@ async def fetch_html_with_playwright(url: str, proxy: Optional[str] = None) -> O
 
         await page.route("**", _ssrf_route_gate)
 
-        await page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_TIMEOUT)
+        # Modern sites (analytics / websockets / chat widgets) frequently never
+        # reach "networkidle" — a goto that waits for it then times out and we
+        # discard the fully-rendered page (0 content). Navigate on the reliable
+        # "domcontentloaded" event, then wait for networkidle only BEST-EFFORT
+        # (don't fail if it never comes), then settle. (Fix 2026-07-06: Squarespace/
+        # Wix/SPA sites were rendering to 0 words because of the strict networkidle.)
+        await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass  # never idles — DOM is parsed and JS has had time; proceed
         await asyncio.sleep(PLAYWRIGHT_WAIT)
 
         # Dismiss cookie consent banners (common patterns)
