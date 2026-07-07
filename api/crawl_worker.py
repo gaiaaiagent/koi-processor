@@ -64,6 +64,8 @@ ERR_LLM_REPEATED = "LLM analysis failing repeatedly"
 ERR_MANUAL_CANCEL = "manual cancel"
 
 _CLAIM_POLL_INTERVAL_S = 2.0
+_HANG_GUARD_BUFFER_S = 90  # hard crawl cap = max_seconds + this; recovers the worker from a wedged iteration that blocks between cancel_checks
+_PER_PAGE_FETCH_TIMEOUT_S = 75  # per-page hard fetch cap; a hung render raises (crawler skips that page) instead of freezing the loop past the graceful wall-clock stop
 _HEARTBEAT_INTERVAL_S = 30.0
 _SWEEP_B_INTERVAL_S = 60.0
 _HEARTBEAT_TIMEOUT_MINUTES = 10
@@ -366,7 +368,22 @@ async def _default_run_crawl(
         budget_obj.max_usd = float(budget["max_usd"])
 
     async def _fetch(url: str):
-        return await fetch_and_preview(url, db_pool=pool, _internal_call=True)
+        # Per-page hard timeout: fetch_and_preview's internal Playwright/Scrapling
+        # timeouts occasionally fail to bound a wedged render (browser launch,
+        # redirect loop, never-settling page). Cap each page so a single hung fetch
+        # RAISES — agentic_crawl then logs it, counts a skip, and continues to the
+        # next candidate — instead of freezing the loop past the graceful wall-clock
+        # stop and losing the partial proposal. (2026-07-06: hollyhock wedged on
+        # page 6 for ~100s and lost 34 in-flight entities.)
+        try:
+            return await asyncio.wait_for(
+                fetch_and_preview(url, db_pool=pool, _internal_call=True),
+                timeout=_PER_PAGE_FETCH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"page fetch exceeded {_PER_PAGE_FETCH_TIMEOUT_S}s: {url}"
+            ) from exc
 
     async def _lookup(name: str, entity_type: str):
         async with pool.acquire() as conn:
@@ -386,7 +403,15 @@ async def _default_run_crawl(
         # started_at within a few milliseconds; immutable across heartbeats).
         elapsed = time.monotonic() - started_at
         if elapsed > max_seconds:
-            raise _WorkerFailed(ERR_WALL_CLOCK_TIMEOUT)
+            # Graceful stop: signal the crawl loop to break and finalize the partial
+            # proposal from entities gathered so far, rather than raising and
+            # discarding everything. (Slow multi-page JS crawls were losing 40+
+            # in-flight entities on wall-clock timeout — 2026-07-06.)
+            logger.info(
+                "job %d wall-clock budget reached; stopping to keep partial proposal",
+                job_id,
+            )
+            return True
         # Check for stop / manual cancel.
         if stop_event.is_set():
             raise _WorkerCancelled("interrupted", "service shutdown")
@@ -427,16 +452,27 @@ async def _default_run_crawl(
             logger.warning("progress update failed on job %d: %s", job_id, exc)
 
     try:
-        proposal = await agentic_crawl(
-            start_url=start_url,
-            goal=goal,
-            budget=budget_obj,
-            fetch_fn=_fetch,
-            lookup_fn=_lookup,
-            vision_fn=_vision,
-            progress_callback=_on_progress,
-            cancel_check=_cancel_check,
+        # Hard hang-guard: a single wedged iteration (e.g. a stuck Playwright fetch)
+        # blocks between per-page cancel_checks and would hang the whole worker (job
+        # stays "running", heartbeat goes stale, the next job starves). Cap the entire
+        # crawl at max_seconds + buffer so the worker always recovers. The graceful
+        # wall-clock stop (cancel_check returns True) fires first in the normal case
+        # and preserves the partial proposal; this only trips on a true hang.
+        proposal = await asyncio.wait_for(
+            agentic_crawl(
+                start_url=start_url,
+                goal=goal,
+                budget=budget_obj,
+                fetch_fn=_fetch,
+                lookup_fn=_lookup,
+                vision_fn=_vision,
+                progress_callback=_on_progress,
+                cancel_check=_cancel_check,
+            ),
+            timeout=budget_obj.max_seconds + _HANG_GUARD_BUFFER_S,
         )
+    except asyncio.TimeoutError as exc:
+        raise _WorkerFailed("crawl hard-timeout (hung iteration)") from exc
     except CrawlBudgetExceeded as exc:
         raise _WorkerFailed(str(exc)) from exc
 

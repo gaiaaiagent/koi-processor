@@ -746,7 +746,7 @@ async def fetch_html_with_playwright(url: str, proxy: Optional[str] = None) -> O
         # Wix/SPA sites were rendering to 0 words because of the strict networkidle.)
         await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
         try:
-            await page.wait_for_load_state("networkidle", timeout=8000)
+            await page.wait_for_load_state("networkidle", timeout=3500)  # SPAs rarely idle; short wait (was 8000, usually fully wasted per page)
         except Exception:
             pass  # never idles — DOM is parsed and JS has had time; proceed
         await asyncio.sleep(PLAYWRIGHT_WAIT)

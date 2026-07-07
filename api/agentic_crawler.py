@@ -450,9 +450,17 @@ async def agentic_crawl(
 
         elapsed = time.monotonic() - started_at
         if elapsed > budget.max_seconds:
-            raise CrawlBudgetExceeded("wall-clock timeout")
+            logger.info(
+                "wall-clock budget hit at %d pages/%d entities; finalizing partial proposal",
+                len(visited), len(world.entities),
+            )
+            break
         if cost_tracker.usd > budget.max_usd:
-            raise CrawlBudgetExceeded("cost budget exhausted")
+            logger.info(
+                "cost budget hit at %d pages/%d entities; finalizing partial proposal",
+                len(visited), len(world.entities),
+            )
+            break
 
         neg_priority, _, url, reason = heapq.heappop(candidates)
         if url in visited_set:
