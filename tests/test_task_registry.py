@@ -43,9 +43,18 @@ def cleanup(client, key: str):
 
 
 def get_task(client, key: str, status_filter: str = "open,inbox,in-progress,waiting,cancelled") -> dict | None:
-    r = client.get("/tasks/", params={"status": status_filter, "limit": 1000})
+    """Fetch one task by key via GET /tasks/{key} (exact, no list truncation).
+
+    Was previously a filtered GET /tasks/?limit=1000 scan, which silently
+    dropped freshly-created test tasks once the registry grew past 1000 rows of
+    a status (they sort last by id). The by-key endpoint (P5 Fix 1) makes this
+    deterministic; status_filter is retained for call-site compatibility.
+    """
+    r = client.get(f"/tasks/{key}")
+    if r.status_code == 404:
+        return None
     assert r.status_code == 200, r.text
-    return next((t for t in r.json() if t["task_key"] == key), None)
+    return r.json()
 
 
 # ---------------------------------------------------------------------------
@@ -242,3 +251,109 @@ class TestStatsExcludesTestSourceType:
             )
         finally:
             cleanup(client, key)
+
+
+# ---------------------------------------------------------------------------
+# P5 Fix 1: PATCH title, GET by key, /stats route ordering, limit + X-Total-Count
+# ---------------------------------------------------------------------------
+
+class TestPatchTitle:
+    """PATCH title must persist (previously silently dropped)."""
+
+    def test_patch_title_persists(self, client):
+        key = make_key("patch-title")
+        try:
+            ingest(client, key, title="Original title")
+            r = client.patch(f"/tasks/{key}", json={"title": "Renamed title"})
+            assert r.status_code == 200, r.text
+
+            task = get_task(client, key)
+            assert task is not None
+            assert task["title"] == "Renamed title", f"title not updated: {task['title']}"
+        finally:
+            cleanup(client, key)
+
+    def test_patch_absent_title_preserves_existing(self, client):
+        key = make_key("patch-title-absent")
+        try:
+            ingest(client, key, title="Keep me")
+            r = client.patch(f"/tasks/{key}", json={"status": "open"})
+            assert r.status_code == 200
+
+            task = get_task(client, key, status_filter="open")
+            assert task is not None
+            assert task["title"] == "Keep me", f"title unexpectedly changed: {task['title']}"
+        finally:
+            cleanup(client, key)
+
+
+class TestGetTaskByKey:
+    """GET /tasks/{key} returns the record or 404 (previously 405 — only PATCH matched)."""
+
+    def test_get_by_key_returns_200_and_record(self, client):
+        key = make_key("get-by-key")
+        try:
+            ingest(client, key, title="Fetch me", status="open", priority="high")
+            r = client.get(f"/tasks/{key}")
+            assert r.status_code == 200, f"GET by key returned {r.status_code}: {r.text}"
+            body = r.json()
+            assert body["task_key"] == key
+            assert body["title"] == "Fetch me"
+            assert body["status"] == "open"
+            assert body["priority"] == "high"
+        finally:
+            cleanup(client, key)
+
+    def test_get_by_key_404_for_missing(self, client):
+        r = client.get("/tasks/reg-test-does-not-exist-zzz-000")
+        assert r.status_code == 404, f"expected 404, got {r.status_code}: {r.text}"
+
+    def test_stats_route_still_wins_over_by_key(self, client):
+        """Regression: /tasks/stats must resolve to the stats endpoint, not
+        GET /{task_key} with task_key='stats'."""
+        r = client.get("/tasks/stats")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        # Stats shape, not a TaskRecord — proves route ordering is intact.
+        assert "by_status" in data and "total_open" in data
+        assert "task_key" not in data
+
+
+class TestListPaginationHeader:
+    """limit accepts up to 5000; X-Total-Count header is present and consistent."""
+
+    def test_limit_5000_accepted(self, client):
+        r = client.get("/tasks/", params={"limit": 5000})
+        assert r.status_code == 200, f"limit=5000 rejected: {r.status_code}: {r.text}"
+        assert isinstance(r.json(), list)
+
+    def test_limit_over_5000_rejected(self, client):
+        r = client.get("/tasks/", params={"limit": 5001})
+        assert r.status_code == 422, f"expected 422 for limit>5000, got {r.status_code}"
+
+    def test_x_total_count_present_and_ge_results(self, client):
+        # Use a small limit so total (all filtered rows) >= returned length.
+        r = client.get("/tasks/", params={"limit": 5})
+        assert r.status_code == 200, r.text
+        assert "X-Total-Count" in r.headers, "X-Total-Count header missing"
+        total = int(r.headers["X-Total-Count"])
+        returned = len(r.json())
+        assert total >= returned, f"X-Total-Count ({total}) < returned rows ({returned})"
+        assert returned <= 5
+
+    def test_x_total_count_matches_filtered_scope(self, client):
+        """With a unique source_type filter the header equals the exact count."""
+        keys = [make_key("total-count") for _ in range(3)]
+        unique_source = f"reg-test-src-{uuid.uuid4().hex[:8]}"
+        try:
+            for k in keys:
+                ingest(client, k, sourceType=unique_source, status="open")
+            r = client.get("/tasks/", params={"source_type": unique_source, "limit": 1})
+            assert r.status_code == 200, r.text
+            assert int(r.headers["X-Total-Count"]) == 3, (
+                f"X-Total-Count {r.headers.get('X-Total-Count')} != 3 for scoped filter"
+            )
+            assert len(r.json()) == 1  # limit honored independently of the count
+        finally:
+            for k in keys:
+                cleanup(client, k)

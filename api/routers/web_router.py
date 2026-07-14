@@ -539,6 +539,75 @@ def _check_parse_relate_rate_limit(identity: str) -> None:
     window.append(now)
 
 
+def _count_inserted(status: str) -> int:
+    """Parse the affected-row count from an asyncpg command tag.
+
+    asyncpg's ``conn.execute`` returns e.g. ``'INSERT 0 1'`` / ``'INSERT 0 0'``
+    (oid, rows). The row count is the last token — 0 when ON CONFLICT DO NOTHING
+    suppressed the insert. Mirrors the ``_count()`` idiom in admin_router.py.
+    """
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _rel_attr(rel: Any, name: str) -> Optional[str]:
+    """Read subject/predicate/object from either a dict or a pydantic model.
+
+    /web/ingest passes WebIngestRelationship models; /web/process passes plain
+    dicts extracted from the LLM. Both flow through _store_relationships.
+    """
+    if isinstance(rel, dict):
+        return rel.get(name)
+    return getattr(rel, name, None)
+
+
+async def _store_relationships(conn, relationships, source: str,
+                              doc_rid: Optional[str] = None) -> int:
+    """Insert entity relationships, returning the count actually inserted.
+
+    Matches subject/object against ``entity_registry.normalized_text`` using
+    ``normalize_entity_text()`` (hyphen/underscore-aware) rather than a raw
+    ``lower(trim())`` — the latter missed hyphenated/underscored names because
+    ``normalized_text`` stores them with those separators collapsed to spaces.
+
+    Counts only rows that were really inserted (parses the asyncpg command tag,
+    so ON CONFLICT DO NOTHING no longer inflates the total) and skips self-loops
+    (subject == object after normalization would violate the table's
+    ``CHECK (subject_uri != object_uri)`` constraint anyway).
+    """
+    from api.personal_ingest_api import normalize_entity_text
+
+    created = 0
+    for rel in (relationships or []):
+        subject = _rel_attr(rel, "subject")
+        obj = _rel_attr(rel, "object")
+        predicate = _rel_attr(rel, "predicate")
+        if not subject or not obj or not predicate:
+            continue
+        subj_norm = normalize_entity_text(subject)
+        obj_norm = normalize_entity_text(obj)
+        if not subj_norm or not obj_norm or subj_norm == obj_norm:
+            continue  # skip empties and self-loops
+        try:
+            status = await conn.execute(
+                """
+                INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
+                SELECT s.fuseki_uri, $3, o.fuseki_uri, $4
+                FROM entity_registry s, entity_registry o
+                WHERE s.normalized_text = $1
+                  AND o.normalized_text = $2
+                ON CONFLICT DO NOTHING
+                """,
+                subj_norm, obj_norm, predicate, source,
+            )
+            created += _count_inserted(status)
+        except Exception as e:
+            logger.warning(f"Failed to create relationship {rel} (doc_rid={doc_rid}): {e}")
+    return created
+
+
 def create_router(pool, caps):
     """Return an APIRouter for web sensor endpoints."""
     from api import crawl_auth
@@ -834,6 +903,7 @@ def create_router(pool, caps):
         # Step 4: Auto-ingest if requested
         entities_created = 0
         entities_resolved = 0
+        new_relationships = 0
         if body.auto_ingest and entities_raw:
             async with pool.acquire() as conn:
                 from api.personal_ingest_api import resolve_entity, store_new_entity, ExtractedEntity
@@ -848,6 +918,13 @@ def create_router(pool, caps):
                     if is_new:
                         await store_new_entity(conn, extracted, canonical, preview.rid or body.url, source="web_process")
                         entities_created += 1
+
+                # Store extracted relationships now that both endpoints' entities
+                # exist in entity_registry for the normalized-text match to hit.
+                new_relationships = await _store_relationships(
+                    conn, relationships_raw, source="web_process",
+                    doc_rid=(preview.rid or body.url),
+                )
 
                 await conn.execute("""
                     UPDATE web_submissions SET status = 'ingested', ingested_at = NOW()
@@ -868,7 +945,7 @@ def create_router(pool, caps):
             ingestion_stats={
                 "new_entities": entities_created,
                 "resolved_entities": entities_resolved,
-                "new_relationships": 0,
+                "new_relationships": new_relationships,
             } if body.auto_ingest else None,
             model_used=model_used,
         )
@@ -949,20 +1026,11 @@ def create_router(pool, caps):
                             (submission["rid"], canonical.uri, _dl_ctx)
                         )
 
-            # Create relationships
-            for rel in body.relationships:
-                try:
-                    await conn.execute("""
-                        INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
-                        SELECT s.fuseki_uri, $3, o.fuseki_uri, 'web_ingest'
-                        FROM entity_registry s, entity_registry o
-                        WHERE s.normalized_text = lower(trim($1))
-                        AND o.normalized_text = lower(trim($2))
-                        ON CONFLICT DO NOTHING
-                    """, rel.subject, rel.object, rel.predicate)
-                    relationships_created += 1
-                except Exception as e:
-                    logger.warning(f"Failed to create relationship {rel}: {e}")
+            # Create relationships (normalized matching; real-insert count; self-loops skipped)
+            relationships_created = await _store_relationships(
+                conn, body.relationships, source="web_ingest",
+                doc_rid=(submission["rid"] if submission else body.url),
+            )
 
             # Create vault notes + RID mappings for new entities
             vault_notes_created = 0
