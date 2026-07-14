@@ -111,6 +111,8 @@ async def _create_minimal_schema(pool, schema: str) -> None:
                 embedding       TEXT,
                 phonetic_code   TEXT,
                 aliases         TEXT[],
+                node_private    BOOLEAN DEFAULT false,
+                merged_into     TEXT,
                 created_at      TIMESTAMP DEFAULT now(),
                 updated_at      TIMESTAMP DEFAULT now()
             )

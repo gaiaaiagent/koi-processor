@@ -146,6 +146,31 @@ class EntityMergeResponse(BaseModel):
     message: Optional[str] = None
 
 
+class EntityRetypeRequest(BaseModel):
+    uri: str = Field(..., description="fuseki_uri of the entity to re-type")
+    new_type: str = Field(..., description="Target entity type (canonicalized server-side)")
+    retyped_by: Optional[str] = Field(
+        None, description="Audit actor; defaults to the authenticated identity")
+    dry_run: bool = Field(
+        False,
+        description="If true, perform the full retype inside a transaction, report "
+                    "what would change, then ROLL BACK — nothing is committed.")
+
+
+class EntityRetypeResponse(BaseModel):
+    old_uri: str
+    new_uri: str
+    old_type: Optional[str]
+    new_type: str
+    merged_into_existing: bool = False    # True when a live twin already held new_uri
+    rewired: Dict[str, Any] = {}
+    merge_log_id: Optional[int] = None
+    applied: bool = False                 # True only if committed
+    dry_run: bool = False
+    already_typed: bool = False           # True when entity already has new_type (no-op)
+    message: Optional[str] = None
+
+
 def create_router(pool) -> APIRouter:
     """Return an APIRouter for admin (entity-merge) endpoints."""
     router = APIRouter(tags=["admin"])
@@ -308,6 +333,108 @@ def create_router(pool) -> APIRouter:
 
         return rewired
 
+    async def _do_retype(
+        conn, old_uri: str, old_type: Optional[str], new_type: str, retyped_by: str,
+    ) -> tuple:
+        """Re-type an entity inside the caller's transaction.
+
+        Strategy (mirrors the operator's manual merge-into-correctly-typed-survivor
+        procedure): the entity type is encoded in the fuseki_uri prefix, so a
+        retype is a URI change. We (a) mint a new registry row at the new-typed
+        URI copying the source row's data, then (b) reuse ``_do_merge`` to rewire
+        every reference old->new and tombstone the old row. When a live row
+        already occupies the new URI, we skip the insert and merge straight into
+        it. When the deterministic URI is unchanged (type label differs only by
+        case/prefix), we update the type in place.
+
+        Assumes validation already passed (row exists, not tombstoned, new_type
+        canonical + != old_type). Returns ``(new_uri, merged_into_existing, rewired)``.
+        """
+        # Deferred imports: generate_entity_uri lives in personal_ingest_api,
+        # which imports this module (circular) — import inside the function body.
+        from api.personal_ingest_api import (
+            generate_entity_uri, get_first_significant_token, get_phonetic_code,
+        )
+        from api.entity_schema import get_schema_for_type
+
+        src = await conn.fetchrow(
+            "SELECT entity_text, normalized_text, koi_rid, wallet_address "
+            "FROM entity_registry WHERE fuseki_uri = $1", old_uri)
+        entity_text = src["entity_text"]
+        normalized = src["normalized_text"]
+
+        new_uri = generate_entity_uri(entity_text, new_type)
+
+        # Recompute phonetic_code for the NEW type's schema (Person-style types
+        # index on it; non-phonetic types store NULL).
+        new_schema = get_schema_for_type(new_type)
+        phonetic_code = None
+        if getattr(new_schema, "phonetic_matching", False):
+            first_token = get_first_significant_token(
+                normalized, new_schema.phonetic_stopwords)
+            phonetic_code = get_phonetic_code(first_token)
+
+        # Type label change that does NOT alter the deterministic URI (e.g. a
+        # case-only difference like 'person' -> 'Person'): update in place.
+        if new_uri == old_uri:
+            await conn.execute(
+                "UPDATE entity_registry SET entity_type = $1, phonetic_code = $2 "
+                "WHERE fuseki_uri = $3", new_type, phonetic_code, old_uri)
+            n_rid = _count(await conn.execute(
+                "UPDATE entity_rid_mappings SET entity_type = $1 WHERE canonical_uri = $2",
+                new_type, old_uri))
+            rewired = {
+                "in_place_type_update": 1,
+                "entity_rid_mappings_type_updated": n_rid,
+                "retype": {"from": old_type, "to": new_type},
+            }
+            return old_uri, False, rewired
+
+        twin = await conn.fetchrow(
+            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1", new_uri)
+
+        merged_into_existing = False
+        if twin is not None and twin["merged_into"] is None:
+            # A live entity already occupies the new-typed URI — merge into it.
+            merged_into_existing = True
+            rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
+        else:
+            # Mint the new-typed row by copying the source row server-side.
+            # koi_rid + wallet_address carry UNIQUE partial indexes and the old
+            # row is only tombstoned (not deleted) by _do_merge, so we MOVE
+            # them: null them on the source first, then set them on the new row.
+            moved_koi_rid = src["koi_rid"]
+            moved_wallet = src["wallet_address"]
+            if moved_koi_rid is not None or moved_wallet is not None:
+                await conn.execute(
+                    "UPDATE entity_registry SET koi_rid = NULL, wallet_address = NULL "
+                    "WHERE fuseki_uri = $1", old_uri)
+            await conn.execute("""
+                INSERT INTO entity_registry (
+                    fuseki_uri, entity_text, entity_type, normalized_text,
+                    ledger_id, metadata_iri, admin_address, aliases, jurisdiction,
+                    class_id, source, first_seen_rid, metadata, embedding,
+                    vault_rid, phonetic_code, node_private, wallet_address, koi_rid,
+                    description, embedding_3072
+                )
+                SELECT $1, entity_text, $2, normalized_text,
+                       ledger_id, metadata_iri, admin_address, aliases, jurisdiction,
+                       class_id, source, first_seen_rid, metadata, embedding,
+                       vault_rid, $3, node_private, $4, $5,
+                       description, embedding_3072
+                FROM entity_registry WHERE fuseki_uri = $6
+            """, new_uri, new_type, phonetic_code, moved_wallet, moved_koi_rid, old_uri)
+            rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
+
+        # _do_merge rewrites entity_rid_mappings.canonical_uri old->new but NOT
+        # the type column — bring it to the new type here.
+        n_rid = _count(await conn.execute(
+            "UPDATE entity_rid_mappings SET entity_type = $1 WHERE canonical_uri = $2",
+            new_type, new_uri))
+        rewired["entity_rid_mappings_type_updated"] = n_rid
+        rewired["retype"] = {"from": old_type, "to": new_type}
+        return new_uri, merged_into_existing, rewired
+
     def _total(rewired: Dict[str, Any]) -> int:
         total = 0
         for v in rewired.values():
@@ -415,6 +542,91 @@ def create_router(pool) -> APIRouter:
             merge_log_id=merge_log_id,
             message=("dry run — rolled back, nothing committed"
                      if body.dry_run else "merge applied"))
+
+    @router.post("/retype", response_model=EntityRetypeResponse)
+    async def retype_entity(
+        body: EntityRetypeRequest,
+        identity: str = Depends(require_service_auth),
+    ):
+        from api.entity_schema import canonicalize_entity_type, get_entity_schemas
+
+        old_uri = body.uri
+        retyped_by = body.retyped_by or identity
+
+        canon_new_type = (
+            canonicalize_entity_type(body.new_type) if body.new_type else body.new_type)
+        if not canon_new_type or canon_new_type not in get_entity_schemas():
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown entity type: {body.new_type!r} "
+                       f"(canonicalized to {canon_new_type!r})")
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT entity_type, merged_into FROM entity_registry "
+                "WHERE fuseki_uri = $1", old_uri)
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"entity not found: {old_uri}")
+            if row["merged_into"] is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"entity is merged into {row['merged_into']}; "
+                           f"retype the live entity instead")
+
+            old_type = row["entity_type"]
+            # No-op when the stored type already equals the requested canonical
+            # type. The comparison is against the RAW stored type on purpose:
+            # a prefixed/variant spelling (e.g. 'schema:Concept') is NOT already
+            # typed as 'Concept' and must fold.
+            if old_type == canon_new_type:
+                return EntityRetypeResponse(
+                    old_uri=old_uri, new_uri=old_uri, old_type=old_type,
+                    new_type=canon_new_type, merged_into_existing=False,
+                    rewired={}, merge_log_id=None, applied=False,
+                    dry_run=body.dry_run, already_typed=True,
+                    message="entity already has the requested type (no-op)")
+
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                new_uri, merged_into_existing, rewired = await _do_retype(
+                    conn, old_uri, old_type, canon_new_type, retyped_by)
+
+                merge_log_id: Optional[int] = None
+                if not body.dry_run:
+                    merge_log_id = await conn.fetchval("""
+                        INSERT INTO entity_merge_log
+                            (survivor_uri, loser_uri, rewired, merged_by)
+                        VALUES ($1, $2, $3::jsonb, $4)
+                        RETURNING id
+                    """, new_uri, old_uri, json.dumps(rewired), retyped_by)
+
+                if body.dry_run:
+                    await tx.rollback()
+                else:
+                    await tx.commit()
+            except HTTPException:
+                await tx.rollback()
+                raise
+            except Exception as e:
+                await tx.rollback()
+                logger.exception(
+                    "entity retype failed uri=%s new_type=%s", old_uri, canon_new_type)
+                raise HTTPException(status_code=500, detail=f"retype failed: {e}")
+
+        logger.info(
+            "entity_retype %s uri=%s -> %s (%s -> %s) merged_into_existing=%s "
+            "merge_log_id=%s by=%s",
+            "DRY_RUN" if body.dry_run else "APPLIED",
+            old_uri, new_uri, old_type, canon_new_type, merged_into_existing,
+            merge_log_id, retyped_by)
+        return EntityRetypeResponse(
+            old_uri=old_uri, new_uri=new_uri, old_type=old_type,
+            new_type=canon_new_type, merged_into_existing=merged_into_existing,
+            rewired=rewired, merge_log_id=merge_log_id,
+            applied=(not body.dry_run), dry_run=body.dry_run, already_typed=False,
+            message=("dry run — rolled back, nothing committed"
+                     if body.dry_run else "retype applied"))
 
     @router.get("/{uri:path}/resolve")
     async def resolve_entity_redirect(uri: str):
