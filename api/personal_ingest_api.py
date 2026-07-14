@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import logging
 import uuid
 from pathlib import Path as _VaultPath
@@ -87,6 +87,7 @@ from api.entity_schema import (
     reload_entity_schemas,
     get_first_significant_token,
     get_phonetic_enabled_types,
+    canonicalize_entity_type,
     EntityTypeConfig,
 )
 
@@ -255,6 +256,13 @@ class ExtractedEntity(BaseModel):
     associated_people: Optional[List[str]] = None
     associated_organizations: Optional[List[str]] = None
 
+    @field_validator("type")
+    @classmethod
+    def _canonicalize_type(cls, v: str) -> str:
+        # Strip schema:/bkc: prefixes and resolve to the canonical schema
+        # type_key (case/plural tolerant). Empty string passes through.
+        return canonicalize_entity_type(v) if v else v
+
 
 class ExtractedRelationship(BaseModel):
     """Relationship between entities"""
@@ -293,6 +301,12 @@ class CanonicalEntity(BaseModel):
     is_new: bool
     merged_with: Optional[str] = None  # If deduplicated
     confidence: float = 1.0
+    # Vault-path annotation (P2, 2026-07-13). Populated for resolved
+    # (is_new=false) entities on /ingest. ANNOTATE-ONLY — never gates or
+    # demotes resolution. Null when there is no entity_rid_mappings row.
+    vault_path: Optional[str] = None
+    vault_note_exists: Optional[bool] = None
+    vault_folder: Optional[str] = None
 
 
 class IngestStats(BaseModel):
@@ -331,6 +345,11 @@ class RegisterEntityRequest(BaseModel):
     content_hash: Optional[str] = None
     publication_scope: Optional[str] = "local_graph"  # "local_graph" | "federated"
     visibility_scope: Optional[str] = "public"  # "public" | "node_private"
+
+    @field_validator("entity_type")
+    @classmethod
+    def _canonicalize_entity_type(cls, v: str) -> str:
+        return canonicalize_entity_type(v) if v else v
 
 
 class RegisterEntityResponse(BaseModel):
@@ -1314,6 +1333,9 @@ async def store_new_entity(
 ) -> None:
     """Store a new entity in the registry with embedding and phonetic code"""
     normalized = normalize_entity_text(entity.name)
+    # Canonicalize the persisted type (strip schema:/bkc:, resolve plural/case)
+    # so entity_registry never accumulates prefixed/variant type spellings.
+    entity_type = canonicalize_entity_type(entity.type) if entity.type else entity.type
 
     import json as json_module
     metadata = json_module.dumps({
@@ -1331,13 +1353,13 @@ async def store_new_entity(
 
     # Compute phonetic code for types with phonetic_matching enabled (schema-driven)
     phonetic_code = None
-    schema = get_schema_for_type(entity.type)
+    schema = get_schema_for_type(entity_type)
     if schema.phonetic_matching:
         # Use first significant token (skip stopwords)
         first_token = get_first_significant_token(normalized, schema.phonetic_stopwords)
         phonetic_code = get_phonetic_code(first_token)
         if phonetic_code:
-            logger.info(f"Generated phonetic code for new {entity.type}: {entity.name} -> {phonetic_code}")
+            logger.info(f"Generated phonetic code for new {entity_type}: {entity.name} -> {phonetic_code}")
 
     if embedding:
         # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
@@ -1352,7 +1374,7 @@ async def store_new_entity(
         """,
             canonical.uri,
             entity.name,
-            entity.type,
+            entity_type,
             normalized,
             source,
             document_rid,
@@ -1370,7 +1392,7 @@ async def store_new_entity(
         """,
             canonical.uri,
             entity.name,
-            entity.type,
+            entity_type,
             normalized,
             source,
             document_rid,
@@ -1382,7 +1404,7 @@ async def store_new_entity(
     await enqueue_outbox(conn, "entity_upsert", {
         "fuseki_uri": canonical.uri,
         "entity_text": entity.name,
-        "entity_type": entity.type,
+        "entity_type": entity_type,
         "normalized_text": normalized,
         "occurrence_count": 0,
         "phonetic_code": phonetic_code or "",
@@ -2546,6 +2568,13 @@ async def ingest_extraction(request: IngestRequest):
                             logger.info(f"Stored new entity: {canonical.uri}")
                         else:
                             resolved_count += 1
+                            # Vault-path annotation (P2, annotate-only). Mutates the
+                            # already-appended canonical in place. One indexed query.
+                            (canonical.vault_path,
+                             canonical.vault_note_exists,
+                             canonical.vault_folder) = await _annotate_vault_fields(
+                                conn, canonical.uri, canonical.type
+                            )
                             logger.info(f"Resolved to existing: {canonical.uri}")
 
                         # Emit federation event for entity replication
@@ -2872,6 +2901,46 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
     return {"results": results, "count": len(results)}
 
 
+async def _annotate_vault_fields(
+    conn: asyncpg.Connection,
+    canonical_uri: Optional[str],
+    entity_type: Optional[str],
+) -> Tuple[Optional[str], bool, Optional[str]]:
+    """Return (vault_path, vault_note_exists, vault_folder) for a resolved entity.
+
+    ANNOTATION ONLY — this never gates, demotes, or alters resolution; it only
+    describes where (if anywhere) the resolved entity lives in the vault.
+
+    - vault_path: from the entity_rid_mappings row (public/local scope only;
+      node_private mappings are excluded). One indexed lookup on the existing
+      idx_rid_mappings_canonical index. Null when there is no mapping.
+    - vault_note_exists: best-effort filesystem check via _vault_note_exists
+      (True when the vault isn't mounted here — see that helper). False when
+      there is no mapping.
+    - vault_folder: the schema folder for the entity type (e.g. Person ->
+      People). Null when entity_type is missing.
+    """
+    vault_path = None
+    if canonical_uri:
+        vault_path = await conn.fetchval(
+            """
+            SELECT vault_path FROM entity_rid_mappings
+            WHERE canonical_uri = $1
+              AND COALESCE(visibility_scope, 'public') != 'node_private'
+            LIMIT 1
+            """,
+            canonical_uri,
+        )
+    vault_note_exists = _vault_note_exists(vault_path) if vault_path else False
+    vault_folder = None
+    if entity_type:
+        try:
+            vault_folder = get_schema_for_type(entity_type).folder
+        except Exception:
+            vault_folder = None
+    return vault_path, vault_note_exists, vault_folder
+
+
 @app.get("/entity/resolve")
 async def resolve_entity_get(
     label: str,
@@ -2951,13 +3020,25 @@ async def resolve_entity_get(
                 for r in sibling_rows
             ]
 
+        # Vault-path annotation (P2, annotate-only) for the winning candidate
+        # and each sibling. Still inside the connection block.
+        p_vpath, p_vexists, p_vfolder = await _annotate_vault_fields(
+            conn, canonical.uri, canonical.type
+        )
+        for s in siblings:
+            s["vault_path"], s["vault_note_exists"], s["vault_folder"] = \
+                await _annotate_vault_fields(conn, s["uri"], s["type"])
+
     return {
         "candidates": [{
             "name": canonical.name,
             "uri": canonical.uri,
             "type": canonical.type,
             "confidence": canonical.confidence,
-            "merged_with": canonical.merged_with
+            "merged_with": canonical.merged_with,
+            "vault_path": p_vpath,
+            "vault_note_exists": p_vexists,
+            "vault_folder": p_vfolder,
         }] + siblings,
         "ambiguous": len(siblings) > 0,
         "is_new": is_new,
@@ -3050,13 +3131,24 @@ async def resolve_entity_post(request: ResolveRequest):
                 for r in sibling_rows
             ]
 
+        # Vault-path annotation (P2, annotate-only) for winner + siblings.
+        p_vpath, p_vexists, p_vfolder = await _annotate_vault_fields(
+            conn, canonical.uri, canonical.type
+        )
+        for s in siblings:
+            s["vault_path"], s["vault_note_exists"], s["vault_folder"] = \
+                await _annotate_vault_fields(conn, s["uri"], s["type"])
+
     return {
         "candidates": [{
             "name": canonical.name,
             "uri": canonical.uri,
             "type": canonical.type,
             "confidence": canonical.confidence,
-            "merged_with": canonical.merged_with
+            "merged_with": canonical.merged_with,
+            "vault_path": p_vpath,
+            "vault_note_exists": p_vexists,
+            "vault_folder": p_vfolder,
         }] + siblings,
         "ambiguous": len(siblings) > 0,
         "is_new": is_new,

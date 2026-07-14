@@ -1028,6 +1028,13 @@ def create_router(
         from api.personal_ingest_api import (
             normalize_entity_text, generate_entity_uri
         )
+        from api.entity_schema import canonicalize_entity_type
+
+        # Canonicalize the caller's type hint (strip schema:/bkc:, resolve
+        # plural/case) so type-gated exact/alias/fuzzy queries and Tier-3
+        # creates below use the canonical schema type_key.
+        if type_hint:
+            type_hint = canonicalize_entity_type(type_hint)
 
         normalized = normalize_entity_text(name)
 

@@ -585,6 +585,62 @@ def get_schema_for_type(type_hint: str) -> EntityTypeConfig:
     return UNKNOWN_TYPE_SCHEMA
 
 
+# Namespace prefixes stripped by canonicalize_entity_type. Kept conservative:
+# only these documented prefixes are removed (not arbitrary "x:y" values).
+_TYPE_NAMESPACE_PREFIXES = ("schema:", "bkc:")
+
+
+def canonicalize_entity_type(raw: str) -> str:
+    """Canonicalize a raw entity-type label to its schema ``type_key``.
+
+    - Strips a leading ``schema:`` / ``bkc:`` namespace prefix.
+    - Resolves case-insensitively and singular/plural-tolerantly through the
+      loaded schema keys and each type's ``type_aliases``.
+    - Falls back to the prefix-stripped value when no schema matches (unknown
+      types pass through unchanged apart from prefix stripping).
+
+    Examples:
+        ``schema:SoftwareApplication`` -> ``SoftwareApplication`` (prefix only)
+        ``bkc:Concept`` -> ``Concept``
+        ``schema:Persons`` -> ``Person`` (plural-tolerant)
+        ``organization`` -> ``Organization`` (case-insensitive)
+        ``FooBar`` -> ``FooBar`` (unknown passthrough)
+    """
+    if raw is None:
+        return raw
+    stripped = raw.strip()
+    for prefix in _TYPE_NAMESPACE_PREFIXES:
+        if stripped.lower().startswith(prefix):
+            stripped = stripped[len(prefix):].strip()
+            break
+    if not stripped:
+        return raw
+
+    schemas = get_entity_schemas()
+
+    def _match(candidate: str) -> Optional[str]:
+        cl = candidate.casefold()
+        for key, schema in schemas.items():
+            if key.casefold() == cl:
+                return key
+            if any(a.casefold() == cl for a in schema.type_aliases):
+                return key
+        return None
+
+    # Try the value as-is, then a singular/plural variant.
+    variants = [stripped]
+    if stripped.endswith('s') and len(stripped) > 1:
+        variants.append(stripped[:-1])
+    else:
+        variants.append(stripped + 's')
+    for v in variants:
+        hit = _match(v)
+        if hit:
+            return hit
+
+    return stripped
+
+
 def get_all_entity_types() -> List[str]:
     """Get list of all known entity type keys."""
     return list(get_entity_schemas().keys())
