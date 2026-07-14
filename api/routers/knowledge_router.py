@@ -207,6 +207,13 @@ class EpisodeCreateRequest(BaseModel):
         "supersede existing facts (legacy behavior). If false (default), "
         "parallel attributions coexist."
     )
+    # Idempotency: when supplied and already recorded, the endpoint returns the
+    # stored response (idempotent_replay=true) without writing again. The stored
+    # response is committed in the SAME transaction as the writes, so a rolled-
+    # back request never leaves a stale idempotency entry. Requires migration
+    # 106 (ingest_idempotency).
+    request_id: Optional[str] = Field(
+        None, description="Optional idempotency key for safe client retries.")
 
 
 class FactRecord(BaseModel):
@@ -260,6 +267,9 @@ class EpisodeCreateResponse(BaseModel):
     # Type-hint divergence list — empty unless caller provided subject_type
     # or object_type that conflicted with an existing entity. See TypeMismatch.
     type_mismatches: List[TypeMismatch] = Field(default_factory=list)
+    # True only when this response is a replay of a prior request with the same
+    # request_id (no new writes were performed). See EpisodeCreateRequest.request_id.
+    idempotent_replay: bool = False
 
 
 class EpisodeRecord(BaseModel):
@@ -363,6 +373,10 @@ def _row_to_dict(row) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 EmbedFn = Callable[[str], Coroutine[Any, Any, Optional[List[float]]]]
+# Batch embed: many texts -> parallel list of vectors (or None on provider failure).
+BatchEmbedFn = Callable[
+    [List[str]], Coroutine[Any, Any, Optional[List[Optional[List[float]]]]]
+]
 
 
 def _parse_jsonb(value) -> Dict:
@@ -655,6 +669,7 @@ def create_router(
     *,
     generate_query_embedding: Optional[EmbedFn] = None,
     generate_document_embedding: Optional[EmbedFn] = None,
+    generate_batch_embedding: Optional[BatchEmbedFn] = None,
 ) -> APIRouter:
     """Return an APIRouter for knowledge graph endpoints.
 
@@ -668,10 +683,15 @@ def create_router(
         QUERY mode embedding (with instruction prefix).
     generate_document_embedding : callable, optional
         DOCUMENT mode embedding (no instruction prefix).
+    generate_batch_embedding : callable, optional
+        DOCUMENT mode batch embedding: List[str] -> List[Optional[vector]].
+        Used by POST /episodes to prefetch all fact/entity embeddings in one
+        provider round-trip BEFORE acquiring a DB connection.
     """
     # Resolve to explicit query/document or fall back to unified
     _query_embed = generate_query_embedding or generate_embedding
     _doc_embed = generate_document_embedding or generate_embedding
+    _batch_embed = generate_batch_embedding
     router = APIRouter(tags=["knowledge"])
 
     # Federation Phase 1 step 2e: knowledge_episode emit. emit_domain_event is
@@ -717,273 +737,354 @@ def create_router(
         seen_uris: dict = {}  # cache name->uri within this request
 
         episode_reused = False
+        import json as json_mod
+
+        # Idempotency: replay a prior identical request without re-writing.
+        # (Sequential retries — the common case — hit here. A rare concurrent
+        # duplicate loses the race on the in-transaction INSERT below and its
+        # transaction rolls back; the client's retry then replays here.)
+        if body.request_id:
+            async with pool.acquire() as conn:
+                prior = await conn.fetchval(
+                    "SELECT response FROM ingest_idempotency WHERE request_id = $1",
+                    body.request_id)
+            if prior is not None:
+                data = prior if isinstance(prior, dict) else json_mod.loads(prior)
+                data["idempotent_replay"] = True
+                logger.info("idempotent replay for request_id=%s", body.request_id)
+                return EpisodeCreateResponse(**data)
+
+        # P4: prefetch every fact/entity embedding in ONE provider round-trip
+        # BEFORE acquiring a DB connection, so no embedding network call happens
+        # while a connection is held. The per-text path (_cached_doc_embed) then
+        # serves from this cache; entities discovered mid-request that weren't in
+        # the batch fall back to a single embed call. Keyed by normalized text so
+        # the fact-text, raw-name, and resolver's normalized-name lookups all hit.
+        from api.personal_ingest_api import normalize_entity_text
+        embed_cache: Dict[str, Optional[List[float]]] = {}
+        if _batch_embed and body.facts:
+            _raw_texts: List[str] = []
+            for _f in body.facts:
+                if _f.fact_text:
+                    _raw_texts.append(_f.fact_text)
+                if _f.subject:
+                    _raw_texts.append(_f.subject)
+                if _f.object:
+                    _raw_texts.append(_f.object)
+            _norm_to_raw: Dict[str, str] = {}
+            for _t in _raw_texts:
+                _norm_to_raw.setdefault(normalize_entity_text(_t), _t)
+            _unique_norms = list(_norm_to_raw.keys())
+            if _unique_norms:
+                _batch = await _batch_embed([_norm_to_raw[n] for n in _unique_norms])
+                if _batch and len(_batch) == len(_unique_norms):
+                    embed_cache = dict(zip(_unique_norms, _batch))
+
+        async def _cached_doc_embed(text):
+            if not text:
+                return None
+            key = normalize_entity_text(text)
+            if key in embed_cache:
+                return embed_cache[key]
+            val = await _doc_embed(text) if _doc_embed else None
+            embed_cache[key] = val
+            return val
+
+        embed_fn = _cached_doc_embed if (_doc_embed or _batch_embed) else None
 
         async with pool.acquire() as conn:
-            # 1. Check for existing episode by (source_document, group_id) (dedup).
-            # Wave 2 B3 (2026-04-30): scope dedup to group_id so multi-group
-            # writes with the same source_document don't accidentally collapse
-            # into a single episode. Today (2026-04-30) all production episodes
-            # are in `koi_canon_v1` so 0 collisions exist; B3 hardens forward.
-            import json as json_mod
-            episode_id = None
-            existing_ep = None
-            if body.source_document:
-                existing_ep = await conn.fetchrow("""
-                    SELECT id, name, content, source_description,
-                           source_document, group_id, valid_at, created_at,
-                           metadata
-                    FROM knowledge_episodes
-                    WHERE source_document = $1 AND group_id = $2
-                    LIMIT 1
-                """, body.source_document, body.group_id)
-                if existing_ep:
-                    episode_id = existing_ep["id"]
+            # P4: single transaction — every write below commits together or not
+            # at all. On an already-in-transaction connection (tests) this opens a
+            # SAVEPOINT. Federation emit stays AFTER commit (see 2e note below).
+            async with conn.transaction():
+                # 1. Check for existing episode by (source_document, group_id) (dedup).
+                # Wave 2 B3 (2026-04-30): scope dedup to group_id so multi-group
+                # writes with the same source_document don't accidentally collapse
+                # into a single episode. Today (2026-04-30) all production episodes
+                # are in `koi_canon_v1` so 0 collisions exist; B3 hardens forward.
+                episode_id = None
+                existing_ep = None
+                if body.source_document:
+                    existing_ep = await conn.fetchrow("""
+                        SELECT id, name, content, source_description,
+                               source_document, group_id, valid_at, created_at,
+                               metadata
+                        FROM knowledge_episodes
+                        WHERE source_document = $1 AND group_id = $2
+                        LIMIT 1
+                    """, body.source_document, body.group_id)
+                    if existing_ep:
+                        episode_id = existing_ep["id"]
 
-            if episode_id:
-                episode_reused = True
-                logger.info(
-                    f"Reusing existing episode {episode_id} "
-                    f"for source_document: {body.source_document}")
-                # Federation 2e: bundled-emit episode payload — current DB row.
-                episode_payload = {
-                    "id": str(existing_ep["id"]),
-                    "name": existing_ep["name"],
-                    "content": existing_ep["content"],
-                    "source_description": existing_ep["source_description"],
-                    "source_document": existing_ep["source_document"],
-                    "group_id": existing_ep["group_id"],
-                    "valid_at": existing_ep["valid_at"].isoformat()
-                        if existing_ep["valid_at"] else None,
-                    "created_at": existing_ep["created_at"].isoformat()
-                        if existing_ep["created_at"] else None,
-                    "metadata": existing_ep["metadata"],
-                }
-            else:
-                new_ep = await conn.fetchrow("""
-                    INSERT INTO knowledge_episodes
-                        (name, content, source_description, source_document,
-                         group_id, valid_at, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                    RETURNING id, created_at
-                """, body.name, body.content, body.source_description,
-                    body.source_document, body.group_id, valid_at,
-                    json_mod.dumps(metadata))
-                episode_id = new_ep["id"]
-                # Federation 2e: bundled-emit episode payload — request values.
-                episode_payload = {
-                    "id": str(episode_id),
-                    "name": body.name,
-                    "content": body.content,
-                    "source_description": body.source_description,
-                    "source_document": body.source_document,
-                    "group_id": body.group_id,
-                    "valid_at": valid_at.isoformat() if valid_at else None,
-                    "created_at": new_ep["created_at"].isoformat()
-                        if new_ep["created_at"] else None,
-                    "metadata": metadata,
-                }
+                if episode_id:
+                    episode_reused = True
+                    logger.info(
+                        f"Reusing existing episode {episode_id} "
+                        f"for source_document: {body.source_document}")
+                    # Federation 2e: bundled-emit episode payload — current DB row.
+                    episode_payload = {
+                        "id": str(existing_ep["id"]),
+                        "name": existing_ep["name"],
+                        "content": existing_ep["content"],
+                        "source_description": existing_ep["source_description"],
+                        "source_document": existing_ep["source_document"],
+                        "group_id": existing_ep["group_id"],
+                        "valid_at": existing_ep["valid_at"].isoformat()
+                            if existing_ep["valid_at"] else None,
+                        "created_at": existing_ep["created_at"].isoformat()
+                            if existing_ep["created_at"] else None,
+                        "metadata": existing_ep["metadata"],
+                    }
+                else:
+                    new_ep = await conn.fetchrow("""
+                        INSERT INTO knowledge_episodes
+                            (name, content, source_description, source_document,
+                             group_id, valid_at, metadata)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                        RETURNING id, created_at
+                    """, body.name, body.content, body.source_description,
+                        body.source_document, body.group_id, valid_at,
+                        json_mod.dumps(metadata))
+                    episode_id = new_ep["id"]
+                    # Federation 2e: bundled-emit episode payload — request values.
+                    episode_payload = {
+                        "id": str(episode_id),
+                        "name": body.name,
+                        "content": body.content,
+                        "source_description": body.source_description,
+                        "source_document": body.source_document,
+                        "group_id": body.group_id,
+                        "valid_at": valid_at.isoformat() if valid_at else None,
+                        "created_at": new_ep["created_at"].isoformat()
+                            if new_ep["created_at"] else None,
+                        "metadata": metadata,
+                    }
 
-            # 2. Process each fact
-            facts_created = 0
-            facts_skipped = 0
-            facts_superseded = 0
-            facts_null_embed = 0  # Wave A A2: silent-fail surface
-            emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
-            # Collect type mismatches across all facts in this request
-            type_mismatches: List[TypeMismatch] = []
+                # 2. Process each fact
+                facts_created = 0
+                facts_skipped = 0
+                facts_superseded = 0
+                facts_null_embed = 0  # Wave A A2: silent-fail surface
+                emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
+                # Collect type mismatches across all facts in this request
+                type_mismatches: List[TypeMismatch] = []
 
-            for fact in body.facts:
-                # Resolve subject
-                subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
-                    conn, fact.subject, body.create_entities,
-                    _doc_embed, seen_uris,
-                    type_hint=fact.subject_type)
-                if not subject_uri:
-                    logger.warning(f"Could not resolve subject: {fact.subject}")
-                    continue
-                entities_resolved += 1
-                if is_new:
-                    entities_created += 1
-                # Flag type mismatch (caller provided hint, resolved type differs,
-                # and this wasn't a cache hit which returns None for resolved_type)
-                if (fact.subject_type and subj_resolved_type
-                        and fact.subject_type != subj_resolved_type):
-                    type_mismatches.append(TypeMismatch(
-                        name=fact.subject, role="subject",
-                        requested_type=fact.subject_type,
-                        resolved_type=subj_resolved_type,
-                        resolved_uri=subject_uri,
-                    ))
-
-                # Resolve object (if entity name provided)
-                object_uri = None
-                if fact.object:
-                    object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
-                        conn, fact.object, body.create_entities,
-                        _doc_embed, seen_uris,
-                        type_hint=fact.object_type)
-                    if object_uri:
-                        entities_resolved += 1
-                        if obj_new:
-                            entities_created += 1
-                        if (fact.object_type and obj_resolved_type
-                                and fact.object_type != obj_resolved_type):
-                            type_mismatches.append(TypeMismatch(
-                                name=fact.object, role="object",
-                                requested_type=fact.object_type,
-                                resolved_type=obj_resolved_type,
-                                resolved_uri=object_uri,
-                            ))
-
-                # Generate fact embedding
-                fact_embedding = None
-                if _doc_embed:
-                    fact_embedding = await _doc_embed(fact.fact_text)
-
-                # --- Dedup + invalidation ---
-                # Reads from fact_embedding_3072 (post-migration 096); halfvec
-                # cast required because pgvector full-precision indexes cap at
-                # 2000 dims (see migration 097).
-                if fact_embedding:
-                    existing = await conn.fetch("""
-                        SELECT id, fact_text, predicate, object_uri,
-                               1 - (fact_embedding_3072::halfvec(3072)
-                                    <=> $1::halfvec(3072)) AS similarity
-                        FROM knowledge_facts
-                        WHERE subject_uri = $2 AND valid_to IS NULL
-                          AND fact_embedding_3072 IS NOT NULL
-                        ORDER BY fact_embedding_3072::halfvec(3072)
-                                 <=> $1::halfvec(3072)
-                        LIMIT 5
-                    """, str(fact_embedding), subject_uri)
-
-                    # Check for near-duplicate (similarity > 0.95).
-                    # Task A 2026-04-29: parallel-attribution dedup-shape fix.
-                    # The skip condition now also requires (predicate, object_uri)
-                    # to match — otherwise parallel attributions like
-                    # AUTHORED_WITHIN with different session UUIDs (which produce
-                    # near-identical fact_text differing only by the embedded
-                    # UUID) would be silently dropped on cosine>0.95.
-                    # Re-writes of the EXACT same fact still skip correctly
-                    # because (subject, predicate, object_uri, fact_text)
-                    # all match.
-                    predicate_upper = fact.predicate.upper()
-                    skip = False
-                    for row in existing:
-                        sim = float(row['similarity'])
-                        if sim > 0.95 \
-                                and row['predicate'] == predicate_upper \
-                                and row['object_uri'] == object_uri:
-                            logger.info(
-                                f"Skipped duplicate fact: {fact.fact_text} "
-                                f"(similarity: {sim:.3f} with fact {row['id']}; "
-                                f"same predicate+object)")
-                            facts_skipped += 1
-                            skip = True
-                            break
-
-                    if skip:
+                for fact in body.facts:
+                    # Resolve subject
+                    subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
+                        conn, fact.subject, body.create_entities,
+                        embed_fn, seen_uris,
+                        type_hint=fact.subject_type)
+                    if not subject_uri:
+                        logger.warning(f"Could not resolve subject: {fact.subject}")
                         continue
+                    entities_resolved += 1
+                    if is_new:
+                        entities_created += 1
+                    # Flag type mismatch (caller provided hint, resolved type differs,
+                    # and this wasn't a cache hit which returns None for resolved_type)
+                    if (fact.subject_type and subj_resolved_type
+                            and fact.subject_type != subj_resolved_type):
+                        type_mismatches.append(TypeMismatch(
+                            name=fact.subject, role="subject",
+                            requested_type=fact.subject_type,
+                            resolved_type=subj_resolved_type,
+                            resolved_uri=subject_uri,
+                        ))
 
-                    # Invalidation: same subject + same predicate + different object → retire old.
-                    # Task A 2026-04-29: opt-in via request-level
-                    # `expire_existing=true`. Default false → parallel
-                    # attributions coexist.
-                    # Wave 2 B1 2026-04-30: predicate-aware default. SUPERSEDE
-                    # bucket auto-retires; COEXIST bucket auto-coexists; unknown
-                    # falls through to request flag (yesterday's behavior).
-                    should_supersede = _resolve_supersession_policy(
-                        predicate_upper, body.expire_existing
-                    )
-                    if should_supersede:
+                    # Resolve object (if entity name provided)
+                    object_uri = None
+                    if fact.object:
+                        object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
+                            conn, fact.object, body.create_entities,
+                            embed_fn, seen_uris,
+                            type_hint=fact.object_type)
+                        if object_uri:
+                            entities_resolved += 1
+                            if obj_new:
+                                entities_created += 1
+                            if (fact.object_type and obj_resolved_type
+                                    and fact.object_type != obj_resolved_type):
+                                type_mismatches.append(TypeMismatch(
+                                    name=fact.object, role="object",
+                                    requested_type=fact.object_type,
+                                    resolved_type=obj_resolved_type,
+                                    resolved_uri=object_uri,
+                                ))
+
+                    # Generate fact embedding (served from the prefetch cache)
+                    fact_embedding = None
+                    if embed_fn:
+                        fact_embedding = await embed_fn(fact.fact_text)
+
+                    # --- Dedup + invalidation ---
+                    # Reads from fact_embedding_3072 (post-migration 096); halfvec
+                    # cast required because pgvector full-precision indexes cap at
+                    # 2000 dims (see migration 097).
+                    if fact_embedding:
+                        existing = await conn.fetch("""
+                            SELECT id, fact_text, predicate, object_uri,
+                                   1 - (fact_embedding_3072::halfvec(3072)
+                                        <=> $1::halfvec(3072)) AS similarity
+                            FROM knowledge_facts
+                            WHERE subject_uri = $2 AND valid_to IS NULL
+                              AND fact_embedding_3072 IS NOT NULL
+                            ORDER BY fact_embedding_3072::halfvec(3072)
+                                     <=> $1::halfvec(3072)
+                            LIMIT 5
+                        """, str(fact_embedding), subject_uri)
+
+                        # Check for near-duplicate (similarity > 0.95).
+                        # Task A 2026-04-29: parallel-attribution dedup-shape fix.
+                        # The skip condition now also requires (predicate, object_uri)
+                        # to match — otherwise parallel attributions like
+                        # AUTHORED_WITHIN with different session UUIDs (which produce
+                        # near-identical fact_text differing only by the embedded
+                        # UUID) would be silently dropped on cosine>0.95.
+                        # Re-writes of the EXACT same fact still skip correctly
+                        # because (subject, predicate, object_uri, fact_text)
+                        # all match.
+                        predicate_upper = fact.predicate.upper()
+                        skip = False
                         for row in existing:
                             sim = float(row['similarity'])
-                            if (row['predicate'] == predicate_upper
-                                    and row['object_uri'] != object_uri
-                                    and sim > 0.5):
-                                await conn.execute("""
-                                    UPDATE knowledge_facts
-                                    SET valid_to = NOW()
-                                    WHERE id = $1
-                                """, row['id'])
+                            if sim > 0.95 \
+                                    and row['predicate'] == predicate_upper \
+                                    and row['object_uri'] == object_uri:
                                 logger.info(
-                                    f"Superseded fact {row['id']}: "
-                                    f"{row['fact_text']} → {fact.fact_text}")
-                                facts_superseded += 1
+                                    f"Skipped duplicate fact: {fact.fact_text} "
+                                    f"(similarity: {sim:.3f} with fact {row['id']}; "
+                                    f"same predicate+object)")
+                                facts_skipped += 1
+                                skip = True
+                                break
 
-                # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
-                # writes. When fact_embedding is None (provider degraded /
-                # quota / auth fail), the fact still writes (don't lose data)
-                # but we (a) log structured WARNING with the predicate +
-                # subject identifying the affected fact, (b) bump a process-
-                # level counter on app.state for /health to surface, and
-                # (c) bump per-response facts_null_embed so the caller sees
-                # the silent-fail count immediately.
-                if fact_embedding is None:
-                    facts_null_embed += 1
-                    logger.warning(
-                        "null_embed_fact_write subject=%s predicate=%s "
-                        "group_id=%s episode_id=%s — provider degraded; "
-                        "fact written without fact_embedding_3072 and will "
-                        "BYPASS future cosine dedup until re-embedded",
-                        subject_uri,
-                        fact.predicate.upper(),
-                        body.group_id,
-                        episode_id,
-                    )
-                    try:
-                        request.app.state.null_embed_fact_counter = (
-                            getattr(request.app.state, "null_embed_fact_counter", 0) + 1
+                        if skip:
+                            continue
+
+                        # Invalidation: same subject + same predicate + different object → retire old.
+                        # Task A 2026-04-29: opt-in via request-level
+                        # `expire_existing=true`. Default false → parallel
+                        # attributions coexist.
+                        # Wave 2 B1 2026-04-30: predicate-aware default. SUPERSEDE
+                        # bucket auto-retires; COEXIST bucket auto-coexists; unknown
+                        # falls through to request flag (yesterday's behavior).
+                        should_supersede = _resolve_supersession_policy(
+                            predicate_upper, body.expire_existing
                         )
-                    except Exception:
-                        pass
+                        if should_supersede:
+                            for row in existing:
+                                sim = float(row['similarity'])
+                                if (row['predicate'] == predicate_upper
+                                        and row['object_uri'] != object_uri
+                                        and sim > 0.5):
+                                    await conn.execute("""
+                                        UPDATE knowledge_facts
+                                        SET valid_to = NOW()
+                                        WHERE id = $1
+                                    """, row['id'])
+                                    logger.info(
+                                        f"Superseded fact {row['id']}: "
+                                        f"{row['fact_text']} → {fact.fact_text}")
+                                    facts_superseded += 1
 
-                fact_row = await conn.fetchrow("""
-                    INSERT INTO knowledge_facts
-                        (episode_id, subject_uri, predicate, object_uri,
-                         object_literal, fact_text, fact_embedding_3072,
-                         valid_from, valid_to, group_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10)
-                    RETURNING id, created_at, source_node_rid
-                """, episode_id, subject_uri, fact.predicate.upper(),
-                    object_uri, fact.object_literal, fact.fact_text,
-                    str(fact_embedding) if fact_embedding else None,
-                    _dt(fact.valid_from), _dt(fact.valid_to), body.group_id)
-                facts_created += 1
+                    # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
+                    # writes. When fact_embedding is None (provider degraded /
+                    # quota / auth fail), the fact still writes (don't lose data)
+                    # but we (a) log structured WARNING with the predicate +
+                    # subject identifying the affected fact, (b) bump a process-
+                    # level counter on app.state for /health to surface, and
+                    # (c) bump per-response facts_null_embed so the caller sees
+                    # the silent-fail count immediately.
+                    if fact_embedding is None:
+                        facts_null_embed += 1
+                        logger.warning(
+                            "null_embed_fact_write subject=%s predicate=%s "
+                            "group_id=%s episode_id=%s — provider degraded; "
+                            "fact written without fact_embedding_3072 and will "
+                            "BYPASS future cosine dedup until re-embedded",
+                            subject_uri,
+                            fact.predicate.upper(),
+                            body.group_id,
+                            episode_id,
+                        )
+                        try:
+                            request.app.state.null_embed_fact_counter = (
+                                getattr(request.app.state, "null_embed_fact_counter", 0) + 1
+                            )
+                        except Exception:
+                            pass
 
-                # Federation 2e: accumulate per-fact bundled-emit payload.
-                # Shape pinned by the subscriber contract (_insert_fact in
-                # domain_event_handlers.py). turn_range_* are None — this
-                # endpoint is not the deep-extraction path.
-                emb_col, emb_val = _fact_embedding_discriminator(
-                    fact_embedding_3072=fact_embedding
+                    fact_row = await conn.fetchrow("""
+                        INSERT INTO knowledge_facts
+                            (episode_id, subject_uri, predicate, object_uri,
+                             object_literal, fact_text, fact_embedding_3072,
+                             valid_from, valid_to, group_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10)
+                        RETURNING id, created_at, source_node_rid
+                    """, episode_id, subject_uri, fact.predicate.upper(),
+                        object_uri, fact.object_literal, fact.fact_text,
+                        str(fact_embedding) if fact_embedding else None,
+                        _dt(fact.valid_from), _dt(fact.valid_to), body.group_id)
+                    facts_created += 1
+
+                    # Federation 2e: accumulate per-fact bundled-emit payload.
+                    # Shape pinned by the subscriber contract (_insert_fact in
+                    # domain_event_handlers.py). turn_range_* are None — this
+                    # endpoint is not the deep-extraction path.
+                    emb_col, emb_val = _fact_embedding_discriminator(
+                        fact_embedding_3072=fact_embedding
+                    )
+                    emit_facts.append({
+                        "id": str(fact_row["id"]),
+                        "subject_uri": subject_uri,
+                        "predicate": fact.predicate.upper(),
+                        "object_uri": object_uri,
+                        "object_literal": fact.object_literal,
+                        "fact_text": fact.fact_text,
+                        "valid_from": fact.valid_from,
+                        "valid_to": fact.valid_to,
+                        "created_at": fact_row["created_at"].isoformat()
+                            if fact_row["created_at"] else None,
+                        "group_id": body.group_id,
+                        "source_node_rid": fact_row["source_node_rid"],
+                        "turn_range_start": None,
+                        "turn_range_end": None,
+                        "embedding_column": emb_col,
+                        "embedding_value": emb_val,
+                    })
+
+                # Build the response inside the transaction so the idempotency
+                # ledger stores exactly what the caller receives.
+                response = EpisodeCreateResponse(
+                    episode_id=str(episode_id),
+                    episode_reused=episode_reused,
+                    facts_created=facts_created,
+                    facts_skipped=facts_skipped,
+                    facts_superseded=facts_superseded,
+                    entities_resolved=entities_resolved,
+                    entities_created=entities_created,
+                    facts_null_embed=facts_null_embed,
+                    type_mismatches=type_mismatches,
                 )
-                emit_facts.append({
-                    "id": str(fact_row["id"]),
-                    "subject_uri": subject_uri,
-                    "predicate": fact.predicate.upper(),
-                    "object_uri": object_uri,
-                    "object_literal": fact.object_literal,
-                    "fact_text": fact.fact_text,
-                    "valid_from": fact.valid_from,
-                    "valid_to": fact.valid_to,
-                    "created_at": fact_row["created_at"].isoformat()
-                        if fact_row["created_at"] else None,
-                    "group_id": body.group_id,
-                    "source_node_rid": fact_row["source_node_rid"],
-                    "turn_range_start": None,
-                    "turn_range_end": None,
-                    "embedding_column": emb_col,
-                    "embedding_value": emb_val,
-                })
+
+                # Idempotency: record the response in the SAME transaction. A
+                # plain INSERT (not ON CONFLICT DO NOTHING) so a concurrent
+                # duplicate loses here and its whole transaction rolls back
+                # rather than committing duplicate writes.
+                if body.request_id:
+                    await conn.execute(
+                        "INSERT INTO ingest_idempotency (request_id, endpoint, response) "
+                        "VALUES ($1, $2, $3::jsonb)",
+                        body.request_id, "/knowledge/episodes",
+                        json_mod.dumps(response.model_dump()))
 
         # Federation 2e: emit the bundled knowledge_episode event AFTER the
-        # `async with pool.acquire()` block exits — i.e. after every statement
-        # above has auto-committed (asyncpg commits per-statement; this endpoint
-        # opens no explicit transaction). Emitting inside the block would risk
-        # queueing an event for a row a later rollback removed. emit_domain_event
-        # is internally gated by KOI_FEDERATE_KNOWLEDGE and never raises, so a
-        # flag-off run and an emit failure are both perfect no-ops here.
+        # transaction commits (the `async with` blocks above have exited).
+        # Emitting inside the transaction would risk queueing an event for a row
+        # a later rollback removed. emit_domain_event is internally gated by
+        # KOI_FEDERATE_KNOWLEDGE and never raises, so a flag-off run and an emit
+        # failure are both perfect no-ops here.
         bundled_payload = {**episode_payload, "facts": emit_facts}
         await emit_domain_event(
             "knowledge_episode",
@@ -993,17 +1094,7 @@ def create_router(
             payload_event_id=str(uuid4()),
         )
 
-        return EpisodeCreateResponse(
-            episode_id=str(episode_id),
-            episode_reused=episode_reused,
-            facts_created=facts_created,
-            facts_skipped=facts_skipped,
-            facts_superseded=facts_superseded,
-            entities_resolved=entities_resolved,
-            entities_created=entities_created,
-            facts_null_embed=facts_null_embed,
-            type_mismatches=type_mismatches,
-        )
+        return response
 
     async def _resolve_or_create(
         conn, name: str, create_if_missing: bool,

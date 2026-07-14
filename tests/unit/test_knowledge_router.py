@@ -591,3 +591,193 @@ class TestTypeMismatch:
         )
         assert resp.status_code == 201
         assert resp.json()["type_mismatches"] == []
+
+
+# ---------------------------------------------------------------------------
+# P4: batch-embed prefetch + single transaction + request_id idempotency
+# ---------------------------------------------------------------------------
+
+P4_SVC_TOKEN = "test-p4-service-token"
+P4_AUTH = {"Authorization": f"Bearer {P4_SVC_TOKEN}"}
+
+
+def _fake_vec(text):
+    seed = hash(text)
+    return [float(((seed + i) % 97) + 1) / 97.0 for i in range(EMBED_DIM)]
+
+
+class _EmbedCounter:
+    """Counts single vs batch embed calls; returns valid 3072-dim vectors."""
+
+    def __init__(self):
+        self.single = 0
+        self.batch = 0
+
+    async def single_embed(self, text, **kwargs):
+        self.single += 1
+        return _fake_vec(text)
+
+    async def batch_embed(self, texts, **kwargs):
+        self.batch += 1
+        return [_fake_vec(t) for t in texts]
+
+
+@pytest.fixture
+async def p4_harness(monkeypatch):
+    """(client, conn, counter) wired against a rolled-back txn, with batch embed
+    + an in-txn ingest_idempotency table + service-token auth satisfied.
+    """
+    from api.routers.knowledge_router import create_router
+
+    monkeypatch.setenv("KOI_CLAIMS_SERVICE_TOKEN", P4_SVC_TOKEN)
+
+    conn = await asyncpg.connect(DB_URL)
+    tx = conn.transaction()
+    await tx.start()
+    # Idempotency ledger lives inside the rolled-back txn (migration 106 not
+    # applied to the live DB in tests).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS ingest_idempotency (
+            request_id TEXT PRIMARY KEY,
+            endpoint   TEXT NOT NULL,
+            response   JSONB NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+
+    prev_queue = federation_events._event_queue
+    fake_queue = _FakeQueue(_InstrumentedPool(conn))
+    federation_events.set_event_queue(fake_queue)
+
+    counter = _EmbedCounter()
+    pool = _InstrumentedPool(conn)
+    router = create_router(
+        pool,
+        generate_document_embedding=counter.single_embed,
+        generate_batch_embedding=counter.batch_embed,
+    )
+    app = FastAPI()
+    app.include_router(router, prefix="/knowledge")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client, conn, counter
+
+    federation_events.set_event_queue(prev_queue)
+    await tx.rollback()
+    await conn.close()
+
+
+class TestP4BatchTransactionIdempotency:
+
+    @pytest.mark.anyio
+    async def test_batch_embed_one_call_no_per_text(self, p4_harness, monkeypatch):
+        """A 20-fact episode uses ONE batch embed call and zero per-text calls."""
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, counter = p4_harness
+
+        resp = await client.post(
+            "/knowledge/episodes", json=_episode_body(20), headers=P4_AUTH)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["facts_created"] == 20
+        # ≤2 batch calls (implementation does exactly 1) and no per-text fallback.
+        assert counter.batch == 1, f"expected 1 batch call, got {counter.batch}"
+        assert counter.single == 0, f"expected 0 per-text calls, got {counter.single}"
+
+    @pytest.mark.anyio
+    async def test_idempotent_replay(self, p4_harness, monkeypatch):
+        """Same request_id replays the stored response without new writes."""
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, counter = p4_harness
+
+        body = _episode_body(3)
+        body["request_id"] = f"idem-{uuid.uuid4()}"
+
+        r1 = await client.post("/knowledge/episodes", json=body, headers=P4_AUTH)
+        assert r1.status_code == 201, r1.text
+        d1 = r1.json()
+        assert d1["idempotent_replay"] is False
+        assert d1["facts_created"] == 3
+        ep_id = d1["episode_id"]
+
+        # Replay: identical request_id → stored response, no new writes.
+        r2 = await client.post("/knowledge/episodes", json=body, headers=P4_AUTH)
+        assert r2.status_code == 201, r2.text
+        d2 = r2.json()
+        assert d2["idempotent_replay"] is True
+        assert d2["episode_id"] == ep_id
+        assert d2["facts_created"] == 3
+        # Discriminator: a fresh episode-reuse would report episode_reused=True;
+        # a replay returns the STORED first response (episode_reused=False).
+        assert d2["episode_reused"] is False
+
+        # Exactly one idempotency row, one episode, three facts.
+        rows = await conn.fetchval(
+            "SELECT COUNT(*) FROM ingest_idempotency WHERE request_id = $1",
+            body["request_id"])
+        assert rows == 1
+        ep_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM knowledge_episodes WHERE id = $1::uuid", ep_id)
+        assert ep_count == 1
+        fact_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE episode_id = $1::uuid", ep_id)
+        assert fact_count == 3
+
+    @pytest.mark.anyio
+    async def test_mid_transaction_failure_rolls_back_everything(
+        self, p4_harness, monkeypatch
+    ):
+        """An exception after partial writes rolls back the whole episode."""
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, counter = p4_harness
+        import api.routers.knowledge_router as kr
+
+        calls = {"n": 0}
+        orig = kr._fact_embedding_discriminator
+
+        def boom(**kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise RuntimeError("simulated mid-transaction failure")
+            return orig(**kwargs)
+
+        monkeypatch.setattr(kr, "_fact_embedding_discriminator", boom)
+
+        body = _episode_body(3)
+        src = body["source_document"]
+
+        raised = False
+        status = None
+        try:
+            resp = await client.post(
+                "/knowledge/episodes", json=body, headers=P4_AUTH)
+            status = resp.status_code
+        except RuntimeError:
+            raised = True
+        assert raised or status == 500, f"expected failure, got status={status}"
+
+        # Nothing persisted — episode + all facts rolled back.
+        ep_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM knowledge_episodes WHERE source_document = $1", src)
+        assert ep_count == 0
+        fact_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM knowledge_facts f "
+            "JOIN knowledge_episodes e ON e.id = f.episode_id "
+            "WHERE e.source_document = $1", src)
+        assert fact_count == 0
+
+    @pytest.mark.anyio
+    async def test_single_transaction_semantics_normal_commit(
+        self, p4_harness, monkeypatch
+    ):
+        """Sanity: with batch embedding wired, a normal episode commits fully."""
+        monkeypatch.delenv("KOI_FEDERATE_KNOWLEDGE", raising=False)
+        client, conn, counter = p4_harness
+
+        body = _episode_body(2)
+        resp = await client.post("/knowledge/episodes", json=body, headers=P4_AUTH)
+        assert resp.status_code == 201, resp.text
+        ep_id = resp.json()["episode_id"]
+        fact_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM knowledge_facts WHERE episode_id = $1::uuid", ep_id)
+        assert fact_count == 2

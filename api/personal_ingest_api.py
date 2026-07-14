@@ -291,6 +291,11 @@ class IngestRequest(BaseModel):
     source: str = "obsidian-vault"
     context: Optional[ResolutionContext] = None  # For contextual entity resolution
     parent_receipt_id: Optional[str] = None  # Chain to a parent CAT receipt
+    # Optional idempotency key for safe client retries. See ingest_idempotency
+    # (migration 106). NOTE: /ingest stores the response AFTER its post-commit
+    # receipt step (store-after-commit, not single-transaction) because the CAT
+    # receipt is created outside the main write transaction — see the endpoint.
+    request_id: Optional[str] = None
 
 
 class CanonicalEntity(BaseModel):
@@ -327,6 +332,9 @@ class IngestResponse(BaseModel):
     receipt_rid: Optional[str] = None  # Deprecated alias — use receipt_id
     receipt_persisted: bool = True  # False if receipt DB write failed (receipt_id still valid format but not in DB)
     stats: IngestStats
+    # True only when this response is a replay of a prior request with the same
+    # request_id (no new writes were performed). See IngestRequest.request_id.
+    idempotent_replay: bool = False
 
 
 class RegisterEntityRequest(BaseModel):
@@ -345,6 +353,11 @@ class RegisterEntityRequest(BaseModel):
     content_hash: Optional[str] = None
     publication_scope: Optional[str] = "local_graph"  # "local_graph" | "federated"
     visibility_scope: Optional[str] = "public"  # "public" | "node_private"
+    # When true, suppress the Tier 1.1b cross-type dedup guard so a same-name
+    # entity of THIS type can register even if a live entity of a DIFFERENT type
+    # already carries the name. Use to intentionally create a legitimately
+    # distinct same-named entity (the advisory cross_type_warning still fires).
+    force_type: bool = False
 
     @field_validator("entity_type")
     @classmethod
@@ -476,6 +489,25 @@ async def generate_document_embedding(text: str, prompt_type: str = "extraction"
     normalized = normalize_entity_text(text)
     return await embedding_provider.embed_or_none(
         normalized, is_query=False, prompt_type=prompt_type
+    )
+
+
+async def generate_document_embeddings_batch(
+    texts: List[str], prompt_type: str = "extraction"
+) -> Optional[List[Optional[List[float]]]]:
+    """Batch DOCUMENT embeddings — one provider round-trip for many texts.
+
+    Mirrors generate_document_embedding's normalization (normalize_entity_text)
+    and DOCUMENT mode so batch-computed vectors are byte-for-byte the same as
+    the per-text path — callers can safely prefetch a batch and fall back to
+    the single-text function for cache misses. Returns None when embeddings are
+    disabled or the provider fails (caller falls back to per-text embeds).
+    """
+    if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
+        return None
+    normalized = [normalize_entity_text(t or "") for t in texts]
+    return await embedding_provider.embed_batch_or_none(
+        normalized, prompt_type=prompt_type
     )
 
 
@@ -977,6 +1009,7 @@ async def resolve_entity(
     entity: ExtractedEntity,
     context: Optional[ResolutionContext] = None,
     skip_fuzzy: bool = False,
+    skip_cross_type: bool = False,
 ) -> Tuple[CanonicalEntity, bool]:
     """
     Resolve an entity against the knowledge base.
@@ -994,6 +1027,9 @@ async def resolve_entity(
         context: Optional disambiguation context (associated_people)
         skip_fuzzy: When true, use Tier 1 exact only; on exact miss, create a
             new entity instead of consulting alias/contextual/fuzzy/semantic tiers.
+        skip_cross_type: When true, suppress ONLY the Tier 1.1b type-agnostic
+            cross-type dedup fallback (see register-entity ``force_type``). All
+            other tiers run normally.
 
     Returns: (CanonicalEntity, is_new)
     """
@@ -1093,7 +1129,9 @@ async def resolve_entity(
     # guess; we fall through to fuzzy/semantic/create as before. This is no looser
     # than the pre-existing type-agnostic branch used when type_hint is absent
     # (lines above), and is strictly tighter (exactly-one + merged_into IS NULL).
-    if entity.type:
+    # Suppressed when skip_cross_type is set (register-entity force_type) so an
+    # intentionally-distinct same-named entity of this type can be created.
+    if entity.type and not skip_cross_type:
         cross_type_rows = await conn.fetch("""
             SELECT fuseki_uri, entity_text, entity_type
             FROM entity_registry
@@ -1663,6 +1701,7 @@ async def startup():
                     db_pool,
                     generate_query_embedding=generate_query_embedding,
                     generate_document_embedding=generate_document_embedding,
+                    generate_batch_embedding=generate_document_embeddings_batch,
                 ), prefix="/knowledge")
                 logger.info("Knowledge router mounted (/knowledge)")
             except Exception as e:
@@ -2522,6 +2561,19 @@ async def ingest_extraction(request: IngestRequest):
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
 
+    # Idempotency entry-check: replay a prior identical request without re-ingesting.
+    if request.request_id:
+        async with db_pool.acquire() as conn:
+            prior = await conn.fetchval(
+                "SELECT response FROM ingest_idempotency WHERE request_id = $1",
+                request.request_id)
+        if prior is not None:
+            import json as _json_replay
+            data = prior if isinstance(prior, dict) else _json_replay.loads(prior)
+            data["idempotent_replay"] = True
+            logger.info("idempotent replay for /ingest request_id=%s", request.request_id)
+            return IngestResponse(**data)
+
     canonical_entities: List[CanonicalEntity] = []
     new_count = 0
     resolved_count = 0
@@ -2732,7 +2784,7 @@ async def ingest_extraction(request: IngestRequest):
     except Exception as e:
         logger.error(f"Failed to create ingest CAT receipt: {e}")
 
-    return IngestResponse(
+    response = IngestResponse(
         success=success,
         canonical_entities=canonical_entities,
         receipt_id=receipt_id,
@@ -2740,6 +2792,24 @@ async def ingest_extraction(request: IngestRequest):
         receipt_persisted=receipt_persisted,
         stats=stats
     )
+
+    # Idempotency store-after-commit (best-effort). Unlike /knowledge/episodes,
+    # /ingest cannot store inside the main write transaction because the CAT
+    # receipt above is created afterwards. ON CONFLICT DO NOTHING so a concurrent
+    # duplicate never errors; a crash between commit and here just means a retry
+    # re-ingests (entity writes are dedup-idempotent). See IngestRequest.request_id.
+    if request.request_id:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO ingest_idempotency (request_id, endpoint, response) "
+                    "VALUES ($1, $2, $3::jsonb) ON CONFLICT (request_id) DO NOTHING",
+                    request.request_id, "/ingest",
+                    json_module_global.dumps(response.model_dump()))
+        except Exception as e:
+            logger.warning(f"Failed to store ingest idempotency record: {e}")
+
+    return response
 
 
 @app.get("/receipts/{receipt_id}/chain")
@@ -3703,8 +3773,11 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 context=None
             )
 
-            # Resolve against existing entities
-            canonical, is_new = await resolve_entity(conn, entity)
+            # Resolve against existing entities. force_type suppresses only the
+            # Tier 1.1b cross-type dedup fallback (advisory cross_type_warning
+            # below still fires).
+            canonical, is_new = await resolve_entity(
+                conn, entity, skip_cross_type=request.force_type)
 
             # Backfill vault_rid / vault_path for alias-only updates.
             # When the caller omits them (e.g. alias auto-learning), reuse the
