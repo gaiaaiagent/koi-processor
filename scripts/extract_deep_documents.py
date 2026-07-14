@@ -136,6 +136,22 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_MODEL = os.getenv("DOC_EXTRACTOR_OPENAI_MODEL", "gpt-4.1")
 OPENAI_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_OPENAI_MAX_TOKENS", "16000"))
 OPENAI_FALLBACK = env_flag("DOC_EXTRACTOR_OPENAI_FALLBACK", False)
+# call_extractor tries the NEXT transport (instead of raising) when a transport
+# fails with one of these ExtractionError.reason values. The default widens the
+# historical {extract_http_error, no_api_key} to also cover a transport that
+# connected but produced unusable output — truncated at max_tokens
+# (extract_truncated) or an empty completion (empty_completion) — because a
+# different backend may not hit the same limit. Terminal/parse reasons
+# (extract_parse_error, headless_llm_disabled, no_rag, …) are deliberately absent,
+# so they always raise. Override with DOC_EXTRACTOR_FALLBACK_REASONS="a,b,c".
+FALLBACK_REASONS = {
+    r.strip()
+    for r in os.getenv(
+        "DOC_EXTRACTOR_FALLBACK_REASONS",
+        "empty_completion,extract_http_error,extract_truncated,no_api_key",
+    ).split(",")
+    if r.strip()
+}
 AGENT_WINDOW_DIR = os.getenv("DOC_EXTRACTOR_AGENT_WINDOW_DIR")
 EPISODE_POST_TIMEOUT = env_float("DOC_EPISODE_POST_TIMEOUT_SECONDS", 1200.0)
 EXACT_REGISTER_ALL_EXTRACTED_ENTITIES = env_flag("DOC_EXACT_REGISTER_ALL_EXTRACTED_ENTITIES", False)
@@ -552,7 +568,7 @@ async def call_extractor(prompt: str, http: httpx.AsyncClient, *, model: str) ->
         try:
             return await run()
         except ExtractionError as e:
-            if e.reason not in {"extract_http_error", "no_api_key"}:
+            if e.reason not in FALLBACK_REASONS:
                 raise
             errors.append(f"{name}:{e.detail[:400]}")
 

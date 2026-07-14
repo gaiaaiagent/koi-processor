@@ -141,6 +141,137 @@ def test_call_extractor_headless_llm_disabled_by_default(monkeypatch):
     assert extractor.OPENAI_FALLBACK is False
 
 
+def _enable_headless_with_openai_fallback(monkeypatch):
+    """Load the module with headless extraction + OpenAI fallback enabled.
+
+    Constants are read at import time, so env must be set before load_extractor().
+    """
+    monkeypatch.setenv("DOC_EXTRACTOR_ALLOW_HEADLESS_LLM", "1")
+    monkeypatch.setenv("DOC_EXTRACTOR_OPENAI_FALLBACK", "1")
+    monkeypatch.delenv("DOC_EXTRACTOR_CLAUDE_P_FALLBACK", raising=False)
+    monkeypatch.delenv("DOC_EXTRACTOR_CLAUDE_P_PRIMARY", raising=False)
+
+
+def test_fallback_reasons_default_widened():
+    """Default set widens the historical pair to also cover unusable output."""
+    extractor = load_extractor()
+    assert extractor.FALLBACK_REASONS == {
+        "extract_http_error",
+        "no_api_key",
+        "extract_truncated",
+        "empty_completion",
+    }
+
+
+def test_extract_truncated_falls_through_to_openai(monkeypatch):
+    """anthropic raising extract_truncated → openai transport is attempted."""
+    _enable_headless_with_openai_fallback(monkeypatch)
+    monkeypatch.delenv("DOC_EXTRACTOR_FALLBACK_REASONS", raising=False)
+    extractor = load_extractor()
+
+    calls = []
+
+    async def fake_anthropic(prompt, http, *, model, **kwargs):
+        calls.append("anthropic")
+        raise extractor.ExtractionError("extract_truncated", "hit max_tokens")
+
+    async def fake_openai(prompt, http, *, model=None, **kwargs):
+        calls.append("openai")
+        return '{"ok": true}'
+
+    monkeypatch.setattr(extractor, "_call_anthropic", fake_anthropic)
+    monkeypatch.setattr(extractor, "_call_openai", fake_openai)
+
+    raw, route = asyncio.run(
+        extractor.call_extractor("prompt", object(), model="claude-sonnet-4-6")
+    )
+
+    assert calls == ["anthropic", "openai"], "openai must be tried after truncation"
+    assert raw == '{"ok": true}'
+    assert route == "openai_fallback"
+
+
+def test_empty_completion_falls_through_to_openai(monkeypatch):
+    """anthropic raising empty_completion → openai transport is attempted."""
+    _enable_headless_with_openai_fallback(monkeypatch)
+    monkeypatch.delenv("DOC_EXTRACTOR_FALLBACK_REASONS", raising=False)
+    extractor = load_extractor()
+
+    calls = []
+
+    async def fake_anthropic(prompt, http, *, model, **kwargs):
+        calls.append("anthropic")
+        raise extractor.ExtractionError("empty_completion", "no text content")
+
+    async def fake_openai(prompt, http, *, model=None, **kwargs):
+        calls.append("openai")
+        return '{"ok": true}'
+
+    monkeypatch.setattr(extractor, "_call_anthropic", fake_anthropic)
+    monkeypatch.setattr(extractor, "_call_openai", fake_openai)
+
+    raw, route = asyncio.run(
+        extractor.call_extractor("prompt", object(), model="claude-sonnet-4-6")
+    )
+    assert calls == ["anthropic", "openai"]
+    assert route == "openai_fallback"
+
+
+def test_terminal_parse_error_still_raises(monkeypatch):
+    """A terminal reason (extract_parse_error) is not in the set → no fallback."""
+    _enable_headless_with_openai_fallback(monkeypatch)
+    monkeypatch.delenv("DOC_EXTRACTOR_FALLBACK_REASONS", raising=False)
+    extractor = load_extractor()
+
+    calls = []
+
+    async def fake_anthropic(prompt, http, *, model, **kwargs):
+        calls.append("anthropic")
+        raise extractor.ExtractionError("extract_parse_error", "no JSON object found")
+
+    async def fake_openai(prompt, http, *, model=None, **kwargs):
+        calls.append("openai")
+        return '{"ok": true}'
+
+    monkeypatch.setattr(extractor, "_call_anthropic", fake_anthropic)
+    monkeypatch.setattr(extractor, "_call_openai", fake_openai)
+
+    with pytest.raises(extractor.ExtractionError) as exc:
+        asyncio.run(
+            extractor.call_extractor("prompt", object(), model="claude-sonnet-4-6")
+        )
+    assert exc.value.reason == "extract_parse_error"
+    assert calls == ["anthropic"], "openai must NOT be tried for a terminal error"
+
+
+def test_fallback_reasons_env_override_narrows_set(monkeypatch):
+    """DOC_EXTRACTOR_FALLBACK_REASONS can narrow the set so extract_truncated raises."""
+    _enable_headless_with_openai_fallback(monkeypatch)
+    monkeypatch.setenv("DOC_EXTRACTOR_FALLBACK_REASONS", "extract_http_error,no_api_key")
+    extractor = load_extractor()
+    assert extractor.FALLBACK_REASONS == {"extract_http_error", "no_api_key"}
+
+    calls = []
+
+    async def fake_anthropic(prompt, http, *, model, **kwargs):
+        calls.append("anthropic")
+        raise extractor.ExtractionError("extract_truncated", "hit max_tokens")
+
+    async def fake_openai(prompt, http, *, model=None, **kwargs):
+        calls.append("openai")
+        return '{"ok": true}'
+
+    monkeypatch.setattr(extractor, "_call_anthropic", fake_anthropic)
+    monkeypatch.setattr(extractor, "_call_openai", fake_openai)
+
+    with pytest.raises(extractor.ExtractionError) as exc:
+        asyncio.run(
+            extractor.call_extractor("prompt", object(), model="claude-sonnet-4-6")
+        )
+    assert exc.value.reason == "extract_truncated"
+    assert calls == ["anthropic"], "narrowed set must not fall through on truncation"
+
+
 def test_post_episode_uses_configured_timeout():
     extractor = load_extractor()
     extractor.EPISODE_POST_TIMEOUT = 42.5
