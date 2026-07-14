@@ -10,7 +10,7 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
 from api.utils import parse_ts, validity_filter_clause
@@ -118,6 +118,7 @@ class TaskRecord(BaseModel):
 class TaskPatchRequest(BaseModel):
     # Fix 3: all fields default to None; model_fields_set distinguishes
     # "not provided" from "explicitly null" for date clearing.
+    title: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
     dueDate: Optional[str] = None
@@ -369,6 +370,7 @@ def create_router(pool, caps) -> APIRouter:
 
     @router.get("/", response_model=List[TaskRecord])
     async def list_tasks(
+        response: Response,
         status: Optional[str] = Query(None, description="Comma-separated statuses; omit to exclude done,cancelled"),
         owner: Optional[str] = Query(None, description="Name or URI substring — matches entity_rid_mappings name or owner_uri"),
         project: Optional[str] = Query(None, description="Case-insensitive project name lookup → project_uri; fallback substring on project_uri"),
@@ -391,10 +393,15 @@ def create_router(pool, caps) -> APIRouter:
         include_out_of_window: bool = Query(
             False, description="Bypass validity filter when t_now is set."
         ),
-        limit: int = Query(100, ge=1, le=1000),
+        limit: int = Query(100, ge=1, le=5000),
         offset: int = Query(0, ge=0),
     ):
-        """List tasks with optional filters. Default excludes done and cancelled."""
+        """List tasks with optional filters. Default excludes done and cancelled.
+
+        Sets an ``X-Total-Count`` response header with the number of rows
+        matching the filters (before LIMIT/OFFSET) so paginating clients can
+        size their loop without re-querying.
+        """
         async with pool.acquire() as conn:
             conditions = []
             params: List[Any] = []
@@ -492,6 +499,12 @@ def create_router(pool, caps) -> APIRouter:
                 # validity_sql already starts with ' AND '
                 where = (where or "WHERE 1=1") + validity_sql
 
+            # Total matching rows (same WHERE, before LIMIT/OFFSET) for the
+            # X-Total-Count header. params here holds only the filter binds.
+            total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM task_registry {where}", *params
+            )
+
             params += [limit, offset]
             query = f"""
                 SELECT * FROM task_registry
@@ -513,6 +526,7 @@ def create_router(pool, caps) -> APIRouter:
             """
             rows = await conn.fetch(query, *params)
 
+        response.headers["X-Total-Count"] = str(total or 0)
         return [TaskRecord(**_row_to_dict(r)) for r in rows]
 
     # -----------------------------------------------------------------------
@@ -540,6 +554,8 @@ def create_router(pool, caps) -> APIRouter:
             updates: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).replace(tzinfo=None)}
             explicitly_set = req.model_fields_set
 
+            if req.title is not None:
+                updates["title"] = req.title
             if req.status is not None:
                 updates["status"] = req.status
             if req.priority is not None:
@@ -613,7 +629,7 @@ def create_router(pool, caps) -> APIRouter:
             )
 
         await emit_domain_event("task", "UPDATE", task_key, {
-            "task_key": task_key, "title": existing["title"],
+            "task_key": task_key, "title": updates.get("title", existing["title"]),
             "status": new_status, "priority": updates.get("priority", existing["priority"]),
         })
         return {"task_key": task_key, "action": "updated"}
@@ -679,5 +695,25 @@ def create_router(pool, caps) -> APIRouter:
             due_today=due_today,
             due_this_week=due_this_week,
         )
+
+    # -----------------------------------------------------------------------
+    # GET /{task_key} — fetch a single task by key
+    #
+    # MUST be declared AFTER /stats: FastAPI matches routes in declaration
+    # order, so the literal /stats route has to win before this parametrized
+    # route would bind task_key="stats". (Before this route existed, GET on a
+    # bare key 405'd because only PATCH /{task_key} matched.)
+    # -----------------------------------------------------------------------
+
+    @router.get("/{task_key}", response_model=TaskRecord)
+    async def get_task(task_key: str):
+        """Return a single task by its taskKey, or 404 if not found."""
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM task_registry WHERE task_key = $1", task_key
+            )
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Task not found: {task_key}")
+        return TaskRecord(**_row_to_dict(row))
 
     return router
