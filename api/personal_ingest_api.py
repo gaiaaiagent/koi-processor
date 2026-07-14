@@ -90,6 +90,16 @@ from api.entity_schema import (
     EntityTypeConfig,
 )
 
+# Shared resolver name guards (single source of truth in resolution_primitives).
+# Wired into Tier 1.5 (Person), Tier 2a (via passes_token_overlap_check) and
+# Tier 2b (via passes_semantic_match_guard) below.
+from api.resolution_primitives import (
+    GENERIC_NAME_TOKENS,
+    passes_person_name_guard,
+    passes_distinctive_token_check,
+    passes_semantic_match_guard,
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -633,12 +643,26 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
                 return False
         return True
 
+    # Distinctive-token guard for Organization/Project/Concept. Both inputs are
+    # multi-token here (single-token cases returned above). Rejects names whose
+    # distinctive (non-generic) tokens are DISJOINT ("University of Guelph" vs
+    # "University of Melbourne") or a strict token-level extension ("DWeb Camp
+    # Cascadia" vs "DWeb Camp"). Shared implementation in resolution_primitives.
+    if entity_type in ("Organization", "Project", "Concept"):
+        if not passes_distinctive_token_check(text1, text2):
+            return False
+
     # Get schema-driven config for multi-word token overlap
     schema = get_schema_for_type(entity_type)
     if not schema.require_token_overlap:
-        # Even with token overlap bypassed, guard against first-name inflation for
-        # 2-token full names (First Last): require the last tokens (family names)
-        # to have a minimum JW similarity so "Benjamin Life" ≠ "Benjamin Neal".
+        # Person: require BOTH first- and last-token JW>=0.85 (stricter than the
+        # legacy last-token-only 0.75 rule) so "Kevin Owocki" != "Kevin Triplett"
+        # and "Carol Newell" != "Carol Anne". Registered aliases are handled at
+        # Tier 1.1 before this runs. Shared guard in resolution_primitives.
+        if entity_type == "Person":
+            return passes_person_name_guard(text1, text2)
+        # Other bypass types (Concept, Question, Claim, Intent): keep the 2-token
+        # family-name guard so "Benjamin Life" != "Benjamin Neal".
         if len(tokens1) == 2 and len(tokens2) == 2:
             last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
             if last_jw < 0.75:
@@ -1101,13 +1125,20 @@ async def resolve_entity(
 
                 # Token overlap guard for multi-token names (prevents "Silke Helfrich" -> "Simon Grant")
                 # If both names have 2+ tokens and share zero tokens, reject regardless of score
+                best_norm = best.get('normalized_text', best['name'])
                 query_tokens = set(normalized.lower().split())
-                candidate_tokens = set(best.get('normalized_text', best['name']).lower().split())
+                candidate_tokens = set(best_norm.lower().split())
                 token_overlap = query_tokens & candidate_tokens
                 if len(query_tokens) >= 2 and len(candidate_tokens) >= 2 and len(token_overlap) == 0:
                     logger.info(f"Tier 1.5 contextual match REJECTED (zero token overlap): "
                                f"'{entity.name}' -> '{best['name']}' "
                                f"(tokens: {query_tokens} vs {candidate_tokens})")
+                elif entity.type == "Person" and not passes_person_name_guard(normalized, best_norm):
+                    # Person name guard: a bare first name must not collapse into
+                    # a full name (or a different full name) on context alone.
+                    # Registered aliases resolve at Tier 1.1 before this runs.
+                    logger.info(f"Tier 1.5 contextual match REJECTED (person name guard): "
+                               f"'{entity.name}' -> '{best['name']}'")
                 else:
                     # Two-tier threshold: phonetic matches get lower bar (strong evidence)
                     # Non-phonetic matches need higher score to avoid false positives
@@ -1223,16 +1254,31 @@ async def resolve_entity(
                 """, str(embedding), semantic_threshold)
 
             if semantic_match:
-                logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
-                           f"(similarity: {semantic_match['similarity']:.3f})")
-                return CanonicalEntity(
-                    name=semantic_match['entity_text'],
-                    uri=semantic_match['fuseki_uri'],
-                    type=semantic_match['entity_type'] or entity.type,
-                    is_new=False,
-                    merged_with=entity.name if semantic_match['entity_text'] != entity.name else None,
-                    confidence=float(semantic_match['similarity'])
-                ), False
+                # Name-shape guard: embedding proximity alone conflates
+                # same-first-name people, short generic names, and disjoint
+                # multi-word names. Reject those and fall through to Tier 3.
+                match_norm = normalize_entity_text(semantic_match['entity_text'])
+                match_type = semantic_match['entity_type'] or entity.type
+                if not passes_semantic_match_guard(
+                    match_type, normalized, match_norm,
+                    float(semantic_match['similarity']), semantic_threshold,
+                ):
+                    logger.info(
+                        f"Tier 2b REJECTED (name guard): '{entity.name}' -> "
+                        f"'{semantic_match['entity_text']}' "
+                        f"(similarity: {semantic_match['similarity']:.3f}); creating new entity"
+                    )
+                else:
+                    logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
+                               f"(similarity: {semantic_match['similarity']:.3f})")
+                    return CanonicalEntity(
+                        name=semantic_match['entity_text'],
+                        uri=semantic_match['fuseki_uri'],
+                        type=semantic_match['entity_type'] or entity.type,
+                        is_new=False,
+                        merged_with=entity.name if semantic_match['entity_text'] != entity.name else None,
+                        confidence=float(semantic_match['similarity'])
+                    ), False
 
     # Tier 3: Create new entity
     new_uri = generate_entity_uri(entity.name, entity.type)

@@ -162,6 +162,137 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     return True
 
 
+# =============================================================================
+# Shared resolver name guards (P1 — 2026-07-13)
+#
+# These are the single source of truth for the person-name, distinctive-token
+# and semantic-match guards. `personal_ingest_api.py` imports them (no
+# duplication) and wires them into its Tier 1.5 / 2a / 2b, and
+# `resolve_entity_multi_tier` below applies them in its Tier 2a / 2b.
+# =============================================================================
+
+# Generic "scaffolding" tokens that carry little identity signal for
+# Organization / Project / Concept names. Two names that share ONLY generic
+# tokens (e.g. "University of Guelph" vs "University of Melbourne") are not the
+# same entity.
+GENERIC_NAME_TOKENS = {
+    "of", "the", "and", "for", "a", "in",
+    "institute", "university", "college", "foundation", "network",
+    "initiative", "project", "program", "alliance", "association",
+    "council", "group", "lab", "labs", "camp", "team", "fund", "trust",
+    "society", "collective", "coalition", "centre", "center",
+}
+
+
+def passes_person_name_guard(query_norm: str, cand_norm: str) -> bool:
+    """Guard Person merges against first-name / single-token collisions.
+
+    Applied wherever a Person candidate would be accepted by fuzzy, semantic,
+    or contextual similarity. Registered aliases are resolved earlier
+    (Tier 1.1), so this guard can be strict:
+
+    - Multi-token vs single-token (either direction) -> False. A bare first
+      name ("Dan", "Carol", "Anthony") must not collapse into a full name
+      unless a registered alias says so ("Dan" -> Dana Tizya-Tramm is handled
+      by Tier 1.1, not here).
+    - Both multi-token -> require Jaro-Winkler >= 0.85 on the FIRST tokens AND
+      >= 0.85 on the LAST tokens, independently. Rejects "Carol Newell" vs
+      "Carol Anne" (last JW 0.61), "Kevin Owocki" vs "Kevin Triplett"
+      (last 0.43), "Sarah Wilshaw" vs "Sarah Wilson" (last 0.848) while
+      allowing spelling variants of the same full name.
+    - Single vs single -> True; the caller's single-word JW>=0.95 rule
+      (passes_token_overlap_check) is the gate for those.
+
+    Inputs are expected to be normalized (lowercased, hyphen/underscore ->
+    space) but the function lowercases defensively.
+    """
+    q = query_norm.lower().split()
+    c = cand_norm.lower().split()
+    if not q or not c:
+        return False
+    q_multi = len(q) >= 2
+    c_multi = len(c) >= 2
+    if q_multi != c_multi:
+        return False  # multi vs single — never merge without a registered alias
+    if not q_multi:
+        return True   # single vs single — deferred to single-word JW rule
+    first_jw = jaro_winkler_similarity(q[0], c[0])
+    last_jw = jaro_winkler_similarity(q[-1], c[-1])
+    return first_jw >= 0.85 and last_jw >= 0.85
+
+
+def _distinctive_tokens(text: str) -> set:
+    """Tokens of `text` with generic scaffolding words removed."""
+    return {t for t in text.lower().split() if t not in GENERIC_NAME_TOKENS}
+
+
+def passes_distinctive_token_check(text1: str, text2: str) -> bool:
+    """Distinctive-token guard for Organization / Project / Concept merges.
+
+    Strips generic tokens (of / the / institute / university / network / ...)
+    and reasons about the remaining *distinctive* tokens:
+
+    - Both sides have >=1 distinctive token and the distinctive sets are
+      DISJOINT -> reject. E.g. "University of Guelph" vs "University of
+      Melbourne" -> {guelph} vs {melbourne}.
+    - One side's distinctive set is a STRICT SUPERSET of the other's (a
+      token-level extension, e.g. {dweb, cascadia} over {dweb}) -> reject
+      unless the full strings are near-identical (JW >= 0.97).
+
+    Otherwise pass (defer to the caller's token-overlap-count / JW rules).
+    Returns True when either side has no distinctive tokens (nothing to
+    compare) so purely-generic names fall through to other checks.
+    """
+    d1 = _distinctive_tokens(text1)
+    d2 = _distinctive_tokens(text2)
+    if not d1 or not d2:
+        return True
+    if d1.isdisjoint(d2):
+        return False
+    if d1 < d2 or d2 < d1:  # strict superset in either direction
+        if jaro_winkler_similarity(text1.lower(), text2.lower()) < 0.97:
+            return False
+    return True
+
+
+def passes_semantic_match_guard(
+    entity_type: str,
+    query_norm: str,
+    match_text_norm: str,
+    similarity: float,
+    threshold: float,
+) -> bool:
+    """Composite guard applied to a Tier 2b (semantic) candidate before accept.
+
+    Semantic similarity alone conflates same-first-name people, short generic
+    names, and disjoint multi-word names. This layers the name-shape guards on
+    top:
+
+    (a) Person -> passes_person_name_guard.
+    (b) Any multi-token pair -> passes_token_overlap_check (must share tokens),
+        plus the distinctive-token guard for Organization/Project/Concept.
+    (c) Short names (query <=2 tokens or <12 chars) -> require the embedding
+        similarity to clear threshold by a 0.03 margin (short names embed
+        weakly, so demand a stronger signal).
+    """
+    if entity_type == "Person" and not passes_person_name_guard(query_norm, match_text_norm):
+        return False
+
+    q = query_norm.split()
+    m = match_text_norm.split()
+    if len(q) >= 2 and len(m) >= 2:
+        if not passes_token_overlap_check(query_norm, match_text_norm, entity_type):
+            return False
+    if entity_type in ("Organization", "Project", "Concept"):
+        if not passes_distinctive_token_check(query_norm, match_text_norm):
+            return False
+
+    if len(q) <= 2 or len(query_norm) < 12:
+        if similarity < threshold + 0.03:
+            return False
+    return True
+
+
 async def resolve_entity_multi_tier(
     conn,
     entity_name: str,
@@ -239,11 +370,27 @@ async def resolve_entity_multi_tier(
     best_score = 0.0
 
     for c in candidates:
-        score = jaro_winkler_similarity(normalized, c["normalized_text"])
+        cand_norm = c["normalized_text"]
+        score = jaro_winkler_similarity(normalized, cand_norm)
         if score >= threshold and score > best_score:
-            if passes_token_overlap_check(normalized, c["normalized_text"], entity_type):
-                best_score = score
-                best_uri = c["fuseki_uri"]
+            if not passes_token_overlap_check(normalized, cand_norm, entity_type):
+                continue
+            # Shared P1 guards (same as personal_ingest_api Tier 2a).
+            if entity_type == "Person" and not passes_person_name_guard(normalized, cand_norm):
+                logger.info(
+                    "multi-tier Tier 2a REJECTED (person name guard): %r vs %r",
+                    entity_name, cand_norm,
+                )
+                continue
+            if entity_type in ("Organization", "Project", "Concept") and \
+                    not passes_distinctive_token_check(normalized, cand_norm):
+                logger.info(
+                    "multi-tier Tier 2a REJECTED (distinctive token guard): %r vs %r",
+                    entity_name, cand_norm,
+                )
+                continue
+            best_score = score
+            best_uri = c["fuseki_uri"]
 
     if best_uri:
         return best_uri, best_score, "related_to"
@@ -267,7 +414,7 @@ async def resolve_entity_multi_tier(
     # at 2000 dims. Uses idx_entity_registry_embedding_3072_hnsw.
     sem_row = await conn.fetchrow(
         """
-        SELECT fuseki_uri,
+        SELECT fuseki_uri, normalized_text,
                1 - (embedding_3072::halfvec(3072)
                     <=> $1::halfvec(3072)) AS similarity
         FROM entity_registry
@@ -279,6 +426,18 @@ async def resolve_entity_multi_tier(
         entity_type,
     )
     if sem_row and sem_row["similarity"] >= semantic_threshold:
+        # Semantic candidate must clear the shared name-shape guards before we
+        # accept it (matches personal_ingest_api Tier 2b).
+        sem_norm = sem_row["normalized_text"] or ""
+        if sem_norm and not passes_semantic_match_guard(
+            entity_type, normalized, sem_norm,
+            float(sem_row["similarity"]), semantic_threshold,
+        ):
+            logger.info(
+                "multi-tier Tier 2b REJECTED (name guard): %r vs %r (sim=%.3f)",
+                entity_name, sem_norm, float(sem_row["similarity"]),
+            )
+            return None, 0.0, "unresolved"
         return sem_row["fuseki_uri"], float(sem_row["similarity"]), "related_to"
 
     return None, 0.0, "unresolved"
