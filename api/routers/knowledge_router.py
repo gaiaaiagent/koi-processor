@@ -689,7 +689,11 @@ def create_router(
     # POST /episodes — create episode with facts
     # -------------------------------------------------------------------
     @router.post("/episodes", response_model=EpisodeCreateResponse, status_code=201)
-    async def create_episode(request: Request, body: EpisodeCreateRequest):
+    async def create_episode(
+        request: Request,
+        body: EpisodeCreateRequest,
+        _identity: str = Depends(require_service_auth),
+    ):
         if not _facts_surface_available(request):
             raise HTTPException(
                 status_code=503,
