@@ -122,6 +122,93 @@ def _count(status: str) -> int:
         return 0
 
 
+# --- Closure ---------------------------------------------------------------
+# The status lattice. Derived from the verdicts the research record actually
+# produced, not invented up front:
+#   INCONCLUSIVE — tested, but the instrument could not decide (e.g. the map
+#                  construction was gauge-flat, so holonomy was zero *by
+#                  construction* and the claim never got a fair test)
+#   SCOPED       — dead in one regime, still standing in another. The load-bearing
+#                  value: a binary OPEN/REFUTED forces a wrong answer for exactly
+#                  the claims that matter ("dead on the single embedding-derived
+#                  concept graph, still open on federated cross-schema data" is
+#                  neither), and collapsing it to either loses the finding.
+_CLOSURE_STATUSES = frozenset(
+    {"OPEN", "SUPPORTED", "REFUTED", "SCOPED", "SUPERSEDED", "INCONCLUSIVE"})
+
+
+class EntityCloseRequest(BaseModel):
+    status: str = Field(..., description="One of: " + ", ".join(sorted(_CLOSURE_STATUSES)))
+    rationale: str = Field(
+        ..., min_length=1,
+        description="Why. A closure act with no reason is not reviewable.")
+    scope: Optional[str] = Field(
+        None,
+        description="REQUIRED when status=SCOPED: the regime in which the claim STILL STANDS.")
+    evidence_uris: List[str] = Field(
+        default_factory=list,
+        description="What closed it: RIDs, arXiv URLs, repo paths, commit SHAs. Empty = a "
+                    "bare assertion of authority (permitted, but legible as such).")
+    authority: Optional[str] = Field(
+        None, description="Under what authority the act was taken.")
+    closed_by: Optional[str] = Field(
+        None, description="Audit actor; defaults to the authenticated identity")
+    dry_run: bool = Field(
+        False, description="Validate + report inside a transaction, then ROLL BACK.")
+
+
+class ClosureAct(BaseModel):
+    id: Optional[int] = None
+    status: str
+    rationale: str
+    scope: Optional[str] = None
+    evidence_uris: List[str] = []
+    authority: Optional[str] = None
+    closed_by: str
+    closed_at: Optional[str] = None
+
+
+class EntityCloseResponse(BaseModel):
+    entity_uri: str
+    entity_text: Optional[str] = None
+    dry_run: bool
+    applied: bool
+    previous_status: Optional[str] = None   # None = never closed before
+    closure: Optional[ClosureAct] = None    # the act just recorded (= the new projection)
+    closure_log_id: Optional[int] = None
+    message: Optional[str] = None
+
+
+class EntityClosureResponse(BaseModel):
+    entity_uri: str
+    entity_text: Optional[str] = None
+    current: Optional[ClosureAct] = None    # the projection: latest act (None = never closed)
+    history: List[ClosureAct] = []          # the append-only log, newest first
+    is_closed: bool = False                 # standing is anything other than OPEN/never-closed
+
+
+class ReprojectResponse(BaseModel):
+    dry_run: bool
+    entities_with_log: int                  # entities that have >=1 closure act
+    healed: int                             # projections rebuilt (were missing or stale)
+    already_current: int                    # projections that already matched the log
+    healed_uris: List[str] = []
+
+
+def _act_from_row(row) -> ClosureAct:
+    """Build a ClosureAct from an entity_closure_log row."""
+    return ClosureAct(
+        id=row["id"],
+        status=row["status"],
+        rationale=row["rationale"],
+        scope=row["scope"],
+        evidence_uris=list(row["evidence_uris"] or []),
+        authority=row["authority"],
+        closed_by=row["closed_by"],
+        closed_at=row["closed_at"].isoformat() if row["closed_at"] else None,
+    )
+
+
 class EntityMergeRequest(BaseModel):
     survivor_uri: str = Field(..., description="fuseki_uri of the entity to KEEP")
     loser_uri: str = Field(..., description="fuseki_uri of the entity to merge in + tombstone")
@@ -627,6 +714,210 @@ def create_router(pool) -> APIRouter:
             applied=(not body.dry_run), dry_run=body.dry_run, already_typed=False,
             message=("dry run — rolled back, nothing committed"
                      if body.dry_run else "retype applied"))
+
+    # ------------------------------------------------------------------
+    # Closure — the non-monotone operation this surface was missing.
+    #
+    # Asserting and relating are MONOTONE: they commute, they are order-independent,
+    # they never retract a conclusion. Closure (REFUTED / SCOPED / SUPERSEDED /
+    # authority change) is NOT, and by CALM (Hellerstein 2010; Ameloot/Neven/Van den
+    # Bussche, JACM 2013) it admits no coordination-free implementation. We do not
+    # pretend otherwise — we split it:
+    #   * entity_closure_log        — APPEND-ONLY. One row per attributable act.
+    #                                 Never UPDATEd, never DELETEd. Stays monotone.
+    #   * metadata->'closure'       — the DERIVED PROJECTION of the latest act.
+    #                                 Non-monotone, but a deterministic function of
+    #                                 the log, so always recomputable and never
+    #                                 authoritative on its own.
+    # Replay determinism without pretending to schedule invariance. Reopening is
+    # just another act (status=OPEN); nothing is ever overwritten.
+    #
+    # Without this, a refutation could only be appended as *facts* while the
+    # hypothesis kept full retrieval standing — which is how a killed experiment
+    # (holonomy on the RAGE concept graph, permutation p = 0.980, 2026-06-29) was
+    # re-proposed on 2026-07-14 with nothing in the substrate able to object.
+    # See migration 107 and rage-research/notes/confluence-audit.md.
+    # ------------------------------------------------------------------
+
+    @router.get("/closed", response_model=List[EntityClosureResponse])
+    async def list_closed_entities(status: Optional[str] = None, limit: int = 100):
+        """Entities whose latest act is a non-OPEN closure.
+
+        Backs the proposal-time gate: 'is there a closed hypothesis overlapping
+        what I am about to propose?'
+        """
+        if status is not None and status not in _CLOSURE_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown status {status!r}; expected one of {sorted(_CLOSURE_STATUSES)}")
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (l.entity_uri) l.*, e.entity_text
+                FROM entity_closure_log l
+                JOIN entity_registry e ON e.fuseki_uri = l.entity_uri
+                ORDER BY l.entity_uri, l.closed_at DESC, l.id DESC
+            """)
+        out: List[EntityClosureResponse] = []
+        for r in rows:
+            if r["status"] == "OPEN":            # reopened — no longer closed
+                continue
+            if status is not None and r["status"] != status:
+                continue
+            out.append(EntityClosureResponse(
+                entity_uri=r["entity_uri"], entity_text=r["entity_text"],
+                current=_act_from_row(r), history=[], is_closed=True))
+        return out[:limit]
+
+    @router.post("/reproject-closures", response_model=ReprojectResponse)
+    async def reproject_closures(
+        dry_run: bool = False,
+        identity: str = Depends(require_service_auth),
+    ):
+        """Rebuild metadata->'closure' from entity_closure_log for every entity
+        that has closure acts. Idempotent.
+
+        The projection is a CACHE of the log's latest act. Concurrent metadata
+        upserts from other pipelines (session extraction, entity sync) can reset
+        an entity's metadata to '{}' and silently drop the projection — the standing
+        then vanishes from the retrieval surfaces even though the LOG is intact.
+        This is the read-model rebuild: the log is the source of truth, so this can
+        run any time, after any bulk operation, or on a schedule. It never invents
+        a closure — an entity with no log rows is left untouched.
+        """
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (entity_uri) *
+                FROM entity_closure_log
+                ORDER BY entity_uri, closed_at DESC, id DESC
+            """)
+            healed: List[str] = []
+            already = 0
+            for r in rows:
+                projected = _act_from_row(r).model_dump(exclude={"id"})
+                cur_raw = await conn.fetchval(
+                    "SELECT metadata -> 'closure' FROM entity_registry WHERE fuseki_uri = $1",
+                    r["entity_uri"])
+                cur = json.loads(cur_raw) if isinstance(cur_raw, str) else cur_raw
+                if cur == projected:
+                    already += 1
+                    continue
+                if not dry_run:
+                    await conn.execute("""
+                        UPDATE entity_registry
+                        SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                       || jsonb_build_object('closure', $2::jsonb),
+                            updated_at = NOW()
+                        WHERE fuseki_uri = $1
+                    """, r["entity_uri"], json.dumps(projected))
+                healed.append(r["entity_uri"])
+        logger.info("reproject_closures %s: %d healed / %d already-current / %d total",
+                    "DRY_RUN" if dry_run else "APPLIED", len(healed), already, len(rows))
+        return ReprojectResponse(
+            dry_run=dry_run, entities_with_log=len(rows),
+            healed=len(healed), already_current=already, healed_uris=healed)
+
+    @router.get("/{uri:path}/closure", response_model=EntityClosureResponse)
+    async def get_entity_closure(uri: str):
+        """Current standing + the full append-only history of closure acts."""
+        async with pool.acquire() as conn:
+            ent = await conn.fetchrow(
+                "SELECT entity_text FROM entity_registry WHERE fuseki_uri = $1", uri)
+            if ent is None:
+                raise HTTPException(status_code=404, detail=f"entity not found: {uri}")
+            rows = await conn.fetch(
+                "SELECT * FROM entity_closure_log WHERE entity_uri = $1 "
+                "ORDER BY closed_at DESC, id DESC", uri)
+        history = [_act_from_row(r) for r in rows]
+        current = history[0] if history else None
+        return EntityClosureResponse(
+            entity_uri=uri, entity_text=ent["entity_text"],
+            current=current, history=history,
+            is_closed=bool(current and current.status != "OPEN"))
+
+    @router.post("/{uri:path}/close", response_model=EntityCloseResponse)
+    async def close_entity(
+        uri: str,
+        body: EntityCloseRequest,
+        identity: str = Depends(require_service_auth),
+    ):
+        """Record an attributable, versioned closure act against an entity.
+
+        Appends to entity_closure_log (never overwrites) and re-projects
+        metadata->'closure'. Idempotency is deliberately NOT enforced: re-closing is
+        a new act, because *who* closed it and *on what evidence* is the point.
+        """
+        status = body.status.upper().strip()
+        if status not in _CLOSURE_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown status {body.status!r}; expected one of "
+                       f"{sorted(_CLOSURE_STATUSES)}")
+        if status == "SCOPED" and not (body.scope or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="status=SCOPED requires `scope`: the regime in which the claim still "
+                       "stands. Without it a scoped kill degrades to a wrong binary.")
+        closed_by = body.closed_by or identity
+
+        async with pool.acquire() as conn:
+            ent = await conn.fetchrow(
+                "SELECT entity_text, merged_into FROM entity_registry WHERE fuseki_uri = $1",
+                uri)
+            if ent is None:
+                raise HTTPException(status_code=404, detail=f"entity not found: {uri}")
+            if ent["merged_into"] is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"entity is a tombstone (merged into {ent['merged_into']}); "
+                           f"close the live entity instead")
+
+            previous_status = await conn.fetchval(
+                "SELECT status FROM entity_closure_log WHERE entity_uri = $1 "
+                "ORDER BY closed_at DESC, id DESC LIMIT 1", uri)
+
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                row = await conn.fetchrow("""
+                    INSERT INTO entity_closure_log
+                        (entity_uri, status, rationale, scope, evidence_uris, authority, closed_by)
+                    VALUES ($1, $2, $3, $4, $5::text[], $6, $7)
+                    RETURNING *
+                """, uri, status, body.rationale, body.scope,
+                     list(body.evidence_uris or []), body.authority, closed_by)
+                act = _act_from_row(row)
+
+                # Re-project the latest act onto the entity. Shallow jsonb merge —
+                # every other metadata key is preserved.
+                await conn.execute("""
+                    UPDATE entity_registry
+                    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                   || jsonb_build_object('closure', $2::jsonb),
+                        updated_at = NOW()
+                    WHERE fuseki_uri = $1
+                """, uri, json.dumps(act.model_dump(exclude={"id"})))
+
+                if body.dry_run:
+                    await tx.rollback()
+                else:
+                    await tx.commit()
+            except HTTPException:
+                await tx.rollback()
+                raise
+            except Exception as e:
+                await tx.rollback()
+                logger.exception("entity close failed uri=%s status=%s", uri, status)
+                raise HTTPException(status_code=500, detail=f"close failed: {e}")
+
+        logger.info("entity_close %s uri=%s %s->%s by=%s",
+                    "DRY_RUN" if body.dry_run else "APPLIED", uri,
+                    previous_status or "(never closed)", status, closed_by)
+        return EntityCloseResponse(
+            entity_uri=uri, entity_text=ent["entity_text"], dry_run=body.dry_run,
+            applied=(not body.dry_run), previous_status=previous_status,
+            closure=act, closure_log_id=(None if body.dry_run else act.id),
+            message=("dry run — rolled back, nothing committed" if body.dry_run
+                     else f"closed {previous_status or '(never closed)'} -> {status}"))
 
     @router.get("/{uri:path}/resolve")
     async def resolve_entity_redirect(uri: str):

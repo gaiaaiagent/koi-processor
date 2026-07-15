@@ -1715,6 +1715,7 @@ def create_router(
                     rows = await conn.fetch("""
                         SELECT er.fuseki_uri, er.entity_text, er.entity_type,
                                erm.vault_path,
+                               er.metadata -> 'closure' AS closure,
                                1 - (er.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
                         FROM entity_registry er
                         LEFT JOIN LATERAL (
@@ -1727,6 +1728,18 @@ def create_router(
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):
+                        meta = {"vector_score": float(row["score"])}
+                        # An entity's CLOSURE — its adjudicated standing — must ride
+                        # every retrieval result, or the closure operation is invisible
+                        # to exactly the readers it exists for. A REFUTED/SCOPED claim
+                        # that still retrieves as live is how a killed experiment gets
+                        # re-proposed (see migration 107 / admin_router closure block).
+                        raw_closure = row["closure"]
+                        if raw_closure:
+                            closure = (json.loads(raw_closure)
+                                       if isinstance(raw_closure, str) else raw_closure)
+                            meta["closure"] = closure
+                            meta["is_closed"] = closure.get("status") != "OPEN"
                         all_results.append({
                             "text": row["entity_text"],
                             "score": 1.0 / (k + rank + 1),
@@ -1736,7 +1749,7 @@ def create_router(
                             # Piece C: openable entity locators (vault + quartz).
                             "vault_path": row.get("vault_path"),
                             "quartz_url": _quartz_url(row["entity_type"], row["entity_text"]),
-                            "metadata": {"vector_score": float(row["score"])},
+                            "metadata": meta,
                         })
 
                 # Facts (vector similarity, joined with episodes).
@@ -1750,10 +1763,12 @@ def create_router(
                             SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
                                    f.fact_text, f.source_node_rid, e.name AS episode_name,
                                    e.source_document, e.metadata AS ep_metadata,
+                                   se.metadata -> 'closure' AS subject_closure,
                                    1 - (f.fact_embedding_3072::halfvec(3072)
                                         <=> $1::halfvec(3072)) AS score
                             FROM knowledge_facts f
                             LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
+                            LEFT JOIN entity_registry se ON se.fuseki_uri = f.subject_uri
                             WHERE f.valid_to IS NULL
                               AND f.fact_embedding_3072 IS NOT NULL
                             ORDER BY f.fact_embedding_3072::halfvec(3072)
@@ -1766,6 +1781,28 @@ def create_router(
                     f_url_map = await _build_source_url_map(
                         conn, [r.get("source_node_rid") for r in rows])
                     for rank, row in enumerate(rows):
+                        fact_meta = {
+                            "subject": row["subject_uri"],
+                            "predicate": row["predicate"],
+                            "object": row["object_uri"],
+                            "vector_score": float(row["score"]),
+                        }
+                        # Carry the SUBJECT's adjudicated standing onto the fact.
+                        #
+                        # This is the load-bearing one. Facts are what actually
+                        # retrieve — roughly half of all Claim entities have no
+                        # embedding_3072 at all, so they never surface on the entity
+                        # surface, and an agent asking "what's the frontier here?" gets
+                        # FACTS. If a fact about a REFUTED claim retrieves clean, the
+                        # closure operation is decorative. On 2026-07-14 exactly that
+                        # happened: a fact asserting a killed hypothesis was "the
+                        # cleanest novelty bet" retrieved as live, and the dead
+                        # experiment was re-proposed.
+                        raw_sc = row["subject_closure"]
+                        if raw_sc:
+                            sc = json.loads(raw_sc) if isinstance(raw_sc, str) else raw_sc
+                            fact_meta["subject_closure"] = sc
+                            fact_meta["subject_is_closed"] = sc.get("status") != "OPEN"
                         fact_result = {
                             "text": row["fact_text"],
                             "score": 1.0 / (k + rank + 1),
@@ -1776,12 +1813,7 @@ def create_router(
                             "source_url": derive_source_url(
                                 row.get("source_node_rid"), row.get("source_document"),
                                 _parse_jsonb(row.get("ep_metadata")), f_url_map),
-                            "metadata": {
-                                "subject": row["subject_uri"],
-                                "predicate": row["predicate"],
-                                "object": row["object_uri"],
-                                "vector_score": float(row["score"]),
-                            },
+                            "metadata": fact_meta,
                         }
                         facts_results.append(fact_result)
                         all_results.append(fact_result)
