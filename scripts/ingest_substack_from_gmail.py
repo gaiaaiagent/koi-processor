@@ -47,7 +47,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 IMAP_HOST = "imap.gmail.com"
-IMAP_USER = os.environ.get("SUBSTACK_GMAIL_USER", "zaldarren@gmail.com")
 IMAP_PASS_FILE = os.path.expanduser(os.environ.get("SUBSTACK_GMAIL_PASS_FILE", "~/.gmail-app-password"))
 IMAP_MAILBOX = '"[Gmail]/All Mail"'          # search across all mail, not just INBOX
 
@@ -56,23 +55,11 @@ INGEST_SCRIPT = REPO_ROOT / "scripts" / "ingest_substack_corpus.py"
 PYTHON = sys.executable
 BACKFILL_SINCE = "01-Jan-2020"                # generous floor for full backfill
 
-# Publications to harvest from email. Mirrors substack_sensor.py PUBLICATIONS.
-PUBLICATIONS: Dict[str, Dict] = {
-    "willruddick": {
-        "sender": "willruddick@substack.com",
-        "host": "willruddick.substack.com",
-        "author": "Will Ruddick",
-        "domain": "regen",
-        "tags": "substack,will-ruddick,grassroots-economics,commitment-pooling,regen",
-    },
-    "michelbauwens": {
-        "sender": "4thgenerationcivilization@substack.com",
-        "host": "4thgenerationcivilization.substack.com",
-        "author": "Michel Bauwens",
-        "domain": "commons",
-        "tags": "substack,michel-bauwens,p2p-foundation,commons,4th-generation-civilization",
-    },
-}
+# WHICH publications + which Gmail inbox is personal config, loaded from
+# config/substack_publications.yaml (see substack_config). Only publications
+# with an `email_sender` participate in the Gmail bridge. Not hardcoded so forks
+# configure their own.
+from substack_config import load_publications, gmail_user  # noqa: E402
 
 # "View this post on the web at https://<host>/p/<slug>" — the marker that an
 # email is an actual POST (notes-digests and "new notes" emails lack it).
@@ -147,11 +134,11 @@ def _parse_msg(msg: email.message.Message, host: str) -> Optional[Dict]:
     }
 
 
-def _imap_connect() -> imaplib.IMAP4_SSL:
+def _imap_connect(user: str) -> imaplib.IMAP4_SSL:
     with open(IMAP_PASS_FILE) as f:
         pw = f.read().strip()
     M = imaplib.IMAP4_SSL(IMAP_HOST)
-    M.login(IMAP_USER, pw)
+    M.login(user, pw)
     M.select(IMAP_MAILBOX, readonly=True)
     return M
 
@@ -196,18 +183,28 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    user = gmail_user()
+    if not user:
+        print("ERROR: no gmail_user in substack publications config", file=sys.stderr)
+        return 1
+    # Only publications with an email_sender participate in the Gmail bridge.
+    pubs = {p["feed_slug"]: p for p in load_publications() if p.get("email_sender")}
+    if not pubs:
+        print("No publications with an email_sender configured — nothing to do.")
+        return 0
+
     try:
-        M = _imap_connect()
+        M = _imap_connect(user)
     except Exception as e:
         print(f"ERROR: IMAP connect/login failed: {e}", file=sys.stderr)
         return 1
 
     grand = 0
     try:
-        for feed_slug, pub in PUBLICATIONS.items():
+        for feed_slug, pub in pubs.items():
             if args.only and feed_slug != args.only:
                 continue
-            posts = harvest(M, pub, since)
+            posts = harvest(M, {**pub, "sender": pub["email_sender"]}, since)
             print(f"[{feed_slug}] {len(posts)} full post(s) from Gmail since {since}")
             if not posts:
                 continue
@@ -234,7 +231,7 @@ def main() -> int:
                 "--substack-domain", pub["host"],
                 "--author", pub["author"],
                 "--domain", pub["domain"],
-                "--tags", pub["tags"],
+                "--tags", ",".join(pub["tags"]) if isinstance(pub["tags"], list) else str(pub["tags"]),
             ]
             print(f"    ingesting → {feed_slug} ({len(posts)} posts)")
             rc = subprocess.run(cmd, cwd=str(REPO_ROOT)).returncode
