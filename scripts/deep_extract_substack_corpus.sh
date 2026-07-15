@@ -20,6 +20,11 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 cd "$REPO_ROOT" || exit 9
 
+# launchd runs this under macOS system /bin/bash (3.2) with a minimal PATH that
+# lacks Homebrew bins — psql lives in /opt/homebrew/bin. Prepend it so `psql`
+# resolves the same way it does in an interactive shell.
+export PATH="/opt/homebrew/bin:$PATH"
+
 VENV="${KOI_VENV:-/Users/darrenzal/venvs/koi-server}"
 PY="$VENV/bin/python"
 LOG_DIR="$REPO_ROOT/logs"
@@ -36,7 +41,12 @@ PSQL_URL="${POSTGRES_URL:-postgresql://darrenzal:@localhost:5432/personal_koi}"
 if [[ ! -x "$PY" ]]; then echo "[$(ts)] ERROR: venv python not found at $PY" >> "$LOG"; exit 1; fi
 
 # Un-extracted substack-corpus posts = ingested rows with no completed deep-extraction.
-mapfile -t RIDS < <(psql "$PSQL_URL" -tAc "
+# NOTE: `mapfile` is a bash-4 builtin; macOS system /bin/bash (used by launchd) is
+# 3.2 and lacks it — read into the array with a portable while-loop instead.
+RIDS=()
+while IFS= read -r _rid; do
+  [[ -n "$_rid" ]] && RIDS+=("$_rid")
+done < <(psql "$PSQL_URL" -tAc "
   SELECT m.rid FROM koi_memories m
   WHERE m.source_sensor = '$SOURCE_SENSOR'
     AND m.rid LIKE 'substack-corpus:%'
