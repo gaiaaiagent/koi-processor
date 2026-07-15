@@ -58,6 +58,13 @@ SOURCE_SENSOR = "substack-corpus-backfill"  # continuity with the 2026-05-18 ind
 ACCESS_SOURCE = "substack-public"
 UA = {"User-Agent": "Mozilla/5.0 (personal-koi substack sensor)"}
 
+# Optional Substack session cookie (paid-subscriber auth). When set, the sensor
+# fetches full body_html for `only_paid` posts instead of skipping them. The
+# cookie rotates periodically — an expired one yields a short/empty body, which
+# the <200-char gate in run() skips, so stale creds degrade gracefully.
+SUBSTACK_SID = os.getenv("SUBSTACK_SID", "").strip()
+SUBSTACK_COOKIES = {"substack.sid": SUBSTACK_SID} if SUBSTACK_SID else None
+
 # Free Substack publications to ingest. Extend this list to add more authors.
 PUBLICATIONS: List[Dict[str, Any]] = [
     {
@@ -67,6 +74,22 @@ PUBLICATIONS: List[Dict[str, Any]] = [
         "domain": "commons",
         "tags": ["substack", "indy-johar", "dark-matter-labs", "civic-design", "institutional-form"],
         "author_entity": {"name": "Indy Johar", "type": "Person"},
+    },
+    {
+        "feed_slug": "willruddick",
+        "base": "https://willruddick.substack.com",
+        "author": "Will Ruddick",
+        "domain": "regen",
+        "tags": ["substack", "will-ruddick", "grassroots-economics", "commitment-pooling", "regen"],
+        "author_entity": {"name": "Will Ruddick", "type": "Person"},
+    },
+    {
+        "feed_slug": "michelbauwens",
+        "base": "https://4thgenerationcivilization.substack.com",
+        "author": "Michel Bauwens",
+        "domain": "commons",
+        "tags": ["substack", "michel-bauwens", "p2p-foundation", "commons", "4th-generation-civilization"],
+        "author_entity": {"name": "Michel Bauwens", "type": "Person"},
     },
 ]
 
@@ -205,7 +228,7 @@ async def run(args) -> None:
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
     totals = {"considered": 0, "ingested": 0, "skipped": 0, "errors": 0}
     try:
-        async with httpx.AsyncClient(timeout=60.0) as http:
+        async with httpx.AsyncClient(timeout=60.0, cookies=SUBSTACK_COOKIES) as http:
             for pub in PUBLICATIONS:
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
@@ -225,7 +248,11 @@ async def run(args) -> None:
                     meta = dict(archive[slug])
                     try:
                         detail = await fetch_body(http, pub["base"], slug)
-                        if detail.get("audience") not in (None, "everyone"):
+                        # Paid posts: skip only when we have no subscriber cookie.
+                        # With SUBSTACK_SID set the API returns full body_html for
+                        # paid posts; the <200-char gate below still catches any
+                        # that come back paywalled (e.g. an expired cookie).
+                        if detail.get("audience") not in (None, "everyone") and not SUBSTACK_COOKIES:
                             logger.info("skip non-free %s (audience=%s)", slug, detail.get("audience"))
                             totals["skipped"] += 1
                             continue
