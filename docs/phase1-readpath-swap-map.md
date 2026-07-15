@@ -65,3 +65,16 @@ After the swap, the **4,144 conservatively-`unclassified`** entities (email-sour
 - **(a)** Accept it — they're triage-pending; the conservative default is deliberate (third-party consent). Triage `Meta/Indigenomics-Classify-Triage.md` over time.
 - **(b)** Broaden the backfill Rule 5 to also team-stamp the non-email internal-ambiguous subset (keep only email-sensor/proton-email + explicit third-party as unclassified), shrinking the hidden set.
 Decide before step 2.
+
+---
+
+## ⛔ BACKFILL OBSTACLE (found 2026-07-14 during first --apply attempt)
+
+**Bulk-updating `entity_registry.visibility_scope` is expensive (~1s/row → the 17k-row backfill is multi-hour).** Root cause: `entity_registry` has **two HNSW vector indexes** (`idx_entity_registry_embedding_3072_hnsw`, `idx_entity_vector`) and **very large rows** (two `embedding_3072` halfvec columns, ~6–12 KB/row → no page room for a second tuple version). So *every* `visibility_scope` UPDATE is **non-HOT** and re-indexes both HNSW indexes. Dropping the small btree `idx_entity_registry_visibility_scope` only helped 5s→1s/row; the HNSW cost is unavoidable for in-place updates.
+
+**This makes the backfill (and any future re-classification — Eve narrowing, triage) a maintenance-window operation, not a quick script run.** Two paths for a focused session to decide:
+
+1. **Maintenance-window drop/rebuild:** `DROP INDEX` the 2 HNSW indexes → bulk `UPDATE` (fast, no vector maintenance) → `CREATE INDEX ... USING hnsw` (rebuild). Cost: **live semantic search is degraded while the HNSW indexes rebuild** (potentially 10–30 min on 21k×3072 vectors). Schedule off-hours.
+2. **Off-table visibility (architecture reconsideration — recommended to evaluate):** store scope in a small `entity_visibility(fuseki_uri PK, visibility_scope, source_context, …)` table instead of a column on `entity_registry`. Then classification/re-classification never touches the vector-indexed table (fast, repeatable), and the read-path predicate becomes a JOIN to `entity_visibility` instead of a column filter. Supersedes migration 107's column-on-entity_registry choice. Slightly more complex read SQL; far cheaper writes forever.
+
+**Until decided, the backfill is NOT run.** DB state is clean: migration 107 columns exist, all 21,592 rows `unclassified`, nothing classified, backend healthy. The `--apply` attempt rolled back cleanly (transactional).

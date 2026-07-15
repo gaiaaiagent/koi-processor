@@ -405,12 +405,18 @@ def apply_backfill(conn, cur, args, conf_uris, eve_uris, drift) -> None:
         sys.exit(f"REFUSED: --dump-path {dump} is missing or empty. Run e.g.\n"
                  f"    pg_dump -t entity_registry <db> > {dump}")
 
-    # --- Precondition 2: Eve sign-off token. -------------------------------- #
-    if args.eve_signoff != "EVE-SIGNED-OFF":
-        sys.exit("REFUSED: --apply requires --eve-signoff EVE-SIGNED-OFF, confirming "
-                 "Eve has reviewed the hydro-utility candidate list. She governs "
-                 "whether BC Hydro / Bchydro / Hydro-Québec / Manitoba Hydro are "
-                 "confidential; this script never stamps them.")
+    # --- Precondition 2: Eve governance on the hydro-utility candidates. ----- #
+    # Two HONEST ways past this gate — never fake a sign-off:
+    #   (a) --eve-signoff EVE-SIGNED-OFF : Eve reviewed the candidate list (recorded).
+    #   (b) --defer-eve-candidates       : HOLD mode — every candidate stays
+    #       'unclassified' pending Eve; no candidate is stamped, so no decision that
+    #       is Eve's to make is being made. The over-restrictive-safe path when Eve
+    #       is unavailable. (Precondition 3 below still refuses if a candidate is
+    #       confidential-by-name — that genuinely needs Eve, defer or not.)
+    if args.eve_signoff != "EVE-SIGNED-OFF" and not args.defer_eve_candidates:
+        sys.exit("REFUSED: --apply requires EITHER --eve-signoff EVE-SIGNED-OFF (Eve "
+                 "reviewed the hydro-utility candidates) OR --defer-eve-candidates (hold "
+                 "all candidates as unclassified, pending Eve). Do NOT fabricate a sign-off.")
 
     # --- Precondition 3: name-based drift verification. --------------------- #
     # The confidential/eve sets used below were RE-DERIVED by name at run time (see
@@ -506,6 +512,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eve-signoff", default=None,
                     help="[--apply only] pass EVE-SIGNED-OFF to confirm Eve reviewed "
                          "the hydro-utility candidate list.")
+    ap.add_argument("--defer-eve-candidates", action="store_true",
+                    help="[--apply only] HONEST alternative to --eve-signoff when Eve is "
+                         "unavailable: run in HOLD mode — every hydro-utility candidate "
+                         "stays 'unclassified' (invisible to team), no candidate stamped, "
+                         "no decision made that is Eve's to make. Never fakes her review.")
     args = ap.parse_args(argv)
 
     applying = bool(args.apply)
