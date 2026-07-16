@@ -1,3 +1,14 @@
+# research_author_sensors.example.yaml — TEMPLATE (safe to commit / fork).
+#
+# Copy to `research_author_sensors.yaml` (gitignored) and adapt to your own watched
+# authors. The sensor loads `research_author_sensors.yaml` by default; this .example
+# is only a schema reference and is not read at runtime.
+#
+# One illustrative author is shown below. Per author: author_id (slug), canonical_name,
+# aliases, corpus_root, author_dir, optional official_preprints, arxiv_queries (arXiv
+# API query strings), project_tags (KOI field memberships — a paper can carry several),
+# corpus_tags, and relevance.{direct,project} keyword gates. For names that collide on
+# arXiv (e.g. a common surname), gate arxiv_queries by category/keyword.
 authors:
   - author_id: ghrist-robert
     canonical_name: Robert Ghrist

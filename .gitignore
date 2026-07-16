@@ -92,6 +92,7 @@ exports/
 *.log.*
 *.gz
 config/personal.env
+config/research_author_sensors.yaml
 
 # TerminusDB phase artifacts
 scripts/terminusdb/artifacts/
