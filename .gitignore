@@ -93,6 +93,8 @@ exports/
 *.gz
 config/personal.env
 config/substack_publications.yaml
+config/rss_feeds.yaml
+config/research_author_sensors.yaml
 config/projects.json
 
 # TerminusDB phase artifacts

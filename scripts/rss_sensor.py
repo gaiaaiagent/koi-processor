@@ -123,6 +123,14 @@ def _parse_feed(url: str) -> Any:
 
 
 def _load_feeds(path: Path, feed_url: Optional[str]) -> List[Dict[str, Any]]:
+    # Which feeds to poll is personal config (config/rss_feeds.yaml, gitignored).
+    # Fall back to the committed template so a fresh fork still runs.
+    if not path.exists():
+        example = path.with_name(path.stem + ".example" + path.suffix)
+        if example.exists():
+            logger.warning("No personal %s — using %s. Copy it to %s and add your feeds.",
+                           path.name, example.name, path.name)
+            path = example
     with path.open() as f:
         data = yaml.safe_load(f) or {}
     feeds = [feed for feed in data.get("feeds", []) if feed.get("enabled", True)]
