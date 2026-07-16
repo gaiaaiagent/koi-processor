@@ -487,3 +487,159 @@ def test_readonly_mirror_overlap_warning_triggers():
     finally:
         vs._VAULT_READONLY_INCOMING_PATHS = saved_ro
         vs._VAULT_MIRROR_PATTERNS = saved_mp
+
+
+# =============================================================================
+# Per-file-origin ownership tests (KOI_VAULT_OWNER_UPDATE_ACCEPT)
+# Added 2026-07-15 with the readonly owner-update fix. Reuse the fixtures above.
+# =============================================================================
+
+
+@pytest.fixture
+def readonly_shared(monkeypatch):
+    """Configure 'Shared/' as a READONLY (locally-authoritative) path."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_READONLY_INCOMING_PATHS", ["Shared/"])
+    yield
+
+
+async def _seed_new(mgr, rel_path, content, origin_node, origin_seq=1):
+    """Establish initial state via a NEW event (readonly accepts NEW)."""
+    await mgr.apply_event(**_make_apply_kwargs(
+        rel_path, "NEW", content, origin_node=origin_node, origin_seq=origin_seq,
+    ))
+
+
+_BIG = "# Owner note\n" + ("substantive body line that makes the file comfortably large. " * 20)
+
+
+@pytest.mark.anyio
+async def test_owner_update_accepted_flag_on(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T1: flag ON + owner (origin==local origin) UPDATE on a readonly path → accepted."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", True)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t1.md"
+    await _seed_new(mgr, "Shared/t1.md", _BIG, PEER_NODE, 1)
+    assert f.read_text() == _BIG
+    updated = _BIG + "\n# Enriched by the owning peer.\n" * 6
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t1.md", "UPDATE", updated, base_hash=_sha256(_BIG),
+        origin_node=PEER_NODE, origin_seq=2,
+    ))
+    assert f.read_text() == updated
+    assert mgr._metrics.readonly_owner_update_accepted == 1
+    assert mgr._metrics.rejected_path_authoritative == 0
+
+
+@pytest.mark.anyio
+async def test_non_owner_update_rejected(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T2: flag ON but file is locally authored (origin=MY_NODE); a PEER-origin UPDATE → rejected."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", True)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t2.md"
+    await _seed_new(mgr, "Shared/t2.md", _BIG, MY_NODE, 1)  # Mac-authored
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t2.md", "UPDATE", _BIG + "\nmutated by non-owner", base_hash=_sha256(_BIG),
+        origin_node=PEER_NODE, origin_seq=2,
+    ))
+    assert f.read_text() == _BIG  # unchanged
+    assert mgr._metrics.rejected_path_authoritative >= 1
+    assert mgr._metrics.readonly_owner_update_accepted == 0
+
+
+@pytest.mark.anyio
+async def test_no_local_row_rejected(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T3: flag ON, UPDATE with no local state row → rejected (safe default)."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", True)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t3.md"
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t3.md", "UPDATE", _BIG, origin_node=PEER_NODE, origin_seq=2,
+    ))
+    assert not f.exists()
+    assert mgr._metrics.rejected_path_authoritative >= 1
+    assert mgr._metrics.readonly_owner_update_accepted == 0
+
+
+@pytest.mark.anyio
+async def test_flag_off_owner_update_rejected(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T4: flag OFF → owner UPDATE still rejected (identical to pre-fix behavior)."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", False)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t4.md"
+    await _seed_new(mgr, "Shared/t4.md", _BIG, PEER_NODE, 1)
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t4.md", "UPDATE", _BIG + "\nnope", base_hash=_sha256(_BIG),
+        origin_node=PEER_NODE, origin_seq=2,
+    ))
+    assert f.read_text() == _BIG
+    assert mgr._metrics.rejected_path_authoritative >= 1
+    assert mgr._metrics.readonly_owner_update_accepted == 0
+
+
+@pytest.mark.anyio
+async def test_owner_update_shrink_guarded(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T5: flag ON, owner UPDATE that collapses a rich note to a stub → shrink-guarded reject."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", True)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t5.md"
+    await _seed_new(mgr, "Shared/t5.md", _BIG, PEER_NODE, 1)  # big (>512B)
+    tiny = "# stub"
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t5.md", "UPDATE", tiny, base_hash=_sha256(_BIG),
+        origin_node=PEER_NODE, origin_seq=2,
+    ))
+    assert f.read_text() == _BIG  # kept rich
+    assert mgr._metrics.readonly_owner_update_shrink_guarded == 1
+    assert mgr._metrics.readonly_owner_update_accepted == 0
+
+
+@pytest.mark.anyio
+async def test_owner_update_growth_accepted(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T5b: flag ON, stub→rich owner UPDATE (the dobby enrichment shape) → accepted."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", True)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t5b.md"
+    stub = "# Awaiting enrichment"
+    await _seed_new(mgr, "Shared/t5b.md", stub, PEER_NODE, 1)
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t5b.md", "UPDATE", _BIG, base_hash=_sha256(stub),
+        origin_node=PEER_NODE, origin_seq=2,
+    ))
+    assert f.read_text() == _BIG
+    assert mgr._metrics.readonly_owner_update_accepted == 1
+
+
+@pytest.mark.anyio
+async def test_owner_forget_rejected(
+    pool, setup_peer, tmp_vault, mock_event_queue, readonly_shared, monkeypatch,
+):
+    """T6: flag ON, FORGET from the owner on a readonly path → still rejected (UPDATE-only bypass)."""
+    from api import vault_sync as vs
+    monkeypatch.setattr(vs, "_VAULT_OWNER_UPDATE_ACCEPT", True)
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    f = tmp_vault / "Shared" / "t6.md"
+    await _seed_new(mgr, "Shared/t6.md", _BIG, PEER_NODE, 1)
+    await mgr.apply_event(**_make_apply_kwargs(
+        "Shared/t6.md", "FORGET", _BIG, origin_node=PEER_NODE, origin_seq=2, deleted=True,
+    ))
+    assert f.exists() and f.read_text() == _BIG
+    assert mgr._metrics.rejected_path_authoritative >= 1
