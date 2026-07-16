@@ -1,86 +1,33 @@
 # research_author_sensors.example.yaml — TEMPLATE (safe to commit / fork).
 #
-# Copy to `research_author_sensors.yaml` (gitignored) and adapt to your own watched
-# authors. The sensor loads `research_author_sensors.yaml` by default; this .example
-# is only a schema reference and is not read at runtime.
+# WHICH authors to watch is personal config. Copy this to
+# `research_author_sensors.yaml` (gitignored) and adapt to your own watched
+# authors. The sensor loads `research_author_sensors.yaml` by default and falls
+# back to this .example only as a schema reference.
 #
-# One illustrative author is shown below. Per author: author_id (slug), canonical_name,
-# aliases, corpus_root, author_dir, optional official_preprints, arxiv_queries (arXiv
-# API query strings), project_tags (KOI field memberships — a paper can carry several),
-# corpus_tags, and relevance.{direct,project} keyword gates. For names that collide on
-# arXiv (e.g. a common surname), gate arxiv_queries by category/keyword.
+# Per author: author_id (slug), canonical_name, aliases, corpus_root (where the
+# paper corpus lives on YOUR machine — use ~ so it isn't a hardcoded path),
+# author_dir, optional official_preprints, arxiv_queries (arXiv API query
+# strings), project_tags (KOI field memberships — a paper can carry several),
+# corpus_tags, and relevance.{direct,project} keyword gates. For names that
+# collide on arXiv (e.g. a common surname), gate arxiv_queries by category/keyword.
+
 authors:
-  - author_id: ghrist-robert
-    canonical_name: Robert Ghrist
+  - author_id: example-author
+    canonical_name: Example Author
     aliases:
-      - Robert W. Ghrist
-      - R. Ghrist
-    corpus_root: /Users/darrenzal/Documents/Research/Papers
-    author_dir: authors/ghrist-robert
-    official_preprints: https://www2.math.upenn.edu/~ghrist/preprints.html
+      - E. Author
+    corpus_root: ~/research/papers           # expanded per-user; never a hardcoded /Users/... path
+    author_dir: authors/example-author
+    official_preprints: https://example.edu/~author/preprints.html
     arxiv_queries:
-      - 'au:"Robert Ghrist"'
+      - 'au:"Example Author"'
     project_tags:
-      - sheaf-explorer
-      - spore
-      - intelligence-commons
-      - personal-knowledge-graph
+      - your-project
     corpus_tags:
-      - sheaf-theory
-      - applied-topology
-      - cellular-sheaves
-      - discourse
-      - multi-agent-coordination
-      - robotics
-      - sensor-networks
-      - geometry
-      - topology
-      - scientific-discourse
+      - your-topic
     relevance:
       direct:
-        - sheaf
-        - sheaves
-        - discourse
-        - lattice
-        - lattices
-        - tarski
-        - quiver
-        - network coding
-        - social information
-        - liability
-        - directed hypergraph
-        - hypergraph
-        - local-to-global
-        - neural network
-        - belief
-        - communication
-        - coherence
-        - cohomology
+        - keyword-that-strongly-implies-relevance
       project:
-        - multi-robot
-        - coordination
-        - cooperative
-        - distributed
-        - sensor
-        - coverage
-        - network
-        - preference
-        - gossip
-        - graph
-        - homology
-        - homological
-        - persistence
-        - persistent
-        - topological data
-        - topology of data
-        - euler
-        - signal
-        - robot
-        - configuration space
-        - braid
-        - geometry
-        - curvature
-        - max-flow
-        - min-cut
-        - automata
-        - path planning
+        - broader-context-keyword

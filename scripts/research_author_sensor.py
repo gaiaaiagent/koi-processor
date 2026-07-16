@@ -139,6 +139,14 @@ def fetch_bytes(url: str, timeout: int = 120) -> bytes:
 
 
 def load_config(path: Path) -> list[AuthorConfig]:
+    # Which authors to watch is personal config (research_author_sensors.yaml,
+    # gitignored). Fall back to the committed template so a fresh fork still runs.
+    if not path.exists():
+        example = path.with_name(path.stem + ".example" + path.suffix)
+        if example.exists():
+            logger.warning("No personal %s — using %s. Copy it to %s and add your authors.",
+                           path.name, example.name, path.name)
+            path = example
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     authors: list[AuthorConfig] = []
     for item in payload.get("authors", []):
