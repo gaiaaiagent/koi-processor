@@ -67,6 +67,69 @@ def _vault_note_exists(rel_path: Optional[str]) -> bool:
     return (_VAULT_ROOT / f"{rel}.md").exists() or (_VAULT_ROOT / rel).exists()
 
 
+def _pick_best_mapping(rows, expected_folder: Optional[str] = None) -> Optional[str]:
+    """Choose one vault_path among entity_rid_mappings rows sharing a canonical.
+
+    Several rows can share one canonical_uri because /register-entity upserts on
+    ``ON CONFLICT (vault_rid)``: registering a second note for an entity that
+    already has one inserts a NEW row instead of repointing the old one. Renames
+    and duplicate-note consolidation both produce this.
+
+    The old query was a bare ``LIMIT 1`` with no ORDER BY, so Postgres returned
+    an arbitrary (in practice oldest) row. Observed 2026-07-16: canonical
+    person-marie-gauthier-1bb78735e78e had mappings to both People/Marie.md (a
+    deleted-then-sync-restored duplicate, created 2026-03) and the live
+    People/Marie Gauthier.md, and the stale loser won on age — so resolution and
+    --propagate both wrote to the wrong note.
+
+    Preference order, highest first:
+      1. the note actually exists on disk (a mapping to a missing file is dead);
+      2. the note sits in the folder for the entity's OWN type — Regenerate
+         Cascadia is an Organization, so Organizations/ beats Projects/. Without
+         this, same-name cross-type pairs (Regenerate Cascadia, PKOLS, KOI,
+         SeaTrees, Scott Morris) tie on name and fall through to recency, which
+         is arbitrary and silently flips the answer;
+      3. the mapping's recorded name matches the canonical entity's name
+         ("Marie Gauthier" beats "Marie" for canonical "Marie Gauthier");
+      4. most recently synced — the caller orders rows accordingly, and max()
+         keeps the first maximal element, so recency is the natural tiebreak.
+
+    (2) and (3) are independent: Marie's duplicates are both in People/ and are
+    separated by name; Regenerate Cascadia's both match on name and are
+    separated by folder.
+
+    Note (1) is fail-safe: when the vault isn't mounted _vault_note_exists
+    returns True for every row, collapsing this to the later signals rather than
+    discarding all candidates. expected_folder=None likewise just skips (2).
+    """
+    if not rows:
+        return None
+
+    def comparable(value: Optional[str]) -> Optional[str]:
+        # normalize_entity_text collapses runs of spaces with a single
+        # non-idempotent .replace('  ', ' '), so 'a   b' survives as 'a  b'.
+        # Collapse here rather than changing that shared normalizer, whose
+        # semantics the whole resolution stack depends on.
+        if not value:
+            return None
+        return " ".join(normalize_entity_text(value).split())
+
+    def rank(row):
+        path = row["vault_path"] or ""
+        exists = _vault_note_exists(path)
+        folder_match = bool(
+            expected_folder and path.startswith(f"{expected_folder}/")
+        )
+        canonical_name = comparable(row.get("canonical_name"))
+        mapping_name = comparable(row.get("name"))
+        name_match = bool(
+            canonical_name and mapping_name and mapping_name == canonical_name
+        )
+        return (exists, folder_match, name_match)
+
+    return max(rows, key=rank)["vault_path"]
+
+
 # Import CAT receipt chain
 from api.cat_receipts import create_receipt, generate_receipt_id, get_receipt_chain
 
@@ -2983,31 +3046,37 @@ async def _annotate_vault_fields(
 
     - vault_path: from the entity_rid_mappings row (public/local scope only;
       node_private mappings are excluded). One indexed lookup on the existing
-      idx_rid_mappings_canonical index. Null when there is no mapping.
+      idx_rid_mappings_canonical index. Null when there is no mapping. When more
+      than one mapping shares the canonical, _pick_best_mapping decides — see
+      that helper for why duplicates exist and how the winner is chosen.
     - vault_note_exists: best-effort filesystem check via _vault_note_exists
       (True when the vault isn't mounted here — see that helper). False when
       there is no mapping.
     - vault_folder: the schema folder for the entity type (e.g. Person ->
       People). Null when entity_type is missing.
     """
-    vault_path = None
-    if canonical_uri:
-        vault_path = await conn.fetchval(
-            """
-            SELECT vault_path FROM entity_rid_mappings
-            WHERE canonical_uri = $1
-              AND COALESCE(visibility_scope, 'public') != 'node_private'
-            LIMIT 1
-            """,
-            canonical_uri,
-        )
-    vault_note_exists = _vault_note_exists(vault_path) if vault_path else False
     vault_folder = None
     if entity_type:
         try:
             vault_folder = get_schema_for_type(entity_type).folder
         except Exception:
             vault_folder = None
+
+    vault_path = None
+    if canonical_uri:
+        rows = await conn.fetch(
+            """
+            SELECT erm.vault_path, erm.name, er.entity_text AS canonical_name
+            FROM entity_rid_mappings erm
+            LEFT JOIN entity_registry er ON er.fuseki_uri = erm.canonical_uri
+            WHERE erm.canonical_uri = $1
+              AND COALESCE(erm.visibility_scope, 'public') != 'node_private'
+            ORDER BY erm.last_synced DESC NULLS LAST, erm.id DESC
+            """,
+            canonical_uri,
+        )
+        vault_path = _pick_best_mapping(rows, vault_folder)
+    vault_note_exists = _vault_note_exists(vault_path) if vault_path else False
     return vault_path, vault_note_exists, vault_folder
 
 
@@ -3875,6 +3944,37 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     request.content_hash,
                     request.visibility_scope or "public"
                 )
+
+                # Prune sibling mappings for this canonical whose note is gone.
+                # The upsert above conflicts on vault_rid, so registering a
+                # second note for an existing canonical INSERTs rather than
+                # repointing — leaving the old row to compete forever (that is
+                # how People/Marie.md kept beating People/Marie Gauthier.md).
+                # Only rows whose file no longer exists are removed: two LIVE
+                # notes on one canonical is a real ambiguity for the operator,
+                # surfaced as the collision warning, not something to silently
+                # resolve by deletion. _vault_note_exists is fail-safe (True
+                # when the vault isn't mounted), so a headless deploy prunes
+                # nothing. document_entity_links hang off canonical_uri, not
+                # these rows, so pruning never drops links.
+                sibling_rows = await conn.fetch(
+                    """
+                    SELECT vault_rid, vault_path FROM entity_rid_mappings
+                    WHERE canonical_uri = $1 AND vault_rid != $2
+                    """,
+                    canonical.uri, eff_vault_rid,
+                )
+                for sibling in sibling_rows:
+                    if _vault_note_exists(sibling["vault_path"]):
+                        continue
+                    await conn.execute(
+                        "DELETE FROM entity_rid_mappings WHERE vault_rid = $1",
+                        sibling["vault_rid"],
+                    )
+                    logger.info(
+                        "Pruned stale mapping %s -> %s (note missing) for %s",
+                        sibling["vault_rid"], sibling["vault_path"], canonical.uri,
+                    )
 
                 # Update entity_registry with vault_rid if not set
                 await conn.execute("""
