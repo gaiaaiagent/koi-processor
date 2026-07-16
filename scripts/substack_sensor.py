@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Substack ingestion sensor for personal-koi (free publications).
+"""Substack ingestion sensor for personal-koi.
 
-Ingests a free Substack publication's posts into personal-koi under the
-`substack-corpus:<feed_slug>:<post_slug>` RID scheme — continuous with the
-2026-05-18 indyjohar backfill (source_sensor='substack-corpus-backfill').
+Ingests a Substack publication's posts into personal-koi under the
+`substack-corpus:<feed_slug>:<post_slug>` RID scheme (source_sensor
+'substack-corpus-backfill').
 
-Drives entirely off Substack's public JSON API — NO auth, NO Playwright:
+Drives off Substack's public JSON API (no Playwright). Free posts need no auth;
+set SUBSTACK_SID (a paid subscriber's session cookie) to also ingest `only_paid`
+posts in full instead of skipping them.
   - archive list:  GET /api/v1/archive?sort=new&offset=N&limit=12  (slug, post_date, title, audience)
   - per-post body: GET /api/v1/posts/<slug>                        (body_html, subtitle, audience)
 
@@ -17,7 +19,9 @@ For each archive post whose RID is not already in koi_memories (or --force):
 Idempotent: only NEW rids are ingested by default, so the already-repaired
 141 backfill rows are never re-embedded. `--force` re-ingests everything.
 
-Config: PUBLICATIONS below (free Substacks only).
+Config: which publications to ingest is personal config in
+config/substack_publications.yaml (gitignored; see the .example file) — not
+hardcoded here, so forks configure their own.
 Schedule: ~/Library/LaunchAgents/com.personal-koi.substack-sensor.plist (daily).
 
 Usage (source config/personal.env first for OPENAI_API_KEY + POSTGRES_URL):
@@ -58,17 +62,18 @@ SOURCE_SENSOR = "substack-corpus-backfill"  # continuity with the 2026-05-18 ind
 ACCESS_SOURCE = "substack-public"
 UA = {"User-Agent": "Mozilla/5.0 (personal-koi substack sensor)"}
 
-# Free Substack publications to ingest. Extend this list to add more authors.
-PUBLICATIONS: List[Dict[str, Any]] = [
-    {
-        "feed_slug": "indyjohar",
-        "base": "https://indyjohar.substack.com",
-        "author": "Indy Johar",
-        "domain": "commons",
-        "tags": ["substack", "indy-johar", "dark-matter-labs", "civic-design", "institutional-form"],
-        "author_entity": {"name": "Indy Johar", "type": "Person"},
-    },
-]
+# Optional Substack session cookie (paid-subscriber auth). When set, the sensor
+# fetches full body_html for `only_paid` posts instead of skipping them. The
+# cookie rotates periodically — an expired one yields a short/empty body, which
+# the <200-char gate in run() skips, so stale creds degrade gracefully.
+SUBSTACK_SID = os.getenv("SUBSTACK_SID", "").strip()
+SUBSTACK_COOKIES = {"substack.sid": SUBSTACK_SID} if SUBSTACK_SID else None
+
+# WHICH publications to ingest is personal config, loaded at runtime from
+# config/substack_publications.yaml (see substack_config / the .example file).
+# Deliberately NOT hardcoded here so forks configure their own publications
+# without editing code or committing personal choices to the repo.
+from substack_config import load_publications  # noqa: E402
 
 
 def rid_for(feed_slug: str, post_slug: str) -> str:
@@ -205,8 +210,9 @@ async def run(args) -> None:
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
     totals = {"considered": 0, "ingested": 0, "skipped": 0, "errors": 0}
     try:
-        async with httpx.AsyncClient(timeout=60.0) as http:
-            for pub in PUBLICATIONS:
+        publications = load_publications()
+        async with httpx.AsyncClient(timeout=60.0, cookies=SUBSTACK_COOKIES) as http:
+            for pub in publications:
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
                         "SELECT rid FROM koi_memories WHERE rid LIKE $1",
@@ -225,7 +231,11 @@ async def run(args) -> None:
                     meta = dict(archive[slug])
                     try:
                         detail = await fetch_body(http, pub["base"], slug)
-                        if detail.get("audience") not in (None, "everyone"):
+                        # Paid posts: skip only when we have no subscriber cookie.
+                        # With SUBSTACK_SID set the API returns full body_html for
+                        # paid posts; the <200-char gate below still catches any
+                        # that come back paywalled (e.g. an expired cookie).
+                        if detail.get("audience") not in (None, "everyone") and not SUBSTACK_COOKIES:
                             logger.info("skip non-free %s (audience=%s)", slug, detail.get("audience"))
                             totals["skipped"] += 1
                             continue
