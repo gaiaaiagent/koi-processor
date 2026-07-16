@@ -11,9 +11,11 @@
 # per-doc advisory lock, so overlap with a manual run or a re-fire is safe. Sequential —
 # daily volume is 0-2 posts; no need for concurrency.
 #
-# Requires ANTHROPIC_API_KEY credits (the extractor's pay-per-token key). If that key is
-# dry, posts fail individually and are logged; the job exits cleanly (no crash-loop) and
-# the next run retries them (resumable).
+# Extraction transport defaults to the Claude Code SUBSCRIPTION via `claude -p`
+# (DOC_EXTRACTOR_TRANSPORT=claude_p, $0 marginal cost) — set DOC_EXTRACTOR_TRANSPORT=api
+# to use the pay-per-token ANTHROPIC_API_KEY instead (faster, but billed). Either way,
+# posts that fail extract individually, are logged, and the next run retries them
+# (resumable); the job exits cleanly (no crash-loop).
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,9 +23,10 @@ REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 cd "$REPO_ROOT" || exit 9
 
 # launchd runs this under macOS system /bin/bash (3.2) with a minimal PATH that
-# lacks Homebrew bins — psql lives in /opt/homebrew/bin. Prepend it so `psql`
-# resolves the same way it does in an interactive shell.
-export PATH="/opt/homebrew/bin:$PATH"
+# lacks Homebrew bins — psql lives in /opt/homebrew/bin. Prepend it (and ~/.local/bin,
+# where the `claude` CLI lives — needed for the subscription extraction transport) so
+# both resolve the same way they do in an interactive shell.
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
 
 VENV="${KOI_VENV:-/Users/darrenzal/venvs/koi-server}"
 PY="$VENV/bin/python"
