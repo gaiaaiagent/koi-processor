@@ -41,10 +41,65 @@ COLLISION_PAIRS = [
     ("Locations/Esquimalt Harbour.md", "Locations/Esquimalt Lagoon.md"),
     ("Locations/Vancouver Island.md", "Locations/Vancouver.md"),
     ("Concepts/Bioregionalism.md", "Concepts/Bioregional Finance.md"),
+
+    # --- 2026-07-16 round ---------------------------------------------------
+    # Surfaced by auditing entity_rid_mappings for canonicals with >1 mapping.
+    # Only pairs that are DEMONSTRABLY two different real things are listed;
+    # same-thing duplicates (Will Reddick/Will Ruddick, Becca/Rebecca Harman,
+    # Claims Engine/Claims Engine V1, and the cross-type Org-vs-Project pairs)
+    # are note-duplication, not entity collisions — splitting those would
+    # fragment one real entity, so they are deliberately excluded.
+    ("Organizations/University of Victoria.md", "Organizations/University of Alberta.md"),           # Edmonton, ualberta.ca
+    ("Organizations/First Nations National Guardians Network.md", "Organizations/First Nations Finance Authority.md"),  # FNFA, fnfa.ca
+    ("Projects/Regen Ledger.md", "Concepts/REGEN Token.md"),                                          # the chain vs its native token
+    ("Projects/KOI.md", "People/Koi.md"),                                                             # KOI infra vs an unrelated person in Brazil
+    ("Projects/Claims Engine Demo Checklist.md", "Projects/Claims Engine Prod Runbook.md"),           # two distinct documents
 ]
 
 VAULT_ROOT = os.path.expanduser("~/Documents/Notes")
 API_BASE = "http://localhost:8351"
+
+
+def doc_rid_to_vault_path(doc_rid: str):
+    """Map a document_rid to a vault-relative .md path, or None if not a vault note.
+
+    Step 5 previously hard-coded `doc_rid.replace('orn:obsidian.document:Notes/', '')`.
+    Real document_rid prefixes are `vault:` (the dominant form for vault notes),
+    plus `orn:`, `document:`, `claude-session:` and `substack-corpus:` — so for
+    every `vault:`-prefixed rid the replace was a no-op, the resulting path never
+    existed, and the loop `continue`d. Step 5 therefore re-attributed NOTHING,
+    silently, for every split run to date (2026-07-16).
+
+    Only vault-backed notes are returned; non-vault sources (sessions, substack)
+    have no file to inspect for wikilinks.
+    """
+    for prefix in ("vault:", "orn:obsidian.document:Notes/", "orn:obsidian.note:Notes/"):
+        if doc_rid.startswith(prefix):
+            rel = doc_rid[len(prefix):]
+            return rel if rel.endswith(".md") else rel + ".md"
+    return None
+
+
+def update_note_canonical_uri(vault_path: str, old_uri: str, new_uri: str) -> bool:
+    """Repoint a note's koi.canonical_uri from old_uri to new_uri.
+
+    Step 6 used to only LOG the required change, so a split note kept advertising
+    the winner's URI in its own frontmatter (e.g. University of Alberta.md still
+    claimed organization-university-of-victoria-...). Rewrites only the exact
+    `canonical_uri: <old_uri>` line, and only when it still holds old_uri, so it
+    is idempotent and cannot touch anything else in the file.
+    """
+    path = os.path.join(VAULT_ROOT, vault_path)
+    if not os.path.exists(path):
+        return False
+    with open(path) as f:
+        content = f.read()
+    needle = f"canonical_uri: {old_uri}"
+    if needle not in content:
+        return False
+    with open(path, "w") as f:
+        f.write(content.replace(needle, f"canonical_uri: {new_uri}", 1))
+    return True
 
 
 def generate_uri(entity_type: str, name: str) -> str:
@@ -132,7 +187,7 @@ async def split_one(conn, pair, dry_run=False):
     logger.info(f"    New URI: {new_uri}")
 
     if dry_run:
-        return new_uri
+        return (old_uri, new_uri)
 
     # --- Phase B-I: Commit split mappings (single transaction) ---
     async with conn.transaction():
@@ -221,9 +276,9 @@ async def split_one(conn, pair, dry_run=False):
     entity_b_wikilink = entity_b_path.replace('.md', '')
     for link in doc_links:
         doc_rid = link['document_rid']
-        # Convert document_rid to vault path for file check
-        # orn:obsidian.document:Notes/Meetings/foo → Meetings/foo.md
-        doc_vault_path = doc_rid.replace('orn:obsidian.document:Notes/', '') + '.md'
+        doc_vault_path = doc_rid_to_vault_path(doc_rid)
+        if not doc_vault_path:
+            continue  # non-vault source (session/substack) — no file to inspect
         doc_filepath = os.path.join(VAULT_ROOT, doc_vault_path)
 
         if not os.path.exists(doc_filepath):
@@ -250,7 +305,7 @@ async def split_one(conn, pair, dry_run=False):
             """, doc_rid, new_uri)
             logger.info(f"    Moved doc link: {doc_rid} → new URI")
 
-    return new_uri
+    return (old_uri, new_uri)
 
 
 async def main():
@@ -263,19 +318,25 @@ async def main():
         results = {}
         for pair in COLLISION_PAIRS:
             logger.info(f"\n--- Splitting: {pair[0]} / {pair[1]} ---")
-            new_uri = await split_one(conn, pair, dry_run=dry_run)
-            if new_uri:
-                results[pair[1]] = new_uri
+            split = await split_one(conn, pair, dry_run=dry_run)
+            if split:
+                results[pair[1]] = split  # (old_uri, new_uri) — Step 6 needs both
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"Split complete. {len(results)} entities split.")
         if dry_run:
             logger.info("(DRY RUN — no changes made)")
 
-        # Output vault frontmatter updates needed
-        logger.info(f"\n--- Vault frontmatter updates needed (Step 6) ---")
-        for vault_path, new_uri in results.items():
-            logger.info(f"  {vault_path}: koi.canonical_uri → {new_uri}")
+        # Step 6: repoint each split note's koi.canonical_uri. Previously this
+        # only logged, leaving split notes advertising the winner's URI forever.
+        logger.info(f"\n--- Vault frontmatter updates (Step 6) ---")
+        for vault_path, (old_uri, new_uri) in results.items():
+            if dry_run:
+                logger.info(f"  [dry-run] {vault_path}: koi.canonical_uri → {new_uri}")
+            elif update_note_canonical_uri(vault_path, old_uri, new_uri):
+                logger.info(f"  {vault_path}: koi.canonical_uri → {new_uri}")
+            else:
+                logger.info(f"  {vault_path}: no koi.canonical_uri to update (skipped)")
 
         # Return results for programmatic use
         return results
