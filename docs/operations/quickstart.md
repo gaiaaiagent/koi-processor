@@ -8,11 +8,9 @@
 > those before running). Ports/DB shown here (8090/8100, `eliza`, BGE-1024) are the RegenAI
 > surface.
 >
-> **This does NOT describe personal-KOI.** For the primary local personal-KOI surface the
-> backend is `api/personal_ingest_api.py` on **port 8351**, DB **`personal_koi`**, embeddings
-> **OpenAI `text-embedding-3-large` (3072-dim)**, started via
-> `~/.config/personal-koi/start.sh` / `restart.sh` (launchd) — see the repo `CLAUDE.md`
-> "Personal KOI Backend" + DEPLOY TOPOLOGY. A personal-KOI quickstart is still TODO.
+> **This does NOT describe personal-KOI.** For the primary local personal-KOI surface
+> (backend `api/personal_ingest_api.py` :8351, DB `personal_koi`, OpenAI-3072 embeddings),
+> use **[`quickstart-personal-koi.md`](quickstart-personal-koi.md)**.
 
 ## 🚀 5-Minute Setup
 
