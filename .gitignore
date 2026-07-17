@@ -92,6 +92,7 @@ exports/
 *.log.*
 *.gz
 config/personal.env
+config/extract-batch.env
 config/substack_publications.yaml
 config/rss_feeds.yaml
 config/research_author_sensors.yaml

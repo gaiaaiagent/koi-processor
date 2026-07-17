@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -99,15 +100,46 @@ MAX_WINDOWS = int(os.getenv("DOC_MAX_WINDOWS", "12"))        # per-invocation bu
 # false-retracting genuinely-distinct facts.
 SEMANTIC_DEDUP_THRESHOLD = float(os.getenv("DOC_SEMANTIC_DEDUP_THRESHOLD", "0.95"))
 
-# Per-window extraction transport: the direct Anthropic Messages API (DOCUMENT path
-# only — the session pipeline keeps its own `claude -p` on the subscription). The API
-# is ~4-5x faster than the claude -p CLI (which adds harness/MCP overhead) and is the
-# correct headless backend transport. Bills per-token against ANTHROPIC_API_KEY.
+# Per-window extraction transport — selected by DOC_EXTRACTOR_TRANSPORT:
+#   'claude_p' (DEFAULT): run each window through the `claude -p` CLI on the Claude Code
+#       SUBSCRIPTION — zero pay-per-token cost. Slower (harness startup, no server-side
+#       batching) but $0 marginal. We strip ANTHROPIC_API_KEY from the child env so the
+#       CLI uses OAuth, and pass --strict-mcp-config + --setting-sources '' to shed the
+#       MCP/CLAUDE.md context (~7x fewer overhead tokens per call in measurement).
+#   'api': the direct Anthropic Messages API — ~4-5x faster, but BILLS per-token against
+#       ANTHROPIC_API_KEY.
+#   'openai': ANY OpenAI-compatible /v1/chat/completions endpoint — bring your own model
+#       (public OpenAI, a self-hosted vLLM/Ollama, a provider-hosted open model, etc.).
+#       Configure it entirely via DOC_EXTRACTOR_OPENAI_* env vars (below); no endpoint or
+#       key is baked in, so forks point it at their own infra.
+# The default is 'claude_p' and should stay that way — 'openai'/'api' are opt-in per run.
+DOC_EXTRACTOR_TRANSPORT = os.getenv("DOC_EXTRACTOR_TRANSPORT", "claude_p").strip().lower()
+# Resolve the claude binary — the launchd job runs with a minimal PATH that may lack
+# ~/.local/bin, so shutil.which() can miss it; fall back to the known install location.
+CLAUDE_BIN = (os.getenv("CLAUDE_BIN") or shutil.which("claude")
+              or os.path.expanduser("~/.local/bin/claude"))
+ROUTE_USED = {"api": "anthropic_api", "openai": "openai_compat"}.get(
+    DOC_EXTRACTOR_TRANSPORT, "claude_p_cli")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("DOC_EXTRACTOR_MODEL", CLAUDE_P_MODEL)
 ANTHROPIC_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_MAX_TOKENS", "24000"))
 ANTHROPIC_TIMEOUT = int(os.getenv("DOC_EXTRACTOR_TIMEOUT", "300"))
 ANTHROPIC_RETRYABLE = {429, 500, 502, 503, 529}
+
+# 'openai' transport config — bring-your-own OpenAI-compatible model. Defaults are
+# GENERIC (public OpenAI) so a fork works with just an OPENAI_API_KEY; point BASE_URL
+# at any compatible server (vLLM/Ollama/provider) to use a different model. Nothing
+# operator-specific is committed here — set these in your (gitignored) config/env.
+#   DOC_EXTRACTOR_OPENAI_NO_THINK: for reasoning models (Qwen3, etc.) served by vLLM,
+#     set =1 to send chat_template_kwargs.enable_thinking=false — otherwise the model
+#     spends its budget reasoning and returns content=null. Default 0 because the param
+#     is a vLLM extension that the public OpenAI API rejects. Enable it for reasoning
+#     models on a compatible server.
+OPENAI_BASE_URL = os.getenv("DOC_EXTRACTOR_OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_MODEL = os.getenv("DOC_EXTRACTOR_OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.getenv("DOC_EXTRACTOR_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+OPENAI_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_OPENAI_MAX_TOKENS", "12000"))
+OPENAI_NO_THINK = os.getenv("DOC_EXTRACTOR_OPENAI_NO_THINK", "0").strip().lower() in ("1", "true", "yes")
 
 # Type-priority coercion (plan §23): highest wins on cross-window conflict.
 TYPE_PRIORITY = {"Person": 7, "Organization": 6, "Project": 5, "Location": 4,
@@ -173,6 +205,173 @@ async def _call_anthropic(prompt: str, http: httpx.AsyncClient, *, model: str,
             last = f"{type(e).__name__}: {e}"
             await asyncio.sleep(2 ** attempt)
     raise ExtractionError("extract_http_error", f"anthropic api failed after {max_retries} attempts: {last}")
+
+
+async def _call_claude_p(prompt: str, *, model: str, timeout: int = ANTHROPIC_TIMEOUT,
+                         max_retries: int = 3) -> str:
+    """Subscription transport: run the extractor prompt through the `claude -p` CLI.
+
+    Bills the Claude Code SUBSCRIPTION, not ANTHROPIC_API_KEY. Same model/prompt/schema
+    as the API path — just a headless CLI transport with $0 marginal per-token cost.
+
+    Two things make this correct-and-cheap: (1) we strip ANTHROPIC_API_KEY /
+    ANTHROPIC_AUTH_TOKEN from the child env so `claude` authenticates via the OAuth
+    subscription instead of falling back to pay-per-token API billing (the shell wrapper
+    exports the key via `source personal.env`, so a naive child would inherit it); and
+    (2) --strict-mcp-config (no MCP servers) + --setting-sources '' + a neutral cwd shed
+    the MCP tool schemas and CLAUDE.md, cutting per-call overhead tokens ~7x. Retries
+    transient CLI/API-status errors with backoff; raises (resumable) on exhaustion.
+    """
+    if not CLAUDE_BIN or not os.path.exists(CLAUDE_BIN):
+        raise ExtractionError("no_claude_bin",
+                              f"claude CLI not found (CLAUDE_BIN={CLAUDE_BIN!r}); set CLAUDE_BIN "
+                              f"or add ~/.local/bin to PATH", terminal=True)
+    # Force subscription auth — a set ANTHROPIC_API_KEY would make `claude` bill the API.
+    child_env = {k: v for k, v in os.environ.items()
+                 if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    cmd = [CLAUDE_BIN, "-p", "--output-format", "json", "--model", model,
+           "--strict-mcp-config", "--setting-sources", ""]
+    last = None
+    for attempt in range(max_retries):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, env=child_env, cwd="/tmp")
+        except OSError as e:
+            raise ExtractionError("no_claude_bin", f"failed to spawn {CLAUDE_BIN}: {e}", terminal=True)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=timeout)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            last = f"timeout after {timeout}s"
+            await asyncio.sleep(2 ** attempt)
+            continue
+        if proc.returncode != 0:
+            last = f"exit {proc.returncode}: {err.decode(errors='replace')[:400]}"
+            await asyncio.sleep(2 ** attempt)
+            continue
+        try:
+            env = json.loads(out.decode())
+        except json.JSONDecodeError:
+            last = f"non-JSON stdout: {out.decode(errors='replace')[:400]}"
+            await asyncio.sleep(2 ** attempt)
+            continue
+        if env.get("is_error") or env.get("subtype") != "success":
+            last = f"claude -p reported error: {str(env)[:400]}"
+            await asyncio.sleep(2 ** attempt)
+            continue
+        text = env.get("result") or ""
+        if not text.strip():
+            raise ExtractionError("empty_completion", f"claude -p empty result: {str(env)[:400]}")
+        return text
+    raise ExtractionError("claude_p_error", f"claude -p failed after {max_retries} attempts: {last}")
+
+
+async def _call_openai(prompt: str, http: httpx.AsyncClient, *,
+                       timeout: int = ANTHROPIC_TIMEOUT, max_retries: int = 3,
+                       temperature: float = 0.0) -> str:
+    """OpenAI-compatible /v1/chat/completions transport (bring-your-own model).
+
+    Same prompt/schema as the other transports. For reasoning models we disable the
+    think phase (OPENAI_NO_THINK) — otherwise the model spends its budget in a
+    `reasoning`/`<think>` channel and returns `content: null`. parse_and_validate
+    downstream strips any residual <think> block and fences. Retries transient
+    errors with backoff; raises (resumable) on exhaustion. `temperature` is bumped
+    by the repair loop so a re-ask is not deterministically identical.
+    """
+    headers = {"content-type": "application/json"}
+    if OPENAI_API_KEY:
+        headers["authorization"] = f"Bearer {OPENAI_API_KEY}"
+    body: Dict[str, Any] = {
+        "model": OPENAI_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": OPENAI_MAX_TOKENS,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if OPENAI_NO_THINK:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    url = OPENAI_BASE_URL.rstrip("/") + "/chat/completions"
+    last = None
+    for attempt in range(max_retries):
+        try:
+            r = await http.post(url, headers=headers, json=body, timeout=timeout)
+            if r.status_code in ANTHROPIC_RETRYABLE:
+                last = f"http {r.status_code}: {r.text[:400]}"
+                await asyncio.sleep(2 ** attempt)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message") or {}
+            text = msg.get("content") or msg.get("reasoning") or ""
+            if choice.get("finish_reason") == "length" and not text.strip():
+                raise ExtractionError("extract_truncated",
+                                      f"hit max_tokens={OPENAI_MAX_TOKENS}; raise "
+                                      f"DOC_EXTRACTOR_OPENAI_MAX_TOKENS or lower DOC_WINDOW_CHARS")
+            if not text.strip():
+                raise ExtractionError("empty_completion", f"no content: {str(data)[:400]}")
+            return text
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError) as e:
+            last = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(2 ** attempt)
+    raise ExtractionError("extract_http_error", f"openai api failed after {max_retries} attempts: {last}")
+
+
+async def _extract_window(prompt: str, http: httpx.AsyncClient, *, model: str,
+                          temperature: float = 0.0) -> str:
+    """Dispatch a window extraction to the configured transport (openai / api / subscription CLI)."""
+    if DOC_EXTRACTOR_TRANSPORT == "openai":
+        return await _call_openai(prompt, http, temperature=temperature)
+    if DOC_EXTRACTOR_TRANSPORT == "api":
+        return await _call_anthropic(prompt, http, model=model)
+    return await _call_claude_p(prompt, model=model)
+
+
+# How many repair passes to attempt when the model returns malformed / schema-invalid
+# JSON. Smaller / open models occasionally slip on strict JSON — a
+# missing comma, or a bare string where the schema wants an object. Re-asking with the
+# exact error + a bumped temperature recovers most of these (a plain retry at temp 0
+# would reproduce the same broken output deterministically). 0 disables the loop.
+DOC_EXTRACTOR_REPAIR_PASSES = int(os.getenv("DOC_EXTRACTOR_REPAIR_PASSES", "2"))
+
+
+async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema: dict,
+                                   *, model: str) -> dict:
+    """Extract one window and parse+validate it, with a repair loop for the free
+    OpenAI-compatible transport. On a parse/schema failure, re-ask the model with the
+    broken output and the exact validator error, nudging temperature up each pass so
+    the retry isn't identical. api / claude_p keep single-shot behaviour (they rarely
+    emit invalid JSON, and re-prompting claude -p is slow)."""
+    raw = await _extract_window(prompt, http, model=model)
+    try:
+        return parse_and_validate(raw, schema)
+    except ExtractionError as first_err:
+        repairable = first_err.reason in ("extract_parse_error", "empty_completion")
+        if DOC_EXTRACTOR_TRANSPORT != "openai" or not repairable or DOC_EXTRACTOR_REPAIR_PASSES <= 0:
+            raise
+        last_err = first_err
+        for i in range(DOC_EXTRACTOR_REPAIR_PASSES):
+            repair_prompt = (
+                f"{prompt}\n\n---\nYour previous response was NOT accepted. Error:\n"
+                f"{last_err.detail}\n\nPrevious response (fix it):\n{raw[:6000]}\n\n"
+                "Return the CORRECTED result as ONE valid JSON object matching the schema "
+                "exactly — no prose, no markdown fences, every required field present, and "
+                "every entities[] item an object with name+type (never a bare string). "
+                "Start with { and end with }."
+            )
+            temp = 0.2 + 0.3 * i
+            logger.info("  repair pass %d/%d (temp=%.1f): %s",
+                        i + 1, DOC_EXTRACTOR_REPAIR_PASSES, temp, last_err.detail[:80])
+            try:
+                raw = await _call_openai(repair_prompt, http, temperature=temp)
+                return parse_and_validate(raw, schema)
+            except ExtractionError as e:
+                last_err = e
+                if e.reason not in ("extract_parse_error", "empty_completion"):
+                    raise
+        raise last_err
 
 
 def parse_and_validate(raw: str, schema: dict) -> dict:
@@ -541,14 +740,13 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 logger.info("window %d/%d: extracting (%d chunks, %d chars) via %s",
                             w.index + 1, len(windows), len(w.chunk_indices), len(w.text), ANTHROPIC_MODEL)
                 prompt = build_prompt(template, w, len(windows))
-                raw = await _call_anthropic(prompt, http, model=ANTHROPIC_MODEL)
-                data = parse_and_validate(raw, schema)
+                data = await extract_window_validated(prompt, http, schema, model=ANTHROPIC_MODEL)
                 per_window[w.index] = data
                 await conn.execute(
                     """UPDATE document_window_extractions
-                       SET status='extracted', route_used='anthropic_api', raw_json=$3::jsonb, updated_at=NOW()
+                       SET status='extracted', route_used=$4, raw_json=$3::jsonb, updated_at=NOW()
                        WHERE document_rid=$1 AND window_index=$2""",
-                    document_rid, w.index, json.dumps(data))
+                    document_rid, w.index, json.dumps(data), ROUTE_USED)
 
             # Merge + write facts through /episodes.
             merged = merge_extractions([d for d in per_window if d], windows)
