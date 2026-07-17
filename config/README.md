@@ -32,7 +32,19 @@ If you're just developing and don't need Google Drive integration:
 - `dashboard_config.yaml` - Created automatically by setup.sh
 - `curator_config.yaml` - Curator settings
 - `services.json` - Service definitions
-- `personal.env.example` - Local/personal KOI config template (includes KOI-net + optional TerminusDB vars)
+- `personal.env.example` - Local/personal KOI config template (includes KOI-net + optional TerminusDB vars; also documents the optional `DOC_EXTRACTOR_*` deep-extraction transport knobs)
+
+### Personal config: `*.example` template pattern
+
+Some config holds personal choices (which publications/feeds/authors to ingest, which
+extraction transport to use for a batch). These follow a convention: the **`*.example.*`
+file is a committed, generic template**; copy it to the un-suffixed name (which is
+**gitignored** — never committed) and fill in your values.
+
+- `substack_publications.example.yaml` → `substack_publications.yaml` — Substacks to ingest (see the "Substack corpus ingestion" section in the repo `CLAUDE.md`)
+- `rss_feeds.example.yaml` → `rss_feeds.yaml` — RSS/Atom feeds to poll
+- `research_author_sensors.example.yaml` → `research_author_sensors.yaml` — research authors + local corpus path to watch (lives in the runtime checkout that runs the sensor)
+- `extract-batch.env.example` → `extract-batch.env` — transport override for one-off batch deep-extraction via `scripts/run_batch_extract.sh`
 
 ## Local Env Loading
 

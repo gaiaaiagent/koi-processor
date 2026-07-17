@@ -1,5 +1,18 @@
 # KOI Processor Quick Start Guide
 
+> ⚠️ **SCOPE / STALENESS (2026-07-16):** This quickstart describes the **legacy RegenAI
+> event-bridge stack** (`bge_server.py`, `koi_event_bridge_v2.py`, `eliza` DB, ports
+> 8090/8100, BGE-1024 embeddings). Several commands below are stale for the **personal-KOI**
+> surface — `bge_server.py`/`koi_event_bridge_v2.py` moved to `src/core/`, and
+> `scripts/test_pipeline.py` / `diagnose.py` / `batch_import.py` no longer exist.
+>
+> **For personal-KOI (the primary local surface):** the backend is
+> `api/personal_ingest_api.py` on **port 8351**, DB **`personal_koi`**, embeddings
+> **OpenAI `text-embedding-3-large` (3072-dim)**. Start/stop via
+> `~/.config/personal-koi/start.sh` / `restart.sh` (a launchd service — see the repo
+> `CLAUDE.md` "Personal KOI Backend" + DEPLOY TOPOLOGY). This section needs a rewrite for
+> personal-KOI; treat the steps below as RegenAI-legacy reference only.
+
 ## 🚀 5-Minute Setup
 
 ### Prerequisites Check

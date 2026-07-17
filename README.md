@@ -960,7 +960,7 @@ Generates semantic embedding for text (currently using BGE model).
 For local personal KOI stacks, see [`docs/PERSONAL_SENSOR_INTEGRATION.md`](docs/PERSONAL_SENSOR_INTEGRATION.md).
 
 Key points:
-- Canonical source sensor IDs: `email-sensor`, `claude-sessions-sensor`
+- Canonical source sensor IDs: `email-sensor`, `claude-sessions-sensor`, `substack-corpus-backfill`, `research-paper-sensor`, `proton-email-sensor`, RSS (`rss-<slug>`). See `docs/integration/personal-sensor.md` for the full roster + the runtime-clone deployment topology.
 - Required migration for email metadata: `migrations/033_email_sensor_tables.sql`
 - Session endpoints: `/search-sessions`, `/session-stats`, `/session-tools`, `/session-files`
 

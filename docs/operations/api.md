@@ -1,5 +1,11 @@
 # KOI Pipeline API Documentation
 
+> ⚠️ **SCOPE (2026-07-16):** This documents the **legacy RegenAI event-bridge API**. The
+> embedding examples below (`BAAI/bge-large-en-v1.5`, 1024-dim) describe that surface —
+> **personal-KOI** migrated to OpenAI `text-embedding-3-large` (**3072-dim**) on 2026-04-23
+> and serves from `api/personal_ingest_api.py` (port 8351). Verify any endpoint here against
+> the current API before relying on it for the personal-KOI surface.
+
 ## Overview
 The KOI Pipeline provides several REST APIs for content processing, knowledge search, and system monitoring.
 

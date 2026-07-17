@@ -4,15 +4,27 @@
 
 # Project Context for Claude
 
-> **DEPLOY TOPOLOGY** (current as of 2026-04-29; see `c4d3a045` 2026-03-12 collapse + `12ecd839` 2026-04-14 stable re-introduction for history):
+> **DEPLOY TOPOLOGY** (updated 2026-07-16; supersedes the single-checkout table — see `c4d3a045` 2026-03-12 collapse + `12ecd839` 2026-04-14 stable re-introduction for older history):
+>
+> **Local checkouts (3 — which one you edit matters):**
+>
+> | Local checkout | Serves | Expected branch | Redeploy |
+> |---|---|---|---|
+> | `~/projects/koi-processor-service` | **Backend service** (personal-koi API, port 8351) — `~/.config/personal-koi/start.sh` `cd`s here | `regen-prod` (may be branch-switched by dev sessions) | `~/.config/personal-koi/restart.sh` (reloads from this working tree) |
+> | `~/projects/koi-processor-runtime` | **The 4 personal-KOI sensor launchd jobs** (`substack-sensor`, `substack-gmail-bridge`, `substack-deep-extract`, `research-author-sensor`) | **pinned to `regen-prod`, never branch-switched** | `git -C ~/projects/koi-processor-runtime pull` |
+> | `~/projects/RegenAI/koi-processor` (= `regenai/koi-processor`, case-insensitive FS) | Shared **dev** checkout | whatever branch a session is on | n/a (dev) |
+>
+> **⚠️ Trap:** sensor code edits must land in **`koi-processor-runtime`** (that's where the sensor jobs run). Editing sensors in `koi-processor-service` or the dev checkout and running `launchctl kickstart` will NOT change what the sensors execute. Commit to `regen-prod`, then `git pull` in the runtime clone.
+>
+> **Branches:**
 >
 > | Branch | Surface | How it deploys |
 > |---|---|---|
-> | **`regen-prod`** (this checkout) | **Local personal-koi** (port 8351) + **NUC federation** | Local: `launchctl kickstart com.personal.koi-processor` reloads from this working tree. NUC: Dobby's `deploy.sh` rsyncs from this working tree. |
-> | **`stable`** | **RegenAI public production** (`darren@202.61.196.119`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep this branch clean. |
-> | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. The old `koi-server` worktree was removed when `server/stable→regen-prod` merged. |
+> | **`regen-prod`** | Local personal-koi (backend + sensors, above) + **NUC federation** | NUC: Dobby's `deploy.sh` rsyncs. Local backend: `restart.sh`. Local sensors: `git pull` in runtime clone. |
+> | **`stable`** | **RegenAI public production** (`darren@202.61.196.119`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep clean. |
+> | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. |
 >
-> Translation: edits committed on `regen-prod` reach personal-koi + NUC immediately. Only RegenAI public production needs an explicit cherry-pick + push to `stable`, on operator's promotion cadence.
+> Translation: commit to `regen-prod` → NUC gets it via Dobby's deploy; the local backend needs `restart.sh`; the local sensors need a `git pull` in the runtime clone. RegenAI public production needs an explicit cherry-pick + push to `stable`.
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
 **Status**: ✅ COMPLETE - Production Deployed (2025-12-25)
@@ -37,6 +49,29 @@
 **`scripts/reconcile_missing_chunks.py` is now the deferred path**: a durable patch that re-routes it to OpenAI is its own scoped sprint when reconcile machinery needs that investment (it re-indexes from source files which is heavier than the column-update job today's 247-chunk backfill needed). For now: prefer `backfill_3072_embeddings_from_manifest.py` for column-only backfills.
 
 **Provider abstraction location**: `api/embedding_provider.py` — has `OpenAIEmbeddingProvider` (line 53), `OllamaEmbeddingProvider` (line 97), `SentenceTransformerProvider` (line 136), `RemoteEmbeddingProvider` (line 173). `OpenAIEmbeddingProvider` already supports `text-embedding-3-large` at 3072-dim (line 68). `backfill_3072_embeddings_from_manifest.py` uses the OpenAI client directly (mirrors `embed_jsonl_via_openai.py` shape) rather than going through the provider abstraction — kept simple for the column-update job.
+
+---
+
+## Deep-extraction transport (2026-07-16)
+
+`scripts/extract_deep_documents.py` runs entity/fact/discourse extraction per window. The **model and transport are env-tunable — not hardcoded** (the in-code `# FORCE Sonnet` comment is an unexamined default, contradicted by evidence). Select via `DOC_EXTRACTOR_TRANSPORT`:
+
+- **`claude_p`** (DEFAULT) — Claude Code subscription via `claude -p`. $0 marginal, slower. The daily launchd jobs use this; leave it unset for them.
+- **`api`** — direct Anthropic Messages API. Faster, metered against `ANTHROPIC_API_KEY`. (That key currently has **no credits**, so this path is unavailable until topped up.)
+- **`openai`** — ANY OpenAI-compatible `/v1/chat/completions` endpoint (bring-your-own model: public OpenAI, self-hosted vLLM/Ollama, provider-hosted open model). Config: `DOC_EXTRACTOR_OPENAI_BASE_URL` / `_MODEL` / `_API_KEY` / `_NO_THINK` (=1 for reasoning models on vLLM) / `_MAX_TOKENS`. Generic public-OpenAI defaults are committed — nothing operator-specific.
+
+Other knobs: `DOC_EXTRACTOR_MODEL` (claude_p/api model), `DOC_EXTRACTOR_REPAIR_PASSES` (re-ask smaller models on invalid JSON — recovers a missing comma / bare-string-vs-object slip), `DOC_WINDOW_CHARS`, `DOC_MAX_WINDOWS`, `DOC_CLAUDE_P_TIMEOUT` (raise to 900). Extraction is serialized by **one global advisory lock** → parallelism buys nothing; model/transport/window are the only speed levers. **Never run parallel extraction agents.**
+
+**One-off batch on an alternate model** (keeps the daily jobs on `claude_p`): `scripts/run_batch_extract.sh <script.(sh|py)> [args]` sources an optional gitignored `config/extract-batch.env` (transport override; template `config/extract-batch.env.example`) then runs the extraction. This is how a backfill uses a faster/cheaper model without making it the permanent process. Model-tiering policy + evidence: memory `reference_koi_extraction_model_tiering`.
+
+## Substack corpus ingestion (2026-07-16)
+
+Personal-KOI ingests selected Substacks (Indy Johar, Will Ruddick, Michel Bauwens) under RID `substack-corpus:<feed_slug>:<post_slug>`, `source_sensor='substack-corpus-backfill'`. **Which publications** is personal config in `config/substack_publications.yaml` (gitignored; template `config/substack_publications.example.yaml`) loaded by `scripts/substack_config.py` — not hardcoded, so forks configure their own.
+
+Two ingest paths + deep-extract, all as launchd jobs run from the **runtime clone** (see DEPLOY TOPOLOGY):
+- `scripts/substack_sensor.py` (`com.personal-koi.substack-sensor`) — Substack public JSON API. Free posts need no auth; set `SUBSTACK_SID` (a paid subscriber's session cookie) to also ingest full-content paid posts.
+- `scripts/ingest_substack_from_gmail.py` + `scripts/run_substack_gmail_bridge.sh` (`com.personal-koi.substack-gmail-bridge`) — pulls full-content **paid** post emails from Gmail over IMAP (auth reuses `~/.gmail-app-password`); feeds `scripts/ingest_substack_corpus.py`. Do NOT route these through the generic email sensor.
+- `scripts/deep_extract_substack_corpus.sh` (`com.personal-koi.substack-deep-extract`) — graph-extracts newly-ingested posts (uses the transport above).
 
 ---
 
