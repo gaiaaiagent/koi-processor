@@ -31,6 +31,13 @@ The KOI Processor is the central processing hub of the Knowledge Organization In
 
 ## Phase 1 TerminusDB Integration
 
+> ℹ️ **Status: EXPERIMENTAL / PARKED (as of 2026-07-16).** TerminusDB is **disabled by
+> default** (`TERMINUSDB_ENABLED=false`) and **not deployed** — no TerminusDB instance runs
+> on personal-KOI or RegenAI prod. This code is code-complete + smoke-validated (Feb 2026)
+> but has not been enabled or touched since. Graph traversal in production uses the
+> PostgreSQL recursive-CTE path (`api/graph_queries.py`), not this mirror. Treat this
+> section as an optional, opt-in experiment, not a live component.
+
 Phase 1 adds an optional TerminusDB graph mirror behind an outbox pattern:
 
 - PostgreSQL remains authoritative for entity resolution and ingestion.
