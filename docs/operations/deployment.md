@@ -1,5 +1,14 @@
 # KOI Processor Deployment Guide
 
+> ⚠️ **SCOPE (verified against live prod 2026-07-16):** The systemd/BGE/event-bridge
+> sections here describe **RegenAI public production** (branch `stable`, host
+> 202.61.196.119, `eliza` DB) — that stack is live (`src/core/bge_server.py` +
+> `src/core/koi_event_bridge_v2.py`; note `src/core/`, not repo root). The "Indexing
+> Hygiene Guardrail" and "Event Flood Detection" sections are current. **personal-KOI**
+> deploys differently: backend `api/personal_ingest_api.py` :8351 on `personal_koi`
+> (OpenAI-3072) via `~/.config/personal-koi/{start,restart}.sh`; the 4 sensor launchd jobs
+> run from `~/projects/koi-processor-runtime` (see the repo `CLAUDE.md` DEPLOY TOPOLOGY).
+
 This guide covers deployment of the KOI Processor to production environments.
 
 ## Table of Contents

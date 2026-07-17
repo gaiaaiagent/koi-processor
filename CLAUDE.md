@@ -389,10 +389,20 @@ Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCES
 ## Production Environment
 
 **Server**: darren@202.61.196.119
+**Branch**: `stable` (verified live 2026-07-16; HEAD `eaf1f77`) — NOT `regen-prod`. Has untracked local drift (backup files); the deploy baseline is the live host, not a clean `stable`.
 **Code Path**: /opt/projects/koi-processor
 **Database**: PostgreSQL (eliza) on port 5433 (Docker: gaia-postgres-1)
 **Fuseki**: Apache Jena Fuseki on port 3030 (Docker: fuseki-koi)
 **Graph URL**: https://regen.gaiaai.xyz/graph
+
+**Live stack (verified 2026-07-16, RegenAI prod ≠ personal-koi):** runs a HYBRID —
+`api.personal_ingest_api:app` (uvicorn) **+** the legacy event-bridge stack:
+`src/core/bge_server.py` (**BGE 1024-dim**, note `src/core/` not repo root),
+`src/core/koi_event_bridge_v2.py` (:8100), `src/core/koi_event_bridge_semantic.py`.
+So the "legacy" ops/architecture docs (event-bridge, BGE-1024, `eliza` DB) are
+**accurate for THIS surface** — but wrong for personal-koi (OpenAI-3072,
+`personal_koi` DB, no event bridge, `regen-prod`). When a doc says `bge_server.py` /
+`koi_event_bridge_v2.py` at repo root, the real path is now `src/core/`.
 
 **Environment setup:**
 ```bash

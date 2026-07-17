@@ -1,5 +1,12 @@
 # KOI Processor Architecture
 
+> ⚠️ **Embedding layer — two surfaces (verified 2026-07-16):** This doc's **BGE-1024
+> embedding server** (`bge_server.py`, now at `src/core/`) describes **RegenAI public
+> production** (branch `stable`, `eliza` DB) — confirmed live there. **personal-KOI** uses
+> **OpenAI `text-embedding-3-large` (3072-dim)** since 2026-04-23 (no BGE server). Read the
+> embedding sections below as the RegenAI-prod design; see the repo `CLAUDE.md` "Embedding
+> Provider Note" for personal-KOI.
+
 ## System Overview
 
 The KOI (Knowledge Organization Infrastructure) Processor is a distributed system for processing, embedding, and storing sensor-generated content with semantic search capabilities. It implements deduplication, versioning, and permission-based access control.
