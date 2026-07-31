@@ -21,14 +21,26 @@
 --   tenant key there forks every entity per tenant and destroys cross-tenant
 --   aggregation. That is a product decision, not a migration.
 
+-- Fail fast rather than queue: an ACCESS EXCLUSIVE request that stacks behind an
+-- in-flight query on koi_memories would put every subsequent query behind it.
+SET lock_timeout = '3s';
+
 ALTER TABLE koi_memories ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(100);
 
 -- Empty string must never be storable. Because attribution is made sticky with
 -- COALESCE(existing, new), an empty-string tenant would count as a real owner and
 -- permanently block the correct tenant from ever being recorded. The Python writers
--- normalise '' -> None, but only 2 of the 8 koi_memories writers are patched in this
--- phase, so the invariant is enforced in the schema where every writer must obey it.
+-- normalise '' -> None, but only 3 of the koi_memories writers are patched in this
+-- phase, so THIS invariant is enforced in the schema where every writer must obey it.
 -- Verified: without this, upserting '' then 'secondmuse' leaves the row owned by ''.
+--
+-- SCOPE OF THIS CONSTRAINT — it enforces BLANKNESS ONLY, not stickiness. Set-once
+-- attribution is implemented per-writer via COALESCE(koi_memories.tenant_id,
+-- EXCLUDED.tenant_id), which means an unpatched writer that later adds tenant_id to
+-- its upsert list with plain EXCLUDED.tenant_id would silently re-attribute rows,
+-- with no error and no way to detect it afterwards. If stickiness needs to be a real
+-- database invariant rather than a convention, it belongs in a BEFORE UPDATE trigger.
+-- Not done here: at present exactly one writer set exists and all of it is patched.
 DO $$
 BEGIN
     ALTER TABLE koi_memories
@@ -50,18 +62,40 @@ CREATE INDEX IF NOT EXISTS idx_koi_memories_tenant_id
   ON koi_memories(tenant_id)
   WHERE tenant_id IS NOT NULL;
 
--- Composite for the eventual "active rows for tenant X" read pattern, mirroring
--- the idx_koi_memories_active_privacy shape introduced in 015.
+-- Composite for the eventual "active rows for tenant X" read pattern. NOTE the column
+-- order: 015's idx_koi_memories_active_privacy leads with superseded_at, but under this
+-- index's own partial predicate superseded_at is constant-NULL, so leading with it would
+-- be informationally dead. tenant_id leads instead — verified with EXPLAIN, which puts
+-- the Index Cond on tenant_id and none on superseded_at.
 CREATE INDEX IF NOT EXISTS idx_koi_memories_active_tenant
-  ON koi_memories(superseded_at, tenant_id)
+  ON koi_memories(tenant_id, superseded_at)
   WHERE superseded_at IS NULL AND tenant_id IS NOT NULL;
 
--- NOTE ON LOCKING: koi_memories is ~68,900 rows / ~577 MB on prod. ADD COLUMN
--- with no default is a catalog-only change in PG11+ and does not rewrite the
--- table. The two CREATE INDEX statements take a brief ACCESS EXCLUSIVE lock;
--- at this row count that is sub-second. If this is ever applied to a much larger
--- table, or if the runner does NOT wrap migrations in a transaction, prefer:
---   CREATE INDEX CONCURRENTLY ... (cannot run inside a transaction block).
+-- NOTE ON LOCKING (measured on a same-size replica, PG 15; an earlier version of this
+-- comment had the lock model inverted):
+--   ALTER TABLE ADD COLUMN        -> AccessExclusiveLock, catalog-only in PG11+,
+--                                    no table rewrite. ~5 ms.
+--   ALTER TABLE ADD CONSTRAINT    -> AccessExclusiveLock, and it BLOCKS READERS
+--     ... CHECK                      during a full heap validation scan. ~60-70 ms.
+--                                    This is the statement that actually blocks queries.
+--   CREATE INDEX (non-concurrent) -> ShareLock: blocks WRITERS only. SELECTs run fine.
+--                                    ~50 ms each.
+-- Sizing: the relevant figure is the HEAP (~178 MB), not pg_total_relation_size
+-- (~577 MB, which includes ~192 MB of indexes and ~207 MB of TOAST). tenant_id is
+-- not TOASTed, so validation scans the heap only.
+-- On a much larger table, or outside a transaction, prefer CREATE INDEX CONCURRENTLY
+-- (which cannot run inside a transaction block).
+--
+-- NOTE ON DEPLOY ORDER — this is load-bearing, not advisory:
+--   RUN THIS MIGRATION BEFORE DEPLOYING THE CODE THAT WRITES tenant_id.
+--   The patched writers name tenant_id in their INSERT column list, so against a
+--   pre-108 database every write raises
+--     asyncpg.exceptions.UndefinedColumnError: column "tenant_id" ... does not exist
+--   and the row is NOT written. Verified by reproduction on a pre-108 scratch DB:
+--   rows written = 0. It fails loudly rather than silently, but it fails closed —
+--   an ingest run against an unmigrated DB loses the documents for that run.
+--   The same applies in reverse: do not roll this migration back while the patched
+--   code is live. Roll back the code first.
 --
 -- NOTE ON ENFORCEMENT: this migration does NOT make it safe to admit an external
 -- user. koi-query-api.ts buildPrivacyFilter() still returns '' for any
