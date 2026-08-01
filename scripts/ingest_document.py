@@ -439,6 +439,23 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         "type_mismatches": int(ext.get("type_mismatches") or 0),
         "discourse_moves_created": int(ext.get("discourse_moves_created") or 0),
         "claims_created": int(cl.get("claims_created") or 0),
+        # DERIVED keys the document-ingest gate actually asserts on. Added 2026-07-31:
+        # phase_expectations.yaml floors on `facts_available` and `claims_available`, but
+        # this function never emitted them, so the gate reported "key ABSENT from evidence"
+        # and exited 2 for EVERY standard/thorough ingest — including runs that landed
+        # hundreds of facts and discourse moves with zero null embeds. The gate was
+        # effectively dead above `rag` tier. Derivations follow the catalog's own comments:
+        #   facts_available  = "facts created or intentionally skipped as known duplicates"
+        #   claims_available = "impact claims or document-argument claims" (discourse moves
+        #                      ARE the document-argument taxonomy, per migrations 103/104)
+        # Purely additive — no existing key changes — so nothing downstream can regress.
+        # 1 = the whole document was windowed; 0 = an explicit DOC_MAX_WINDOWS cap cut the
+        # tail off. Truncation previously passed every floor, so a half-ingested book could
+        # be reported complete. Gate floors on this.
+        "not_truncated": 0 if ext.get("budget_exhausted") else 1,
+        "facts_available": int(ext.get("facts_created") or 0) + int(ext.get("facts_skipped") or 0),
+        "claims_available": int(cl.get("claims_created") or 0)
+                            + int(ext.get("discourse_moves_created") or 0),
         "embeds_ok": 1 if (rag_null == 0 and facts_null == 0) else 0,
         "dups_ok": 1 if dups == 0 else 0,
         # End-state invariant (the right "0 residual dups" gate floor): 1 = no duplicate
