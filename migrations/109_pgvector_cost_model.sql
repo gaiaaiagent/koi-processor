@@ -34,6 +34,18 @@
 -- NOTE: hnsw.iterative_scan requires pgvector >= 0.8.0 and applies to NEW connections
 -- only, so RESTART the service after applying (asyncpg holds long-lived pooled conns).
 --
+-- WHERE THIS MATTERS (surveyed 2026-08-01):
+--   personal_koi (laptop)  — APPLIED. 6,691 ms -> 114 ms.
+--   NUC 10.100.0.22        — DEFECT PRESENT AND MATERIAL (measured 213 ms vs 3.1 ms with
+--                            the index forced, 68x). pgvector 0.8.2, applies cleanly.
+--                            NOT YET APPLIED — needs a service restart afterwards.
+--   prod 202.61.196.119    — DOES NOT MANIFEST. pgvector 0.5.1, vector(1536), a PLAIN
+--                            (non-expression) HNSW index, 56 MB table — the planner
+--                            already picks Index Scan on every live path. Applying this
+--                            there is unnecessary; hnsw.iterative_scan does not even
+--                            exist before 0.8.0.
+--   VPS 10.100.0.21 cv_koi — present but negligible (2,293 rows) and pgvector 0.5.1.
+--
 -- ROLLBACK:
 --   ALTER FUNCTION cosine_distance(halfvec, halfvec)     COST 1;
 --   ALTER FUNCTION cosine_distance(vector, vector)       COST 1;
@@ -47,13 +59,21 @@ BEGIN
         -- Cost is expressed in units of cpu_operator_cost. 10000 is far above the default
         -- 1 and comfortably exceeds the seq-scan estimate for tables of this size, so the
         -- planner prefers the index without needing per-query enable_seqscan hints.
-        EXECUTE 'ALTER FUNCTION cosine_distance(halfvec, halfvec) COST 10000';
-        EXECUTE 'ALTER FUNCTION cosine_distance(vector, vector) COST 10000';
+        -- Guard EACH signature independently. `halfvec` and `sparsevec` only exist from
+        -- pgvector 0.7/0.8; production (202.61.196.119) still runs 0.5.1, where an
+        -- unguarded halfvec ALTER raises undefined_function and aborts the migration.
+        -- Only `vector` is present in every version, so it is the one that must succeed.
+        BEGIN
+            EXECUTE 'ALTER FUNCTION cosine_distance(halfvec, halfvec) COST 10000';
+        EXCEPTION WHEN undefined_function OR undefined_object THEN
+            RAISE NOTICE 'halfvec cosine_distance absent (pgvector < 0.7) — skipped';
+        END;
         BEGIN
             EXECUTE 'ALTER FUNCTION cosine_distance(sparsevec, sparsevec) COST 10000';
-        EXCEPTION WHEN undefined_function THEN
+        EXCEPTION WHEN undefined_function OR undefined_object THEN
             RAISE NOTICE 'sparsevec cosine_distance absent (older pgvector) — skipped';
         END;
+        EXECUTE 'ALTER FUNCTION cosine_distance(vector, vector) COST 10000';
         RAISE NOTICE 'pgvector distance functions re-costed to 10000';
     ELSE
         RAISE NOTICE 'pgvector extension absent — nothing to do';
