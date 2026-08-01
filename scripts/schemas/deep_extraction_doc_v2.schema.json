@@ -5,16 +5,16 @@
   "description": "Per-window output schema for document deep-extraction, thorough tier. Mirrored inline in scripts/prompts/deep_extraction_doc_v2.md. Coordinates are GLOBAL RAG-chunk indices (windows carry global [N] labels; no offset). v2 adds the discourse (argument) layer on top of v1's entities + facts; move_types reuse the session_discourse_moves CHECK vocab so no schema migration of that table's enum is needed.",
   "type": "object",
   "required": ["document", "entities", "facts", "discourse"],
-  "additionalProperties": false,
+  "additionalProperties": true,
   "properties": {
     "document": {
       "type": "object",
       "required": ["name", "summary", "doc_kind", "chunk_span"],
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 200},
         "summary": {"type": "string"},
-        "doc_kind": {"enum": ["whitepaper", "paper", "report", "essay", "spec", "other"]},
+        "doc_kind": {"enum": ["whitepaper", "paper", "report", "essay", "spec", "book", "manual", "textbook", "handbook", "other"]},
         "chunk_span": {
           "type": "array",
           "items": {"type": "integer", "minimum": 0},
@@ -28,7 +28,7 @@
       "items": {
         "type": "object",
         "required": ["name", "type", "first_seen_chunk", "mention_count"],
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "name": {"type": "string"},
           "type": {"enum": ["Person", "Organization", "Project", "Concept", "Location", "Protocol", "CaseStudy"]},
@@ -42,7 +42,7 @@
       "items": {
         "type": "object",
         "required": ["subject", "predicate", "object", "object_literal", "fact_text", "chunk_range", "confidence"],
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "subject": {"type": "string"},
           "predicate": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
@@ -54,7 +54,7 @@
             "items": {"type": "integer", "minimum": 0},
             "minItems": 2, "maxItems": 2
           },
-          "confidence": {"enum": ["high", "medium"]}
+          "confidence": {"enum": ["high", "medium", "low"]}
         }
       }
     },
@@ -64,7 +64,7 @@
       "items": {
         "type": "object",
         "required": ["move_type", "title", "detail", "status", "supports", "chunk_range"],
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "move_type": {"type": "string", "minLength": 1},
           "title": {"type": "string", "minLength": 1},

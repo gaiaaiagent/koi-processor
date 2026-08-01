@@ -69,7 +69,8 @@ window's text.
   object_literal="152 initiatives across 44 countries").
 - `fact_text` is a single-sentence natural-language restatement.
 - `chunk_range` = `[first_chunk_with_evidence, last_chunk_with_evidence]` (global
-  indices, both integers).
+  indices, both integers). It MUST ALWAYS contain EXACTLY TWO integers. When the
+  evidence sits in a single chunk, repeat the index: `[26, 26]` — NEVER `[26]`.
 - `confidence`: `"high"` if explicitly stated, `"medium"` if strongly implied.
   Do not emit low-confidence facts. Skip vague/obvious facts.
 
@@ -111,7 +112,8 @@ Fields per move:
 - `supports`: for `premise`/`evidence`/`counterpoint` (any move that backs or contests
   another), the EXACT `title` of the `claim`/`thesis` it supports — this builds the
   argument edge. `null` for standalone moves.
-- `chunk_range`: `[first, last]` global chunk index supporting the move.
+- `chunk_range`: `[first, last]` global chunk index supporting the move. ALWAYS
+  exactly two integers; for a single chunk repeat it, e.g. `[26, 26]`, never `[26]`.
 
 Do NOT duplicate a fact as a discourse move — facts are atomic triples; moves are
 argument steps. A move may summarize several facts.
@@ -120,7 +122,7 @@ argument steps. A move may summarize several facts.
 
 - `name`: the document's title (or best inference for this window).
 - `summary`: 1–3 sentences, present tense, no "this window".
-- `doc_kind`: one of `whitepaper`, `paper`, `report`, `essay`, `spec`, `other`.
+- `doc_kind`: one of `whitepaper`, `paper`, `report`, `essay`, `spec`, `book`, `manual`, `textbook`, `handbook`, `other`. This value MUST be copied exactly from that list — never invent a different word.
 - `chunk_span`: `[first, last]` global chunk index this window covers.
 
 ## APPENDIX: Schema
@@ -137,7 +139,7 @@ argument steps. A move may summarize several facts.
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 200},
         "summary": {"type": "string"},
-        "doc_kind": {"enum": ["whitepaper","paper","report","essay","spec","other"]},
+        "doc_kind": {"enum": ["whitepaper","paper","report","essay","spec","book","manual","textbook","handbook","other"]},
         "chunk_span": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2}
       }
     },
@@ -192,3 +194,17 @@ argument steps. A move may summarize several facts.
 ## DOCUMENT WINDOW (chunks labeled [N] with global indices)
 
 <!-- The pipeline appends the concatenated window chunks here at call time -->
+
+## HARD OUTPUT RULES (a violation aborts the ENTIRE document, not just this window)
+
+1. Emit ONLY the keys named in the schema. Do NOT add any extra key — not
+   `confidence`, not `definition`, not `notes` — to a `discourse` or `entities` item.
+   If you want to record something there is no key for, fold it into an existing
+   free-text field instead.
+2. `entities[].type` MUST be exactly one of:
+   Person, Organization, Project, Concept, Location, Protocol, CaseStudy.
+   There is no Practice/Pattern/Method/Evidence/Claim option here — map to the closest
+   of the seven (a named method or practice is a `Concept`).
+3. `facts[].confidence` MUST be one of: high, medium, low.
+4. `document.doc_kind` MUST be copied exactly from its enum — never invent a word.
+5. `chunk_range` is ALWAYS exactly two integers; for a single chunk repeat it: [26, 26].
