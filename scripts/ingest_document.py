@@ -453,6 +453,10 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         # tail off. Truncation previously passed every floor, so a half-ingested book could
         # be reported complete. Gate floors on this.
         "not_truncated": 0 if ext.get("budget_exhausted") else 1,
+        # 1 = every window extracted; 0 = one or more were dead-lettered (#40). A
+        # document that lost windows must not pass as complete.
+        "all_windows_ok": 0 if int(ext.get("windows_failed") or 0) > 0 else 1,
+        "windows_failed": int(ext.get("windows_failed") or 0),
         "facts_available": int(ext.get("facts_created") or 0) + int(ext.get("facts_skipped") or 0),
         "claims_available": int(cl.get("claims_created") or 0)
                             + int(ext.get("discourse_moves_created") or 0),

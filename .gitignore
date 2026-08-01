@@ -140,3 +140,7 @@ deep_extract.env
 
 # Tier-3 migration scripts (intentional, tracked)
 !scripts/tier-3/*.sql
+
+# Local staging root for document ingest (DEFAULT_ALLOWED_ROOTS in
+# scripts/ingest_document.py) and the isolation smoke test's fixture.
+tmp/incoming/

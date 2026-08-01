@@ -344,17 +344,27 @@ DOC_EXTRACTOR_REPAIR_PASSES = int(os.getenv("DOC_EXTRACTOR_REPAIR_PASSES", "2"))
 
 async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema: dict,
                                    *, model: str) -> dict:
-    """Extract one window and parse+validate it, with a repair loop for the free
-    OpenAI-compatible transport. On a parse/schema failure, re-ask the model with the
-    broken output and the exact validator error, nudging temperature up each pass so
-    the retry isn't identical. api / claude_p keep single-shot behaviour (they rarely
-    emit invalid JSON, and re-prompting claude -p is slow)."""
+    """Extract one window and parse+validate it, with a repair loop on EVERY transport.
+
+    On a parse/schema failure, re-ask the model with the broken output and the exact
+    validator error, nudging temperature up each pass so the retry isn't identical.
+    Set DOC_EXTRACTOR_REPAIR_PASSES=0 for single-shot behaviour.
+
+    If repair is still exhausted, the caller dead-letters this WINDOW and continues over
+    the rest of the document (#40) — a bad window no longer costs the whole book."""
     raw = await _extract_window(prompt, http, model=model)
     try:
         return parse_and_validate(raw, schema)
     except ExtractionError as first_err:
         repairable = first_err.reason in ("extract_parse_error", "empty_completion")
-        if DOC_EXTRACTOR_TRANSPORT != "openai" or not repairable or DOC_EXTRACTOR_REPAIR_PASSES <= 0:
+        # #40: the repair loop used to be gated to the 'openai' transport, on the reasoning
+        # that api/claude_p "rarely emit invalid JSON" and re-prompting claude -p is slow.
+        # Measured otherwise: on the Kurtz corpus the DEFAULT claude_p transport hit four
+        # separate schema failures, each of which discarded a whole document (30-50 min of
+        # extraction) because it had no repair path at all. One extra ~2 min repair call is
+        # obviously cheaper than that. Repair now runs on every transport; set
+        # DOC_EXTRACTOR_REPAIR_PASSES=0 to restore single-shot behaviour.
+        if not repairable or DOC_EXTRACTOR_REPAIR_PASSES <= 0:
             raise
         last_err = first_err
         for i in range(DOC_EXTRACTOR_REPAIR_PASSES):
@@ -773,7 +783,22 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 if cached and cached["status"] in ("extracted", "imported") and cached["raw_json"] and not force:
                     per_window[w.index] = json.loads(cached["raw_json"])
 
-            # Extract any window not already cached (FORCE Sonnet for quality).
+            # Extract any window not already cached.
+            #
+            # PER-WINDOW ISOLATION (#40): a window that cannot be extracted is DEAD-LETTERED
+            # and the run continues over the windows that succeeded. Previously any single
+            # window error propagated out and aborted the whole document, discarding every
+            # window already extracted — during the Kurtz corpus drain that cost four
+            # separate 30-50 minute passes, each losing 7-78 successfully extracted windows
+            # to one stray key or a 1-element chunk_range. The schema already had
+            # status='failed' + last_error for exactly this; nothing used them.
+            #
+            # Prefer "N-1 of N windows, loudly reported" over "0 of N, silently re-run
+            # tomorrow". windows_failed is surfaced in the result and the gate evidence, and
+            # deep_extracted_at is left NULL when any window failed, so a partial document
+            # is retried rather than marked complete. Failed windows stay status='failed'
+            # with their error, so a later run retries only those.
+            windows_failed: List[int] = []
             for w in windows:
                 if per_window[w.index] is not None:
                     logger.info("window %d/%d cached — skip", w.index + 1, len(windows))
@@ -781,13 +806,38 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 logger.info("window %d/%d: extracting (%d chunks, %d chars) via %s",
                             w.index + 1, len(windows), len(w.chunk_indices), len(w.text), ANTHROPIC_MODEL)
                 prompt = build_prompt(template, w, len(windows))
-                data = await extract_window_validated(prompt, http, schema, model=ANTHROPIC_MODEL)
+                try:
+                    data = await extract_window_validated(prompt, http, schema, model=ANTHROPIC_MODEL)
+                except ExtractionError as e:
+                    windows_failed.append(w.index)
+                    logger.error("window %d/%d FAILED (%s) — dead-lettering the WINDOW and "
+                                 "continuing; the document is not lost: %s",
+                                 w.index + 1, len(windows), e.reason, str(e)[:400])
+                    await conn.execute(
+                        """UPDATE document_window_extractions
+                           SET status='failed', last_error=$3, route_used=$4, updated_at=NOW()
+                           WHERE document_rid=$1 AND window_index=$2""",
+                        document_rid, w.index, str(e)[:2000], ROUTE_USED)
+                    continue
                 per_window[w.index] = data
                 await conn.execute(
                     """UPDATE document_window_extractions
-                       SET status='extracted', route_used=$4, raw_json=$3::jsonb, updated_at=NOW()
+                       SET status='extracted', route_used=$4, raw_json=$3::jsonb,
+                           last_error=NULL, updated_at=NOW()
                        WHERE document_rid=$1 AND window_index=$2""",
                     document_rid, w.index, json.dumps(data), ROUTE_USED)
+
+            # Only a TOTAL loss is fatal — there is nothing to merge, and silently writing an
+            # empty episode would look like success.
+            if windows_failed and not any(d for d in per_window):
+                raise ExtractionError(
+                    "all_windows_failed",
+                    f"all {len(windows)} window(s) failed extraction; nothing to merge "
+                    f"(see document_window_extractions.last_error for {document_rid})")
+            if windows_failed:
+                logger.warning("proceeding with %d/%d windows — %d dead-lettered: %s",
+                               len(windows) - len(windows_failed), len(windows),
+                               len(windows_failed), windows_failed)
 
             # Merge + write facts through /episodes.
             merged = merge_extractions([d for d in per_window if d], windows)
@@ -904,17 +954,30 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 logger.info("discourse: merged %d move(s) → wrote %d (source_type=document)",
                             len(merged_moves), discourse_created)
 
+            # Only promote windows that actually extracted. A dead-lettered window must KEEP
+            # status='failed' (with its last_error) so a later run retries just that window.
             for w in windows:
+                if w.index in windows_failed:
+                    continue
                 await conn.execute(
                     "UPDATE document_window_extractions SET status='imported', updated_at=NOW() "
                     "WHERE document_rid=$1 AND window_index=$2", document_rid, w.index)
+            # deep_extracted_at stays NULL when the document is INCOMPLETE for any reason —
+            # a truncated tail OR a dead-lettered window — so a partial document is retried
+            # rather than reported done.
+            incomplete = bool(budget_exhausted) or bool(windows_failed)
+            _err_parts = []
+            if budget_exhausted:
+                _err_parts.append(f"budget_truncated:{MAX_WINDOWS}/{len(chunks)}")
+            if windows_failed:
+                _err_parts.append(f"windows_failed:{len(windows_failed)}/{len(windows)}"
+                                  f":{windows_failed[:20]}")
             await conn.execute(
                 """UPDATE document_ingestion_log
                    SET deep_extracted_at = CASE WHEN $2 THEN NULL ELSE NOW() END,
                        deep_extraction_attempts = 0, deep_extraction_last_error = $3
                    WHERE document_rid = $1""",
-                document_rid, budget_exhausted,
-                (f"budget_truncated:{MAX_WINDOWS}/{len(chunks)}" if budget_exhausted else None))
+                document_rid, incomplete, ("; ".join(_err_parts) if _err_parts else None))
 
             return {
                 "status": "ok", "document_rid": document_rid, "group_id": group_id,
@@ -927,6 +990,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "entities_created": ep.get("entities_created"), "entities_resolved": ep.get("entities_resolved"),
                 "discourse_moves_created": discourse_created,
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,
+                "windows_failed": len(windows_failed), "windows_failed_idx": windows_failed,
                 "episode_id": ep.get("episode_id"),
             }
         finally:
