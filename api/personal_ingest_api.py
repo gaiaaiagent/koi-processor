@@ -2226,25 +2226,38 @@ async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
 async def health_check(request: Request):
     """Health check endpoint.
 
-    Wave A A2 (2026-05-01): includes `null_embed_fact_count_db` (durable;
-    queries `knowledge_facts WHERE fact_embedding_3072 IS NULL`) and
-    `null_embed_fact_counter_process` (transient; in-process counter
-    accumulating since boot, cleared on restart). Non-zero values surface
-    silent embedding-provider degradation; pair with
-    `/diagnostics/embedding-health` for current-state failure rate.
+    Wave A A2 (2026-05-01): includes `null_embed_fact_count_db` (durable) and
+    `null_embed_fact_counter_process` (transient; in-process counter accumulating
+    since boot, cleared on restart). Non-zero values surface silent
+    embedding-provider degradation; pair with `/diagnostics/embedding-health`
+    for current-state failure rate.
+
+    2026-08-01: `null_embed_fact_count_db` used to carry a hidden
+    `AND valid_to IS NULL`, which the docstring did not mention. That made the
+    gauge under-report 8.4x (13 reported against 109 actually present) and, worse,
+    made it DECREASE with no repair — superseding a null-embed fact simply dropped
+    it out of the count. A superseded fact is still a row; it still bypasses cosine
+    dedup until re-embedded. Both numbers are now reported: `_db` is the honest
+    total (matching this docstring), `_live` is the actionable subset.
     """
     try:
         null_embed_count_db = 0
+        null_embed_count_live = 0
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
             try:
                 null_embed_count_db = await conn.fetchval("""
                     SELECT COUNT(*) FROM knowledge_facts
                     WHERE fact_embedding_3072 IS NULL
+                """) or 0
+                null_embed_count_live = await conn.fetchval("""
+                    SELECT COUNT(*) FROM knowledge_facts
+                    WHERE fact_embedding_3072 IS NULL
                       AND valid_to IS NULL
                 """) or 0
             except Exception:
                 null_embed_count_db = -1  # signal "query failed"
+                null_embed_count_live = -1
 
         # Get loaded entity types from schema
         schemas = get_entity_schemas()
@@ -2270,6 +2283,9 @@ async def health_check(request: Request):
                 "tier3_create": True
             },
             "null_embed_fact_count_db": null_embed_count_db,
+            # actionable subset: excludes superseded rows (valid_to set). The _db
+            # figure above is the honest total — see the docstring.
+            "null_embed_fact_count_live": null_embed_count_live,
             "null_embed_fact_counter_process": process_counter,
         }
     except Exception as e:
