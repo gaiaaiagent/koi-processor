@@ -688,6 +688,77 @@ async def post_episode(http: httpx.AsyncClient, payload: dict) -> dict:
     return r.json()
 
 
+# Episode request-size cap (#41). `EpisodeCreateRequest.facts` has no max_items and the
+# write path has no chunking anywhere, so request duration scaled with DOCUMENT size,
+# unbounded: a book merges into ONE call (WWS 4th edition 296 entities/299 facts; the
+# blog 1,502/1,323). Two coupled failures followed. (a) The request outran the client
+# timeout. (b) Worse, a client disconnect does NOT cancel the server request —
+# create_episode runs to completion and COMMITS — so the client's retry then lock-waited
+# on the ORIGINAL request's own uncommitted tuples, blew asyncpg's 60s per-statement
+# command_timeout, and surfaced as a bare TimeoutError + HTTP 500. A request colliding
+# with itself.
+#
+# Batching converts request duration from a function of document size (unbounded) into a
+# function of batch size (bounded, tunable). Batches share (source_document, group_id), and
+# the server's episode-reuse path keys on exactly that pair (knowledge_router ~line 813),
+# so they collapse into ONE episode — same episode_id, so the post-episode dedup sweeps
+# (which key on episode_id) still see the whole document and now also catch CROSS-BATCH
+# duplicates that a single mega-request would have merged internally.
+#
+# ATOMICITY TRADE, stated plainly: P4's "every write commits together or not at all"
+# narrows from per-DOCUMENT to per-BATCH. Acceptable because it still holds for every
+# individual request; resume state lives in document_window_extractions, so a failure
+# costs a re-POST and never a re-extraction; episode reuse plus the dedup sweeps make a
+# re-POST convergent; and deep_extracted_at is only set after the LAST batch, so a
+# partially-written document is retried rather than marked done. The status quo was
+# strictly worse — the retry collision above already produced 489 facts from a ~299-fact
+# payload.
+DOC_EPISODE_BATCH_SIZE = int(os.getenv("DOC_EPISODE_BATCH_SIZE", "100"))
+
+
+async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
+    """POST an episode, splitting oversized fact lists into sequential same-episode calls.
+
+    Returns one aggregated response shaped like a single post_episode() result.
+    A payload at or under the cap takes the single-POST path, byte-identical to before;
+    set DOC_EPISODE_BATCH_SIZE=0 to force that path always.
+    """
+    facts = payload.get("facts") or []
+    if DOC_EPISODE_BATCH_SIZE <= 0 or len(facts) <= DOC_EPISODE_BATCH_SIZE:
+        return await post_episode(http, payload)
+
+    n = DOC_EPISODE_BATCH_SIZE
+    chunks = [facts[i:i + n] for i in range(0, len(facts), n)]
+    logger.info("episode: %d facts > cap %d → %d sequential batches sharing one episode",
+                len(facts), n, len(chunks))
+
+    agg = {"facts_created": 0, "facts_skipped": 0, "facts_null_embed": 0,
+           "entities_created": 0, "entities_resolved": 0}
+    mismatches: List[dict] = []
+    episode_id = None
+    for i, batch in enumerate(chunks):
+        sub = {**payload, "facts": batch}
+        ep = await post_episode(http, sub)
+        for k in agg:
+            agg[k] += int(ep.get(k) or 0)
+        mismatches.extend(ep.get("type_mismatches") or [])
+        eid = ep.get("episode_id")
+        if episode_id is None:
+            episode_id = eid
+        elif eid and eid != episode_id:
+            # The whole design rests on episode reuse collapsing these. If it did not,
+            # the document is now split across episodes and the dedup sweeps (which key on
+            # a single episode_id) would silently only clean the first one. Fail loud.
+            raise ExtractionError(
+                "episode_split",
+                f"batch {i + 1}/{len(chunks)} landed in episode {eid}, not {episode_id} — "
+                f"episode reuse by (source_document, group_id) did not hold; refusing to "
+                f"continue with a document split across episodes")
+        logger.info("  episode batch %d/%d: %d facts (created=%s skipped=%s)",
+                    i + 1, len(chunks), len(batch), ep.get("facts_created"), ep.get("facts_skipped"))
+    return {**agg, "episode_id": episode_id, "type_mismatches": mismatches}
+
+
 async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: str, tm: dict) -> None:
     """Record the mismatch in the dead-letter table AND file a best-effort cleanup task."""
     with contextlib.suppress(Exception):
@@ -849,7 +920,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                                                source_document=source_document, group_id=group_id)
             logger.info("merged: %d entities, %d facts → POST /knowledge/episodes (group=%s)",
                         len(merged["entities"]), len(merged["facts"]), group_id)
-            ep = await post_episode(http, payload)
+            ep = await post_episode_batched(http, payload)
 
             # Type-mismatches → dead-letter + cleanup task.
             mismatches = ep.get("type_mismatches") or []
