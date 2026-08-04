@@ -1518,6 +1518,90 @@ async def store_new_entity(
 
 
 # =============================================================================
+# Entity federation payload
+# =============================================================================
+
+async def _build_entity_federation_payload(
+    conn,
+    uri: str,
+    *,
+    fallback_name: str = "",
+    fallback_type: str = "",
+) -> Dict[str, Any]:
+    """Build an entity federation payload from the authoritative registry row.
+
+    Both emit sites used to inline a 6-key literal that hardcoded
+    ``"aliases": []`` and ``"metadata": {}``. That was doubly wrong: the peer
+    learned nothing, and — because the subscriber's UPSERT did
+    ``SET metadata = EXCLUDED.metadata`` — the empty payload ERASED whatever the
+    peer had computed locally. See ``_apply_entity`` in domain_event_handlers.py
+    for the merge side of this fix.
+
+    Deliberately NOT included: the embedding vector. Entity events run ~22k per
+    30 days at ~241 bytes each; a 3072-float vector is ~60 kB, which would take
+    this domain from roughly 5 MB to 1.3 GB per month. (For contrast the fact
+    domain does ship vectors, but it is only ~620 events per 30 days.) Receiving
+    nodes fill ``embedding_3072`` via ``scripts/backfill_entity_embeddings.py``
+    instead, which also composes a richer text (name + context + description)
+    than the register path's bare name.
+
+    Falls back to the caller-supplied name/type if the row has gone (e.g. the
+    entity was merged away between write and emit), so the emit never crashes
+    the request path.
+    """
+    row = None
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT fuseki_uri, entity_text, entity_type, normalized_text,
+                   aliases, metadata, description, phonetic_code
+            FROM entity_registry
+            WHERE fuseki_uri = $1
+            """,
+            uri,
+        )
+    except Exception as e:  # never let a federation emit break the write path
+        logger.warning(f"entity federation payload lookup failed for {uri}: {e}")
+
+    if row is None:
+        return {
+            "fuseki_uri": uri,
+            "entity_text": fallback_name,
+            "entity_type": fallback_type,
+            "normalized_text": (fallback_name or "").lower().strip(),
+            "aliases": [],
+            "metadata": {},
+        }
+
+    metadata = row["metadata"]
+    if isinstance(metadata, str):
+        # NB: this module aliases the stdlib json as `json_module_global`
+        # (line 22) and never binds bare `json` — using `json.loads` here
+        # raises NameError at runtime, which py_compile does not catch.
+        try:
+            metadata = json_module_global.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    payload: Dict[str, Any] = {
+        "fuseki_uri": row["fuseki_uri"],
+        "entity_text": row["entity_text"] or fallback_name,
+        "entity_type": row["entity_type"] or fallback_type,
+        "normalized_text": row["normalized_text"]
+        or (row["entity_text"] or fallback_name or "").lower().strip(),
+        "aliases": list(row["aliases"] or []),
+        "metadata": metadata,
+    }
+    if row["description"]:
+        payload["description"] = row["description"]
+    if row["phonetic_code"]:
+        payload["phonetic_code"] = row["phonetic_code"]
+    return payload
+
+
+# =============================================================================
 # TerminusDB Outbox Helpers
 # =============================================================================
 
@@ -2692,16 +2776,22 @@ async def ingest_extraction(request: IngestRequest):
                             )
                             logger.info(f"Resolved to existing: {canonical.uri}")
 
-                        # Emit federation event for entity replication
+                        # Emit federation event for entity replication.
+                        # Payload is read back from entity_registry so the peer
+                        # gets the real aliases/metadata/description rather than
+                        # hardcoded empties that would blank its own copy.
                         from api.federation_events import emit_domain_event
-                        await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
-                            "fuseki_uri": canonical.uri,
-                            "entity_text": canonical.name,
-                            "entity_type": entity.type,
-                            "normalized_text": canonical.name.lower().strip(),
-                            "aliases": [],
-                            "metadata": {},
-                        })
+                        await emit_domain_event(
+                            "entity",
+                            "NEW" if is_new else "UPDATE",
+                            canonical.uri,
+                            await _build_entity_federation_payload(
+                                conn,
+                                canonical.uri,
+                                fallback_name=canonical.name,
+                                fallback_type=entity.type,
+                            ),
+                        )
 
                         # Link entity to document
                         await conn.execute("""
@@ -4082,16 +4172,22 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 koi_rid=final_koi_rid if request.publication_scope == "federated" else None
             )
 
-            # Emit federation event for entity replication
+            # Emit federation event for entity replication. See
+            # _build_entity_federation_payload — the previous hardcoded
+            # {"aliases": [], "metadata": {}} literal here is what blanked
+            # peers' locally-computed metadata on every round-trip.
             from api.federation_events import emit_domain_event
-            await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
-                "fuseki_uri": canonical.uri,
-                "entity_text": request.name,
-                "entity_type": request.entity_type,
-                "normalized_text": canonical.name.lower().strip() if canonical.name else request.name.lower().strip(),
-                "aliases": [],
-                "metadata": {},
-            })
+            await emit_domain_event(
+                "entity",
+                "NEW" if is_new else "UPDATE",
+                canonical.uri,
+                await _build_entity_federation_payload(
+                    conn,
+                    canonical.uri,
+                    fallback_name=request.name,
+                    fallback_type=request.entity_type,
+                ),
+            )
 
             return result
 
