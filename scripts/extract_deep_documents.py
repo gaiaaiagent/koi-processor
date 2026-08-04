@@ -49,6 +49,9 @@ import asyncpg
 import httpx
 from jsonschema import Draft202012Validator
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from api.provider_http import provider_async_client  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -1091,7 +1094,12 @@ async def amain(args) -> int:
             return 1
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-        async with httpx.AsyncClient() as http:
+        # #36: the pool settings that actually fix CLOSE_WAIT reuse (keepalive_expiry
+        # + TCP keepalive) can only come from the CLIENT — a per-request `timeout=`
+        # scalar does not reliably fire on a half-closed pooled socket (observed: a
+        # 40-minute hang against timeout=300). Per-request overrides below still
+        # apply on top of these per-phase ceilings.
+        async with provider_async_client(read=ANTHROPIC_TIMEOUT) as http:
             result = await extract_deep_document(
                 pool, http, document_rid=document_rid, tier=args.tier,
                 group_id=args.group_id, run_id=run_id, force=args.force,

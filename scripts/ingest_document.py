@@ -50,6 +50,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.embedding_provider import OpenAIEmbeddingProvider  # noqa: E402
 from api.chunker import TextChunker  # noqa: E402
+from api.provider_http import provider_async_client  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -528,7 +529,12 @@ async def ingest_path(
             return result
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-        async with httpx.AsyncClient() as http:
+        # #36: the pool settings that actually fix CLOSE_WAIT reuse (keepalive_expiry
+        # + TCP keepalive) can only come from the CLIENT — a per-request `timeout=`
+        # scalar does not reliably fire on a half-closed pooled socket (observed: a
+        # 40-minute hang against timeout=300). Per-request overrides below still
+        # apply on top of these per-phase ceilings.
+        async with provider_async_client(read=900.0) as http:
             # Stage 2 — deep-extract entities + facts (standard/thorough).
             edd = _load_extractor()
             result["extract"] = await edd.extract_deep_document(
