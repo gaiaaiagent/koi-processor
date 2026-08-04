@@ -10,8 +10,11 @@ Part of the unified thorough content-ingestion plan
 
 Reads a document's RAG chunks (koi_memory_chunks, written by ingest_document.py),
 packs them into windows (well under the claude -p char cap), runs the document
-extractor prompt per window via `claude -p` (Sonnet — forced for extraction
-quality), then MERGES entities (type-priority coercion) + facts (dedup) across
+extractor prompt per window (transport + model are BOTH env-tunable — see
+DOC_EXTRACTOR_TRANSPORT / DOC_EXTRACTOR_MODEL below; the old "Sonnet, forced for
+extraction quality" wording was an unexamined default, and Haiku matched
+fact-density at ~3.6x the speed in measurement — issue #37), then MERGES entities
+(type-priority coercion) + facts (dedup) across
 windows deterministically. Facts are written through POST /knowledge/episodes —
 NOT the session raw-INSERT — so they land in fact_embedding_3072 and get 3-tier
 resolution + cosine>0.95 dedup + type-mismatch detection. Type-mismatches are
