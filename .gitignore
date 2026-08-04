@@ -133,3 +133,9 @@ deep_extract.env
 
 # Tier-3 migration scripts (intentional, tracked)
 !scripts/tier-3/*.sql
+
+# Rotation/edit backups of the ignored env files — these DO contain live secrets
+# (OPENAI_API_KEY, POSTGRES_URL). Untracked AND unignored is one `git add -A`
+# away from pushing keys to a shared org repo.
+config/*.env.bak*
+config/personal.env.bak*
