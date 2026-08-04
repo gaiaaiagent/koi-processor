@@ -2243,6 +2243,7 @@ async def health_check(request: Request):
     try:
         null_embed_count_db = 0
         null_embed_count_live = 0
+        null_embed_count_chunks = 0
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
             try:
@@ -2255,9 +2256,18 @@ async def health_check(request: Request):
                     WHERE fact_embedding_3072 IS NULL
                       AND valid_to IS NULL
                 """) or 0
+                # CHUNKS were not gauged at all, which is why a dead chunk-embedder
+                # LaunchAgent went unnoticed 2026-07-31..08-03 while 334 chunks landed
+                # with no vector — /health stayed green the whole time because it only
+                # watched facts. A sustained non-zero here means the embedder is down.
+                null_embed_count_chunks = await conn.fetchval("""
+                    SELECT COUNT(*) FROM koi_memory_chunks
+                    WHERE embedding_3072 IS NULL
+                """) or 0
             except Exception:
                 null_embed_count_db = -1  # signal "query failed"
                 null_embed_count_live = -1
+                null_embed_count_chunks = -1
 
         # Get loaded entity types from schema
         schemas = get_entity_schemas()
@@ -2286,6 +2296,9 @@ async def health_check(request: Request):
             # actionable subset: excludes superseded rows (valid_to set). The _db
             # figure above is the honest total — see the docstring.
             "null_embed_fact_count_live": null_embed_count_live,
+            # RAG chunks with no vector — sustained non-zero = the
+            # com.personal-koi.chunk-embedder LaunchAgent is not running.
+            "null_embed_chunk_count": null_embed_count_chunks,
             "null_embed_fact_counter_process": process_counter,
         }
     except Exception as e:
