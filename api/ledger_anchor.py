@@ -351,37 +351,8 @@ def derive_ledger_iri(content_hash: str) -> str:
                 pass
 
 
-class _CompletedProc:
-    """Mirror of subprocess.CompletedProcess so call sites need no reshaping."""
-    __slots__ = ("returncode", "stdout", "stderr")
-
-    def __init__(self, returncode: int, stdout: str, stderr: str):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
-async def _run_async(cmd, *, timeout: float):
-    """Non-blocking `subprocess.run(capture_output=True, text=True, timeout=…)`.
-
-    #15: broadcast_anchor / broadcast_attest are `async def` but called
-    subprocess.run() plus time.sleep(5) in a 6-attempt poll loop — blocking the ENTIRE
-    event loop for up to 30s per anchor. On the shared :8351 service that stalls every
-    other request, which is the same class of defect as the sync Anthropic SDK call
-    fixed in #36 (claim_extractor).
-
-    Raises subprocess.TimeoutExpired on timeout so existing except-clauses still match.
-    """
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.wait()
-        raise subprocess.TimeoutExpired(cmd, timeout)
-    return _CompletedProc(proc.returncode or 0,
-                          out.decode(errors="replace"), err.decode(errors="replace"))
+from api.async_proc import run_async as _run_async  # noqa: E402  (#15/#36:
+# shared non-blocking subprocess helper — see api/async_proc.py for why.
 
 
 async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
