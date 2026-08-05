@@ -789,6 +789,126 @@ async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: s
 
 # ── Orchestration ──────────────────────────────────────────────────────────────────
 
+# ── Deep-extract lease: liveness + identity around the per-document advisory lock (#35) ──
+# The advisory lock is still the mutex. What it cannot express is "is the holder ALIVE or
+# WEDGED": a process that hangs rather than crashes keeps its session-level lock forever
+# (the `finally` never runs), and the contended caller just gets `skipped_locked`, which
+# naive callers read as "nothing to do". These helpers add a heartbeat + holder identity
+# so contention is diagnosable and a reclaim can be identity-checked.
+#
+# NOTE the GLOBAL lock #35 describes no longer exists — only `deep-extract-doc:<rid>` is
+# taken, so distinct documents already extract concurrently (verified 2026-08-05). Scope
+# of a wedged holder is one document, not the fleet.
+DOC_EXTRACT_LEASE_TTL = float(os.getenv("DOC_EXTRACT_LEASE_TTL", "300"))
+DOC_EXTRACT_HEARTBEAT_INTERVAL = float(os.getenv("DOC_EXTRACT_HEARTBEAT_INTERVAL", "30"))
+
+
+async def _lease_acquire(conn, document_rid: str, run_id: Optional[str]) -> None:
+    """Record who holds this document's lock. Call right after the advisory lock is taken."""
+    await conn.execute(
+        """
+        INSERT INTO deep_extract_lease
+            (document_rid, holder_pid, holder_backend_start, run_id, acquired_at, last_heartbeat)
+        SELECT $1, pg_backend_pid(), a.backend_start, $2, now(), now()
+          FROM pg_stat_activity a WHERE a.pid = pg_backend_pid()
+        ON CONFLICT (document_rid) DO UPDATE SET
+            holder_pid = EXCLUDED.holder_pid,
+            holder_backend_start = EXCLUDED.holder_backend_start,
+            run_id = EXCLUDED.run_id,
+            acquired_at = now(),
+            last_heartbeat = now()
+        """, document_rid, run_id)
+
+
+async def _lease_heartbeat(pool, document_rid: str) -> None:
+    """Background task: prove liveness until cancelled.
+
+    Uses its OWN pooled connection — the run's connection is busy inside the extract, so
+    a heartbeat sharing it would only ever tick between statements and would go silent
+    during exactly the long provider call we most need to distinguish from a hang.
+    """
+    try:
+        while True:
+            await asyncio.sleep(DOC_EXTRACT_HEARTBEAT_INTERVAL)
+            try:
+                async with pool.acquire() as hb:
+                    await hb.execute(
+                        "UPDATE deep_extract_lease SET last_heartbeat = now() WHERE document_rid = $1",
+                        document_rid)
+            except Exception as e:  # noqa: BLE001
+                # A failed heartbeat must not kill the extraction it is only observing.
+                logger.warning("lease heartbeat failed for %s: %s", document_rid, e)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _lease_release(conn, document_rid: str) -> None:
+    with contextlib.suppress(Exception):
+        await conn.execute("DELETE FROM deep_extract_lease WHERE document_rid = $1", document_rid)
+
+
+async def lease_status(conn, document_rid: str) -> dict:
+    """Who holds this document, for how long, and does it look wedged?"""
+    row = await conn.fetchrow(
+        """
+        SELECT l.holder_pid, l.holder_backend_start, l.run_id, l.acquired_at, l.last_heartbeat,
+               EXTRACT(EPOCH FROM (now() - l.last_heartbeat))::float AS heartbeat_age_s,
+               EXTRACT(EPOCH FROM (now() - l.acquired_at))::float    AS held_for_s,
+               (a.pid IS NOT NULL) AS holder_alive,
+               a.state AS holder_state, a.wait_event_type, a.wait_event
+          FROM deep_extract_lease l
+          LEFT JOIN pg_stat_activity a
+                 ON a.pid = l.holder_pid AND a.backend_start = l.holder_backend_start
+         WHERE l.document_rid = $1
+        """, document_rid)
+    if row is None:
+        return {"lease": None,
+                "note": "advisory lock is held but no lease row — holder predates this "
+                        "feature, or crashed between lock and lease insert"}
+    d = dict(row)
+    d["stale"] = bool(d["heartbeat_age_s"] is not None
+                      and d["heartbeat_age_s"] > DOC_EXTRACT_LEASE_TTL)
+    d["verdict"] = ("holder gone (lock will clear when its session ends)" if not d["holder_alive"]
+                    else "WEDGED — no heartbeat past TTL" if d["stale"]
+                    else "healthy, actively extracting")
+    return d
+
+
+async def reclaim_stale_lease(conn, document_rid: str, *, ttl: Optional[float] = None) -> dict:
+    """Terminate a provably-wedged holder so its lock clears. Explicit, never automatic.
+
+    #35 warns that reclaiming by PID off a stale pg_stat_activity snapshot can kill a
+    HEALTHY backend that has since reused the PID. This does the staleness check and the
+    identity check (pid AND backend_start) inside ONE transaction against
+    pg_stat_activity, so the process being terminated is provably the same one recorded in
+    the lease and provably still stale at the moment of the kill.
+    """
+    ttl = DOC_EXTRACT_LEASE_TTL if ttl is None else ttl
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT l.holder_pid, EXTRACT(EPOCH FROM (now() - l.last_heartbeat))::float AS age,
+                   (a.pid IS NOT NULL) AS alive
+              FROM deep_extract_lease l
+              LEFT JOIN pg_stat_activity a
+                     ON a.pid = l.holder_pid AND a.backend_start = l.holder_backend_start
+             WHERE l.document_rid = $1
+             FOR UPDATE OF l
+            """, document_rid)
+        if row is None:
+            return {"reclaimed": False, "reason": "no lease row"}
+        if not row["alive"]:
+            await conn.execute("DELETE FROM deep_extract_lease WHERE document_rid = $1", document_rid)
+            return {"reclaimed": True, "reason": "holder already gone; cleared orphan lease row"}
+        if row["age"] is None or row["age"] <= ttl:
+            return {"reclaimed": False, "reason": f"holder is live (heartbeat {row['age']:.0f}s "
+                                                  f"<= ttl {ttl:.0f}s) — refusing to terminate"}
+        killed = await conn.fetchval("SELECT pg_terminate_backend($1)", row["holder_pid"])
+        await conn.execute("DELETE FROM deep_extract_lease WHERE document_rid = $1", document_rid)
+        return {"reclaimed": bool(killed), "terminated_pid": row["holder_pid"],
+                "heartbeat_age_s": row["age"]}
+
+
 async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                                 document_rid: str, tier: str, group_id: Optional[str],
                                 run_id: str, force: bool,
@@ -802,8 +922,18 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
         locked = await conn.fetchval(
             "SELECT pg_try_advisory_lock(hashtext('deep-extract-doc:' || $1));", document_rid)
         if not locked:
-            return {"status": "skipped_locked", "document_rid": document_rid}
+            # #35: a bare `skipped_locked` is indistinguishable from "nothing to do", which
+            # is how a wedged holder used to go unnoticed. Say WHO holds it and whether it
+            # still has a pulse.
+            status = await lease_status(conn, document_rid)
+            logger.warning("document %s is locked by another run — %s",
+                           document_rid, status.get("verdict") or status.get("note"))
+            return {"status": "skipped_locked", "document_rid": document_rid,
+                    "lock_holder": status}
+        heartbeat_task = None
         try:
+            await _lease_acquire(conn, document_rid, run_id)
+            heartbeat_task = asyncio.create_task(_lease_heartbeat(pool, document_rid))
             mem = await conn.fetchrow(
                 "SELECT content->>'title' AS title, "
                 "COALESCE(metadata->>'source_url', metadata->>'url') AS url, "
@@ -1071,6 +1201,11 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "episode_id": ep.get("episode_id"),
             }
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await heartbeat_task
+            await _lease_release(conn, document_rid)
             await conn.execute("SELECT pg_advisory_unlock(hashtext('deep-extract-doc:' || $1));", document_rid)
 
 
