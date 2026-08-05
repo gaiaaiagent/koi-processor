@@ -103,19 +103,15 @@ SELECT
   count(*) FILTER (WHERE stance = 'supports') AS support_count,
   count(*) FILTER (WHERE stance = 'opposes') AS oppose_count,
   count(DISTINCT source_document) AS distinct_sources,
-  count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%') AS spore_sources,
-  count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%') AS ic_sources,
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%') > 0
-       THEN true ELSE false END AS cross_project,
+  count(DISTINCT split_part(source_document, '.', 1)) AS distinct_projects,
+  string_agg(DISTINCT split_part(source_document, '.', 1), ', ' ORDER BY split_part(source_document, '.', 1)) AS project_prefixes,
+  count(DISTINCT split_part(source_document, '.', 1)) >= 2 AS cross_project,
   string_agg(DISTINCT source_document, ', ' ORDER BY source_document) AS source_notes
 FROM cluster_members
 GROUP BY cluster_key, target_doc, concept_slug, review_rid, review_statement, target_section, change_slug
 ORDER BY
   -- 1. Cross-project clusters first
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%') > 0
-       THEN 0 ELSE 1 END,
+  CASE WHEN count(DISTINCT split_part(source_document, '.', 1)) >= 2 THEN 0 ELSE 1 END,
   -- 2. More distinct sources = more convergence
   count(DISTINCT source_document) DESC,
   -- 3. Fewer unresolved opposes = more mature
@@ -152,19 +148,16 @@ SELECT
   count(*) FILTER (WHERE stance = 'supports') AS total_supports,
   count(*) FILTER (WHERE stance = 'opposes') AS total_opposes,
   count(DISTINCT source_document) AS distinct_sources,
-  count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%') AS spore_sources,
-  count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%') AS ic_sources,
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%') > 0
+  count(DISTINCT split_part(source_document, '.', 1)) AS distinct_projects,
+  string_agg(DISTINCT split_part(source_document, '.', 1), ', ' ORDER BY split_part(source_document, '.', 1)) AS project_prefixes,
+  CASE WHEN count(DISTINCT split_part(source_document, '.', 1)) >= 2
        THEN 'CROSS-PROJECT' ELSE 'single-project' END AS project_span,
   string_agg(DISTINCT target_doc, ', ' ORDER BY target_doc) AS target_doc_list
 FROM cluster_stats
 GROUP BY concept_slug
 ORDER BY
   -- Cross-project first
-  CASE WHEN count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'spore.%') > 0
-        AND count(DISTINCT source_document) FILTER (WHERE source_document LIKE 'ic.%') > 0
-       THEN 0 ELSE 1 END,
+  CASE WHEN count(DISTINCT split_part(source_document, '.', 1)) >= 2 THEN 0 ELSE 1 END,
   -- More governance clusters = wider spread
   count(DISTINCT cluster_key) DESC,
   -- More sources = more convergence
@@ -210,9 +203,7 @@ WITH family_stats AS (
     count(*) FILTER (WHERE er.predicate = 'supports') AS supports,
     count(*) FILTER (WHERE er.predicate = 'opposes') AS opposes,
     count(DISTINCT sc.source_document) AS distinct_sources,
-    CASE WHEN count(DISTINCT sc.source_document) FILTER (WHERE sc.source_document LIKE 'spore.%') > 0
-          AND count(DISTINCT sc.source_document) FILTER (WHERE sc.source_document LIKE 'ic.%') > 0
-         THEN true ELSE false END AS cross_project
+    count(DISTINCT split_part(sc.source_document, '.', 1)) >= 2 AS cross_project
   FROM claims rc
   JOIN entity_relationships er ON er.object_uri = rc.entity_uri
     AND er.predicate IN ('supports', 'opposes')

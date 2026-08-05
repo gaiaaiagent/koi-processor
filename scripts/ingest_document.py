@@ -421,14 +421,19 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
     dups = int(ext.get("facts_dup_removed") or 0)
     ent_created = int(ext.get("entities_created") or 0)
     ent_resolved = int(ext.get("entities_resolved") or 0)
+    facts_created = int(ext.get("facts_created") or 0)
+    facts_skipped = int(ext.get("facts_skipped") or 0)
+    impact_claims_created = int(cl.get("claims_created") or 0)
+    argument_claims_created = int(ext.get("argument_claims_created") or 0)
     return {
         "tier": result.get("tier"),
         "document_rid": result.get("document_rid"),
         "chunks_written": int(rag.get("chunks_written") or 0),
         "chunks_total": int(rag.get("chunks_total") or 0),
         "rag_null_embeds": rag_null,
-        "facts_created": int(ext.get("facts_created") or 0),
-        "facts_skipped": int(ext.get("facts_skipped") or 0),
+        "facts_created": facts_created,
+        "facts_skipped": facts_skipped,
+        "facts_available": facts_created + facts_skipped,
         "facts_dup_removed": dups,
         "semantic_dups_retracted": int(ext.get("semantic_dups_retracted") or 0),
         "facts_null_embed": facts_null,
@@ -438,7 +443,10 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         "entity_links": int(ext.get("entity_links") or 0),
         "type_mismatches": int(ext.get("type_mismatches") or 0),
         "discourse_moves_created": int(ext.get("discourse_moves_created") or 0),
-        "claims_created": int(cl.get("claims_created") or 0),
+        "claims_created": impact_claims_created,
+        "impact_claims_created": impact_claims_created,
+        "argument_claims_created": argument_claims_created,
+        "claims_available": impact_claims_created + argument_claims_created,
         "embeds_ok": 1 if (rag_null == 0 and facts_null == 0) else 0,
         "dups_ok": 1 if dups == 0 else 0,
         # End-state invariant (the right "0 residual dups" gate floor): 1 = no duplicate
@@ -486,12 +494,19 @@ async def ingest_path(
     }
     source_document = source_url or document_rid
 
-    if not OPENAI_API_KEY:
-        raise RuntimeError(
-            "OPENAI_API_KEY not set — required for document-ingest (OpenAI 3072-dim). "
-            "Source config/personal.env or export the key.")
-    embedder = OpenAIEmbeddingProvider(api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL,
-                                       dimension=EMBEDDING_DIMENSION)
+    # Dry-run is a no-cost preflight: chunk + report only. The OpenAI key and the
+    # embedder are needed only on the real (writing) path, so gate them on `not dry_run`
+    # — `--dry-run` then works with no key and makes no paid/network call. ingest_document_rag
+    # returns right after chunking (before any embed) when dry_run, so embedder=None is safe.
+    if not dry_run:
+        if not OPENAI_API_KEY:
+            raise RuntimeError(
+                "OPENAI_API_KEY not set — required for document-ingest (OpenAI 3072-dim). "
+                "Source config/personal.env or export the key.")
+        embedder = OpenAIEmbeddingProvider(api_key=OPENAI_API_KEY, model=EMBEDDING_MODEL,
+                                           dimension=EMBEDDING_DIMENSION)
+    else:
+        embedder = None
     chunker = TextChunker(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
     result: Dict[str, Any] = {"document_rid": document_rid, "slug": source_meta["slug"],

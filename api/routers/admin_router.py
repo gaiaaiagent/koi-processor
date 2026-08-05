@@ -58,7 +58,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth_deps import make_service_token_auth
-from api.resolution_primitives import normalize_alias_list
 
 logger = logging.getLogger(__name__)
 
@@ -122,93 +121,6 @@ def _count(status: str) -> int:
         return 0
 
 
-# --- Closure ---------------------------------------------------------------
-# The status lattice. Derived from the verdicts the research record actually
-# produced, not invented up front:
-#   INCONCLUSIVE — tested, but the instrument could not decide (e.g. the map
-#                  construction was gauge-flat, so holonomy was zero *by
-#                  construction* and the claim never got a fair test)
-#   SCOPED       — dead in one regime, still standing in another. The load-bearing
-#                  value: a binary OPEN/REFUTED forces a wrong answer for exactly
-#                  the claims that matter ("dead on the single embedding-derived
-#                  concept graph, still open on federated cross-schema data" is
-#                  neither), and collapsing it to either loses the finding.
-_CLOSURE_STATUSES = frozenset(
-    {"OPEN", "SUPPORTED", "REFUTED", "SCOPED", "SUPERSEDED", "INCONCLUSIVE"})
-
-
-class EntityCloseRequest(BaseModel):
-    status: str = Field(..., description="One of: " + ", ".join(sorted(_CLOSURE_STATUSES)))
-    rationale: str = Field(
-        ..., min_length=1,
-        description="Why. A closure act with no reason is not reviewable.")
-    scope: Optional[str] = Field(
-        None,
-        description="REQUIRED when status=SCOPED: the regime in which the claim STILL STANDS.")
-    evidence_uris: List[str] = Field(
-        default_factory=list,
-        description="What closed it: RIDs, arXiv URLs, repo paths, commit SHAs. Empty = a "
-                    "bare assertion of authority (permitted, but legible as such).")
-    authority: Optional[str] = Field(
-        None, description="Under what authority the act was taken.")
-    closed_by: Optional[str] = Field(
-        None, description="Audit actor; defaults to the authenticated identity")
-    dry_run: bool = Field(
-        False, description="Validate + report inside a transaction, then ROLL BACK.")
-
-
-class ClosureAct(BaseModel):
-    id: Optional[int] = None
-    status: str
-    rationale: str
-    scope: Optional[str] = None
-    evidence_uris: List[str] = []
-    authority: Optional[str] = None
-    closed_by: str
-    closed_at: Optional[str] = None
-
-
-class EntityCloseResponse(BaseModel):
-    entity_uri: str
-    entity_text: Optional[str] = None
-    dry_run: bool
-    applied: bool
-    previous_status: Optional[str] = None   # None = never closed before
-    closure: Optional[ClosureAct] = None    # the act just recorded (= the new projection)
-    closure_log_id: Optional[int] = None
-    message: Optional[str] = None
-
-
-class EntityClosureResponse(BaseModel):
-    entity_uri: str
-    entity_text: Optional[str] = None
-    current: Optional[ClosureAct] = None    # the projection: latest act (None = never closed)
-    history: List[ClosureAct] = []          # the append-only log, newest first
-    is_closed: bool = False                 # standing is anything other than OPEN/never-closed
-
-
-class ReprojectResponse(BaseModel):
-    dry_run: bool
-    entities_with_log: int                  # entities that have >=1 closure act
-    healed: int                             # projections rebuilt (were missing or stale)
-    already_current: int                    # projections that already matched the log
-    healed_uris: List[str] = []
-
-
-def _act_from_row(row) -> ClosureAct:
-    """Build a ClosureAct from an entity_closure_log row."""
-    return ClosureAct(
-        id=row["id"],
-        status=row["status"],
-        rationale=row["rationale"],
-        scope=row["scope"],
-        evidence_uris=list(row["evidence_uris"] or []),
-        authority=row["authority"],
-        closed_by=row["closed_by"],
-        closed_at=row["closed_at"].isoformat() if row["closed_at"] else None,
-    )
-
-
 class EntityMergeRequest(BaseModel):
     survivor_uri: str = Field(..., description="fuseki_uri of the entity to KEEP")
     loser_uri: str = Field(..., description="fuseki_uri of the entity to merge in + tombstone")
@@ -233,31 +145,6 @@ class EntityMergeResponse(BaseModel):
     message: Optional[str] = None
 
 
-class EntityRetypeRequest(BaseModel):
-    uri: str = Field(..., description="fuseki_uri of the entity to re-type")
-    new_type: str = Field(..., description="Target entity type (canonicalized server-side)")
-    retyped_by: Optional[str] = Field(
-        None, description="Audit actor; defaults to the authenticated identity")
-    dry_run: bool = Field(
-        False,
-        description="If true, perform the full retype inside a transaction, report "
-                    "what would change, then ROLL BACK — nothing is committed.")
-
-
-class EntityRetypeResponse(BaseModel):
-    old_uri: str
-    new_uri: str
-    old_type: Optional[str]
-    new_type: str
-    merged_into_existing: bool = False    # True when a live twin already held new_uri
-    rewired: Dict[str, Any] = {}
-    merge_log_id: Optional[int] = None
-    applied: bool = False                 # True only if committed
-    dry_run: bool = False
-    already_typed: bool = False           # True when entity already has new_type (no-op)
-    message: Optional[str] = None
-
-
 def create_router(pool) -> APIRouter:
     """Return an APIRouter for admin (entity-merge) endpoints."""
     router = APIRouter(tags=["admin"])
@@ -271,6 +158,17 @@ def create_router(pool) -> APIRouter:
         """
         rewired: Dict[str, Any] = {}
 
+        # Some URI-reference tables are OPTIONAL and not present on every node
+        # (e.g. koi_extraction_records — an RDF mirror that is empty and is not
+        # migrated on the personal-koi nodes). A missing table in the generic
+        # rewire loops (sections 4-6) would abort the whole merge transaction, so
+        # skip any that don't exist. The hand-written blocks (1-3) touch core
+        # tables that always exist.
+        _ref_tables = {t for t, _ in _PLAIN_REF_COLS + _ARRAY_REF_COLS + _JSONB_METADATA_COLS}
+        _existing = {r["t"] for r in await conn.fetch(
+            "SELECT t FROM unnest($1::text[]) AS t WHERE to_regclass(t) IS NOT NULL",
+            list(_ref_tables))}
+
         # --- 0. Union the loser's name + aliases into the survivor's aliases so
         #        the survivor stays findable by the loser's name(s). Mirrors the
         #        register_redirect_alias idiom in api/mediawiki_ingest.py.
@@ -279,7 +177,7 @@ def create_router(pool) -> APIRouter:
             "FROM entity_registry WHERE fuseki_uri = $1", loser)
         loser_text = loser_row["entity_text"] if loser_row else None
         loser_aliases = list(loser_row["aliases"]) if loser_row else []
-        add_aliases = normalize_alias_list([loser_text] + loser_aliases)
+        add_aliases = [a for a in ([loser_text] + loser_aliases) if a]
         await conn.execute("""
             UPDATE entity_registry
             SET aliases = (
@@ -384,6 +282,8 @@ def create_router(pool) -> APIRouter:
 
         # --- 4. Plain text columns (no UNIQUE on the URI column).
         for table, col in _PLAIN_REF_COLS:
+            if table not in _existing:
+                continue
             n = _count(await conn.execute(
                 f"UPDATE {table} SET {col} = $2 WHERE {col} = $1", loser, survivor))
             if n:
@@ -391,6 +291,8 @@ def create_router(pool) -> APIRouter:
 
         # --- 5. Array columns (text[]).
         for table, col in _ARRAY_REF_COLS:
+            if table not in _existing:
+                continue
             n = _count(await conn.execute(
                 f"UPDATE {table} SET {col} = array_replace({col}, $1, $2) "
                 f"WHERE $1 = ANY({col})", loser, survivor))
@@ -399,6 +301,8 @@ def create_router(pool) -> APIRouter:
 
         # --- 6. JSONB metadata text-replace (guarded by LIKE).
         for table, col in _JSONB_METADATA_COLS:
+            if table not in _existing:
+                continue
             n = _count(await conn.execute(
                 f"UPDATE {table} SET {col} = REPLACE({col}::text, $1, $2)::jsonb "
                 f"WHERE {col}::text LIKE '%' || $1 || '%'", loser, survivor))
@@ -419,108 +323,6 @@ def create_router(pool) -> APIRouter:
             "WHERE fuseki_uri = $1 AND merged_into IS NULL", loser, survivor, merged_by))
 
         return rewired
-
-    async def _do_retype(
-        conn, old_uri: str, old_type: Optional[str], new_type: str, retyped_by: str,
-    ) -> tuple:
-        """Re-type an entity inside the caller's transaction.
-
-        Strategy (mirrors the operator's manual merge-into-correctly-typed-survivor
-        procedure): the entity type is encoded in the fuseki_uri prefix, so a
-        retype is a URI change. We (a) mint a new registry row at the new-typed
-        URI copying the source row's data, then (b) reuse ``_do_merge`` to rewire
-        every reference old->new and tombstone the old row. When a live row
-        already occupies the new URI, we skip the insert and merge straight into
-        it. When the deterministic URI is unchanged (type label differs only by
-        case/prefix), we update the type in place.
-
-        Assumes validation already passed (row exists, not tombstoned, new_type
-        canonical + != old_type). Returns ``(new_uri, merged_into_existing, rewired)``.
-        """
-        # Deferred imports: generate_entity_uri lives in personal_ingest_api,
-        # which imports this module (circular) — import inside the function body.
-        from api.personal_ingest_api import (
-            generate_entity_uri, get_first_significant_token, get_phonetic_code,
-        )
-        from api.entity_schema import get_schema_for_type
-
-        src = await conn.fetchrow(
-            "SELECT entity_text, normalized_text, koi_rid, wallet_address "
-            "FROM entity_registry WHERE fuseki_uri = $1", old_uri)
-        entity_text = src["entity_text"]
-        normalized = src["normalized_text"]
-
-        new_uri = generate_entity_uri(entity_text, new_type)
-
-        # Recompute phonetic_code for the NEW type's schema (Person-style types
-        # index on it; non-phonetic types store NULL).
-        new_schema = get_schema_for_type(new_type)
-        phonetic_code = None
-        if getattr(new_schema, "phonetic_matching", False):
-            first_token = get_first_significant_token(
-                normalized, new_schema.phonetic_stopwords)
-            phonetic_code = get_phonetic_code(first_token)
-
-        # Type label change that does NOT alter the deterministic URI (e.g. a
-        # case-only difference like 'person' -> 'Person'): update in place.
-        if new_uri == old_uri:
-            await conn.execute(
-                "UPDATE entity_registry SET entity_type = $1, phonetic_code = $2 "
-                "WHERE fuseki_uri = $3", new_type, phonetic_code, old_uri)
-            n_rid = _count(await conn.execute(
-                "UPDATE entity_rid_mappings SET entity_type = $1 WHERE canonical_uri = $2",
-                new_type, old_uri))
-            rewired = {
-                "in_place_type_update": 1,
-                "entity_rid_mappings_type_updated": n_rid,
-                "retype": {"from": old_type, "to": new_type},
-            }
-            return old_uri, False, rewired
-
-        twin = await conn.fetchrow(
-            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1", new_uri)
-
-        merged_into_existing = False
-        if twin is not None and twin["merged_into"] is None:
-            # A live entity already occupies the new-typed URI — merge into it.
-            merged_into_existing = True
-            rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
-        else:
-            # Mint the new-typed row by copying the source row server-side.
-            # koi_rid + wallet_address carry UNIQUE partial indexes and the old
-            # row is only tombstoned (not deleted) by _do_merge, so we MOVE
-            # them: null them on the source first, then set them on the new row.
-            moved_koi_rid = src["koi_rid"]
-            moved_wallet = src["wallet_address"]
-            if moved_koi_rid is not None or moved_wallet is not None:
-                await conn.execute(
-                    "UPDATE entity_registry SET koi_rid = NULL, wallet_address = NULL "
-                    "WHERE fuseki_uri = $1", old_uri)
-            await conn.execute("""
-                INSERT INTO entity_registry (
-                    fuseki_uri, entity_text, entity_type, normalized_text,
-                    ledger_id, metadata_iri, admin_address, aliases, jurisdiction,
-                    class_id, source, first_seen_rid, metadata, embedding,
-                    vault_rid, phonetic_code, node_private, wallet_address, koi_rid,
-                    description, embedding_3072
-                )
-                SELECT $1, entity_text, $2, normalized_text,
-                       ledger_id, metadata_iri, admin_address, aliases, jurisdiction,
-                       class_id, source, first_seen_rid, metadata, embedding,
-                       vault_rid, $3, node_private, $4, $5,
-                       description, embedding_3072
-                FROM entity_registry WHERE fuseki_uri = $6
-            """, new_uri, new_type, phonetic_code, moved_wallet, moved_koi_rid, old_uri)
-            rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
-
-        # _do_merge rewrites entity_rid_mappings.canonical_uri old->new but NOT
-        # the type column — bring it to the new type here.
-        n_rid = _count(await conn.execute(
-            "UPDATE entity_rid_mappings SET entity_type = $1 WHERE canonical_uri = $2",
-            new_type, new_uri))
-        rewired["entity_rid_mappings_type_updated"] = n_rid
-        rewired["retype"] = {"from": old_type, "to": new_type}
-        return new_uri, merged_into_existing, rewired
 
     def _total(rewired: Dict[str, Any]) -> int:
         total = 0
@@ -629,295 +431,6 @@ def create_router(pool) -> APIRouter:
             merge_log_id=merge_log_id,
             message=("dry run — rolled back, nothing committed"
                      if body.dry_run else "merge applied"))
-
-    @router.post("/retype", response_model=EntityRetypeResponse)
-    async def retype_entity(
-        body: EntityRetypeRequest,
-        identity: str = Depends(require_service_auth),
-    ):
-        from api.entity_schema import canonicalize_entity_type, get_entity_schemas
-
-        old_uri = body.uri
-        retyped_by = body.retyped_by or identity
-
-        canon_new_type = (
-            canonicalize_entity_type(body.new_type) if body.new_type else body.new_type)
-        if not canon_new_type or canon_new_type not in get_entity_schemas():
-            raise HTTPException(
-                status_code=422,
-                detail=f"unknown entity type: {body.new_type!r} "
-                       f"(canonicalized to {canon_new_type!r})")
-
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT entity_type, merged_into FROM entity_registry "
-                "WHERE fuseki_uri = $1", old_uri)
-            if row is None:
-                raise HTTPException(status_code=404, detail=f"entity not found: {old_uri}")
-            if row["merged_into"] is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"entity is merged into {row['merged_into']}; "
-                           f"retype the live entity instead")
-
-            old_type = row["entity_type"]
-            # No-op when the stored type already equals the requested canonical
-            # type. The comparison is against the RAW stored type on purpose:
-            # a prefixed/variant spelling (e.g. 'schema:Concept') is NOT already
-            # typed as 'Concept' and must fold.
-            if old_type == canon_new_type:
-                return EntityRetypeResponse(
-                    old_uri=old_uri, new_uri=old_uri, old_type=old_type,
-                    new_type=canon_new_type, merged_into_existing=False,
-                    rewired={}, merge_log_id=None, applied=False,
-                    dry_run=body.dry_run, already_typed=True,
-                    message="entity already has the requested type (no-op)")
-
-            tx = conn.transaction()
-            await tx.start()
-            try:
-                new_uri, merged_into_existing, rewired = await _do_retype(
-                    conn, old_uri, old_type, canon_new_type, retyped_by)
-
-                merge_log_id: Optional[int] = None
-                if not body.dry_run:
-                    merge_log_id = await conn.fetchval("""
-                        INSERT INTO entity_merge_log
-                            (survivor_uri, loser_uri, rewired, merged_by)
-                        VALUES ($1, $2, $3::jsonb, $4)
-                        RETURNING id
-                    """, new_uri, old_uri, json.dumps(rewired), retyped_by)
-
-                if body.dry_run:
-                    await tx.rollback()
-                else:
-                    await tx.commit()
-            except HTTPException:
-                await tx.rollback()
-                raise
-            except Exception as e:
-                await tx.rollback()
-                logger.exception(
-                    "entity retype failed uri=%s new_type=%s", old_uri, canon_new_type)
-                raise HTTPException(status_code=500, detail=f"retype failed: {e}")
-
-        logger.info(
-            "entity_retype %s uri=%s -> %s (%s -> %s) merged_into_existing=%s "
-            "merge_log_id=%s by=%s",
-            "DRY_RUN" if body.dry_run else "APPLIED",
-            old_uri, new_uri, old_type, canon_new_type, merged_into_existing,
-            merge_log_id, retyped_by)
-        return EntityRetypeResponse(
-            old_uri=old_uri, new_uri=new_uri, old_type=old_type,
-            new_type=canon_new_type, merged_into_existing=merged_into_existing,
-            rewired=rewired, merge_log_id=merge_log_id,
-            applied=(not body.dry_run), dry_run=body.dry_run, already_typed=False,
-            message=("dry run — rolled back, nothing committed"
-                     if body.dry_run else "retype applied"))
-
-    # ------------------------------------------------------------------
-    # Closure — the non-monotone operation this surface was missing.
-    #
-    # Asserting and relating are MONOTONE: they commute, they are order-independent,
-    # they never retract a conclusion. Closure (REFUTED / SCOPED / SUPERSEDED /
-    # authority change) is NOT, and by CALM (Hellerstein 2010; Ameloot/Neven/Van den
-    # Bussche, JACM 2013) it admits no coordination-free implementation. We do not
-    # pretend otherwise — we split it:
-    #   * entity_closure_log        — APPEND-ONLY. One row per attributable act.
-    #                                 Never UPDATEd, never DELETEd. Stays monotone.
-    #   * metadata->'closure'       — the DERIVED PROJECTION of the latest act.
-    #                                 Non-monotone, but a deterministic function of
-    #                                 the log, so always recomputable and never
-    #                                 authoritative on its own.
-    # Replay determinism without pretending to schedule invariance. Reopening is
-    # just another act (status=OPEN); nothing is ever overwritten.
-    #
-    # Without this, a refutation could only be appended as *facts* while the
-    # hypothesis kept full retrieval standing — which is how a killed experiment
-    # (holonomy on the RAGE concept graph, permutation p = 0.980, 2026-06-29) was
-    # re-proposed on 2026-07-14 with nothing in the substrate able to object.
-    # See migration 107 and rage-research/notes/confluence-audit.md.
-    # ------------------------------------------------------------------
-
-    @router.get("/closed", response_model=List[EntityClosureResponse])
-    async def list_closed_entities(status: Optional[str] = None, limit: int = 100):
-        """Entities whose latest act is a non-OPEN closure.
-
-        Backs the proposal-time gate: 'is there a closed hypothesis overlapping
-        what I am about to propose?'
-        """
-        if status is not None and status not in _CLOSURE_STATUSES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown status {status!r}; expected one of {sorted(_CLOSURE_STATUSES)}")
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT DISTINCT ON (l.entity_uri) l.*, e.entity_text
-                FROM entity_closure_log l
-                JOIN entity_registry e ON e.fuseki_uri = l.entity_uri
-                ORDER BY l.entity_uri, l.closed_at DESC, l.id DESC
-            """)
-        out: List[EntityClosureResponse] = []
-        for r in rows:
-            if r["status"] == "OPEN":            # reopened — no longer closed
-                continue
-            if status is not None and r["status"] != status:
-                continue
-            out.append(EntityClosureResponse(
-                entity_uri=r["entity_uri"], entity_text=r["entity_text"],
-                current=_act_from_row(r), history=[], is_closed=True))
-        return out[:limit]
-
-    @router.post("/reproject-closures", response_model=ReprojectResponse)
-    async def reproject_closures(
-        dry_run: bool = False,
-        identity: str = Depends(require_service_auth),
-    ):
-        """Rebuild metadata->'closure' from entity_closure_log for every entity
-        that has closure acts. Idempotent.
-
-        The projection is a CACHE of the log's latest act. Concurrent metadata
-        upserts from other pipelines (session extraction, entity sync) can reset
-        an entity's metadata to '{}' and silently drop the projection — the standing
-        then vanishes from the retrieval surfaces even though the LOG is intact.
-        This is the read-model rebuild: the log is the source of truth, so this can
-        run any time, after any bulk operation, or on a schedule. It never invents
-        a closure — an entity with no log rows is left untouched.
-        """
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT DISTINCT ON (entity_uri) *
-                FROM entity_closure_log
-                ORDER BY entity_uri, closed_at DESC, id DESC
-            """)
-            healed: List[str] = []
-            already = 0
-            for r in rows:
-                projected = _act_from_row(r).model_dump(exclude={"id"})
-                cur_raw = await conn.fetchval(
-                    "SELECT metadata -> 'closure' FROM entity_registry WHERE fuseki_uri = $1",
-                    r["entity_uri"])
-                cur = json.loads(cur_raw) if isinstance(cur_raw, str) else cur_raw
-                if cur == projected:
-                    already += 1
-                    continue
-                if not dry_run:
-                    await conn.execute("""
-                        UPDATE entity_registry
-                        SET metadata = COALESCE(metadata, '{}'::jsonb)
-                                       || jsonb_build_object('closure', $2::jsonb),
-                            updated_at = NOW()
-                        WHERE fuseki_uri = $1
-                    """, r["entity_uri"], json.dumps(projected))
-                healed.append(r["entity_uri"])
-        logger.info("reproject_closures %s: %d healed / %d already-current / %d total",
-                    "DRY_RUN" if dry_run else "APPLIED", len(healed), already, len(rows))
-        return ReprojectResponse(
-            dry_run=dry_run, entities_with_log=len(rows),
-            healed=len(healed), already_current=already, healed_uris=healed)
-
-    @router.get("/{uri:path}/closure", response_model=EntityClosureResponse)
-    async def get_entity_closure(uri: str):
-        """Current standing + the full append-only history of closure acts."""
-        async with pool.acquire() as conn:
-            ent = await conn.fetchrow(
-                "SELECT entity_text FROM entity_registry WHERE fuseki_uri = $1", uri)
-            if ent is None:
-                raise HTTPException(status_code=404, detail=f"entity not found: {uri}")
-            rows = await conn.fetch(
-                "SELECT * FROM entity_closure_log WHERE entity_uri = $1 "
-                "ORDER BY closed_at DESC, id DESC", uri)
-        history = [_act_from_row(r) for r in rows]
-        current = history[0] if history else None
-        return EntityClosureResponse(
-            entity_uri=uri, entity_text=ent["entity_text"],
-            current=current, history=history,
-            is_closed=bool(current and current.status != "OPEN"))
-
-    @router.post("/{uri:path}/close", response_model=EntityCloseResponse)
-    async def close_entity(
-        uri: str,
-        body: EntityCloseRequest,
-        identity: str = Depends(require_service_auth),
-    ):
-        """Record an attributable, versioned closure act against an entity.
-
-        Appends to entity_closure_log (never overwrites) and re-projects
-        metadata->'closure'. Idempotency is deliberately NOT enforced: re-closing is
-        a new act, because *who* closed it and *on what evidence* is the point.
-        """
-        status = body.status.upper().strip()
-        if status not in _CLOSURE_STATUSES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown status {body.status!r}; expected one of "
-                       f"{sorted(_CLOSURE_STATUSES)}")
-        if status == "SCOPED" and not (body.scope or "").strip():
-            raise HTTPException(
-                status_code=400,
-                detail="status=SCOPED requires `scope`: the regime in which the claim still "
-                       "stands. Without it a scoped kill degrades to a wrong binary.")
-        closed_by = body.closed_by or identity
-
-        async with pool.acquire() as conn:
-            ent = await conn.fetchrow(
-                "SELECT entity_text, merged_into FROM entity_registry WHERE fuseki_uri = $1",
-                uri)
-            if ent is None:
-                raise HTTPException(status_code=404, detail=f"entity not found: {uri}")
-            if ent["merged_into"] is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"entity is a tombstone (merged into {ent['merged_into']}); "
-                           f"close the live entity instead")
-
-            previous_status = await conn.fetchval(
-                "SELECT status FROM entity_closure_log WHERE entity_uri = $1 "
-                "ORDER BY closed_at DESC, id DESC LIMIT 1", uri)
-
-            tx = conn.transaction()
-            await tx.start()
-            try:
-                row = await conn.fetchrow("""
-                    INSERT INTO entity_closure_log
-                        (entity_uri, status, rationale, scope, evidence_uris, authority, closed_by)
-                    VALUES ($1, $2, $3, $4, $5::text[], $6, $7)
-                    RETURNING *
-                """, uri, status, body.rationale, body.scope,
-                     list(body.evidence_uris or []), body.authority, closed_by)
-                act = _act_from_row(row)
-
-                # Re-project the latest act onto the entity. Shallow jsonb merge —
-                # every other metadata key is preserved.
-                await conn.execute("""
-                    UPDATE entity_registry
-                    SET metadata = COALESCE(metadata, '{}'::jsonb)
-                                   || jsonb_build_object('closure', $2::jsonb),
-                        updated_at = NOW()
-                    WHERE fuseki_uri = $1
-                """, uri, json.dumps(act.model_dump(exclude={"id"})))
-
-                if body.dry_run:
-                    await tx.rollback()
-                else:
-                    await tx.commit()
-            except HTTPException:
-                await tx.rollback()
-                raise
-            except Exception as e:
-                await tx.rollback()
-                logger.exception("entity close failed uri=%s status=%s", uri, status)
-                raise HTTPException(status_code=500, detail=f"close failed: {e}")
-
-        logger.info("entity_close %s uri=%s %s->%s by=%s",
-                    "DRY_RUN" if body.dry_run else "APPLIED", uri,
-                    previous_status or "(never closed)", status, closed_by)
-        return EntityCloseResponse(
-            entity_uri=uri, entity_text=ent["entity_text"], dry_run=body.dry_run,
-            applied=(not body.dry_run), previous_status=previous_status,
-            closure=act, closure_log_id=(None if body.dry_run else act.id),
-            message=("dry run — rolled back, nothing committed" if body.dry_run
-                     else f"closed {previous_status or '(never closed)'} -> {status}"))
 
     @router.get("/{uri:path}/resolve")
     async def resolve_entity_redirect(uri: str):

@@ -92,10 +92,8 @@ exports/
 *.log.*
 *.gz
 config/personal.env
-config/substack_publications.yaml
-config/rss_feeds.yaml
 config/research_author_sensors.yaml
-config/projects.json
+config/substack_publications.yaml
 
 # TerminusDB phase artifacts
 scripts/terminusdb/artifacts/
@@ -132,3 +130,6 @@ deep_extract.env
 
 # Tier-3 migration scripts (intentional, tracked)
 !scripts/tier-3/*.sql
+config/*.env.bak*
+config/personal.env.bak*
+*.bak-*

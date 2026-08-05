@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "deep_extraction_v2",
+  "title": "Deep Session Extraction v2.0.0",
+  "description": "Authoritative schema for v2 session extractor output. Mirrored inline in scripts/prompts/deep_extraction_v2.md; pre-commit test diffs the two.",
+  "type": "object",
+  "required": ["episode", "entities", "facts", "discourse", "continuity"],
+  "additionalProperties": false,
+  "properties": {
+    "episode": {
+      "type": "object",
+      "required": ["name", "summary", "session_arc", "duration_turns", "is_continuation_of"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "summary": {"type": "string"},
+        "session_arc": {"enum": ["discovery","implementation","debugging","planning","research","routine","meeting_notes","unclear"]},
+        "duration_turns": {"type": "integer", "minimum": 0},
+        "is_continuation_of": {"type": ["string","null"], "description": "session_id (full UUID or 8-char prefix) or null"}
+      }
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name","type","first_seen_turn","mention_count"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string"},
+          "first_seen_turn": {"type": "integer", "minimum": 0},
+          "mention_count": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["subject","predicate","object","object_literal","fact_text","turn_range","confidence"],
+        "additionalProperties": false,
+        "properties": {
+          "subject": {"type": "string"},
+          "predicate": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+          "object": {"type": ["string","null"]},
+          "object_literal": {"type": ["string","null"]},
+          "fact_text": {"type": "string"},
+          "turn_range": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
+          "confidence": {"enum": ["high","medium"]}
+        }
+      }
+    },
+    "discourse": {
+      "type": "object",
+      "required": ["decisions","problems","questions","next_steps","learnings"],
+      "additionalProperties": false,
+      "properties": {
+        "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}},
+        "problems": {"type": "array", "items": {"$ref": "#/$defs/problem"}},
+        "questions": {"type": "array", "items": {"$ref": "#/$defs/question"}},
+        "next_steps": {"type": "array", "items": {"$ref": "#/$defs/next_step"}},
+        "learnings": {"type": "array", "items": {"$ref": "#/$defs/learning"}}
+      }
+    },
+    "continuity": {
+      "type": "object",
+      "required": ["continues_from","referenced_sessions"],
+      "additionalProperties": false,
+      "properties": {
+        "continues_from": {"type": "array", "items": {"$ref": "#/$defs/link"}},
+        "referenced_sessions": {"type": "array", "items": {"$ref": "#/$defs/link"}}
+      }
+    }
+  },
+  "$defs": {
+    "decision": {
+      "type": "object",
+      "required": ["title","detail","turn_range","status"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "detail": {"type": ["string","null"]},
+        "turn_range": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
+        "status": {"enum": ["made","superseded","reverted", null]}
+      }
+    },
+    "problem": {
+      "type": "object",
+      "required": ["title","detail","turn_range","status","resolution_turn_range"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "detail": {"type": ["string","null"]},
+        "turn_range": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
+        "status": {"enum": ["open","resolved","superseded","deferred", null]},
+        "resolution_turn_range": {
+          "type": ["array","null"],
+          "items": {"type": "integer", "minimum": 0},
+          "minItems": 2, "maxItems": 2
+        }
+      }
+    },
+    "question": {
+      "type": "object",
+      "required": ["title","detail","turn_range","status"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "detail": {"type": ["string","null"]},
+        "turn_range": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
+        "status": {"enum": ["open","resolved","deferred", null]}
+      }
+    },
+    "next_step": {
+      "type": "object",
+      "required": ["title","target_date","status"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "target_date": {"type": ["string","null"], "format": "date"},
+        "status": {"enum": ["pending","done","cancelled", null]}
+      }
+    },
+    "learning": {
+      "type": "object",
+      "required": ["title","detail","turn_range"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "detail": {"type": ["string","null"]},
+        "turn_range": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2}
+      }
+    },
+    "link": {
+      "type": "object",
+      "required": ["session_id","link_type","detail"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {"type": "string", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$"},
+        "link_type": {"enum": ["continues","fixes","supersedes","references","expands"]},
+        "detail": {"type": ["string","null"]}
+      }
+    }
+  }
+}

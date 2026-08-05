@@ -1140,52 +1140,6 @@ async def bundles_fetch(request: Request):
     )
 
 
-def _federation_rid_groups() -> Optional[List[str]]:
-    """Optional group_id allowlist for the federation RID directory.
-
-    KOI_FEDERATION_RID_GROUPS is a comma-separated list of group_ids
-    (e.g. "bioregional-coordination,biofi"). When set, /rids/fetch only
-    lists entities whose metadata.group_id is in the list. Unset/empty
-    means no group restriction.
-    """
-    raw = os.getenv("KOI_FEDERATION_RID_GROUPS", "").strip()
-    if not raw:
-        return None
-    groups = [g.strip() for g in raw.split(",") if g.strip()]
-    return groups or None
-
-
-def _build_rids_fetch_query(
-    rid_types: Optional[List[str]],
-    allowed_groups: Optional[List[str]],
-) -> tuple:
-    """Build the /rids/fetch directory query.
-
-    The RID directory is peer-visible, so it must never list entities that
-    are node-private or that were tombstoned by a merge (merged_into set) —
-    peers should only discover live, shareable identities.
-    """
-    conditions = [
-        "er.koi_rid IS NOT NULL",
-        "er.merged_into IS NULL",
-        "NOT COALESCE(er.node_private, FALSE)",
-    ]
-    params: List[Any] = []
-    if rid_types:
-        params.append(rid_types)
-        conditions.append(f"er.entity_type = ANY(${len(params)})")
-    if allowed_groups:
-        params.append(allowed_groups)
-        conditions.append(f"er.metadata->>'group_id' = ANY(${len(params)})")
-    sql = (
-        "SELECT DISTINCT er.koi_rid\n"
-        "FROM entity_registry er\n"
-        "WHERE " + "\n  AND ".join(conditions) + "\n"
-        "ORDER BY er.koi_rid"
-    )
-    return sql, params
-
-
 @koi_net_router.post("/rids/fetch")
 async def rids_fetch(request: Request):
     """List available RIDs, optionally filtered by type."""
@@ -1208,9 +1162,27 @@ async def rids_fetch(request: Request):
             resp = RidsPayloadResponse(rids=[])
             return JSONResponse(content=_wrap_response(resp.model_dump(), source_node, signed))
 
-    sql, params = _build_rids_fetch_query(rid_types, _federation_rid_groups())
     async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(sql, *params)
+        if rid_types:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT er.koi_rid
+                FROM entity_registry er
+                WHERE er.koi_rid IS NOT NULL
+                  AND er.entity_type = ANY($1)
+                ORDER BY er.koi_rid
+                """,
+                rid_types,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT koi_rid
+                FROM entity_registry
+                WHERE koi_rid IS NOT NULL
+                ORDER BY koi_rid
+                """
+            )
 
     rids = [row["koi_rid"] for row in rows]
     resp = RidsPayloadResponse(rids=rids)

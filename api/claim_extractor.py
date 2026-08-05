@@ -133,53 +133,6 @@ def _parse_llm_response(response_text: str) -> List[Dict[str, Any]]:
         return []
 
 
-async def _llm_complete(prompt: str, *, max_tokens: int = 4096) -> "str | None":
-    """Return an LLM completion for `prompt`, or None if no transport works.
-
-    Anthropic API primary, OpenAI fallback — so claim extraction survives an Anthropic
-    credit/quota outage instead of silently returning zero claims on every episode write.
-    NOTE: deliberately NOT the `claude -p` subscription transport — this runs on the
-    synchronous per-episode request path, where a subprocess call (20-160s) would stall
-    /knowledge/episodes. OpenAI is the fast fallback; batch CLI ingests use the subscription.
-    """
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_key:
-        try:
-            import anthropic
-
-            client = anthropic.Anthropic(api_key=anthropic_key)
-            msg = client.messages.create(
-                model=os.getenv("CLAIM_EXTRACTOR_MODEL", "claude-sonnet-4-6"),
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text
-        except Exception as e:
-            logger.warning("claim_extractor: Anthropic transport failed (%s); trying OpenAI fallback", e)
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if openai_key:
-        try:
-            import httpx
-
-            base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-            model = os.getenv("CLAIM_EXTRACTOR_OPENAI_MODEL",
-                              os.getenv("DOC_EXTRACTOR_OPENAI_MODEL", "gpt-4.1"))
-            async with httpx.AsyncClient(timeout=60.0) as http:
-                r = await http.post(
-                    f"{base}/chat/completions",
-                    headers={"Authorization": f"Bearer {openai_key}"},
-                    json={"model": model, "max_tokens": max_tokens,
-                          "messages": [{"role": "user", "content": prompt}]},
-                )
-                r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error("claim_extractor: OpenAI fallback failed (%s)", e)
-            return None
-    logger.error("claim_extractor: no LLM transport available (no ANTHROPIC_API_KEY / OPENAI_API_KEY)")
-    return None
-
-
 async def extract_claims_from_text(
     document_text: str,
     source_document: str,
@@ -205,12 +158,31 @@ async def extract_claims_from_text(
         document_text=cleaned[:10000],  # hard cap — callers window for full coverage (see note above)
     )
 
-    # LLM call: Anthropic API primary, OpenAI fallback (see _llm_complete) so claim
-    # extraction survives an Anthropic credit/quota outage instead of returning [].
-    response_text = await _llm_complete(prompt)
-    if not response_text:
+    # Call Claude via Anthropic API
+    try:
+        import anthropic
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.error("ANTHROPIC_API_KEY not set, cannot extract claims")
+            return []
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = message.content[0].text
+        raw_candidates = _parse_llm_response(response_text)
+
+    except ImportError:
+        logger.error("anthropic package not installed, cannot extract claims")
         return []
-    raw_candidates = _parse_llm_response(response_text)
+    except Exception as e:
+        logger.error(f"Claim extraction LLM call failed: {e}")
+        return []
 
     # Apply quality filters
     candidates = []

@@ -71,10 +71,6 @@ DEFAULT_DOC_KINDS = (
 
 DB_URL = "dbname=personal_koi"
 KOI_BASE_URL = os.environ.get("KOI_API_ENDPOINT", "http://localhost:8351")
-# /knowledge/episodes auth: the CLAIMS service token (server-side require_service_auth
-# checks KOI_CLAIMS_SERVICE_TOKEN). Must be present in this script's env post-gate;
-# sending it is a harmless no-op until the :8351 episodes-gate lands.
-KOI_CLAIMS_SERVICE_TOKEN = os.environ.get("KOI_CLAIMS_SERVICE_TOKEN", "")
 
 # --- Strand-D session map (Spore canon-rebuild parent orchestrators) ---
 SESSION_BC = "bc5c284d-2d1b-4ba0-9730-d83006480c52"
@@ -332,24 +328,6 @@ def post_episode(
             )
         if r.status_code in (200, 201):
             return r.json()
-        if r.status_code in (401, 403):
-            # Loud on auth failure — do NOT silently skip. This script reads
-            # KOI_CLAIMS_SERVICE_TOKEN from the AMBIENT shell env (no dotenv), so
-            # post-:8351-gate a forgot-to-export run would otherwise silently DROP
-            # Spore-canon writes. Fail fast instead.
-            log_fn(
-                {
-                    "event": "episode_auth_error",
-                    "status": r.status_code,
-                    "body": r.text[:300],
-                }
-            )
-            raise SystemExit(
-                f"FATAL: /knowledge/episodes returned {r.status_code} (auth). "
-                f"Export KOI_CLAIMS_SERVICE_TOKEN before running koi_sustained_write "
-                f"(it reads the ambient shell env, not a dotenv).\n"
-                f"  error_code: auth_required"
-            )
         if 400 <= r.status_code < 500:
             log_fn(
                 {
@@ -602,14 +580,8 @@ def main() -> int:
         log_f.write(json.dumps(rec, default=str) + "\n")
         log_f.flush()
 
-    # Pre-flight (httpx client reused for all calls). Bearer the CLAIMS token on
-    # every request so the gated /knowledge/episodes write authenticates (harmless
-    # on the open read/health endpoints).
-    _auth_headers = (
-        {"Authorization": f"Bearer {KOI_CLAIMS_SERVICE_TOKEN}"}
-        if KOI_CLAIMS_SERVICE_TOKEN else {}
-    )
-    client = httpx.Client(headers=_auth_headers)
+    # Pre-flight (httpx client reused for all calls)
+    client = httpx.Client()
     health = preflight_health(client)
     log_fn({"event": "preflight_ok", "health": health})
     print(f"preflight ok: {health.get('embedding_model')}@{health.get('embedding_dimension')}")

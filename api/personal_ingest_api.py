@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 import logging
 import uuid
 from pathlib import Path as _VaultPath
@@ -87,18 +87,7 @@ from api.entity_schema import (
     reload_entity_schemas,
     get_first_significant_token,
     get_phonetic_enabled_types,
-    canonicalize_entity_type,
     EntityTypeConfig,
-)
-
-# Shared resolver name guards (single source of truth in resolution_primitives).
-# Wired into Tier 1.5 (Person), Tier 2a (via passes_token_overlap_check) and
-# Tier 2b (via passes_semantic_match_guard) below.
-from api.resolution_primitives import (
-    GENERIC_NAME_TOKENS,
-    passes_person_name_guard,
-    passes_distinctive_token_check,
-    passes_semantic_match_guard,
 )
 
 # Configure logging
@@ -223,7 +212,6 @@ SOURCE_TO_FILTER = {
         " AND (m.metadata->>'status' IS NULL OR m.metadata->>'status' != 'cancelled')"
     ),
     'vault': "AND m.source_sensor = 'obsidian-sensor'",
-    'substack': "AND m.source_sensor IN ('substack-corpus-backfill', 'substack-sensor')",
 }
 
 from api.embedding_provider import EmbeddingProvider, create_embedding_provider
@@ -256,13 +244,6 @@ class ExtractedEntity(BaseModel):
     associated_people: Optional[List[str]] = None
     associated_organizations: Optional[List[str]] = None
 
-    @field_validator("type")
-    @classmethod
-    def _canonicalize_type(cls, v: str) -> str:
-        # Strip schema:/bkc: prefixes and resolve to the canonical schema
-        # type_key (case/plural tolerant). Empty string passes through.
-        return canonicalize_entity_type(v) if v else v
-
 
 class ExtractedRelationship(BaseModel):
     """Relationship between entities"""
@@ -291,11 +272,6 @@ class IngestRequest(BaseModel):
     source: str = "obsidian-vault"
     context: Optional[ResolutionContext] = None  # For contextual entity resolution
     parent_receipt_id: Optional[str] = None  # Chain to a parent CAT receipt
-    # Optional idempotency key for safe client retries. See ingest_idempotency
-    # (migration 106). NOTE: /ingest stores the response AFTER its post-commit
-    # receipt step (store-after-commit, not single-transaction) because the CAT
-    # receipt is created outside the main write transaction — see the endpoint.
-    request_id: Optional[str] = None
 
 
 class CanonicalEntity(BaseModel):
@@ -306,12 +282,6 @@ class CanonicalEntity(BaseModel):
     is_new: bool
     merged_with: Optional[str] = None  # If deduplicated
     confidence: float = 1.0
-    # Vault-path annotation (P2, 2026-07-13). Populated for resolved
-    # (is_new=false) entities on /ingest. ANNOTATE-ONLY — never gates or
-    # demotes resolution. Null when there is no entity_rid_mappings row.
-    vault_path: Optional[str] = None
-    vault_note_exists: Optional[bool] = None
-    vault_folder: Optional[str] = None
 
 
 class IngestStats(BaseModel):
@@ -332,20 +302,12 @@ class IngestResponse(BaseModel):
     receipt_rid: Optional[str] = None  # Deprecated alias — use receipt_id
     receipt_persisted: bool = True  # False if receipt DB write failed (receipt_id still valid format but not in DB)
     stats: IngestStats
-    # True only when this response is a replay of a prior request with the same
-    # request_id (no new writes were performed). See IngestRequest.request_id.
-    idempotent_replay: bool = False
 
 
 class RegisterEntityRequest(BaseModel):
     """Request to register a vault entity"""
-    # vault_rid / vault_path are optional to support alias-only updates to an
-    # existing entity (e.g. process-note alias auto-learning POSTs only
-    # {name, entity_type, frontmatter.aliases}). When omitted, the handler
-    # backfills them from the existing entity_rid_mappings row so the RID
-    # mapping is updated in place rather than 422-rejected.
-    vault_rid: Optional[str] = None  # e.g., "orn:obsidian.entity:Notes/Person/clare-attwell"
-    vault_path: Optional[str] = None  # e.g., "People/Clare Attwell.md"
+    vault_rid: str  # e.g., "orn:obsidian.entity:Notes/Person/clare-attwell"
+    vault_path: str  # e.g., "People/Clare Attwell.md"
     entity_type: str  # Person, Organization, etc.
     name: str
     properties: Dict[str, Any] = {}
@@ -353,16 +315,6 @@ class RegisterEntityRequest(BaseModel):
     content_hash: Optional[str] = None
     publication_scope: Optional[str] = "local_graph"  # "local_graph" | "federated"
     visibility_scope: Optional[str] = "public"  # "public" | "node_private"
-    # When true, suppress the Tier 1.1b cross-type dedup guard so a same-name
-    # entity of THIS type can register even if a live entity of a DIFFERENT type
-    # already carries the name. Use to intentionally create a legitimately
-    # distinct same-named entity (the advisory cross_type_warning still fires).
-    force_type: bool = False
-
-    @field_validator("entity_type")
-    @classmethod
-    def _canonicalize_entity_type(cls, v: str) -> str:
-        return canonicalize_entity_type(v) if v else v
 
 
 class RegisterEntityResponse(BaseModel):
@@ -489,25 +441,6 @@ async def generate_document_embedding(text: str, prompt_type: str = "extraction"
     normalized = normalize_entity_text(text)
     return await embedding_provider.embed_or_none(
         normalized, is_query=False, prompt_type=prompt_type
-    )
-
-
-async def generate_document_embeddings_batch(
-    texts: List[str], prompt_type: str = "extraction"
-) -> Optional[List[Optional[List[float]]]]:
-    """Batch DOCUMENT embeddings — one provider round-trip for many texts.
-
-    Mirrors generate_document_embedding's normalization (normalize_entity_text)
-    and DOCUMENT mode so batch-computed vectors are byte-for-byte the same as
-    the per-text path — callers can safely prefetch a batch and fall back to
-    the single-text function for cache misses. Returns None when embeddings are
-    disabled or the provider fails (caller falls back to per-text embeds).
-    """
-    if not embedding_provider or not ENABLE_SEMANTIC_MATCHING:
-        return None
-    normalized = [normalize_entity_text(t or "") for t in texts]
-    return await embedding_provider.embed_batch_or_none(
-        normalized, prompt_type=prompt_type
     )
 
 
@@ -694,26 +627,12 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
                 return False
         return True
 
-    # Distinctive-token guard for Organization/Project/Concept. Both inputs are
-    # multi-token here (single-token cases returned above). Rejects names whose
-    # distinctive (non-generic) tokens are DISJOINT ("University of Guelph" vs
-    # "University of Melbourne") or a strict token-level extension ("DWeb Camp
-    # Cascadia" vs "DWeb Camp"). Shared implementation in resolution_primitives.
-    if entity_type in ("Organization", "Project", "Concept"):
-        if not passes_distinctive_token_check(text1, text2):
-            return False
-
     # Get schema-driven config for multi-word token overlap
     schema = get_schema_for_type(entity_type)
     if not schema.require_token_overlap:
-        # Person: require BOTH first- and last-token JW>=0.85 (stricter than the
-        # legacy last-token-only 0.75 rule) so "Kevin Owocki" != "Kevin Triplett"
-        # and "Carol Newell" != "Carol Anne". Registered aliases are handled at
-        # Tier 1.1 before this runs. Shared guard in resolution_primitives.
-        if entity_type == "Person":
-            return passes_person_name_guard(text1, text2)
-        # Other bypass types (Concept, Question, Claim, Intent): keep the 2-token
-        # family-name guard so "Benjamin Life" != "Benjamin Neal".
+        # Even with token overlap bypassed, guard against first-name inflation for
+        # 2-token full names (First Last): require the last tokens (family names)
+        # to have a minimum JW similarity so "Benjamin Life" ≠ "Benjamin Neal".
         if len(tokens1) == 2 and len(tokens2) == 2:
             last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
             if last_jw < 0.75:
@@ -776,14 +695,12 @@ async def resolve_entity_to_uri(
         return await conn.fetchval("""
             SELECT fuseki_uri FROM entity_registry
             WHERE normalized_text = $1 AND entity_type = $2
-            AND merged_into IS NULL
             LIMIT 1
         """, normalized, entity_type)
     else:
         return await conn.fetchval("""
             SELECT fuseki_uri FROM entity_registry
             WHERE normalized_text = $1
-            AND merged_into IS NULL
             LIMIT 1
         """, normalized)
 
@@ -957,7 +874,6 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE normalized_text = $1 AND entity_type = $2
-            AND merged_into IS NULL
             LIMIT 1
             """,
             normalized,
@@ -969,7 +885,6 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE normalized_text = $1
-            AND merged_into IS NULL
             LIMIT 1
             """,
             normalized,
@@ -984,7 +899,6 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE entity_type = $1 AND $2 = ANY(aliases)
-            AND merged_into IS NULL
             LIMIT 1
             """,
             entity_type,
@@ -996,7 +910,6 @@ async def lookup_entity(
             SELECT fuseki_uri
             FROM entity_registry
             WHERE $1 = ANY(aliases)
-            AND merged_into IS NULL
             LIMIT 1
             """,
             normalized_alias,
@@ -1009,7 +922,6 @@ async def resolve_entity(
     entity: ExtractedEntity,
     context: Optional[ResolutionContext] = None,
     skip_fuzzy: bool = False,
-    skip_cross_type: bool = False,
 ) -> Tuple[CanonicalEntity, bool]:
     """
     Resolve an entity against the knowledge base.
@@ -1027,9 +939,6 @@ async def resolve_entity(
         context: Optional disambiguation context (associated_people)
         skip_fuzzy: When true, use Tier 1 exact only; on exact miss, create a
             new entity instead of consulting alias/contextual/fuzzy/semantic tiers.
-        skip_cross_type: When true, suppress ONLY the Tier 1.1b type-agnostic
-            cross-type dedup fallback (see register-entity ``force_type``). All
-            other tiers run normally.
 
     Returns: (CanonicalEntity, is_new)
     """
@@ -1129,10 +1038,9 @@ async def resolve_entity(
     # guess; we fall through to fuzzy/semantic/create as before. This is no looser
     # than the pre-existing type-agnostic branch used when type_hint is absent
     # (lines above), and is strictly tighter (exactly-one + merged_into IS NULL).
-    # Suppressed when skip_cross_type is set (register-entity force_type) so an
-    # intentionally-distinct same-named entity of this type can be created.
-    if entity.type and not skip_cross_type:
-        cross_type_rows = await conn.fetch("""
+    if entity.type:
+        cross_type_rows = await conn.fetch(
+            """
             SELECT fuseki_uri, entity_text, entity_type
             FROM entity_registry
             WHERE merged_into IS NULL
@@ -1182,20 +1090,13 @@ async def resolve_entity(
 
                 # Token overlap guard for multi-token names (prevents "Silke Helfrich" -> "Simon Grant")
                 # If both names have 2+ tokens and share zero tokens, reject regardless of score
-                best_norm = best.get('normalized_text', best['name'])
                 query_tokens = set(normalized.lower().split())
-                candidate_tokens = set(best_norm.lower().split())
+                candidate_tokens = set(best.get('normalized_text', best['name']).lower().split())
                 token_overlap = query_tokens & candidate_tokens
                 if len(query_tokens) >= 2 and len(candidate_tokens) >= 2 and len(token_overlap) == 0:
                     logger.info(f"Tier 1.5 contextual match REJECTED (zero token overlap): "
                                f"'{entity.name}' -> '{best['name']}' "
                                f"(tokens: {query_tokens} vs {candidate_tokens})")
-                elif entity.type == "Person" and not passes_person_name_guard(normalized, best_norm):
-                    # Person name guard: a bare first name must not collapse into
-                    # a full name (or a different full name) on context alone.
-                    # Registered aliases resolve at Tier 1.1 before this runs.
-                    logger.info(f"Tier 1.5 contextual match REJECTED (person name guard): "
-                               f"'{entity.name}' -> '{best['name']}'")
                 else:
                     # Two-tier threshold: phonetic matches get lower bar (strong evidence)
                     # Non-phonetic matches need higher score to avoid false positives
@@ -1227,13 +1128,11 @@ async def resolve_entity(
             SELECT id, fuseki_uri, entity_text, entity_type, normalized_text
             FROM entity_registry
             WHERE entity_type = $1
-            AND merged_into IS NULL
         """, entity.type)
     else:
         candidates = await conn.fetch("""
             SELECT id, fuseki_uri, entity_text, entity_type, normalized_text
             FROM entity_registry
-            WHERE merged_into IS NULL
         """)
 
     best_match = None
@@ -1290,7 +1189,6 @@ async def resolve_entity(
                     FROM entity_registry
                     WHERE embedding_3072 IS NOT NULL
                       AND entity_type = $2
-                      AND merged_into IS NULL
                       AND 1 - (embedding_3072::halfvec(3072)
                                <=> $1::halfvec(3072)) > $3
                     ORDER BY similarity DESC
@@ -1303,7 +1201,6 @@ async def resolve_entity(
                                 <=> $1::halfvec(3072)) AS similarity
                     FROM entity_registry
                     WHERE embedding_3072 IS NOT NULL
-                      AND merged_into IS NULL
                       AND 1 - (embedding_3072::halfvec(3072)
                                <=> $1::halfvec(3072)) > $2
                     ORDER BY similarity DESC
@@ -1311,31 +1208,16 @@ async def resolve_entity(
                 """, str(embedding), semantic_threshold)
 
             if semantic_match:
-                # Name-shape guard: embedding proximity alone conflates
-                # same-first-name people, short generic names, and disjoint
-                # multi-word names. Reject those and fall through to Tier 3.
-                match_norm = normalize_entity_text(semantic_match['entity_text'])
-                match_type = semantic_match['entity_type'] or entity.type
-                if not passes_semantic_match_guard(
-                    match_type, normalized, match_norm,
-                    float(semantic_match['similarity']), semantic_threshold,
-                ):
-                    logger.info(
-                        f"Tier 2b REJECTED (name guard): '{entity.name}' -> "
-                        f"'{semantic_match['entity_text']}' "
-                        f"(similarity: {semantic_match['similarity']:.3f}); creating new entity"
-                    )
-                else:
-                    logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
-                               f"(similarity: {semantic_match['similarity']:.3f})")
-                    return CanonicalEntity(
-                        name=semantic_match['entity_text'],
-                        uri=semantic_match['fuseki_uri'],
-                        type=semantic_match['entity_type'] or entity.type,
-                        is_new=False,
-                        merged_with=entity.name if semantic_match['entity_text'] != entity.name else None,
-                        confidence=float(semantic_match['similarity'])
-                    ), False
+                logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
+                           f"(similarity: {semantic_match['similarity']:.3f})")
+                return CanonicalEntity(
+                    name=semantic_match['entity_text'],
+                    uri=semantic_match['fuseki_uri'],
+                    type=semantic_match['entity_type'] or entity.type,
+                    is_new=False,
+                    merged_with=entity.name if semantic_match['entity_text'] != entity.name else None,
+                    confidence=float(semantic_match['similarity'])
+                ), False
 
     # Tier 3: Create new entity
     new_uri = generate_entity_uri(entity.name, entity.type)
@@ -1371,9 +1253,6 @@ async def store_new_entity(
 ) -> None:
     """Store a new entity in the registry with embedding and phonetic code"""
     normalized = normalize_entity_text(entity.name)
-    # Canonicalize the persisted type (strip schema:/bkc:, resolve plural/case)
-    # so entity_registry never accumulates prefixed/variant type spellings.
-    entity_type = canonicalize_entity_type(entity.type) if entity.type else entity.type
 
     import json as json_module
     metadata = json_module.dumps({
@@ -1391,13 +1270,13 @@ async def store_new_entity(
 
     # Compute phonetic code for types with phonetic_matching enabled (schema-driven)
     phonetic_code = None
-    schema = get_schema_for_type(entity_type)
+    schema = get_schema_for_type(entity.type)
     if schema.phonetic_matching:
         # Use first significant token (skip stopwords)
         first_token = get_first_significant_token(normalized, schema.phonetic_stopwords)
         phonetic_code = get_phonetic_code(first_token)
         if phonetic_code:
-            logger.info(f"Generated phonetic code for new {entity_type}: {entity.name} -> {phonetic_code}")
+            logger.info(f"Generated phonetic code for new {entity.type}: {entity.name} -> {phonetic_code}")
 
     if embedding:
         # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
@@ -1412,7 +1291,7 @@ async def store_new_entity(
         """,
             canonical.uri,
             entity.name,
-            entity_type,
+            entity.type,
             normalized,
             source,
             document_rid,
@@ -1430,7 +1309,7 @@ async def store_new_entity(
         """,
             canonical.uri,
             entity.name,
-            entity_type,
+            entity.type,
             normalized,
             source,
             document_rid,
@@ -1442,7 +1321,7 @@ async def store_new_entity(
     await enqueue_outbox(conn, "entity_upsert", {
         "fuseki_uri": canonical.uri,
         "entity_text": entity.name,
-        "entity_type": entity_type,
+        "entity_type": entity.type,
         "normalized_text": normalized,
         "occurrence_count": 0,
         "phonetic_code": phonetic_code or "",
@@ -1452,6 +1331,80 @@ async def store_new_entity(
         "source": source,
         "first_seen_rid": document_rid,
     }, rid=canonical.uri, source_rid=document_rid)
+
+
+# =============================================================================
+# Entity federation payload
+# =============================================================================
+
+async def _build_entity_federation_payload(
+    conn,
+    uri: str,
+    *,
+    fallback_name: str = "",
+    fallback_type: str = "",
+) -> Dict[str, Any]:
+    """Build an entity federation payload from the authoritative registry row.
+
+    Both emit sites used to inline a 6-key literal hardcoding ``"aliases": []``
+    and ``"metadata": {}``. That was doubly wrong: the peer learned nothing, and
+    — because the subscriber UPSERT did ``SET metadata = EXCLUDED.metadata`` —
+    the empty payload ERASED what the peer had computed locally.
+
+    Deliberately NOT included: the embedding vector. Entity events run ~22k per
+    30 days at ~241 bytes; a 3072-float vector is ~60 kB, which would take this
+    domain from roughly 5 MB to 1.3 GB per month. Receiving nodes fill
+    ``embedding_3072`` via scripts/backfill_entity_embeddings.py instead.
+    """
+    row = None
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT fuseki_uri, entity_text, entity_type, normalized_text,
+                   aliases, metadata, description, phonetic_code
+            FROM entity_registry
+            WHERE fuseki_uri = $1
+            """,
+            uri,
+        )
+    except Exception as e:  # never let a federation emit break the write path
+        logger.warning(f"entity federation payload lookup failed for {uri}: {e}")
+
+    if row is None:
+        return {
+            "fuseki_uri": uri,
+            "entity_text": fallback_name,
+            "entity_type": fallback_type,
+            "normalized_text": (fallback_name or "").lower().strip(),
+            "aliases": [],
+            "metadata": {},
+        }
+
+    metadata = row["metadata"]
+    if isinstance(metadata, str):
+        # NB: this module aliases stdlib json as `json_module_global` and never
+        # binds bare `json` — `json.loads` here is a runtime NameError.
+        try:
+            metadata = json_module_global.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    payload: Dict[str, Any] = {
+        "fuseki_uri": row["fuseki_uri"],
+        "entity_text": row["entity_text"] or fallback_name,
+        "entity_type": row["entity_type"] or fallback_type,
+        "normalized_text": row["normalized_text"]
+        or (row["entity_text"] or fallback_name or "").lower().strip(),
+        "aliases": list(row["aliases"] or []),
+        "metadata": metadata,
+    }
+    if row["description"]:
+        payload["description"] = row["description"]
+    if row["phonetic_code"]:
+        payload["phonetic_code"] = row["phonetic_code"]
+    return payload
 
 
 # =============================================================================
@@ -1701,7 +1654,6 @@ async def startup():
                     db_pool,
                     generate_query_embedding=generate_query_embedding,
                     generate_document_embedding=generate_document_embedding,
-                    generate_batch_embedding=generate_document_embeddings_batch,
                 ), prefix="/knowledge")
                 logger.info("Knowledge router mounted (/knowledge)")
             except Exception as e:
@@ -2561,19 +2513,6 @@ async def ingest_extraction(request: IngestRequest):
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Idempotency entry-check: replay a prior identical request without re-ingesting.
-    if request.request_id:
-        async with db_pool.acquire() as conn:
-            prior = await conn.fetchval(
-                "SELECT response FROM ingest_idempotency WHERE request_id = $1",
-                request.request_id)
-        if prior is not None:
-            import json as _json_replay
-            data = prior if isinstance(prior, dict) else _json_replay.loads(prior)
-            data["idempotent_replay"] = True
-            logger.info("idempotent replay for /ingest request_id=%s", request.request_id)
-            return IngestResponse(**data)
-
     canonical_entities: List[CanonicalEntity] = []
     new_count = 0
     resolved_count = 0
@@ -2620,25 +2559,24 @@ async def ingest_extraction(request: IngestRequest):
                             logger.info(f"Stored new entity: {canonical.uri}")
                         else:
                             resolved_count += 1
-                            # Vault-path annotation (P2, annotate-only). Mutates the
-                            # already-appended canonical in place. One indexed query.
-                            (canonical.vault_path,
-                             canonical.vault_note_exists,
-                             canonical.vault_folder) = await _annotate_vault_fields(
-                                conn, canonical.uri, canonical.type
-                            )
                             logger.info(f"Resolved to existing: {canonical.uri}")
 
-                        # Emit federation event for entity replication
+                        # Emit federation event for entity replication.
+                        # Payload is read back from entity_registry so the peer
+                        # gets real aliases/metadata/description rather than
+                        # hardcoded empties that would blank its own copy.
                         from api.federation_events import emit_domain_event
-                        await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
-                            "fuseki_uri": canonical.uri,
-                            "entity_text": canonical.name,
-                            "entity_type": entity.type,
-                            "normalized_text": canonical.name.lower().strip(),
-                            "aliases": [],
-                            "metadata": {},
-                        })
+                        await emit_domain_event(
+                            "entity",
+                            "NEW" if is_new else "UPDATE",
+                            canonical.uri,
+                            await _build_entity_federation_payload(
+                                conn,
+                                canonical.uri,
+                                fallback_name=canonical.name,
+                                fallback_type=entity.type,
+                            ),
+                        )
 
                         # Link entity to document
                         await conn.execute("""
@@ -2676,7 +2614,7 @@ async def ingest_extraction(request: IngestRequest):
                     # Fallback: look up pre-existing entities by exact normalized_text
                     if not subj_uri:
                         rows = await conn.fetch(
-                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 AND merged_into IS NULL LIMIT 2",
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
                             subj_key)
                         if len(rows) == 1:
                             subj_uri = rows[0]["fuseki_uri"]
@@ -2687,7 +2625,7 @@ async def ingest_extraction(request: IngestRequest):
                                 f"{len(rows)}+ matches, skipping")
                     if not obj_uri:
                         rows = await conn.fetch(
-                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 AND merged_into IS NULL LIMIT 2",
+                            "SELECT fuseki_uri FROM entity_registry WHERE normalized_text = $1 LIMIT 2",
                             obj_key)
                         if len(rows) == 1:
                             obj_uri = rows[0]["fuseki_uri"]
@@ -2784,7 +2722,7 @@ async def ingest_extraction(request: IngestRequest):
     except Exception as e:
         logger.error(f"Failed to create ingest CAT receipt: {e}")
 
-    response = IngestResponse(
+    return IngestResponse(
         success=success,
         canonical_entities=canonical_entities,
         receipt_id=receipt_id,
@@ -2792,24 +2730,6 @@ async def ingest_extraction(request: IngestRequest):
         receipt_persisted=receipt_persisted,
         stats=stats
     )
-
-    # Idempotency store-after-commit (best-effort). Unlike /knowledge/episodes,
-    # /ingest cannot store inside the main write transaction because the CAT
-    # receipt above is created afterwards. ON CONFLICT DO NOTHING so a concurrent
-    # duplicate never errors; a crash between commit and here just means a retry
-    # re-ingests (entity writes are dedup-idempotent). See IngestRequest.request_id.
-    if request.request_id:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO ingest_idempotency (request_id, endpoint, response) "
-                    "VALUES ($1, $2, $3::jsonb) ON CONFLICT (request_id) DO NOTHING",
-                    request.request_id, "/ingest",
-                    json_module_global.dumps(response.model_dump()))
-        except Exception as e:
-            logger.warning(f"Failed to store ingest idempotency record: {e}")
-
-    return response
 
 
 @app.get("/receipts/{receipt_id}/chain")
@@ -2917,7 +2837,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2 AND entity_type = $3 AND NOT node_private AND merged_into IS NULL
+                WHERE normalized_text ILIKE $2 AND entity_type = $3 AND NOT node_private
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -2930,7 +2850,7 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
                             WHEN normalized_text ILIKE $2 THEN 0.9
                             ELSE 0.7 END AS similarity
                 FROM entity_registry
-                WHERE normalized_text ILIKE $2 AND NOT node_private AND merged_into IS NULL
+                WHERE normalized_text ILIKE $2 AND NOT node_private
                 ORDER BY
                     CASE WHEN normalized_text = $1 THEN 0 ELSE 1 END,
                     created_at DESC
@@ -2969,46 +2889,6 @@ async def entity_search(request: Request, query: str = None, limit: int = 20, en
             results.append(result_entry)
 
     return {"results": results, "count": len(results)}
-
-
-async def _annotate_vault_fields(
-    conn: asyncpg.Connection,
-    canonical_uri: Optional[str],
-    entity_type: Optional[str],
-) -> Tuple[Optional[str], bool, Optional[str]]:
-    """Return (vault_path, vault_note_exists, vault_folder) for a resolved entity.
-
-    ANNOTATION ONLY — this never gates, demotes, or alters resolution; it only
-    describes where (if anywhere) the resolved entity lives in the vault.
-
-    - vault_path: from the entity_rid_mappings row (public/local scope only;
-      node_private mappings are excluded). One indexed lookup on the existing
-      idx_rid_mappings_canonical index. Null when there is no mapping.
-    - vault_note_exists: best-effort filesystem check via _vault_note_exists
-      (True when the vault isn't mounted here — see that helper). False when
-      there is no mapping.
-    - vault_folder: the schema folder for the entity type (e.g. Person ->
-      People). Null when entity_type is missing.
-    """
-    vault_path = None
-    if canonical_uri:
-        vault_path = await conn.fetchval(
-            """
-            SELECT vault_path FROM entity_rid_mappings
-            WHERE canonical_uri = $1
-              AND COALESCE(visibility_scope, 'public') != 'node_private'
-            LIMIT 1
-            """,
-            canonical_uri,
-        )
-    vault_note_exists = _vault_note_exists(vault_path) if vault_path else False
-    vault_folder = None
-    if entity_type:
-        try:
-            vault_folder = get_schema_for_type(entity_type).folder
-        except Exception:
-            vault_folder = None
-    return vault_path, vault_note_exists, vault_folder
 
 
 @app.get("/entity/resolve")
@@ -3078,7 +2958,6 @@ async def resolve_entity_get(
                 WHERE LOWER(entity_text) = LOWER($1)
                   AND fuseki_uri != $2
                   AND COALESCE(node_private, FALSE) = FALSE
-                  AND merged_into IS NULL
                 ORDER BY created_at ASC
                 LIMIT $3
                 """,
@@ -3090,25 +2969,13 @@ async def resolve_entity_get(
                 for r in sibling_rows
             ]
 
-        # Vault-path annotation (P2, annotate-only) for the winning candidate
-        # and each sibling. Still inside the connection block.
-        p_vpath, p_vexists, p_vfolder = await _annotate_vault_fields(
-            conn, canonical.uri, canonical.type
-        )
-        for s in siblings:
-            s["vault_path"], s["vault_note_exists"], s["vault_folder"] = \
-                await _annotate_vault_fields(conn, s["uri"], s["type"])
-
     return {
         "candidates": [{
             "name": canonical.name,
             "uri": canonical.uri,
             "type": canonical.type,
             "confidence": canonical.confidence,
-            "merged_with": canonical.merged_with,
-            "vault_path": p_vpath,
-            "vault_note_exists": p_vexists,
-            "vault_folder": p_vfolder,
+            "merged_with": canonical.merged_with
         }] + siblings,
         "ambiguous": len(siblings) > 0,
         "is_new": is_new,
@@ -3189,7 +3056,6 @@ async def resolve_entity_post(request: ResolveRequest):
                 WHERE LOWER(entity_text) = LOWER($1)
                   AND fuseki_uri != $2
                   AND COALESCE(node_private, FALSE) = FALSE
-                  AND merged_into IS NULL
                 ORDER BY created_at ASC
                 LIMIT $3
                 """,
@@ -3201,24 +3067,13 @@ async def resolve_entity_post(request: ResolveRequest):
                 for r in sibling_rows
             ]
 
-        # Vault-path annotation (P2, annotate-only) for winner + siblings.
-        p_vpath, p_vexists, p_vfolder = await _annotate_vault_fields(
-            conn, canonical.uri, canonical.type
-        )
-        for s in siblings:
-            s["vault_path"], s["vault_note_exists"], s["vault_folder"] = \
-                await _annotate_vault_fields(conn, s["uri"], s["type"])
-
     return {
         "candidates": [{
             "name": canonical.name,
             "uri": canonical.uri,
             "type": canonical.type,
             "confidence": canonical.confidence,
-            "merged_with": canonical.merged_with,
-            "vault_path": p_vpath,
-            "vault_note_exists": p_vexists,
-            "vault_folder": p_vfolder,
+            "merged_with": canonical.merged_with
         }] + siblings,
         "ambiguous": len(siblings) > 0,
         "is_new": is_new,
@@ -3485,8 +3340,7 @@ async def get_entities_mentioned_in_batch(request: BatchMentionedInRequest):
                     document_rid=doc_rid,
                     mention_count=row['mention_count'] or 1,
                     doc_date=doc_date,
-                    first_seen=row['created_at'].isoformat() if row['created_at'] else None,
-                    vault_note_exists=_vault_note_exists(vault_path),
+                    first_seen=row['created_at'].isoformat() if row['created_at'] else None
                 ))
 
             results[entity_uri] = MentionedInResponse(
@@ -3773,27 +3627,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 context=None
             )
 
-            # Resolve against existing entities. force_type suppresses only the
-            # Tier 1.1b cross-type dedup fallback (advisory cross_type_warning
-            # below still fires).
-            canonical, is_new = await resolve_entity(
-                conn, entity, skip_cross_type=request.force_type)
-
-            # Backfill vault_rid / vault_path for alias-only updates.
-            # When the caller omits them (e.g. alias auto-learning), reuse the
-            # existing mapping so we update-in-place instead of 422-rejecting.
-            eff_vault_rid = request.vault_rid
-            eff_vault_path = request.vault_path
-            if (eff_vault_rid is None or eff_vault_path is None) and not is_new:
-                existing_rid_row = await conn.fetchrow("""
-                    SELECT vault_rid, vault_path FROM entity_rid_mappings
-                    WHERE canonical_uri = $1
-                    ORDER BY last_synced DESC NULLS LAST
-                    LIMIT 1
-                """, canonical.uri)
-                if existing_rid_row:
-                    eff_vault_rid = eff_vault_rid or existing_rid_row["vault_rid"]
-                    eff_vault_path = eff_vault_path or existing_rid_row["vault_path"]
+            # Resolve against existing entities
+            canonical, is_new = await resolve_entity(conn, entity)
 
             # Check for URI collision with different vault file
             collision_warning = None
@@ -3801,17 +3636,17 @@ async def register_vault_entity(request: RegisterEntityRequest):
             suppress_paths = {'Tests/'}
             is_suppressed = (
                 request.entity_type in suppress_types
-                or (eff_vault_path is not None and any(eff_vault_path.startswith(p) for p in suppress_paths))
+                or any(request.vault_path.startswith(p) for p in suppress_paths)
             )
-            if not is_new and eff_vault_path is not None:
+            if not is_new:
                 existing_mapping = await conn.fetchrow("""
                     SELECT vault_path, name FROM entity_rid_mappings
                     WHERE canonical_uri = $1 AND vault_path != $2
-                """, canonical.uri, eff_vault_path)
+                """, canonical.uri, request.vault_path)
 
                 if existing_mapping and not is_suppressed:
                     collision_warning = (
-                        f"URI collision: '{request.name}' ({eff_vault_path}) "
+                        f"URI collision: '{request.name}' ({request.vault_path}) "
                         f"shares URI with '{existing_mapping['name']}' ({existing_mapping['vault_path']})"
                     )
                     logger.warning(collision_warning)
@@ -3838,50 +3673,43 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     logger.warning(cross_type_warning)
 
             if is_new:
-                # Store new entity. first_seen_rid is informational; fall back to
-                # a sentinel when the caller didn't supply a vault_rid.
-                await store_new_entity(
-                    conn, entity, canonical,
-                    eff_vault_rid or "orn:personal-koi.source:register-entity"
-                )
+                # Store new entity
+                await store_new_entity(conn, entity, canonical, request.vault_rid)
                 logger.info(f"Registered new entity: {canonical.uri}")
             else:
                 logger.info(f"Linked to existing entity: {canonical.uri}")
 
-            # Store or update RID mapping — only when we have an actual vault RID
-            # + path. Alias-only updates (no rid/path, no existing mapping to
-            # backfill from) skip this and just merge aliases below.
-            if eff_vault_rid and eff_vault_path:
-                await conn.execute("""
-                    INSERT INTO entity_rid_mappings (
-                        vault_rid, vault_path, canonical_uri, entity_type,
-                        name, content_hash, sync_status, last_synced, visibility_scope
-                    ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW(), $7)
-                    ON CONFLICT (vault_rid) DO UPDATE SET
-                        vault_path = EXCLUDED.vault_path,
-                        canonical_uri = EXCLUDED.canonical_uri,
-                        entity_type = EXCLUDED.entity_type,
-                        name = EXCLUDED.name,
-                        content_hash = EXCLUDED.content_hash,
-                        sync_status = 'linked',
-                        last_synced = NOW(),
-                        visibility_scope = EXCLUDED.visibility_scope
-                """,
-                    eff_vault_rid,
-                    eff_vault_path,
-                    canonical.uri,
-                    request.entity_type,
-                    request.name,
-                    request.content_hash,
-                    request.visibility_scope or "public"
-                )
+            # Store or update RID mapping
+            await conn.execute("""
+                INSERT INTO entity_rid_mappings (
+                    vault_rid, vault_path, canonical_uri, entity_type,
+                    name, content_hash, sync_status, last_synced, visibility_scope
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'linked', NOW(), $7)
+                ON CONFLICT (vault_rid) DO UPDATE SET
+                    vault_path = EXCLUDED.vault_path,
+                    canonical_uri = EXCLUDED.canonical_uri,
+                    entity_type = EXCLUDED.entity_type,
+                    name = EXCLUDED.name,
+                    content_hash = EXCLUDED.content_hash,
+                    sync_status = 'linked',
+                    last_synced = NOW(),
+                    visibility_scope = EXCLUDED.visibility_scope
+            """,
+                request.vault_rid,
+                request.vault_path,
+                canonical.uri,
+                request.entity_type,
+                request.name,
+                request.content_hash,
+                request.visibility_scope or "public"
+            )
 
-                # Update entity_registry with vault_rid if not set
-                await conn.execute("""
-                    UPDATE entity_registry
-                    SET vault_rid = $1
-                    WHERE fuseki_uri = $2 AND vault_rid IS NULL
-                """, eff_vault_rid, canonical.uri)
+            # Update entity_registry with vault_rid if not set
+            await conn.execute("""
+                UPDATE entity_registry
+                SET vault_rid = $1
+                WHERE fuseki_uri = $2 AND vault_rid IS NULL
+            """, request.vault_rid, canonical.uri)
 
             # Auto-assign koi_rid for federated publication scope
             final_koi_rid = None
@@ -3913,23 +3741,21 @@ async def register_vault_entity(request: RegisterEntityRequest):
             rel_stats = None
             frontmatter_data = request.frontmatter or request.properties
             if frontmatter_data:
-                # Relationship sync needs a vault_path; alias merge (below) does not.
-                if eff_vault_path:
-                    try:
-                        rel_stats = await sync_vault_relationships(
-                            conn,
-                            eff_vault_path,
-                            canonical.uri,
-                            frontmatter_data
-                        )
-                        logger.info(f"Synced relationships: {rel_stats}")
+                try:
+                    rel_stats = await sync_vault_relationships(
+                        conn,
+                        request.vault_path,
+                        canonical.uri,
+                        frontmatter_data
+                    )
+                    logger.info(f"Synced relationships: {rel_stats}")
 
-                        # Enqueue relationship changes to TerminusDB outbox
-                        if rel_stats and TERMINUSDB_ENABLED:
-                            await _enqueue_relationship_outbox(
-                                conn, canonical.uri, eff_vault_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to sync relationships: {e}")
+                    # Enqueue relationship changes to TerminusDB outbox
+                    if rel_stats and TERMINUSDB_ENABLED:
+                        await _enqueue_relationship_outbox(
+                            conn, canonical.uri, request.vault_path)
+                except Exception as e:
+                    logger.warning(f"Failed to sync relationships: {e}")
 
                 # Update aliases in entity_registry if provided in frontmatter
                 raw_aliases = frontmatter_data.get('aliases', [])
@@ -3975,23 +3801,29 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 success=True,
                 canonical_uri=canonical.uri,
                 is_new=is_new,
-                vault_rid=eff_vault_rid or "",
+                vault_rid=request.vault_rid,
                 merged_with=canonical.merged_with,
                 collision_warning=collision_warning,
                 cross_type_warning=cross_type_warning,
                 koi_rid=final_koi_rid if request.publication_scope == "federated" else None
             )
 
-            # Emit federation event for entity replication
+            # Emit federation event for entity replication. See
+            # _build_entity_federation_payload — the previous hardcoded
+            # {"aliases": [], "metadata": {}} literal here is what blanked
+            # peers' locally-computed metadata on every round-trip.
             from api.federation_events import emit_domain_event
-            await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
-                "fuseki_uri": canonical.uri,
-                "entity_text": request.name,
-                "entity_type": request.entity_type,
-                "normalized_text": canonical.name.lower().strip() if canonical.name else request.name.lower().strip(),
-                "aliases": [],
-                "metadata": {},
-            })
+            await emit_domain_event(
+                "entity",
+                "NEW" if is_new else "UPDATE",
+                canonical.uri,
+                await _build_entity_federation_payload(
+                    conn,
+                    canonical.uri,
+                    fallback_name=request.name,
+                    fallback_type=request.entity_type,
+                ),
+            )
 
             return result
 
@@ -4412,7 +4244,6 @@ async def get_contextual_entity_candidates(
         rows = await conn.fetch("""
             SELECT fuseki_uri FROM entity_registry
             WHERE entity_type = 'Person' AND normalized_text = $1
-            AND merged_into IS NULL
         """, normalize_entity_text(person))
 
         if len(people) == 1:
@@ -5197,12 +5028,8 @@ async def search_knowledge_base(request: SearchRequest):
     if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Generate query embedding using the active provider (OpenAI 3072 via
-    # generate_query_embedding — the same path unified_search/entity search use).
-    # Was get_bge_embedding (dim_1024), but the BGE server is not running so it
-    # returned None and forced a text-only fallback; and dim_1024 doc embeddings
-    # are not populated for newer sources (substack). Fix 2026-06-01.
-    query_embedding = await generate_query_embedding(request.query)
+    # Generate query embedding using BGE
+    query_embedding = await get_bge_embedding(request.query)
 
     results = []
     search_type = "text"  # fallback
@@ -5220,32 +5047,21 @@ async def search_knowledge_base(request: SearchRequest):
                 )
             source_filter = SOURCE_TO_FILTER.get(request.source or '', "")
 
-            # Search chunk-level embedding_3072 (the live OpenAI 3072 surface,
-            # populated for ALL sources incl. substack/email; dim_1024 doc-level
-            # is legacy BGE and missing for newer sources). Pipeline: HNSW finds
-            # the top candidate chunks by vector distance (fast), dedup keeps the
-            # best chunk per document, then re-sort by similarity for the page.
+            # Search doc-level embeddings
             query = f"""
-                SELECT * FROM (
-                    SELECT DISTINCT ON (document_rid)
-                        document_rid as rid, title, content_preview,
-                        similarity, source_sensor, metadata, created_at
-                    FROM (
-                        SELECT c.document_rid,
-                               m.content->>'title' as title,
-                               LEFT(c.content->>'text', 500) as content_preview,
-                               1 - (c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) as similarity,
-                               m.source_sensor, m.metadata, m.created_at
-                        FROM koi_memory_chunks c
-                        JOIN koi_memories m ON m.rid = c.document_rid
-                        WHERE c.embedding_3072 IS NOT NULL
-                        {source_filter}
-                        ORDER BY c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
-                        LIMIT 200
-                    ) cand
-                    ORDER BY document_rid, similarity DESC
-                ) ded
-                ORDER BY similarity DESC
+                SELECT
+                    m.rid,
+                    m.content->>'title' as title,
+                    LEFT(m.content->>'text', 500) as content_preview,
+                    1 - (e.dim_1024 <=> $1::vector) as similarity,
+                    m.source_sensor,
+                    m.metadata,
+                    m.created_at
+                FROM koi_memories m
+                JOIN koi_embeddings e ON e.memory_id = m.id
+                WHERE e.dim_1024 IS NOT NULL
+                {source_filter}
+                ORDER BY e.dim_1024 <=> $1::vector
                 LIMIT $2
             """
 

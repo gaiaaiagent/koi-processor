@@ -47,23 +47,6 @@ def _unified_search_surface_timeout_s() -> float:
         return 8.0
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %.1f", name, raw, default)
-        return default
-
-
-UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS = _float_env(
-    "UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS",
-    8.0,
-)
-
-
 # ---------------------------------------------------------------------------
 # B1 (2026-04-30): Predicate-aware default supersession policy.
 #
@@ -181,6 +164,14 @@ class FactInput(BaseModel):
     fact_text: str = Field(..., description="Natural language sentence")
     valid_from: Optional[str] = Field(None, description="ISO datetime when fact became true")
     valid_to: Optional[str] = Field(None, description="ISO datetime when fact stopped being true")
+    turn_range_start: Optional[int] = Field(
+        None,
+        description="Optional source-local provenance start. For document ingestion, this is a global RAG chunk index.",
+    )
+    turn_range_end: Optional[int] = Field(
+        None,
+        description="Optional source-local provenance end. For document ingestion, this is a global RAG chunk index.",
+    )
 
 
 class EpisodeCreateRequest(BaseModel):
@@ -207,13 +198,6 @@ class EpisodeCreateRequest(BaseModel):
         "supersede existing facts (legacy behavior). If false (default), "
         "parallel attributions coexist."
     )
-    # Idempotency: when supplied and already recorded, the endpoint returns the
-    # stored response (idempotent_replay=true) without writing again. The stored
-    # response is committed in the SAME transaction as the writes, so a rolled-
-    # back request never leaves a stale idempotency entry. Requires migration
-    # 106 (ingest_idempotency).
-    request_id: Optional[str] = Field(
-        None, description="Optional idempotency key for safe client retries.")
 
 
 class FactRecord(BaseModel):
@@ -267,9 +251,6 @@ class EpisodeCreateResponse(BaseModel):
     # Type-hint divergence list — empty unless caller provided subject_type
     # or object_type that conflicted with an existing entity. See TypeMismatch.
     type_mismatches: List[TypeMismatch] = Field(default_factory=list)
-    # True only when this response is a replay of a prior request with the same
-    # request_id (no new writes were performed). See EpisodeCreateRequest.request_id.
-    idempotent_replay: bool = False
 
 
 class EpisodeRecord(BaseModel):
@@ -373,10 +354,6 @@ def _row_to_dict(row) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 EmbedFn = Callable[[str], Coroutine[Any, Any, Optional[List[float]]]]
-# Batch embed: many texts -> parallel list of vectors (or None on provider failure).
-BatchEmbedFn = Callable[
-    [List[str]], Coroutine[Any, Any, Optional[List[Optional[List[float]]]]]
-]
 
 
 def _parse_jsonb(value) -> Dict:
@@ -669,7 +646,6 @@ def create_router(
     *,
     generate_query_embedding: Optional[EmbedFn] = None,
     generate_document_embedding: Optional[EmbedFn] = None,
-    generate_batch_embedding: Optional[BatchEmbedFn] = None,
 ) -> APIRouter:
     """Return an APIRouter for knowledge graph endpoints.
 
@@ -683,15 +659,10 @@ def create_router(
         QUERY mode embedding (with instruction prefix).
     generate_document_embedding : callable, optional
         DOCUMENT mode embedding (no instruction prefix).
-    generate_batch_embedding : callable, optional
-        DOCUMENT mode batch embedding: List[str] -> List[Optional[vector]].
-        Used by POST /episodes to prefetch all fact/entity embeddings in one
-        provider round-trip BEFORE acquiring a DB connection.
     """
     # Resolve to explicit query/document or fall back to unified
     _query_embed = generate_query_embedding or generate_embedding
     _doc_embed = generate_document_embedding or generate_embedding
-    _batch_embed = generate_batch_embedding
     router = APIRouter(tags=["knowledge"])
 
     # Federation Phase 1 step 2e: knowledge_episode emit. emit_domain_event is
@@ -737,354 +708,275 @@ def create_router(
         seen_uris: dict = {}  # cache name->uri within this request
 
         episode_reused = False
-        import json as json_mod
-
-        # Idempotency: replay a prior identical request without re-writing.
-        # (Sequential retries — the common case — hit here. A rare concurrent
-        # duplicate loses the race on the in-transaction INSERT below and its
-        # transaction rolls back; the client's retry then replays here.)
-        if body.request_id:
-            async with pool.acquire() as conn:
-                prior = await conn.fetchval(
-                    "SELECT response FROM ingest_idempotency WHERE request_id = $1",
-                    body.request_id)
-            if prior is not None:
-                data = prior if isinstance(prior, dict) else json_mod.loads(prior)
-                data["idempotent_replay"] = True
-                logger.info("idempotent replay for request_id=%s", body.request_id)
-                return EpisodeCreateResponse(**data)
-
-        # P4: prefetch every fact/entity embedding in ONE provider round-trip
-        # BEFORE acquiring a DB connection, so no embedding network call happens
-        # while a connection is held. The per-text path (_cached_doc_embed) then
-        # serves from this cache; entities discovered mid-request that weren't in
-        # the batch fall back to a single embed call. Keyed by normalized text so
-        # the fact-text, raw-name, and resolver's normalized-name lookups all hit.
-        from api.personal_ingest_api import normalize_entity_text
-        embed_cache: Dict[str, Optional[List[float]]] = {}
-        if _batch_embed and body.facts:
-            _raw_texts: List[str] = []
-            for _f in body.facts:
-                if _f.fact_text:
-                    _raw_texts.append(_f.fact_text)
-                if _f.subject:
-                    _raw_texts.append(_f.subject)
-                if _f.object:
-                    _raw_texts.append(_f.object)
-            _norm_to_raw: Dict[str, str] = {}
-            for _t in _raw_texts:
-                _norm_to_raw.setdefault(normalize_entity_text(_t), _t)
-            _unique_norms = list(_norm_to_raw.keys())
-            if _unique_norms:
-                _batch = await _batch_embed([_norm_to_raw[n] for n in _unique_norms])
-                if _batch and len(_batch) == len(_unique_norms):
-                    embed_cache = dict(zip(_unique_norms, _batch))
-
-        async def _cached_doc_embed(text):
-            if not text:
-                return None
-            key = normalize_entity_text(text)
-            if key in embed_cache:
-                return embed_cache[key]
-            val = await _doc_embed(text) if _doc_embed else None
-            embed_cache[key] = val
-            return val
-
-        embed_fn = _cached_doc_embed if (_doc_embed or _batch_embed) else None
 
         async with pool.acquire() as conn:
-            # P4: single transaction — every write below commits together or not
-            # at all. On an already-in-transaction connection (tests) this opens a
-            # SAVEPOINT. Federation emit stays AFTER commit (see 2e note below).
-            async with conn.transaction():
-                # 1. Check for existing episode by (source_document, group_id) (dedup).
-                # Wave 2 B3 (2026-04-30): scope dedup to group_id so multi-group
-                # writes with the same source_document don't accidentally collapse
-                # into a single episode. Today (2026-04-30) all production episodes
-                # are in `koi_canon_v1` so 0 collisions exist; B3 hardens forward.
-                episode_id = None
-                existing_ep = None
-                if body.source_document:
-                    existing_ep = await conn.fetchrow("""
-                        SELECT id, name, content, source_description,
-                               source_document, group_id, valid_at, created_at,
-                               metadata
-                        FROM knowledge_episodes
-                        WHERE source_document = $1 AND group_id = $2
-                        LIMIT 1
-                    """, body.source_document, body.group_id)
-                    if existing_ep:
-                        episode_id = existing_ep["id"]
+            # 1. Check for existing episode by (source_document, group_id) (dedup).
+            # Wave 2 B3 (2026-04-30): scope dedup to group_id so multi-group
+            # writes with the same source_document don't accidentally collapse
+            # into a single episode. Today (2026-04-30) all production episodes
+            # are in `koi_canon_v1` so 0 collisions exist; B3 hardens forward.
+            import json as json_mod
+            episode_id = None
+            existing_ep = None
+            if body.source_document:
+                existing_ep = await conn.fetchrow("""
+                    SELECT id, name, content, source_description,
+                           source_document, group_id, valid_at, created_at,
+                           metadata
+                    FROM knowledge_episodes
+                    WHERE source_document = $1 AND group_id = $2
+                    LIMIT 1
+                """, body.source_document, body.group_id)
+                if existing_ep:
+                    episode_id = existing_ep["id"]
 
-                if episode_id:
-                    episode_reused = True
-                    logger.info(
-                        f"Reusing existing episode {episode_id} "
-                        f"for source_document: {body.source_document}")
-                    # Federation 2e: bundled-emit episode payload — current DB row.
-                    episode_payload = {
-                        "id": str(existing_ep["id"]),
-                        "name": existing_ep["name"],
-                        "content": existing_ep["content"],
-                        "source_description": existing_ep["source_description"],
-                        "source_document": existing_ep["source_document"],
-                        "group_id": existing_ep["group_id"],
-                        "valid_at": existing_ep["valid_at"].isoformat()
-                            if existing_ep["valid_at"] else None,
-                        "created_at": existing_ep["created_at"].isoformat()
-                            if existing_ep["created_at"] else None,
-                        "metadata": existing_ep["metadata"],
-                    }
-                else:
-                    new_ep = await conn.fetchrow("""
-                        INSERT INTO knowledge_episodes
-                            (name, content, source_description, source_document,
-                             group_id, valid_at, metadata)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                        RETURNING id, created_at
-                    """, body.name, body.content, body.source_description,
-                        body.source_document, body.group_id, valid_at,
-                        json_mod.dumps(metadata))
-                    episode_id = new_ep["id"]
-                    # Federation 2e: bundled-emit episode payload — request values.
-                    episode_payload = {
-                        "id": str(episode_id),
-                        "name": body.name,
-                        "content": body.content,
-                        "source_description": body.source_description,
-                        "source_document": body.source_document,
-                        "group_id": body.group_id,
-                        "valid_at": valid_at.isoformat() if valid_at else None,
-                        "created_at": new_ep["created_at"].isoformat()
-                            if new_ep["created_at"] else None,
-                        "metadata": metadata,
-                    }
+            if episode_id:
+                episode_reused = True
+                logger.info(
+                    f"Reusing existing episode {episode_id} "
+                    f"for source_document: {body.source_document}")
+                # Federation 2e: bundled-emit episode payload — current DB row.
+                episode_payload = {
+                    "id": str(existing_ep["id"]),
+                    "name": existing_ep["name"],
+                    "content": existing_ep["content"],
+                    "source_description": existing_ep["source_description"],
+                    "source_document": existing_ep["source_document"],
+                    "group_id": existing_ep["group_id"],
+                    "valid_at": existing_ep["valid_at"].isoformat()
+                        if existing_ep["valid_at"] else None,
+                    "created_at": existing_ep["created_at"].isoformat()
+                        if existing_ep["created_at"] else None,
+                    "metadata": existing_ep["metadata"],
+                }
+            else:
+                new_ep = await conn.fetchrow("""
+                    INSERT INTO knowledge_episodes
+                        (name, content, source_description, source_document,
+                         group_id, valid_at, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                    RETURNING id, created_at
+                """, body.name, body.content, body.source_description,
+                    body.source_document, body.group_id, valid_at,
+                    json_mod.dumps(metadata))
+                episode_id = new_ep["id"]
+                # Federation 2e: bundled-emit episode payload — request values.
+                episode_payload = {
+                    "id": str(episode_id),
+                    "name": body.name,
+                    "content": body.content,
+                    "source_description": body.source_description,
+                    "source_document": body.source_document,
+                    "group_id": body.group_id,
+                    "valid_at": valid_at.isoformat() if valid_at else None,
+                    "created_at": new_ep["created_at"].isoformat()
+                        if new_ep["created_at"] else None,
+                    "metadata": metadata,
+                }
 
-                # 2. Process each fact
-                facts_created = 0
-                facts_skipped = 0
-                facts_superseded = 0
-                facts_null_embed = 0  # Wave A A2: silent-fail surface
-                emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
-                # Collect type mismatches across all facts in this request
-                type_mismatches: List[TypeMismatch] = []
+            # 2. Process each fact
+            facts_created = 0
+            facts_skipped = 0
+            facts_superseded = 0
+            facts_null_embed = 0  # Wave A A2: silent-fail surface
+            emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
+            # Collect type mismatches across all facts in this request
+            type_mismatches: List[TypeMismatch] = []
 
-                for fact in body.facts:
-                    # Resolve subject
-                    subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
-                        conn, fact.subject, body.create_entities,
-                        embed_fn, seen_uris,
-                        type_hint=fact.subject_type)
-                    if not subject_uri:
-                        logger.warning(f"Could not resolve subject: {fact.subject}")
+            for fact in body.facts:
+                # Resolve subject
+                subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
+                    conn, fact.subject, body.create_entities,
+                    _doc_embed, seen_uris,
+                    type_hint=fact.subject_type)
+                if not subject_uri:
+                    logger.warning(f"Could not resolve subject: {fact.subject}")
+                    continue
+                entities_resolved += 1
+                if is_new:
+                    entities_created += 1
+                # Flag type mismatch (caller provided hint, resolved type differs,
+                # and this wasn't a cache hit which returns None for resolved_type)
+                if (fact.subject_type and subj_resolved_type
+                        and fact.subject_type != subj_resolved_type):
+                    type_mismatches.append(TypeMismatch(
+                        name=fact.subject, role="subject",
+                        requested_type=fact.subject_type,
+                        resolved_type=subj_resolved_type,
+                        resolved_uri=subject_uri,
+                    ))
+
+                # Resolve object (if entity name provided)
+                object_uri = None
+                if fact.object:
+                    object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
+                        conn, fact.object, body.create_entities,
+                        _doc_embed, seen_uris,
+                        type_hint=fact.object_type)
+                    if object_uri:
+                        entities_resolved += 1
+                        if obj_new:
+                            entities_created += 1
+                        if (fact.object_type and obj_resolved_type
+                                and fact.object_type != obj_resolved_type):
+                            type_mismatches.append(TypeMismatch(
+                                name=fact.object, role="object",
+                                requested_type=fact.object_type,
+                                resolved_type=obj_resolved_type,
+                                resolved_uri=object_uri,
+                            ))
+
+                # Generate fact embedding
+                fact_embedding = None
+                if _doc_embed:
+                    fact_embedding = await _doc_embed(fact.fact_text)
+
+                # --- Dedup + invalidation ---
+                # Reads from fact_embedding_3072 (post-migration 096); halfvec
+                # cast required because pgvector full-precision indexes cap at
+                # 2000 dims (see migration 097).
+                if fact_embedding:
+                    existing = await conn.fetch("""
+                        SELECT id, fact_text, predicate, object_uri,
+                               1 - (fact_embedding_3072::halfvec(3072)
+                                    <=> $1::halfvec(3072)) AS similarity
+                        FROM knowledge_facts
+                        WHERE subject_uri = $2 AND valid_to IS NULL
+                          AND fact_embedding_3072 IS NOT NULL
+                        ORDER BY fact_embedding_3072::halfvec(3072)
+                                 <=> $1::halfvec(3072)
+                        LIMIT 5
+                    """, str(fact_embedding), subject_uri)
+
+                    # Check for near-duplicate (similarity > 0.95).
+                    # Task A 2026-04-29: parallel-attribution dedup-shape fix.
+                    # The skip condition now also requires (predicate, object_uri)
+                    # to match — otherwise parallel attributions like
+                    # AUTHORED_WITHIN with different session UUIDs (which produce
+                    # near-identical fact_text differing only by the embedded
+                    # UUID) would be silently dropped on cosine>0.95.
+                    # Re-writes of the EXACT same fact still skip correctly
+                    # because (subject, predicate, object_uri, fact_text)
+                    # all match.
+                    predicate_upper = fact.predicate.upper()
+                    skip = False
+                    for row in existing:
+                        sim = float(row['similarity'])
+                        if sim > 0.95 \
+                                and row['predicate'] == predicate_upper \
+                                and row['object_uri'] == object_uri:
+                            logger.info(
+                                f"Skipped duplicate fact: {fact.fact_text} "
+                                f"(similarity: {sim:.3f} with fact {row['id']}; "
+                                f"same predicate+object)")
+                            facts_skipped += 1
+                            skip = True
+                            break
+
+                    if skip:
                         continue
-                    entities_resolved += 1
-                    if is_new:
-                        entities_created += 1
-                    # Flag type mismatch (caller provided hint, resolved type differs,
-                    # and this wasn't a cache hit which returns None for resolved_type)
-                    if (fact.subject_type and subj_resolved_type
-                            and fact.subject_type != subj_resolved_type):
-                        type_mismatches.append(TypeMismatch(
-                            name=fact.subject, role="subject",
-                            requested_type=fact.subject_type,
-                            resolved_type=subj_resolved_type,
-                            resolved_uri=subject_uri,
-                        ))
 
-                    # Resolve object (if entity name provided)
-                    object_uri = None
-                    if fact.object:
-                        object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
-                            conn, fact.object, body.create_entities,
-                            embed_fn, seen_uris,
-                            type_hint=fact.object_type)
-                        if object_uri:
-                            entities_resolved += 1
-                            if obj_new:
-                                entities_created += 1
-                            if (fact.object_type and obj_resolved_type
-                                    and fact.object_type != obj_resolved_type):
-                                type_mismatches.append(TypeMismatch(
-                                    name=fact.object, role="object",
-                                    requested_type=fact.object_type,
-                                    resolved_type=obj_resolved_type,
-                                    resolved_uri=object_uri,
-                                ))
-
-                    # Generate fact embedding (served from the prefetch cache)
-                    fact_embedding = None
-                    if embed_fn:
-                        fact_embedding = await embed_fn(fact.fact_text)
-
-                    # --- Dedup + invalidation ---
-                    # Reads from fact_embedding_3072 (post-migration 096); halfvec
-                    # cast required because pgvector full-precision indexes cap at
-                    # 2000 dims (see migration 097).
-                    if fact_embedding:
-                        existing = await conn.fetch("""
-                            SELECT id, fact_text, predicate, object_uri,
-                                   1 - (fact_embedding_3072::halfvec(3072)
-                                        <=> $1::halfvec(3072)) AS similarity
-                            FROM knowledge_facts
-                            WHERE subject_uri = $2 AND valid_to IS NULL
-                              AND fact_embedding_3072 IS NOT NULL
-                            ORDER BY fact_embedding_3072::halfvec(3072)
-                                     <=> $1::halfvec(3072)
-                            LIMIT 5
-                        """, str(fact_embedding), subject_uri)
-
-                        # Check for near-duplicate (similarity > 0.95).
-                        # Task A 2026-04-29: parallel-attribution dedup-shape fix.
-                        # The skip condition now also requires (predicate, object_uri)
-                        # to match — otherwise parallel attributions like
-                        # AUTHORED_WITHIN with different session UUIDs (which produce
-                        # near-identical fact_text differing only by the embedded
-                        # UUID) would be silently dropped on cosine>0.95.
-                        # Re-writes of the EXACT same fact still skip correctly
-                        # because (subject, predicate, object_uri, fact_text)
-                        # all match.
-                        predicate_upper = fact.predicate.upper()
-                        skip = False
+                    # Invalidation: same subject + same predicate + different object → retire old.
+                    # Task A 2026-04-29: opt-in via request-level
+                    # `expire_existing=true`. Default false → parallel
+                    # attributions coexist.
+                    # Wave 2 B1 2026-04-30: predicate-aware default. SUPERSEDE
+                    # bucket auto-retires; COEXIST bucket auto-coexists; unknown
+                    # falls through to request flag (yesterday's behavior).
+                    should_supersede = _resolve_supersession_policy(
+                        predicate_upper, body.expire_existing
+                    )
+                    if should_supersede:
                         for row in existing:
                             sim = float(row['similarity'])
-                            if sim > 0.95 \
-                                    and row['predicate'] == predicate_upper \
-                                    and row['object_uri'] == object_uri:
+                            if (row['predicate'] == predicate_upper
+                                    and row['object_uri'] != object_uri
+                                    and sim > 0.5):
+                                await conn.execute("""
+                                    UPDATE knowledge_facts
+                                    SET valid_to = NOW()
+                                    WHERE id = $1
+                                """, row['id'])
                                 logger.info(
-                                    f"Skipped duplicate fact: {fact.fact_text} "
-                                    f"(similarity: {sim:.3f} with fact {row['id']}; "
-                                    f"same predicate+object)")
-                                facts_skipped += 1
-                                skip = True
-                                break
+                                    f"Superseded fact {row['id']}: "
+                                    f"{row['fact_text']} → {fact.fact_text}")
+                                facts_superseded += 1
 
-                        if skip:
-                            continue
-
-                        # Invalidation: same subject + same predicate + different object → retire old.
-                        # Task A 2026-04-29: opt-in via request-level
-                        # `expire_existing=true`. Default false → parallel
-                        # attributions coexist.
-                        # Wave 2 B1 2026-04-30: predicate-aware default. SUPERSEDE
-                        # bucket auto-retires; COEXIST bucket auto-coexists; unknown
-                        # falls through to request flag (yesterday's behavior).
-                        should_supersede = _resolve_supersession_policy(
-                            predicate_upper, body.expire_existing
-                        )
-                        if should_supersede:
-                            for row in existing:
-                                sim = float(row['similarity'])
-                                if (row['predicate'] == predicate_upper
-                                        and row['object_uri'] != object_uri
-                                        and sim > 0.5):
-                                    await conn.execute("""
-                                        UPDATE knowledge_facts
-                                        SET valid_to = NOW()
-                                        WHERE id = $1
-                                    """, row['id'])
-                                    logger.info(
-                                        f"Superseded fact {row['id']}: "
-                                        f"{row['fact_text']} → {fact.fact_text}")
-                                    facts_superseded += 1
-
-                    # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
-                    # writes. When fact_embedding is None (provider degraded /
-                    # quota / auth fail), the fact still writes (don't lose data)
-                    # but we (a) log structured WARNING with the predicate +
-                    # subject identifying the affected fact, (b) bump a process-
-                    # level counter on app.state for /health to surface, and
-                    # (c) bump per-response facts_null_embed so the caller sees
-                    # the silent-fail count immediately.
-                    if fact_embedding is None:
-                        facts_null_embed += 1
-                        logger.warning(
-                            "null_embed_fact_write subject=%s predicate=%s "
-                            "group_id=%s episode_id=%s — provider degraded; "
-                            "fact written without fact_embedding_3072 and will "
-                            "BYPASS future cosine dedup until re-embedded",
-                            subject_uri,
-                            fact.predicate.upper(),
-                            body.group_id,
-                            episode_id,
-                        )
-                        try:
-                            request.app.state.null_embed_fact_counter = (
-                                getattr(request.app.state, "null_embed_fact_counter", 0) + 1
-                            )
-                        except Exception:
-                            pass
-
-                    fact_row = await conn.fetchrow("""
-                        INSERT INTO knowledge_facts
-                            (episode_id, subject_uri, predicate, object_uri,
-                             object_literal, fact_text, fact_embedding_3072,
-                             valid_from, valid_to, group_id)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10)
-                        RETURNING id, created_at, source_node_rid
-                    """, episode_id, subject_uri, fact.predicate.upper(),
-                        object_uri, fact.object_literal, fact.fact_text,
-                        str(fact_embedding) if fact_embedding else None,
-                        _dt(fact.valid_from), _dt(fact.valid_to), body.group_id)
-                    facts_created += 1
-
-                    # Federation 2e: accumulate per-fact bundled-emit payload.
-                    # Shape pinned by the subscriber contract (_insert_fact in
-                    # domain_event_handlers.py). turn_range_* are None — this
-                    # endpoint is not the deep-extraction path.
-                    emb_col, emb_val = _fact_embedding_discriminator(
-                        fact_embedding_3072=fact_embedding
+                # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
+                # writes. When fact_embedding is None (provider degraded /
+                # quota / auth fail), the fact still writes (don't lose data)
+                # but we (a) log structured WARNING with the predicate +
+                # subject identifying the affected fact, (b) bump a process-
+                # level counter on app.state for /health to surface, and
+                # (c) bump per-response facts_null_embed so the caller sees
+                # the silent-fail count immediately.
+                if fact_embedding is None:
+                    facts_null_embed += 1
+                    logger.warning(
+                        "null_embed_fact_write subject=%s predicate=%s "
+                        "group_id=%s episode_id=%s — provider degraded; "
+                        "fact written without fact_embedding_3072 and will "
+                        "BYPASS future cosine dedup until re-embedded",
+                        subject_uri,
+                        fact.predicate.upper(),
+                        body.group_id,
+                        episode_id,
                     )
-                    emit_facts.append({
-                        "id": str(fact_row["id"]),
-                        "subject_uri": subject_uri,
-                        "predicate": fact.predicate.upper(),
-                        "object_uri": object_uri,
-                        "object_literal": fact.object_literal,
-                        "fact_text": fact.fact_text,
-                        "valid_from": fact.valid_from,
-                        "valid_to": fact.valid_to,
-                        "created_at": fact_row["created_at"].isoformat()
-                            if fact_row["created_at"] else None,
-                        "group_id": body.group_id,
-                        "source_node_rid": fact_row["source_node_rid"],
-                        "turn_range_start": None,
-                        "turn_range_end": None,
-                        "embedding_column": emb_col,
-                        "embedding_value": emb_val,
-                    })
+                    try:
+                        request.app.state.null_embed_fact_counter = (
+                            getattr(request.app.state, "null_embed_fact_counter", 0) + 1
+                        )
+                    except Exception:
+                        pass
 
-                # Build the response inside the transaction so the idempotency
-                # ledger stores exactly what the caller receives.
-                response = EpisodeCreateResponse(
-                    episode_id=str(episode_id),
-                    episode_reused=episode_reused,
-                    facts_created=facts_created,
-                    facts_skipped=facts_skipped,
-                    facts_superseded=facts_superseded,
-                    entities_resolved=entities_resolved,
-                    entities_created=entities_created,
-                    facts_null_embed=facts_null_embed,
-                    type_mismatches=type_mismatches,
+                fact_row = await conn.fetchrow("""
+                    INSERT INTO knowledge_facts
+                        (episode_id, subject_uri, predicate, object_uri,
+                         object_literal, fact_text, fact_embedding_3072,
+                         valid_from, valid_to, group_id,
+                         turn_range_start, turn_range_end)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10, $11, $12)
+                    RETURNING id, created_at, source_node_rid
+                """, episode_id, subject_uri, fact.predicate.upper(),
+                    object_uri, fact.object_literal, fact.fact_text,
+                    str(fact_embedding) if fact_embedding else None,
+                    _dt(fact.valid_from), _dt(fact.valid_to), body.group_id,
+                    fact.turn_range_start, fact.turn_range_end)
+                facts_created += 1
+
+                # Federation 2e: accumulate per-fact bundled-emit payload.
+                # Shape pinned by the subscriber contract (_insert_fact in
+                # domain_event_handlers.py). turn_range_* are source-local
+                # provenance coordinates when callers provide them.
+                emb_col, emb_val = _fact_embedding_discriminator(
+                    fact_embedding_3072=fact_embedding
                 )
-
-                # Idempotency: record the response in the SAME transaction. A
-                # plain INSERT (not ON CONFLICT DO NOTHING) so a concurrent
-                # duplicate loses here and its whole transaction rolls back
-                # rather than committing duplicate writes.
-                if body.request_id:
-                    await conn.execute(
-                        "INSERT INTO ingest_idempotency (request_id, endpoint, response) "
-                        "VALUES ($1, $2, $3::jsonb)",
-                        body.request_id, "/knowledge/episodes",
-                        json_mod.dumps(response.model_dump()))
+                emit_facts.append({
+                    "id": str(fact_row["id"]),
+                    "subject_uri": subject_uri,
+                    "predicate": fact.predicate.upper(),
+                    "object_uri": object_uri,
+                    "object_literal": fact.object_literal,
+                    "fact_text": fact.fact_text,
+                    "valid_from": fact.valid_from,
+                    "valid_to": fact.valid_to,
+                    "created_at": fact_row["created_at"].isoformat()
+                        if fact_row["created_at"] else None,
+                    "group_id": body.group_id,
+                    "source_node_rid": fact_row["source_node_rid"],
+                    "turn_range_start": fact.turn_range_start,
+                    "turn_range_end": fact.turn_range_end,
+                    "embedding_column": emb_col,
+                    "embedding_value": emb_val,
+                })
 
         # Federation 2e: emit the bundled knowledge_episode event AFTER the
-        # transaction commits (the `async with` blocks above have exited).
-        # Emitting inside the transaction would risk queueing an event for a row
-        # a later rollback removed. emit_domain_event is internally gated by
-        # KOI_FEDERATE_KNOWLEDGE and never raises, so a flag-off run and an emit
-        # failure are both perfect no-ops here.
+        # `async with pool.acquire()` block exits — i.e. after every statement
+        # above has auto-committed (asyncpg commits per-statement; this endpoint
+        # opens no explicit transaction). Emitting inside the block would risk
+        # queueing an event for a row a later rollback removed. emit_domain_event
+        # is internally gated by KOI_FEDERATE_KNOWLEDGE and never raises, so a
+        # flag-off run and an emit failure are both perfect no-ops here.
         bundled_payload = {**episode_payload, "facts": emit_facts}
         await emit_domain_event(
             "knowledge_episode",
@@ -1094,7 +986,17 @@ def create_router(
             payload_event_id=str(uuid4()),
         )
 
-        return response
+        return EpisodeCreateResponse(
+            episode_id=str(episode_id),
+            episode_reused=episode_reused,
+            facts_created=facts_created,
+            facts_skipped=facts_skipped,
+            facts_superseded=facts_superseded,
+            entities_resolved=entities_resolved,
+            entities_created=entities_created,
+            facts_null_embed=facts_null_embed,
+            type_mismatches=type_mismatches,
+        )
 
     async def _resolve_or_create(
         conn, name: str, create_if_missing: bool,
@@ -1119,13 +1021,6 @@ def create_router(
         from api.personal_ingest_api import (
             normalize_entity_text, generate_entity_uri
         )
-        from api.entity_schema import canonicalize_entity_type
-
-        # Canonicalize the caller's type hint (strip schema:/bkc:, resolve
-        # plural/case) so type-gated exact/alias/fuzzy queries and Tier-3
-        # creates below use the canonical schema type_key.
-        if type_hint:
-            type_hint = canonicalize_entity_type(type_hint)
 
         normalized = normalize_entity_text(name)
 
@@ -1441,8 +1336,8 @@ def create_router(
         query: str = Query(..., description="Search query"),
         limit: int = Query(10, ge=1, le=50),
         include: str = Query(
-            "entities,facts,sessions,wiki,vault,memories",
-            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki,vault,memories. 'memories' = koi_memory_chunks for email/substack/calendar/other sensors (everything not wiki- or repo-doc-scoped)."),
+            "entities,facts,sessions,wiki,vault",
+            description="Comma-separated surfaces to query: entities,facts,sessions,docs,wiki,vault"),
         doc_kind: Optional[str] = Query(None, description="Filter docs by doc_kind (e.g. architecture, spec, operations)"),
         status: Optional[str] = Query(None, description="Filter docs by status (e.g. active, draft)"),
         is_governed: Optional[bool] = Query(None, description="Filter docs by governed flag (has doc_id)"),
@@ -1503,31 +1398,6 @@ def create_router(
 
         all_results: list[dict] = []
         facts_results: list[dict] = []
-        surface_errors: Dict[str, str] = {}
-
-        async def _bounded_surface(
-            surface: str,
-            coro: Coroutine[Any, Any, Any],
-            timeout_seconds: float,
-        ) -> Any:
-            try:
-                return await asyncio.wait_for(coro, timeout=timeout_seconds)
-            except asyncio.TimeoutError:
-                surface_errors[surface] = "timeout"
-                logger.warning(
-                    "unified-search %s surface timed out after %.1fs",
-                    surface,
-                    timeout_seconds,
-                )
-                return None
-            except Exception as exc:
-                surface_errors[surface] = type(exc).__name__
-                logger.warning(
-                    "unified-search %s surface failed: %s",
-                    surface,
-                    exc,
-                )
-                return None
 
         async with pool.acquire() as conn:
             if degraded:
@@ -1612,35 +1482,24 @@ def create_router(
 
                     # Sessions: ILIKE on chunk_text (lowest priority)
                     if "sessions" in surfaces:
-                        async def _fetch_text_session_rows():
-                            async with pool.acquire() as session_conn:
-                                table_exists = await session_conn.fetchval("""
-                                    SELECT EXISTS (
-                                        SELECT FROM information_schema.tables
-                                        WHERE table_name = 'session_chunks'
-                                    )
-                                """)
-                                if not table_exists:
-                                    return []
-
-                                conditions = " OR ".join(
-                                    f"chunk_text ILIKE ${i + 1}"
-                                    for i in range(len(words)))
-                                s_params: list = [f"%{w}%" for w in words] + [20]
-                                return await session_conn.fetch(f"""
-                                    SELECT sc.id, sc.session_id, sc.chunk_text
-                                    FROM session_chunks sc
-                                    WHERE ({conditions})
-                                    ORDER BY sc.created_at DESC
-                                    LIMIT ${len(words) + 1}
-                                """, *s_params)
-
-                        rows = await _bounded_surface(
-                            "sessions",
-                            _fetch_text_session_rows(),
-                            UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS,
-                        ) or []
-                        if rows:
+                        table_exists = await conn.fetchval("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_name = 'session_chunks'
+                            )
+                        """)
+                        if table_exists:
+                            conditions = " OR ".join(
+                                f"chunk_text ILIKE ${i + 1}"
+                                for i in range(len(words)))
+                            s_params: list = [f"%{w}%" for w in words] + [20]
+                            rows = await conn.fetch(f"""
+                                SELECT sc.id, sc.session_id, sc.chunk_text
+                                FROM session_chunks sc
+                                WHERE ({conditions})
+                                ORDER BY sc.created_at DESC
+                                LIMIT ${len(words) + 1}
+                            """, *s_params)
                             for rank, row in enumerate(rows):
                                 all_results.append({
                                     "text": row["chunk_text"][:500],
@@ -1715,7 +1574,6 @@ def create_router(
                     rows = await conn.fetch("""
                         SELECT er.fuseki_uri, er.entity_text, er.entity_type,
                                erm.vault_path,
-                               er.metadata -> 'closure' AS closure,
                                1 - (er.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
                         FROM entity_registry er
                         LEFT JOIN LATERAL (
@@ -1728,18 +1586,6 @@ def create_router(
                         LIMIT 20
                     """, emb_str)
                     for rank, row in enumerate(rows):
-                        meta = {"vector_score": float(row["score"])}
-                        # An entity's CLOSURE — its adjudicated standing — must ride
-                        # every retrieval result, or the closure operation is invisible
-                        # to exactly the readers it exists for. A REFUTED/SCOPED claim
-                        # that still retrieves as live is how a killed experiment gets
-                        # re-proposed (see migration 107 / admin_router closure block).
-                        raw_closure = row["closure"]
-                        if raw_closure:
-                            closure = (json.loads(raw_closure)
-                                       if isinstance(raw_closure, str) else raw_closure)
-                            meta["closure"] = closure
-                            meta["is_closed"] = closure.get("status") != "OPEN"
                         all_results.append({
                             "text": row["entity_text"],
                             "score": 1.0 / (k + rank + 1),
@@ -1749,7 +1595,7 @@ def create_router(
                             # Piece C: openable entity locators (vault + quartz).
                             "vault_path": row.get("vault_path"),
                             "quartz_url": _quartz_url(row["entity_type"], row["entity_text"]),
-                            "metadata": meta,
+                            "metadata": {"vector_score": float(row["score"])},
                         })
 
                 # Facts (vector similarity, joined with episodes).
@@ -1763,12 +1609,10 @@ def create_router(
                             SELECT f.id, f.subject_uri, f.predicate, f.object_uri,
                                    f.fact_text, f.source_node_rid, e.name AS episode_name,
                                    e.source_document, e.metadata AS ep_metadata,
-                                   se.metadata -> 'closure' AS subject_closure,
                                    1 - (f.fact_embedding_3072::halfvec(3072)
                                         <=> $1::halfvec(3072)) AS score
                             FROM knowledge_facts f
                             LEFT JOIN knowledge_episodes e ON f.episode_id = e.id
-                            LEFT JOIN entity_registry se ON se.fuseki_uri = f.subject_uri
                             WHERE f.valid_to IS NULL
                               AND f.fact_embedding_3072 IS NOT NULL
                             ORDER BY f.fact_embedding_3072::halfvec(3072)
@@ -1781,28 +1625,6 @@ def create_router(
                     f_url_map = await _build_source_url_map(
                         conn, [r.get("source_node_rid") for r in rows])
                     for rank, row in enumerate(rows):
-                        fact_meta = {
-                            "subject": row["subject_uri"],
-                            "predicate": row["predicate"],
-                            "object": row["object_uri"],
-                            "vector_score": float(row["score"]),
-                        }
-                        # Carry the SUBJECT's adjudicated standing onto the fact.
-                        #
-                        # This is the load-bearing one. Facts are what actually
-                        # retrieve — roughly half of all Claim entities have no
-                        # embedding_3072 at all, so they never surface on the entity
-                        # surface, and an agent asking "what's the frontier here?" gets
-                        # FACTS. If a fact about a REFUTED claim retrieves clean, the
-                        # closure operation is decorative. On 2026-07-14 exactly that
-                        # happened: a fact asserting a killed hypothesis was "the
-                        # cleanest novelty bet" retrieved as live, and the dead
-                        # experiment was re-proposed.
-                        raw_sc = row["subject_closure"]
-                        if raw_sc:
-                            sc = json.loads(raw_sc) if isinstance(raw_sc, str) else raw_sc
-                            fact_meta["subject_closure"] = sc
-                            fact_meta["subject_is_closed"] = sc.get("status") != "OPEN"
                         fact_result = {
                             "text": row["fact_text"],
                             "score": 1.0 / (k + rank + 1),
@@ -1813,7 +1635,12 @@ def create_router(
                             "source_url": derive_source_url(
                                 row.get("source_node_rid"), row.get("source_document"),
                                 _parse_jsonb(row.get("ep_metadata")), f_url_map),
-                            "metadata": fact_meta,
+                            "metadata": {
+                                "subject": row["subject_uri"],
+                                "predicate": row["predicate"],
+                                "object": row["object_uri"],
+                                "vector_score": float(row["score"]),
+                            },
                         }
                         facts_results.append(fact_result)
                         all_results.append(fact_result)
@@ -1840,39 +1667,36 @@ def create_router(
                 # AND-conjunctive plainto_tsquery is too restrictive for the
                 # benchmark's recall-shape.
                 if "sessions" in surfaces:
-                    async def _fetch_semantic_session_rows():
-                        async with pool.acquire() as session_conn:
-                            await session_conn.execute("SET ivfflat.probes = 10")
-                            table_exists = await session_conn.fetchval("""
-                                SELECT EXISTS (
-                                    SELECT FROM information_schema.tables
-                                    WHERE table_name = 'session_chunks'
-                                )
-                            """)
-                            if not table_exists:
-                                return []
+                    table_exists = await conn.fetchval("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = 'session_chunks'
+                        )
+                    """)
+                    rows = []
+                    if table_exists:
+                        # Build OR-disjunctive tsquery string from user query.
+                        # Hyphens preserved (websearch handles ADR-0080 etc).
+                        # Stopwords filtered to reduce 0-recall on natural-
+                        # language phrasings.
+                        _stopwords = {
+                            "the", "what", "when", "where", "how", "why",
+                            "which", "who", "is", "are", "was", "were", "be",
+                            "been", "being", "do", "did", "does", "done",
+                            "can", "could", "should", "would", "may", "might",
+                            "must", "shall", "will", "or", "and", "but",
+                            "not", "of", "to", "for", "on", "at", "in", "by",
+                            "with", "from", "as", "into", "that", "this",
+                            "these", "those", "there", "here", "then", "than",
+                            "such", "also", "very", "more", "most", "just",
+                            "only", "over", "under", "have", "has", "had",
+                        }
+                        _toks = re.findall(r"[A-Za-z0-9_-]{2,}", query.lower())
+                        _toks = [t for t in _toks if t not in _stopwords]
+                        ts_query_str = " OR ".join(_toks) if _toks else query
 
-                            # Build OR-disjunctive tsquery string from user query.
-                            # Hyphens preserved (websearch handles ADR-0080 etc).
-                            # Stopwords filtered to reduce 0-recall on natural-
-                            # language phrasings.
-                            _stopwords = {
-                                "the", "what", "when", "where", "how", "why",
-                                "which", "who", "is", "are", "was", "were", "be",
-                                "been", "being", "do", "did", "does", "done",
-                                "can", "could", "should", "would", "may", "might",
-                                "must", "shall", "will", "or", "and", "but",
-                                "not", "of", "to", "for", "on", "at", "in", "by",
-                                "with", "from", "as", "into", "that", "this",
-                                "these", "those", "there", "here", "then", "than",
-                                "such", "also", "very", "more", "most", "just",
-                                "only", "over", "under", "have", "has", "had",
-                            }
-                            _toks = re.findall(r"[A-Za-z0-9_-]{2,}", query.lower())
-                            _toks = [t for t in _toks if t not in _stopwords]
-                            ts_query_str = " OR ".join(_toks) if _toks else query
-
-                            return await session_conn.fetch("""
+                        try:
+                            rows = await conn.fetch("""
                                 WITH vec_ranked AS (
                                     SELECT id, session_id, chunk_text,
                                            ROW_NUMBER() OVER (
@@ -1924,26 +1748,23 @@ def create_router(
                                 ORDER BY rrf_score DESC
                                 LIMIT 20
                             """, emb_str, ts_query_str)
-
-                    rows = await _bounded_surface(
-                        "sessions",
-                        _fetch_semantic_session_rows(),
-                        UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS,
-                    ) or []
-                    for rank, row in enumerate(rows):
-                        all_results.append({
-                            "text": (row["chunk_text"] or "")[:500],
-                            "score": 1.0 / (k + rank + 1),
-                            "source": "session",
-                            "session_id": row["session_id"],
-                            "metadata": {
-                                "vec_score": float(row["vec_score"]) if row["vec_score"] is not None else None,
-                                "lex_score": float(row["lex_score"]) if row["lex_score"] is not None else None,
-                                "vec_rank": int(row["vec_rank"]) if row["vec_rank"] is not None else None,
-                                "lex_rank": int(row["lex_rank"]) if row["lex_rank"] is not None else None,
-                                "rrf_score": float(row["rrf_score"]),
-                            },
-                        })
+                        except asyncpg.exceptions.DataError as e:
+                            logger.warning("sessions surface hybrid query skipped: %s", e)
+                            rows = []
+                        for rank, row in enumerate(rows):
+                            all_results.append({
+                                "text": (row["chunk_text"] or "")[:500],
+                                "score": 1.0 / (k + rank + 1),
+                                "source": "session",
+                                "session_id": row["session_id"],
+                                "metadata": {
+                                    "vec_score": float(row["vec_score"]) if row["vec_score"] is not None else None,
+                                    "lex_score": float(row["lex_score"]) if row["lex_score"] is not None else None,
+                                    "vec_rank": int(row["vec_rank"]) if row["vec_rank"] is not None else None,
+                                    "lex_rank": int(row["lex_rank"]) if row["lex_rank"] is not None else None,
+                                    "rrf_score": float(row["rrf_score"]),
+                                },
+                            })
 
                 # Docs (vector similarity on koi_memory_chunks from doc-scanner)
                 if "docs" in surfaces:
@@ -2014,46 +1835,6 @@ def create_router(
                             "section_title": row["section_title"],
                             "wiki_url": row["wiki_url"],
                             "document_rid": row["document_rid"],
-                            "chunk_rid": row["chunk_rid"],
-                            "metadata": {"vector_score": float(row["score"])},
-                        })
-
-                # Memories (vector similarity on koi_memory_chunks for every
-                # source NOT covered by the mediawiki-scoped 'wiki' surface or
-                # the repo-scoped 'docs' surface — i.e. email/orn, substack,
-                # calendar/ics, and any future sensor. These chunks have
-                # embedding_3072 populated by the chunk-embedder but had no read
-                # path before (fix 2026-06-01: retrieval-chunk-surfaces).
-                if "memories" in surfaces:
-                    rows = await conn.fetch("""
-                        SELECT mc.chunk_rid,
-                               mc.document_rid,
-                               mc.content->>'text' AS chunk_text,
-                               mc.content->>'title' AS title,
-                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
-                        FROM koi_memory_chunks mc
-                        WHERE mc.embedding_3072 IS NOT NULL
-                          AND mc.document_rid NOT LIKE 'mediawiki:%'
-                          AND mc.document_rid NOT LIKE 'doc-scanner:%'
-                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
-                        LIMIT 20
-                    """, emb_str)
-                    for rank, row in enumerate(rows):
-                        drid = row["document_rid"] or ""
-                        if drid.startswith("orn:gmail"):
-                            _src = "email"
-                        elif drid.startswith("substack-corpus") or drid.startswith("orn:substack"):
-                            _src = "substack"
-                        elif drid.startswith("orn:ics") or "ics-event" in drid:
-                            _src = "calendar"
-                        else:
-                            _src = "memory"
-                        all_results.append({
-                            "text": (row["chunk_text"] or "")[:500],
-                            "score": 1.0 / (k + rank + 1),
-                            "source": _src,
-                            "title": row["title"],
-                            "document_rid": drid,
                             "chunk_rid": row["chunk_rid"],
                             "metadata": {"vector_score": float(row["score"])},
                         })
@@ -2191,8 +1972,6 @@ def create_router(
         if degraded:
             response["degraded"] = True
             response["degraded_reason"] = degraded_reason
-        if surface_errors:
-            response["surface_errors"] = surface_errors
         # Pack 2.2: surface fallback-fired-but-recovered case at request
         # scope. Distinct from `degraded` (embedding unavailable / None);
         # this signals "read succeeded on the secondary provider, quality

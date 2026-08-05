@@ -2,12 +2,10 @@
 """
 Learning Field Graph Projection — Phase 1, Step 7
 
-Projects bridge notes from the canon-bearing repos registered in your projects
-config (config/projects.json — see config/projects.example.json) into the KOI
-knowledge graph as structured Claim, Concept, and Question entities with
-argumentative edges (supports/opposes). Project keys, learning-field claimant
-URIs, and bridge-note directories are operator-specific and are NOT baked into
-this tool — see _load_projects() below.
+Projects bridge notes from Spore, Intelligence Commons (IC), Flow Coding (FC),
+Poietic Match (PM), and bioregional-coordination into the KOI knowledge graph
+as structured Claim, Concept, and Question entities with argumentative edges
+(supports/opposes).
 
 Within Spore's graph-projections architecture (spore:ADR-0058 / spore:ADR-0070),
 this script operates as one infrastructure surface inside the Epistemic primary's
@@ -23,7 +21,10 @@ Usage:
   python scripts/project_bridge_notes.py --dry-run          # preview what would be created
   python scripts/project_bridge_notes.py --apply            # create entities and edges
   python scripts/project_bridge_notes.py --apply --note <path>  # single note
+  python scripts/project_bridge_notes.py --parse-report --note <path>  # parse only, no DB
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -38,82 +39,101 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import asyncpg
-import httpx
 import yaml
+
+try:
+    import asyncpg
+except ImportError:  # pragma: no cover - exercised by pure parser environments
+    asyncpg = None
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - exercised by pure parser environments
+    httpx = None
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("project_bridge_notes")
 
 KOI_BASE = "http://localhost:8351"
 
-def _load_projects() -> dict:
-    """Load the operator-local project registry.
 
-    koi-processor ships with NO baked-in projects: project keys, learning-field
-    claimant URIs, and bridge-note directories are operator-specific. Register
-    your own by copying config/projects.example.json to config/projects.json
-    (gitignored), or point KOI_PROJECTS_CONFIG at a JSON file. Per-key schema:
-
-        {"project_id": str, "claimant_uri": str, "bridge_dir": str}
-
-    where bridge_dir is a filesystem path with ~ and $VARS expanded.
-    """
-    candidates = []
-    if os.getenv("KOI_PROJECTS_CONFIG"):
-        candidates.append(Path(os.environ["KOI_PROJECTS_CONFIG"]).expanduser())
-    candidates.append(Path(__file__).resolve().parent.parent / "config" / "projects.json")
-    for cfg_path in candidates:
-        if cfg_path.is_file():
-            raw = json.loads(cfg_path.read_text())
-            return {
-                key: {
-                    "project_id": entry["project_id"],
-                    "claimant_uri": entry["claimant_uri"],
-                    "bridge_dir": Path(os.path.expandvars(entry["bridge_dir"])).expanduser(),
-                }
-                for key, entry in raw.items()
-                if not key.startswith("_")  # skip _comment-style keys
-            }
-    log.warning(
-        "No projects config found (looked for $KOI_PROJECTS_CONFIG and "
-        "config/projects.json). Copy config/projects.example.json to "
-        "config/projects.json to register your canon repos."
-    )
-    return {}
+def _claims_service_token() -> Optional[str]:
+    """Token for the auth-gated /claims/ write path."""
+    tok = os.getenv("KOI_CLAIMS_SERVICE_TOKEN")
+    if tok:
+        return tok.strip()
+    p = Path.home() / ".config/personal-koi/koi-state/claims_service_token"
+    if p.exists():
+        return p.read_text().strip()
+    return None
 
 
-PROJECTS = _load_projects()
+def _http_error_snippet(text: str, limit: int = 500) -> str:
+    return text[:limit].replace("\n", " ")
+
+
+async def verify_claims_auth(client: httpx.AsyncClient) -> None:
+    """Fail before direct SQL writes if the claims API token is missing/rejected."""
+    resp = await client.get(f"{KOI_BASE}/claims/identity", timeout=10)
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"/claims auth failed ({resp.status_code}); token missing or rejected. "
+            "Source config/personal.env or provide KOI_CLAIMS_SERVICE_TOKEN."
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"/claims auth preflight failed: {resp.status_code} "
+            f"{_http_error_snippet(resp.text)}"
+        )
+
+PROJECTS = {
+    "spore": {
+        "project_id": "spore",
+        "claimant_uri": "org:spore-learning-field",
+        "bridge_dir": Path.home() / "projects/spore/docs/research/connections",
+    },
+    "ic": {
+        "project_id": "ic",
+        "claimant_uri": "org:ic-learning-field",
+        "bridge_dir": Path.home() / "projects/intelligence-commons/docs/research",
+    },
+    "fc": {
+        "project_id": "fc",
+        "claimant_uri": "org:flow-coding-learning-field",
+        "bridge_dir": Path.home() / "projects/flowcoding/docs/research/connections",
+    },
+    "pm": {
+        "project_id": "pm",
+        "claimant_uri": "org:poietic-match-learning-field",
+        "bridge_dir": Path.home() / "projects/poietic-match/docs/research/connections",
+    },
+    "bioregional-coordination": {
+        "project_id": "bioregional-coordination",
+        "claimant_uri": "org:bioregional-coordination-learning-field",
+        "bridge_dir": Path.home() / "projects/bioregional-coordination/docs/research/connections",
+    },
+    "bioregional-mapping": {
+        "project_id": "bioregional-mapping",
+        "claimant_uri": "org:bioregional-mapping-learning-field",
+        "bridge_dir": Path.home() / "projects/bioregional-mapping/docs/research/connections",
+    },
+    "bioregional-economics": {
+        "project_id": "bioregional-economics",
+        "claimant_uri": "org:bioregional-economics-learning-field",
+        "bridge_dir": Path.home() / "projects/bioregional-economics/docs/research/connections",
+    },
+}
 
 DISPOSITION_SLUG = {
     "clarify existing term": "clarify",
     "candidate primitive": "propose-primitive",
     "candidate pattern": "propose-pattern",
+    "candidate protocol": "propose-protocol",
     "implementation hypothesis": "hypothesize",
+    "novel synthesis": "synthesize",
     "unresolved tension": "resolve-tension",
     "no change": "no-change",
-    # New-dialect (Sahely Phase-3+) disposition controlled vocab (DG2=b). These
-    # are already slug-shaped; map to themselves. "n/a" -> "n-a" (slug-safe).
-    "canon-pressure-decision-brief": "canon-pressure-decision-brief",
-    "framing-note-only": "framing-note-only",
-    "decline-with-trigger": "decline-with-trigger",
-    "not-present": "not-present",
-    "n/a": "n-a",
 }
-
-# New-dialect R-claim disposition controlled vocab (DG2=b). Every R-row becomes a
-# queryable governance cluster; only canon-pressure-decision-brief proposes change
-# (carries the supports stance). The rest are descriptive "no change proposed"
-# but still get a cluster so the convergence board can answer concept × target →
-# disposition (note). Ordered most-specific-first for prefix normalization.
-NEW_DISPOSITIONS = (
-    "canon-pressure-decision-brief",
-    "framing-note-only",
-    "decline-with-trigger",
-    "not-present",
-    "n/a",
-)
-PROPOSE_DISPOSITIONS = {"canon-pressure-decision-brief"}
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +155,12 @@ class OpenQuestion:
 
 @dataclass
 class ReviewDirective:
-    """Explicit review claim parsed from ## Review Claims (old dialect) or from
-    a ## R-claim disposition table row (new dialect)."""
-    r_id: str                  # e.g. "R1" / "R-LifeValue" / synthesized "Rrow3"
+    """Explicit review claim parsed from ## Review Claims section."""
+    r_id: str                  # e.g. "R1"
     target_doc: str            # primary target doc (first if "or")
     concept: str               # explicit concept slug
     statement: str             # claim text
     supported_by: list         # list of C-IDs (e.g. ["C1", "C2"])
-    disposition: Optional[str] = None  # new-dialect per-row disposition; None for old dialect
 
 @dataclass
 class BridgeNote:
@@ -159,6 +177,23 @@ class BridgeNote:
     questions: list     # list of OpenQuestion
     review_directives: list  # list of ReviewDirective (may be empty)
     project_key: str    # "spore" or "ic"
+
+@dataclass
+class ParseIssue:
+    severity: str       # error | warning
+    code: str
+    message: str
+    line: int | None = None
+
+@dataclass
+class ParseReport:
+    path: Path
+    doc_id: str
+    project_key: str
+    c_ids: list[str]
+    r_ids: list[str]
+    raw_r_ids: list[str]
+    issues: list[ParseIssue]
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +223,7 @@ def parse_claims(text: str) -> list[BridgeClaim]:
         r'\*\*(C\d+)\*\*\s+'
         r'\[confidence:\s*(high|medium|low)\]\s+'
         r'\[anchor:\s*(.+?)\]\s*\n'
-        r'(.*?)(?=\n\*\*C\d+\*\*|\Z)',
+        r'(.*?)(?=\n\*\*C\d+\*\*|\n(?:-\s*)?\*\*R\d+\*\*|\Z)',
         re.DOTALL
     )
 
@@ -239,325 +274,130 @@ def parse_questions(text: str) -> list[OpenQuestion]:
     return questions
 
 
+def _extract_review_sections(text: str) -> list[tuple[str, int]]:
+    """Return sections that may contain R-claim directives with start lines."""
+    sections = []
+    for header in [r'Review Claims', r'Claim Register']:
+        pattern = re.compile(
+            rf'## (?:\d+\.\s+)?{header}\s*\n(.*?)(?=\n## |\Z)',
+            re.DOTALL,
+        )
+        for match in pattern.finditer(text):
+            section = match.group(1)
+            if re.search(r'(?:^|\n)(?:-\s*)?\*\*R\d+\*\*', section):
+                start_line = text.count("\n", 0, match.start(1)) + 1
+                sections.append((section, start_line))
+    return sections
+
+
+def _primary_target(target_str: str, r_id: str) -> str:
+    """Return the first target from a possibly 'a or b' target expression."""
+    targets = [t.strip() for t in re.split(r'\s+or\s+', target_str.strip())]
+    primary_target = targets[0]
+    if len(targets) > 1:
+        log.info(f"  {r_id}: target '{target_str}' → primary: {primary_target}")
+    return primary_target
+
+
+def _parse_supported_by(text: str) -> list[str]:
+    """Extract C IDs from legacy or v2 supported_by syntax."""
+    return re.findall(r'\bC\d+\b', text)
+
+
+def _clean_review_statement(text: str) -> str:
+    """Remove directive metadata from review-claim statement text."""
+    text = re.sub(r'^\s*-\s*', '', text.strip())
+    text = re.sub(r'^\*\*R\d+\*\*:\s*', '', text)
+    text = re.sub(r'\*\*R\d+\*\*\s+\[review claim\]\s*', '', text)
+    text = re.sub(r'\[target:\s*[^\]]+\]', '', text)
+    text = re.sub(r'\[concept:\s*[^\]]+\]', '', text)
+    text = text.replace("TODO: slug-deferred", "")
+    text = re.sub(r'\n\s+supported_by:.*', '', text)
+    text = re.sub(r'\n?\*R\d+\s+is supported by[^*]*\*', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def parse_review_directives(text: str) -> list[ReviewDirective]:
     """Parse R-claim directives with explicit target + concept.
 
     Searches both '## Review Claims' and '## Claim Register' sections,
     since R-claims may appear alongside C-claims in the Claim Register.
     """
-    # Try dedicated section first, then Claim Register, then full text
-    section = None
-    for header in [r'Review Claims', r'Claim Register']:
-        m = re.search(rf'## (?:\d+\.\s+)?{header}\s*\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
-        if m:
-            section = m.group(1)
-            # Check if this section actually contains R-claims
-            if re.search(r'\*\*R\d+\*\*\s+\[review claim\]', section):
-                break
-            section = None
-
-    if not section:
-        return []
     directives = []
+    sections = _extract_review_sections(text)
+    if not sections:
+        return directives
 
     # Pattern: **R1** [review claim] [target: doc.id] [concept: slug]
     # Statement text
     # *R1 is supported by C1, C2, C3.*
-    pattern = re.compile(
+    legacy_pattern = re.compile(
         r'\*\*(R\d+)\*\*\s+'
         r'\[review claim\]\s+'
         r'\[target:\s*([^\]]+)\]\s+'
         r'\[concept:\s*([^\]]+)\]\s*\n'
-        r'(.*?)(?=\n\*\*R\d+\*\*|\Z)',
+        r'(.*?)(?=\n(?:-\s*)?\*\*R\d+\*\*|\Z)',
         re.DOTALL
     )
 
-    for match in pattern.finditer(section):
-        r_id = match.group(1)
+    # Pattern: - **R1**: Claim text. [target: doc.id] [concept: slug]
+    #   supported_by: C1, C2.
+    v2_pattern = re.compile(
+        r'^\s*-\s+\*\*(R\d+)\*\*:\s*'
+        r'(.*?)(?=^\s*-\s+\*\*R\d+\*\*:|^\s*\*\*R\d+\*\*\s+\[review claim\]|\Z)',
+        re.DOTALL | re.MULTILINE,
+    )
 
-        # Parse target: "a or b" → primary is first, alternatives ignored
-        target_str = match.group(2).strip()
-        targets = [t.strip() for t in re.split(r'\s+or\s+', target_str)]
-        primary_target = targets[0]
-        if len(targets) > 1:
-            log.info(f"  {r_id}: target '{target_str}' → primary: {primary_target}")
+    seen = set()
+    for section, _start_line in sections:
+        for match in legacy_pattern.finditer(section):
+            r_id = match.group(1)
+            if r_id in seen:
+                continue
+            seen.add(r_id)
 
-        concept = match.group(3).strip()
+            primary_target = _primary_target(match.group(2), r_id)
+            concept = match.group(3).strip()
+            body = match.group(4).strip()
 
-        body = match.group(4).strip()
+            # Extract supported_by from italic line: *R1 is supported by C1, C2, C3.*
+            sup_match = re.search(r'\*R\d+\s+is supported by\s+([^*]+)\*', body)
+            supported_by = _parse_supported_by(sup_match.group(1)) if sup_match else []
+            statement = _clean_review_statement(body)
 
-        # Extract supported_by from italic line: *R1 is supported by C1, C2, C3.*
-        supported_by = []
-        sup_match = re.search(r'\*R\d+\s+is supported by\s+([^*]+)\*', body)
-        if sup_match:
-            sup_text = sup_match.group(1)
-            # Extract C-IDs, ignoring "Relates to..." suffix
-            sup_text = re.split(r'\.\s*Relates to', sup_text)[0]
-            supported_by = [c.strip().rstrip('.') for c in re.split(r',\s*', sup_text) if c.strip()]
-            # Remove the support line from statement
-            body = re.sub(r'\n?\*R\d+\s+is supported by[^*]*\*', '', body).strip()
+            directives.append(ReviewDirective(
+                r_id=r_id,
+                target_doc=primary_target,
+                concept=concept,
+                statement=statement,
+                supported_by=supported_by,
+            ))
 
-        statement = re.sub(r'\s+', ' ', body)
+        for match in v2_pattern.finditer(section):
+            r_id = match.group(1)
+            if r_id in seen:
+                continue
 
-        directives.append(ReviewDirective(
-            r_id=r_id,
-            target_doc=primary_target,
-            concept=concept,
-            statement=statement,
-            supported_by=supported_by,
-        ))
+            body = match.group(2).strip()
+            target_match = re.search(r'\[target:\s*([^\]]+)\]', body)
+            concept_match = re.search(r'\[concept:\s*([^\]]+)\]', body)
+            if not target_match or not concept_match:
+                continue
+
+            seen.add(r_id)
+            support_match = re.search(r'^\s+supported_by:\s*(.+)$', body, re.MULTILINE)
+            supported_by = _parse_supported_by(support_match.group(1)) if support_match else []
+            statement = _clean_review_statement(body)
+
+            directives.append(ReviewDirective(
+                r_id=r_id,
+                target_doc=_primary_target(target_match.group(1), r_id),
+                concept=concept_match.group(1).strip(),
+                statement=statement,
+                supported_by=supported_by,
+            ))
 
     return directives
-
-
-# ---------------------------------------------------------------------------
-# NEW-DIALECT parsers (Sahely Phase-3+): "## C-claims" list-bullet blockquotes
-# + "## R-claim disposition table". The old-dialect parsers above are preserved
-# unchanged so the ~1,289 P2P-wiki-era claims project identically (AC2).
-# ---------------------------------------------------------------------------
-
-_CCLAIM_SECTION_NEW = re.compile(
-    # Any H2 header containing "C-claims" (tolerates "## 2. C-claims", "## §2 Verbatim
-    # C-claims", "## C-claims"); body runs to the next H2 (### sub-headers don't terminate).
-    r'^## [^\n]*?\bC-?claims?\b[^\n]*\n(.*?)(?=\n## |\Z)',
-    re.DOTALL | re.IGNORECASE | re.MULTILINE,
-)
-# C-claim head: optional "- " bullet, then **C<n> at line start. Matches BOTH the
-# inline list-bullet form (- **C-1** [anchor] "...") AND the header form
-# (**C-1 [pdf-p1]** — label, statement in a following blockquote). Table rows (lines
-# starting with "|") never match. Anchor + statement are parsed from the remainder.
-_CLAIM_HEAD = re.compile(r'^(?:-\s+)?\*\*(C-?\d+[a-z]?)\b(.*)$')      # bold form (any **C-N ...); spurious `**C5 Label:**` headers are dropped by the no-anchor post-filter in parse_claims_new, NOT by tightening this regex (which would clip real citation-/punctuation-bearing forms)
-_CLAIM_HEAD_H = re.compile(r'^#{2,4}\s+(C-?\d+[a-z]?)\b(.*)$')        # markdown-header form (### C-1 ...)
-_ANCHOR_MARKER = re.compile(r'(?:anchor:|html-section:|pdf-p|§)', re.IGNORECASE)
-_BRACKET = re.compile(r'\[([^\]]*)\]')
-# Leading run of **/LOAD-BEARING/[anchor] tokens that PRECEDE the statement. Stripping
-# only this leading run (not all brackets) removes the anchor bracket — and any stray
-# quote inside it — without mangling editorial brackets ([Sen's], [is]) inside the statement.
-_LEAD = re.compile(r'^(?:\s|\*\*|LOAD-BEARING|\[[^\]]*\])*')
-
-
-def _claim_head(line: str):
-    """Match a C-claim head in either form (bold-bullet or markdown-header)."""
-    return _CLAIM_HEAD.match(line) or _CLAIM_HEAD_H.match(line)
-
-
-def _pick_anchor(*sources: str) -> str:
-    """Anchor = first anchor-marker bracket; else a page-like parenthetical; else the
-    first non-LOAD-BEARING bracket; else ''. (Anchor is evidence metadata, not load-bearing.)"""
-    brackets = [b for s in sources for b in _BRACKET.findall(s)]
-    am = next((b for b in brackets if _ANCHOR_MARKER.search(b)), None)
-    if am:
-        return am.strip()
-    for s in sources:
-        pm = re.search(r'\(([^)]*?(?:pdf-p\d|p\.?\s*\d|§|Abstract|Summary|TOC|Cover)[^)]*)\)', s)
-        if pm:
-            return pm.group(1).strip()
-    nb = next((b for b in brackets if "LOAD-BEARING" not in b.upper()), None)
-    return nb.strip() if nb else ""
-
-
-def _merge_claims(*lists) -> list[BridgeClaim]:
-    """Concatenate claim lists, deduping by c_id (first wins)."""
-    out, seen = [], set()
-    for lst in lists:
-        for c in lst:
-            if c.c_id not in seen:
-                seen.add(c.c_id)
-                out.append(c)
-    return out
-
-
-def parse_claims_new(text: str) -> list[BridgeClaim]:
-    """Parse the new-dialect ``## C-claims`` section.
-
-    Two layouts occur; both handled:
-      * inline list-bullet — ``- **C-1** [anchor] "statement"`` (4 catalogued variants:
-        hyphen-optional id, citation-parenthetical-in-bold, [anchor:]/[html-section:]/
-        [pdf-pN] labels, separate **LOAD-BEARING** token).
-      * header + blockquote — ``**C-1 [pdf-p1]** — label`` (no bullet, anchor inside the
-        bold) optionally followed by ``> "verbatim statement"`` blockquote line(s) (the
-        life-value-manifesto / ethics-as-science-of-viability layout).
-    Three head layouts occur and all are handled:
-      * inline list-bullet — ``- **C-1** [anchor] "statement"`` (4 catalogued variants).
-      * header-in-bold + blockquote — ``**C-1 [pdf-p1]** — label`` then ``> "..."``.
-      * markdown-header + blockquote — ``### C-1 (p3, Abstract) — label [LOAD-BEARING]``
-        then ``> "..." [pdf-pN]`` (ethics-as-science / money-growth layout).
-    Anchor via _pick_anchor (head brackets + parenthetical + blockquote); load_bearing if
-    'LOAD-BEARING' appears on the head line or its blockquote. Table rows (lines starting
-    with '|') never match — heads require '**C', '- **C', or '## C'/'### C'.
-    """
-    m = _CCLAIM_SECTION_NEW.search(text)
-    if not m:
-        return []
-    lines = m.group(1).splitlines()
-    claims: list[BridgeClaim] = []
-    seen: set = set()
-    i = 0
-    while i < len(lines):
-        hm = _claim_head(lines[i].strip())
-        if not hm:
-            i += 1
-            continue
-        c_id = hm.group(1).replace("-", "")        # "C-1" -> "C1"
-        rest = hm.group(2)
-        load_bearing = "LOAD-BEARING" in rest
-        blob = ""
-        qm = re.search(r'"(.+)"', _LEAD.sub("", rest))  # strip ONLY the leading anchor/bold run (kills the in-anchor quote, BLOCKER 1) then GREEDY first..last — preserves editorial brackets + inner quotes inside the statement
-        if qm:
-            statement = qm.group(1).strip()
-        else:
-            # No inline quote: scan forward for a blockquote statement before the next
-            # C-head (the header + ``> "..."`` layout); accumulate consecutive > lines.
-            statement = ""
-            j = i + 1
-            while j < len(lines) and not _claim_head(lines[j].strip()):
-                if lines[j].strip().startswith(">"):
-                    qlines = []
-                    while j < len(lines) and lines[j].strip().startswith(">"):
-                        if "LOAD-BEARING" in lines[j]:
-                            load_bearing = True
-                        qlines.append(lines[j].strip().lstrip(">").strip())
-                        j += 1
-                    blob = " ".join(qlines)
-                    qq = re.search(r'"(.+)"', _LEAD.sub("", blob))  # strip leading anchor/bold run, then greedy (keep inner quotes + editorial brackets)
-                    statement = qq.group(1).strip() if qq else blob.strip().strip('"').strip()
-                    break
-                j += 1
-            if not statement:
-                # one-liner label: drop bold + the anchor bracket(s), keep the prose label
-                tail = _BRACKET.sub('', rest.replace("**", ""))
-                statement = re.sub(r'\s+', ' ', tail).strip(" —-:*").strip()
-        anchor = _pick_anchor(rest, blob)
-        if not anchor.strip():
-            # HARDENING (a): no evidence anchor -> a bold/header **C<n> ...** with no
-            # [anchor]/(page)/§ is a subsection label (e.g. **C5 Label:**), not a real
-            # evidence-anchored claim. Drop it. Form-agnostic (doesn't clip citation/
-            # punctuation head forms the way a tightened head regex did). 0 occurrences in
-            # the current Sahely corpus -> no-op now; forward-proofing for other corpora.
-            i += 1
-            continue
-        if c_id in seen:
-            i += 1
-            continue
-        seen.add(c_id)
-        claims.append(BridgeClaim(
-            c_id=c_id,
-            confidence="high" if load_bearing else "medium",
-            anchor=anchor,
-            statement=re.sub(r'\s+', ' ', statement),
-        ))
-        i += 1
-    return claims
-
-
-_RTABLE_SECTION = re.compile(
-    # Any H2 header containing "R-claim disposition table" (tolerates "## 3. ...",
-    # "## §3 ... (Wave-4 ...)"); body runs to the next H2.
-    r'^## [^\n]*?R-claim disposition table[^\n]*\n(.*?)(?=\n## |\Z)',
-    re.DOTALL | re.IGNORECASE | re.MULTILINE,
-)
-_TABLE_ROW_SEP = re.compile(r'^\s*\|?[\s:|\-]+\|?\s*$')
-_SPORE_DOCID = re.compile(r'(spore\.[a-z0-9][a-z0-9.\-]+)')
-_BACKTICK_SPAN = re.compile(r'`([^`]+)`')
-_CID_REF = re.compile(r'\bC-?\d+[a-z]?\b')
-
-
-def _clean_cell(cell: str) -> str:
-    # Remove ALL backticks + bold markers (not just edges): a `**`token`**`` cell would
-    # otherwise leave stray backticks after **-removal and break disposition normalization.
-    return cell.replace("**", "").replace("`", "").strip()
-
-
-def _extract_target(cell: str) -> str:
-    """Canonical target: spore.* doc_id > first backtick span > cleaned prose (parens stripped)."""
-    md = _SPORE_DOCID.search(cell)
-    if md:
-        return md.group(1)
-    bm = _BACKTICK_SPAN.search(cell)
-    if bm:
-        return bm.group(1).strip()
-    return re.sub(r'\([^)]*\)', '', _clean_cell(cell)).strip()
-
-
-def _normalize_disposition(cell: str) -> str:
-    d = _clean_cell(cell).lower().lstrip("*").strip()
-    for v in NEW_DISPOSITIONS:
-        if d.startswith(v):
-            return v
-    return d
-
-
-def parse_disposition_table(text: str) -> list[ReviewDirective]:
-    """Parse the new-dialect ``## R-claim disposition table`` into ReviewDirectives.
-
-    Columns vary (optional leading #/R-id, Target, Concept, Disposition, One-line);
-    located by header name. Emits one ReviewDirective per (row x concept); a row's
-    one-line cell C-IDs populate ``supported_by`` (precise C->R edges), with a
-    concept-match fallback applied in the apply path when a row names no C-IDs.
-    Rows with no resolvable target (e.g. routing-completeness "(none)") are skipped
-    with a warning.
-    """
-    m = _RTABLE_SECTION.search(text)
-    if not m:
-        return []
-    rows = [ln for ln in m.group(1).splitlines() if ln.strip().startswith("|")]
-    if len(rows) < 2:
-        return []
-    header = [h.strip().lower() for h in rows[0].strip().strip("|").split("|")]
-
-    def col(*names):
-        for i, h in enumerate(header):
-            if any(n in h for n in names):
-                return i
-        return None
-
-    ti, ci, di = col("target"), col("concept"), col("disposition")
-    idi = col("#", "r-id", "r-claim")
-    if ci is not None and ci == ti:
-        # merged "Target + concept" column (money-growth schema): keep it as target,
-        # generalize concept to 'unspecified' rather than duplicating the merged text.
-        ci = None
-    if ti is None or di is None:
-        # No "Target"/"Concept" column (e.g. failure-of-economics' Resonance /
-        # Resolved-state-citation prose schema): leave unparsed + surfaced, rather than
-        # mapping prose into messy cluster keys. Operator can normalize that note's header.
-        return []
-    out: list[ReviewDirective] = []
-    for ri, ln in enumerate(rows[1:]):
-        if _TABLE_ROW_SEP.match(ln):
-            continue
-        cells = ln.strip().strip("|").split("|")
-        if len(cells) <= max(x for x in (ti, ci, di) if x is not None):
-            continue
-        target = _extract_target(cells[ti])
-        tlow = _clean_cell(cells[ti]).lower()
-        if not target or tlow.startswith("none") or tlow in ("—", "-", "n/a", ""):
-            log.warning(f"  disposition-table row {ri + 1}: no resolvable target "
-                        f"({cells[ti].strip()!r}) — skipped")
-            continue
-        disposition = _normalize_disposition(cells[di])
-        r_id = (_clean_cell(cells[idi]) if idi is not None and idi < len(cells) else "") or f"Rrow{ri + 1}"
-        oneline = cells[-1].strip() if (len(cells) - 1) > di else ""
-        supported_by = sorted({c.replace("-", "") for c in _CID_REF.findall(oneline)})
-        concepts: list = []
-        if ci is not None and ci < len(cells):
-            craw = re.sub(r'^\((.*)\)$', r'\1', _clean_cell(cells[ci])).strip()
-            if craw and craw not in ("—", "-"):
-                concepts = [c.strip() for c in craw.split(",") if c.strip()]
-        if not concepts:
-            # DG(c)=(ii): blank concept -> a target-level cluster (no concept node). concept=None
-            # is handled in the apply path (about_uri=spec:target, gck=target:disposition).
-            concepts = [None]
-        for concept in concepts:
-            out.append(ReviewDirective(
-                r_id=r_id,
-                target_doc=target,
-                concept=concept,
-                statement=re.sub(r'\s+', ' ', _clean_cell(oneline)),
-                supported_by=supported_by,
-                disposition=disposition,
-            ))
-    return out
 
 
 def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
@@ -575,11 +415,119 @@ def parse_bridge_note(path: Path, project_key: str) -> BridgeNote:
         concepts=fm.get("concepts") or [],
         depends_on=fm.get("depends_on") or [],
         relates_to=fm.get("relates_to") or [],
-        claims=_merge_claims(parse_claims(text), parse_claims_new(text)),
+        claims=parse_claims(text),
         questions=parse_questions(text),
-        review_directives=parse_review_directives(text) + parse_disposition_table(text),
+        review_directives=parse_review_directives(text),
         project_key=project_key,
     )
+
+
+def _iter_raw_review_blocks(text: str) -> list[dict]:
+    """Return raw R-claim-like blocks from review-capable sections."""
+    blocks = []
+    pattern = re.compile(
+        r'(?ms)^(?:-\s*)?\*\*(R\d+)\*\*.*?'
+        r'(?=^(?:-\s*)?\*\*R\d+\*\*|\Z)'
+    )
+    for section, start_line in _extract_review_sections(text):
+        for match in pattern.finditer(section):
+            line = start_line + section.count("\n", 0, match.start())
+            blocks.append({
+                "r_id": match.group(1),
+                "line": line,
+                "text": match.group(0).strip(),
+            })
+    return blocks
+
+
+def build_parse_report(note: BridgeNote, text: str) -> ParseReport:
+    """Build a parse-only validation report for a bridge note."""
+    issues: list[ParseIssue] = []
+    c_ids = [claim.c_id for claim in note.claims]
+    c_id_set = set(c_ids)
+    r_ids = [directive.r_id for directive in note.review_directives]
+    parsed_r_ids = set(r_ids)
+    raw_blocks = _iter_raw_review_blocks(text)
+    raw_r_ids = [block["r_id"] for block in raw_blocks]
+
+    for claim in note.claims:
+        if re.search(r'(?:^|\s)(?:-\s*)?\*\*R\d+\*\*', claim.statement):
+            issues.append(ParseIssue(
+                "error",
+                "claim_contains_review_directive",
+                f"{claim.c_id} statement appears to include R-claim text",
+            ))
+
+    for block in raw_blocks:
+        r_id = block["r_id"]
+        body = block["text"]
+        if not re.search(r'\[target:\s*[^\]]+\]', body):
+            issues.append(ParseIssue(
+                "error", "missing_target",
+                f"{r_id} is missing [target: ...]",
+                block["line"],
+            ))
+        if not re.search(r'\[concept:\s*[^\]]+\]', body):
+            issues.append(ParseIssue(
+                "error", "missing_concept",
+                f"{r_id} is missing [concept: ...]",
+                block["line"],
+            ))
+        if not re.search(r'\bsupported_by:\s*|\*R\d+\s+is supported by\s+', body):
+            issues.append(ParseIssue(
+                "warning", "missing_supported_by",
+                f"{r_id} has no supported_by line",
+                block["line"],
+            ))
+        if r_id not in parsed_r_ids and re.search(r'\[target:\s*[^\]]+\]', body) and re.search(r'\[concept:\s*[^\]]+\]', body):
+            issues.append(ParseIssue(
+                "error", "unparsed_review_directive",
+                f"{r_id} has target and concept metadata but was not parsed",
+                block["line"],
+            ))
+
+    for directive in note.review_directives:
+        if not directive.supported_by:
+            issues.append(ParseIssue(
+                "warning", "missing_supported_by",
+                f"{directive.r_id} parsed with no source-claim support refs",
+            ))
+        for c_id in directive.supported_by:
+            if c_id not in c_id_set:
+                issues.append(ParseIssue(
+                    "error", "unknown_support_ref",
+                    f"{directive.r_id} supported_by references unknown {c_id}",
+                ))
+
+    return ParseReport(
+        path=note.path,
+        doc_id=note.doc_id,
+        project_key=note.project_key,
+        c_ids=c_ids,
+        r_ids=r_ids,
+        raw_r_ids=raw_r_ids,
+        issues=issues,
+    )
+
+
+def format_parse_report(report: ParseReport) -> str:
+    """Format a parse report for CLI output."""
+    lines = [
+        f"Parse report: {report.path}",
+        f"  doc_id: {report.doc_id or '(missing)'}",
+        f"  project: {report.project_key}",
+        f"  C-claims parsed: {len(report.c_ids)} {report.c_ids}",
+        f"  R-claims parsed: {len(report.r_ids)} {report.r_ids}",
+        f"  Raw R-like blocks: {len(report.raw_r_ids)} {report.raw_r_ids}",
+    ]
+    if report.issues:
+        lines.append("  Issues:")
+        for issue in report.issues:
+            loc = f" line {issue.line}:" if issue.line is not None else ":"
+            lines.append(f"    {issue.severity.upper()} {issue.code}{loc} {issue.message}")
+    else:
+        lines.append("  Issues: none")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -758,8 +706,15 @@ async def create_source_claim(
 
     resp = await client.post(f"{KOI_BASE}/claims/", json=payload, timeout=30)
     if resp.status_code not in (200, 201):
-        log.error(f"  Failed to create source claim {c_id}: {resp.status_code} {resp.text}")
-        return {}
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"/claims auth failed ({resp.status_code}) while creating source claim {c_id}; "
+                "token missing or rejected."
+            )
+        raise RuntimeError(
+            f"Failed to create source claim {c_id}: {resp.status_code} "
+            f"{_http_error_snippet(resp.text)}"
+        )
     data = resp.json()
     claim_rid = data.get("claim_rid", "?")
     log.info(f"  Source claim {c_id}: {claim_rid}")
@@ -784,7 +739,6 @@ async def create_review_claim(
     disposition_slug: str,
     project_uri: str,
     projection_batch: str,
-    disposition: Optional[str] = None,
 ) -> dict:
     """Create a review claim via POST /claims/. Deterministic from target+concept.
 
@@ -801,55 +755,43 @@ async def create_review_claim(
     by a bridge note, traverse ``supports`` edges from its source claims
     (or filter on ``metadata->>'projection_batch'`` for batch-level audits).
     """
+    change_slug = f"{disposition_slug}-{concept_name}"
     target_spec_uri = f"spec:{target_spec_doc}"
-    if concept_name is None:
-        # DG(c)=(ii) target-level cluster (blank concept): keyed by target:disposition, no concept node.
-        change_slug = disposition_slug
-        governance_cluster_key = f"{target_spec_doc}:{disposition_slug}"
-        statement = (
-            f"Canon review: {disposition_slug.replace('-', ' ')} — "
-            f"target-level (no concept) in {target_spec_doc}"
-        )
-    else:
-        change_slug = f"{disposition_slug}-{concept_name}"
-        # New-dialect clusters are disposition-keyed so an OLD-dialect (target:concept)
-        # find_review_claim lookup can never collide with them. Old-dialect path unchanged.
-        if disposition is not None:
-            governance_cluster_key = f"{target_spec_doc}:{concept_name}:{disposition_slug}"
-        else:
-            governance_cluster_key = f"{target_spec_doc}:{concept_name}"
-        statement = (
-            f"Canon review: {disposition_slug.replace('-', ' ')} — "
-            f"{concept_name.replace('-', ' ')} in {target_spec_doc}"
-        )
-
-    metadata = {
-        "claim_layer": "review",
-        "target_spec_doc": target_spec_doc,
-        "target_section": concept_name,
-        "change_slug": change_slug,
-        "target_spec_uri": target_spec_uri,
-        "governance_cluster_key": governance_cluster_key,
-        "project_uri": project_uri,
-        "source": "learning_field",
-    }
-    # Emit disposition only for new-dialect clusters; old-dialect metadata stays byte-identical.
-    if disposition is not None:
-        metadata["disposition"] = disposition
+    governance_cluster_key = f"{target_spec_doc}:{concept_name}"
+    statement = (
+        f"Canon review: {disposition_slug.replace('-', ' ')} — "
+        f"{concept_name.replace('-', ' ')} in {target_spec_doc}"
+    )
 
     payload = {
         "claimant_uri": claimant_uri,
         "statement": statement,
         "claim_type": "governance",
         "about_uri": about_uri,
-        "metadata": metadata,
+        "metadata": {
+            "claim_layer": "review",
+            "target_spec_doc": target_spec_doc,
+            "target_section": concept_name,
+            "change_slug": change_slug,
+            "target_spec_uri": target_spec_uri,
+            "governance_cluster_key": governance_cluster_key,
+            "project_uri": project_uri,
+            "source": "learning_field",
+        },
         "created_by": "darren",
     }
 
     resp = await client.post(f"{KOI_BASE}/claims/", json=payload, timeout=30)
     if resp.status_code not in (200, 201):
-        log.error(f"  Failed to create review claim: {resp.status_code} {resp.text}")
-        return {}
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"/claims auth failed ({resp.status_code}) while creating review claim "
+                f"({target_spec_doc} x {concept_name}); token missing or rejected."
+            )
+        raise RuntimeError(
+            f"Failed to create review claim ({target_spec_doc} x {concept_name}): "
+            f"{resp.status_code} {_http_error_snippet(resp.text)}"
+        )
     data = resp.json()
     claim_rid = data.get("claim_rid", "?")
     log.info(f"  Review claim ({target_spec_doc} × {concept_name}): {claim_rid}")
@@ -867,37 +809,18 @@ async def find_review_claim(
     conn: asyncpg.Connection,
     target_spec_doc: str,
     concept_name: str,
-    change_slug: Optional[str] = None,
 ) -> Optional[str]:
-    """Find an existing review claim.
-
-    Old dialect: dedup by (target_spec_doc, governance_cluster_key=target:concept).
-    New dialect (change_slug given): dedup by (target_spec_doc, change_slug=
-    disposition-concept) so a framing-note-only cluster never shadows a
-    canon-pressure-decision-brief cluster for the same (target, concept).
-    """
-    if change_slug is not None:
-        row = await conn.fetchrow(
-            "SELECT entity_uri FROM claims "
-            "WHERE metadata->>'claim_layer' = 'review' "
-            "  AND metadata->>'source' = 'learning_field' "
-            "  AND metadata->>'target_spec_doc' = $1 "
-            "  AND metadata->>'change_slug' = $2 "
-            "LIMIT 1",
-            target_spec_doc,
-            change_slug,
-        )
-    else:
-        row = await conn.fetchrow(
-            "SELECT entity_uri FROM claims "
-            "WHERE metadata->>'claim_layer' = 'review' "
-            "  AND metadata->>'source' = 'learning_field' "
-            "  AND metadata->>'target_spec_doc' = $1 "
-            "  AND metadata->>'governance_cluster_key' = $2 "
-            "LIMIT 1",
-            target_spec_doc,
-            f"{target_spec_doc}:{concept_name}",
-        )
+    """Find an existing review claim by target + concept in metadata."""
+    row = await conn.fetchrow(
+        "SELECT entity_uri FROM claims "
+        "WHERE metadata->>'claim_layer' = 'review' "
+        "  AND metadata->>'source' = 'learning_field' "
+        "  AND metadata->>'target_spec_doc' = $1 "
+        "  AND metadata->>'governance_cluster_key' = $2 "
+        "LIMIT 1",
+        target_spec_doc,
+        f"{target_spec_doc}:{concept_name}",
+    )
     return row["entity_uri"] if row else None
 
 
@@ -1008,8 +931,7 @@ async def project_bridge_note(
     concept_uris = {}
     all_concept_names = set(note.concepts)
     for rd in note.review_directives:
-        if rd.concept is not None:        # (ii) blank-concept rows are target-level — no concept node
-            all_concept_names.add(rd.concept)
+        all_concept_names.add(rd.concept)
     for concept_name in all_concept_names:
         uri = await resolve_or_create_concept(conn, concept_name)
         concept_uris[concept_name] = uri
@@ -1037,52 +959,27 @@ async def project_bridge_note(
 
     if has_review_directives:
         for rd in note.review_directives:
-            # Per-directive disposition (new-dialect table rows) or note-level (old dialect).
-            if rd.disposition is not None:
-                rd_slug = DISPOSITION_SLUG.get(rd.disposition, "unclassified")
-                rd_proposes = rd.disposition in PROPOSE_DISPOSITIONS
-                # (ii) blank-concept rows dedup by (target, disposition); concept'd by (target, disposition, concept)
-                rd_change_slug = rd_slug if rd.concept is None else f"{rd_slug}-{rd.concept}"
-            else:
-                rd_slug = disp_slug
-                rd_proposes = proposes_change
-                rd_change_slug = None
-            cache_key = (rd.target_doc, rd.concept, rd.disposition)
+            cache_key = (rd.target_doc, rd.concept)
             if cache_key not in review_claim_cache:
-                if rd.concept is None:
-                    # (ii) target-level cluster, no concept node. about_uri must be a valid
-                    # 'about' type (concept/pattern/project/...); a spec:<target> SpecDoc is
-                    # rejected by /claims/, so anchor on the project. Target traversability is
-                    # preserved via metadata.target_spec_doc + the supports/opposes edges.
-                    about_uri = project_uri
-                else:
-                    about_uri = concept_uris.get(rd.concept)
-                    if not about_uri:
-                        log.warning(f"  Skipping {rd.r_id}: concept '{rd.concept}' not resolved")
-                        continue
-                # Always check for an existing cluster first (global dedup). For
-                # new-dialect rows dedup by change_slug (disposition+concept) so a
-                # framing-note-only cluster never shadows a canon-pressure one.
-                existing = await find_review_claim(
-                    conn, rd.target_doc, rd.concept, change_slug=rd_change_slug)
+                about_uri = concept_uris.get(rd.concept)
+                if not about_uri:
+                    log.warning(f"  Skipping {rd.r_id}: concept '{rd.concept}' not resolved")
+                    continue
+                # Fix 2: always check for existing review claim first
+                existing = await find_review_claim(conn, rd.target_doc, rd.concept)
                 if existing:
                     review_claim_cache[cache_key] = existing
-                    log.info(f"  {rd.r_id}: reusing existing review claim "
-                             f"({rd.target_doc} × {rd.concept} / {rd.disposition or note.disposition})")
-                elif (rd.disposition is not None) or rd_proposes:
-                    # DG2=(b): every new-dialect R-row gets a governance cluster
-                    # (incl. framing-note-only / decline-with-trigger). Old dialect
-                    # keeps the proposes_change gate.
+                    log.info(f"  {rd.r_id}: reusing existing review claim ({rd.target_doc} × {rd.concept})")
+                elif proposes_change:
                     review_data = await create_review_claim(
                         client, conn,
                         claimant_uri=claimant_uri,
                         concept_name=rd.concept,
                         about_uri=about_uri,
                         target_spec_doc=rd.target_doc,
-                        disposition_slug=rd_slug,
+                        disposition_slug=disp_slug,
                         project_uri=project_uri,
                         projection_batch=projection_batch,
-                        disposition=rd.disposition,
                     )
                     if review_data and review_data.get("entity_uri"):
                         review_claim_cache[cache_key] = review_data["entity_uri"]
@@ -1128,32 +1025,20 @@ async def project_bridge_note(
         source_claim_uris[claim.c_id] = source_entity_uri
 
         if has_review_directives:
-            # Link source claims to review claims. New dialect: each R-row names its
-            # supporting C-IDs in the one-line cell (supported_by); fall back to
-            # concept-match only when the row named none. Old dialect: explicit
-            # supported_by only (unchanged). Stance is per-directive.
+            # Link source claims to review claims via supported_by from R-directives
             for rd in note.review_directives:
-                rd_stance = "supports" if (
-                    (rd.disposition in PROPOSE_DISPOSITIONS)
-                    if rd.disposition is not None else proposes_change
-                ) else "opposes"
-                linked = claim.c_id in rd.supported_by
-                if (not linked and rd.disposition is not None
-                        and not rd.supported_by and primary_concept == rd.concept):
-                    linked = True
-                if not linked:
-                    continue
-                review_uri = review_claim_cache.get((rd.target_doc, rd.concept, rd.disposition))
-                if review_uri:
-                    inserted = await insert_edge(
-                        conn, source_entity_uri, rd_stance, review_uri,
-                        source_rid=f"projection:{note.doc_id}",
-                    )
-                    if inserted:
-                        if rd_stance == "supports":
-                            stats["supports_edges"] += 1
-                        else:
-                            stats["opposes_edges"] += 1
+                if claim.c_id in rd.supported_by:
+                    review_uri = review_claim_cache.get((rd.target_doc, rd.concept))
+                    if review_uri:
+                        inserted = await insert_edge(
+                            conn, source_entity_uri, default_stance, review_uri,
+                            source_rid=f"projection:{note.doc_id}",
+                        )
+                        if inserted:
+                            if default_stance == "supports":
+                                stats["supports_edges"] += 1
+                            else:
+                                stats["opposes_edges"] += 1
         else:
             # Fallback (Fix 3): use depends_on targets only
             if not fallback_targets or not primary_concept:
@@ -1272,13 +1157,7 @@ def discover_bridge_notes() -> list[tuple[Path, str]]:
                 continue  # no frontmatter — not a bridge note
             except Exception:
                 continue
-            # Tolerant predicate (DG1): old-dialect bridge_note OR new-dialect
-            # connection note. Synthesis docs (zero claims) are caught by the
-            # per-note zero-claim warning, not excluded here.
-            if isinstance(fm, dict) and (
-                fm.get("research_subkind") == "bridge_note"
-                or fm.get("doc_kind") == "connection"
-            ):
+            if isinstance(fm, dict) and fm.get("research_subkind") == "bridge_note":
                 notes.append((md_path, project_key))
 
     return notes
@@ -1290,18 +1169,15 @@ def discover_bridge_notes() -> list[tuple[Path, str]]:
 
 async def main():
     parser = argparse.ArgumentParser(description="Project bridge notes into KOI graph")
+    parser.add_argument("--parse-report", action="store_true", help="Parse notes and report issues without DB access")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--apply", action="store_true", help="Write to KOI graph")
     parser.add_argument("--note", type=str, help="Project a single note by path")
-    parser.add_argument("--match", type=str, default=None,
-                        help="Only project notes whose filename contains this substring (e.g. 'sahely-')")
-    parser.add_argument("--project", type=str, default=None,
-                        help="Only project notes from this PROJECTS key (e.g. 'spore')")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    if not args.dry_run and not args.apply:
-        parser.error("Specify --dry-run or --apply")
+    if not args.parse_report and not args.dry_run and not args.apply:
+        parser.error("Specify --parse-report, --dry-run, or --apply")
 
     if args.verbose:
         log.setLevel(logging.DEBUG)
@@ -1309,27 +1185,24 @@ async def main():
     # Discover notes
     if args.note:
         note_path = Path(args.note).expanduser().resolve()
-        # Determine project key by matching the note path against each configured
-        # bridge_dir (config-driven; no hardcoded per-project paths).
-        project_key = None
-        for key, cfg in PROJECTS.items():
-            bridge_dir = cfg["bridge_dir"].expanduser().resolve()
-            if note_path == bridge_dir or bridge_dir in note_path.parents:
-                project_key = key
-                break
-        if project_key is None:
-            parser.error(
-                f"could not match note path to any configured project bridge_dir: {note_path}\n"
-                "Register the project in config/projects.json (or $KOI_PROJECTS_CONFIG)."
-            )
+        # Determine project key from path
+        if "intelligence-commons" in str(note_path):
+            project_key = "ic"
+        elif "flowcoding" in str(note_path):
+            project_key = "fc"
+        elif "poietic-match" in str(note_path):
+            project_key = "pm"
+        elif "bioregional-coordination" in str(note_path):
+            project_key = "bioregional-coordination"
+        elif "bioregional-mapping" in str(note_path):
+            project_key = "bioregional-mapping"
+        elif "bioregional-economics" in str(note_path):
+            project_key = "bioregional-economics"
+        else:
+            project_key = "spore"
         note_paths = [(note_path, project_key)]
     else:
         note_paths = discover_bridge_notes()
-        # Scoping (DG5 Sahely-first): --project <key> and/or --match <substr>.
-        if args.project:
-            note_paths = [(p, k) for (p, k) in note_paths if k == args.project]
-        if args.match:
-            note_paths = [(p, k) for (p, k) in note_paths if args.match in p.name]
 
     log.info(f"Found {len(note_paths)} bridge notes")
 
@@ -1337,16 +1210,58 @@ async def main():
         log.error("No bridge notes found")
         sys.exit(1)
 
+    if args.parse_report:
+        had_errors = False
+        for note_path, project_key in note_paths:
+            try:
+                text = note_path.read_text()
+                note = parse_bridge_note(note_path, project_key)
+                report = build_parse_report(note, text)
+                print(format_parse_report(report))
+                if any(issue.severity == "error" for issue in report.issues):
+                    had_errors = True
+            except Exception as e:
+                had_errors = True
+                print(f"Parse report: {note_path}")
+                print(f"  ERROR parse_failed: {e}")
+        sys.exit(1 if had_errors else 0)
+
+    if asyncpg is None or httpx is None:
+        parser.error("asyncpg and httpx are required for --dry-run/--apply; use --parse-report for parser-only checks")
+
+    # Parse and validate all notes before touching KOI. This prevents malformed
+    # review-claim syntax from silently falling back to source-claim-only behavior.
+    parsed_notes = []
+    had_parse_errors = False
+    for note_path, project_key in note_paths:
+        try:
+            text = note_path.read_text()
+            note = parse_bridge_note(note_path, project_key)
+            report = build_parse_report(note, text)
+            if any(issue.severity == "error" for issue in report.issues):
+                had_parse_errors = True
+                log.error("\n" + format_parse_report(report))
+            parsed_notes.append(note)
+        except Exception as e:
+            had_parse_errors = True
+            log.error(f"Failed to parse {note_path}: {e}")
+
+    if had_parse_errors:
+        log.error("Bridge-note parse validation failed; aborting before KOI access")
+        sys.exit(1)
+
+    if not parsed_notes:
+        log.error("No parseable bridge notes found")
+        sys.exit(1)
+
     # Connect to KOI
     conn = await asyncpg.connect("postgresql://localhost:5432/personal_koi")
 
     active_project_keys = {project_key for _, project_key in note_paths}
 
-    # Verify claimant orgs + project URIs resolve for participating projects.
-    # Unregistered-project guard: a project that is configured but not yet
-    # ingested into the KB (e.g. 'fc') is SKIPPED with a warning rather than
-    # halting the whole run; its notes are dropped from this run.
-    skip_projects: set = set()
+    # Verify claimant orgs exist for projects participating in this run.
+    # Optional configured projects may not have KOI seed entities until they
+    # first author bridge notes.
     for project_key in sorted(active_project_keys):
         cfg = PROJECTS[project_key]
         exists = await conn.fetchval(
@@ -1354,22 +1269,17 @@ async def main():
             cfg["claimant_uri"],
         )
         if not exists:
-            log.warning(f"Skipping project '{project_key}': claimant entity "
-                        f"missing ({cfg['claimant_uri']})")
-            skip_projects.add(project_key)
-            continue
+            log.error(f"Claimant entity missing: {cfg['claimant_uri']}")
+            sys.exit(1)
+
+    # Verify project URIs resolve for projects participating in this run.
+    for project_key in sorted(active_project_keys):
+        cfg = PROJECTS[project_key]
         try:
             uri = await resolve_project_uri(conn, cfg["project_id"])
             log.info(f"Project {cfg['project_id']} → {uri}")
         except RuntimeError as e:
-            log.warning(f"Skipping project '{project_key}': {e}")
-            skip_projects.add(project_key)
-
-    if skip_projects:
-        note_paths = [(p, k) for (p, k) in note_paths if k not in skip_projects]
-        if not note_paths:
-            log.error("No projectable notes remain after unregistered-project skip")
-            await conn.close()
+            log.error(str(e))
             sys.exit(1)
 
     totals = {
@@ -1385,26 +1295,9 @@ async def main():
         "related_to_edges": 0,
     }
 
-    # Parse all notes first, then process in two passes:
+    # Process in two passes:
     # Pass 1: change-proposing notes (creates review claims + supports edges)
     # Pass 2: "no change" notes (links to existing review claims with opposes)
-    parsed_notes = []
-    zero_claim_notes = []
-    for note_path, project_key in note_paths:
-        try:
-            n = parse_bridge_note(note_path, project_key)
-        except Exception as e:
-            log.error(f"Failed to parse {note_path}: {e}")
-            continue
-        parsed_notes.append(n)
-        # Silent-data-loss guard: a discovered note that yields no claims AND no
-        # review directives is logged so partial coverage is never mistaken for
-        # complete (synthesis docs / capstones land here correctly).
-        if not n.claims and not n.review_directives:
-            zero_claim_notes.append(n.doc_id or str(note_path))
-            log.warning(f"  ZERO-CLAIM: {n.doc_id or note_path} discovered but "
-                        f"yielded 0 claims + 0 review directives")
-
     change_notes = [n for n in parsed_notes if n.disposition != "no change"]
     nochange_notes = [n for n in parsed_notes if n.disposition == "no change"]
     log.info(f"  Pass 1: {len(change_notes)} change-proposing notes")
@@ -1414,11 +1307,19 @@ async def main():
     log.info(f"  Projection batch: {batch_ts}")
 
     # Write path on POST /claims/ requires auth (make_service_token_auth).
-    # Send the service token from the env (sourced from config/personal.env);
-    # never hardcode it. Falls back to no header if unset (read-only/dry-run).
-    _svc_token = os.getenv("KOI_CLAIMS_SERVICE_TOKEN", "")
+    # Send the service token from the env or local koi-state file; never
+    # hardcode it. Dry-run stays read-only and can run without auth.
+    _svc_token = _claims_service_token() if args.apply else None
+    if args.apply and not _svc_token:
+        log.error(
+            "KOI_CLAIMS_SERVICE_TOKEN not found (env or "
+            "~/.config/personal-koi/koi-state/claims_service_token); aborting before writes"
+        )
+        sys.exit(1)
     _auth_headers = {"Authorization": f"Bearer {_svc_token}"} if _svc_token else {}
     async with httpx.AsyncClient(headers=_auth_headers) as client:
+        if args.apply:
+            await verify_claims_auth(client)
         for note in change_notes + nochange_notes:
             stats = await project_bridge_note(
                 note, conn, client,
@@ -1443,20 +1344,6 @@ async def main():
     log.info(f"  Opposes edges:   {totals.get('opposes_edges', 0)}")
     log.info(f"  About edges:     {totals['about_edges']}")
     log.info(f"  Related_to edges:{totals['related_to_edges']}")
-
-    # New-dialect convergence visibility: R-row count, disposition histogram,
-    # zero-claim notes (DG2=b + silent-data-loss guard).
-    disp_hist: dict = {}
-    rrow_total = 0
-    for n in parsed_notes:
-        for rd in n.review_directives:
-            rrow_total += 1
-            key = rd.disposition or "(old-dialect/no-disposition)"
-            disp_hist[key] = disp_hist.get(key, 0) + 1
-    log.info(f"  R-rows / review directives parsed: {rrow_total}")
-    log.info(f"  Disposition histogram: {dict(sorted(disp_hist.items(), key=lambda kv: -kv[1]))}")
-    log.info(f"  Zero-claim discovered notes: {len(zero_claim_notes)}"
-             + (f" → {zero_claim_notes}" if zero_claim_notes and len(zero_claim_notes) <= 25 else ""))
 
 
 if __name__ == "__main__":

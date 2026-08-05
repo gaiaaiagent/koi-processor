@@ -49,14 +49,7 @@ def embedding_up(client):
 
 def test_unified_search_embedding_up(client, embedding_up):
     """Normal path: HTTP 200, embedding_available=true, no match_mode in metadata."""
-    r = client.get(
-        "/knowledge/unified-search",
-        params={
-            "query": "entity resolution",
-            "limit": 5,
-            "include": "entities,facts,sessions,wiki,memories",
-        },
-    )
+    r = client.get("/knowledge/unified-search", params={"query": "entity resolution", "limit": 5})
     assert r.status_code == 200
     body = r.json()
     assert body["embedding_available"] is True

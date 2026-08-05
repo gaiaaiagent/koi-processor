@@ -59,23 +59,6 @@ _VAULT_MIRROR_PATTERNS: list = [
     for p in os.getenv("KOI_VAULT_MIRROR_PATHS", "").split(",")
     if p.strip()
 ]
-# Per-file-origin ownership (KOI_VAULT_OWNER_UPDATE_ACCEPT). When true, a readonly
-# path accepts an incoming UPDATE iff the file's stored origin_node == the event's
-# origin_node — the original author (e.g. the NUC dobby pipeline) updating a note it
-# created. Default OFF: deploying the code is inert until the owner opts in; rollback
-# = unset + restart. FORGET is never accepted this way (Mac stays the durable home).
-_VAULT_OWNER_UPDATE_ACCEPT: bool = os.getenv(
-    "KOI_VAULT_OWNER_UPDATE_ACCEPT", "false"
-).strip().lower() in ("1", "true", "yes", "on")
-# Stub-collapse guard (0 disables): refuse an owner UPDATE whose content is
-# < RATIO * current file size when current size >= MIN_BYTES. base_hash cannot
-# catch a rich->stub regression; this can.
-_VAULT_OWNER_UPDATE_SHRINK_RATIO: float = float(
-    os.getenv("KOI_VAULT_OWNER_UPDATE_SHRINK_RATIO", "0.5") or 0
-)
-_VAULT_OWNER_UPDATE_SHRINK_MIN_BYTES: int = int(
-    os.getenv("KOI_VAULT_OWNER_UPDATE_SHRINK_MIN_BYTES", "512") or 0
-)
 _GLOB_META_RE = re.compile(r"[*?\[]")
 
 
@@ -223,9 +206,6 @@ class SyncMetrics:
     mirror_authorship_change: int = 0
     mirror_forget_rejected_no_state: int = 0
     mirror_forget_rejected_non_owner: int = 0
-    # Per-file-origin ownership (KOI_VAULT_OWNER_UPDATE_ACCEPT)
-    readonly_owner_update_accepted: int = 0
-    readonly_owner_update_shrink_guarded: int = 0
     # Timestamps
     last_scan_started_at: Optional[str] = None
     last_scan_completed_at: Optional[str] = None
@@ -599,10 +579,14 @@ class VaultSyncManager:
                          f"path excluded by config: {relative_path}")
             return
 
-        # Locally-authoritative path guard MOVED inside the write lock (after the
-        # stale-event guard) so it can be origin-aware — see KOI_VAULT_OWNER_UPDATE_ACCEPT.
-        # Non-owner readonly UPDATE/FORGET is still rejected there; those events now run
-        # E2EE-decrypt + dedup first (negligible extra work, correctness unchanged).
+        # Locally-authoritative path guard — reject UPDATE/FORGET from remote peers for
+        # paths this node owns. NEW events are still accepted so peers can create new files.
+        if event_type in ("UPDATE", "FORGET") and _VAULT_READONLY_INCOMING_PATHS:
+            for prefix in _VAULT_READONLY_INCOMING_PATHS:
+                if relative_path.startswith(prefix):
+                    self._reject("path_authoritative_local", rid, source_node, event_id,
+                                 f"incoming {event_type} rejected: {relative_path} is locally authoritative")
+                    return
 
         # Size check
         manifest_bytes = manifest.get("bytes", 0)
@@ -674,41 +658,6 @@ class VaultSyncManager:
                     self._reject("stale_event", rid, source_node, event_id,
                                  f"origin_seq {origin_seq} <= local {local_row['origin_seq']}")
                     return
-
-            # ── PER-FILE-ORIGIN OWNERSHIP (KOI_VAULT_OWNER_UPDATE_ACCEPT) ──
-            # Readonly paths reject incoming UPDATE/FORGET so remote enrichment can't
-            # overwrite files THIS node authored. Exception (flag-gated, UPDATE-only):
-            # accept when the file's stored origin_node == the incoming origin_node — the
-            # peer that ORIGINALLY created the file (its NEW event) updating its own file
-            # (e.g. the NUC dobby pipeline enriching a Meetings/ note it authored). A note
-            # this node authored (origin=self) still rejects any peer-origin UPDATE.
-            if event_type in ("UPDATE", "FORGET") and _VAULT_READONLY_INCOMING_PATHS \
-                    and any(relative_path.startswith(p) for p in _VAULT_READONLY_INCOMING_PATHS):
-                owner_updating_own = (
-                    _VAULT_OWNER_UPDATE_ACCEPT
-                    and event_type == "UPDATE"        # UPDATE-only; FORGET stays rejected
-                    and local_row is not None
-                    and not local_row["is_deleted"]
-                    and local_row["origin_node"] == origin_node
-                )
-                if owner_updating_own and _VAULT_OWNER_UPDATE_SHRINK_RATIO > 0:
-                    # Stub-collapse guard: reject a rich->stub owner UPDATE (base_hash
-                    # cannot catch it — a stub legitimately bases on the prior rich hash).
-                    local_len = local_row["file_size_bytes"] or 0
-                    incoming_len = len(markdown.encode("utf-8"))
-                    if local_len >= _VAULT_OWNER_UPDATE_SHRINK_MIN_BYTES \
-                            and incoming_len < local_len * _VAULT_OWNER_UPDATE_SHRINK_RATIO:
-                        self._metrics.readonly_owner_update_shrink_guarded += 1
-                        self._reject("path_authoritative_local", rid, source_node, event_id,
-                                     f"owner UPDATE to {relative_path} shrinks "
-                                     f"{local_len}->{incoming_len} bytes; refusing stub-collapse")
-                        return
-                if not owner_updating_own:
-                    self._reject("path_authoritative_local", rid, source_node, event_id,
-                                 f"incoming {event_type} rejected: {relative_path} is locally authoritative")
-                    return
-                self._metrics.readonly_owner_update_accepted += 1
-            # ── end per-file-origin ownership ──
 
             if event_type == "FORGET":
                 await self._apply_forget(

@@ -1,0 +1,227 @@
+feeds:
+  - url: https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_engineering.xml
+    slug: anthropic
+    domain: ai
+    tags: [anthropic, models]
+    enabled: true
+  - url: https://lilianweng.github.io/index.xml
+    slug: lilianweng
+    domain: ai
+    tags: [llm, agents, research]
+    enabled: true
+  - url: https://simonwillison.net/atom/everything/
+    slug: simonwillison
+    domain: ai
+    tags: [llm, tooling]
+    enabled: true
+  - url: https://magazine.sebastianraschka.com/feed
+    slug: sebastianraschka
+    domain: ai
+    tags: [llm, research]
+    enabled: true
+  - url: https://blog.p2pfoundation.net/feed
+    slug: p2pfoundation
+    domain: commons
+    tags: [commons, p2p]
+    enabled: false  # 2026-04-30: 403 Cloudflare bot-block; replaced by shareable below
+  - url: https://www.shareable.net/feed/
+    slug: shareable
+    domain: commons
+    tags: [commons, sharing-economy]
+    enabled: true
+  - url: https://www.resilience.org/feed/
+    slug: resilience
+    domain: commons
+    tags: [bioregionalism, resilience]
+    enabled: true
+  - url: https://www.henrikkarlsson.xyz/feed
+    slug: hraundalur
+    domain: commons
+    tags: [epistemics, scenius]
+    enabled: true
+  - url: https://refidao.substack.com/feed
+    slug: refidao
+    domain: regen
+    tags: [refi, regen]
+    enabled: true
+  - url: https://kolektivohub.substack.com/feed
+    slug: kolektivo
+    domain: regen
+    tags: [bioregionalism, regen]
+    enabled: false  # 2026-04-30: 404 (Substack URL changed); replaced by celo below (Kolektivo built on Celo, semantic continuity)
+  - url: https://blog.celo.org/feed
+    slug: celo
+    domain: regen
+    tags: [refi, layer2, regen]
+    enabled: true
+  - url: https://medium.com/feed/@designforsustainability
+    slug: danielchristianwahl
+    domain: regen
+    tags: [regeneration, bioregionalism]
+    enabled: true
+  - url: https://www.latent.space/feed
+    slug: latentspace
+    domain: engineering
+    tags: [agents, engineering]
+    enabled: true
+  - url: https://hamel.dev/index.xml
+    slug: hamel
+    domain: engineering
+    tags: [evals, llmops]
+    enabled: true
+
+  # ─── Phase 1.5 expansion (2026-04-30) — named-author Substacks + AI subdomain feeds ───
+
+  # AI subdomain — model labs / release notes
+  - url: https://github.com/anthropics/claude-code/releases.atom
+    slug: claude-code-releases
+    domain: ai
+    tags: [anthropic, claude-code, releases]
+    enabled: true  # docs.anthropic.com/.../rss.xml 301s to HTML; using GitHub releases atom instead
+
+  # Anthropic content (no direct RSS on anthropic.com / claude.com pages — Olshansk maintains scraped mirrors)
+  - url: https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml
+    slug: anthropic-research
+    domain: ai
+    tags: [anthropic, research, papers]
+    enabled: true
+  - url: https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml
+    slug: anthropic-news
+    domain: ai
+    tags: [anthropic, news, economic-futures]
+    enabled: true
+  - url: https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_red.xml
+    slug: anthropic-red
+    domain: ai
+    tags: [anthropic, red-team, safety]
+    enabled: true
+  - url: https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_claude.xml
+    slug: claude-blog
+    domain: ai
+    tags: [anthropic, claude, product]
+    enabled: true
+
+  # Deep learning + geometric deep learning (2026-05-02 expansion)
+  - url: https://medium.com/feed/@michael-bronstein
+    slug: bronstein
+    domain: ai
+    tags: [gdl, gnn, geometric-deep-learning, bronstein]
+    enabled: true
+  - url: https://petar-v.com/feed
+    slug: petar-velickovic
+    domain: ai
+    tags: [gdl, gnn, deepmind, velickovic]
+    enabled: true
+  - url: https://distill.pub/rss.xml
+    slug: distill
+    domain: ai
+    tags: [dl, explanations, canonical]
+    enabled: true
+  - url: https://thegradient.pub/rss/
+    slug: thegradient
+    domain: ai
+    tags: [dl, ai-research, publication]
+    enabled: true
+  - url: http://export.arxiv.org/api/query?search_query=cat:cs.LG+AND+abs:%22sheaf%22&max_results=20&sortBy=submittedDate&sortOrder=descending
+    slug: arxiv-sheaf
+    domain: ai
+    tags: [arxiv, sheaf-neural-network, sheaf-diffusion, gdl]
+    enabled: true
+  - url: http://export.arxiv.org/api/query?search_query=cat:cs.LG+AND+abs:%22heterophilic%22&max_results=20&sortBy=submittedDate&sortOrder=descending
+    slug: arxiv-heterophilic
+    domain: ai
+    tags: [arxiv, heterophilic, graph-learning, gdl]
+    enabled: true
+  - url: http://export.arxiv.org/api/query?search_query=cat:cs.LG+AND+abs:%22graph+neural%22&max_results=20&sortBy=submittedDate&sortOrder=descending
+    slug: arxiv-gnn
+    domain: ai
+    tags: [arxiv, graph-neural-networks, gnn, gdl]
+    enabled: true
+  - url: https://openai.com/blog/rss.xml
+    slug: openai
+    domain: ai
+    tags: [openai, models]
+    enabled: true
+  - url: https://huggingface.co/blog/feed.xml
+    slug: huggingface
+    domain: ai
+    tags: [open-models, ml]
+    enabled: true
+
+  # AI commentary / policy
+  - url: https://importai.substack.com/feed
+    slug: importai
+    domain: ai
+    tags: [policy, frontier, jack-clark]
+    enabled: true
+  - url: https://thezvi.substack.com/feed
+    slug: zvi
+    domain: ai
+    tags: [ai-safety, commentary]
+    enabled: true
+  - url: https://natesnewsletter.substack.com/feed
+    slug: natesnewsletter
+    domain: ai
+    tags: [agents, nate-jones, paid]
+    enabled: true
+  - url: https://news.smol.ai/rss.xml
+    slug: ainews-smol
+    domain: ai
+    tags: [daily, swyx, aggregator]
+    enabled: true
+
+  # AI engineering / agent infra
+  - url: https://github.com/langchain-ai/langchain/releases.atom
+    slug: langchain-releases
+    domain: ai
+    tags: [agents, llmops, releases]
+    enabled: true  # blog.langchain.com/rss 301s to HTML; using GitHub releases atom instead
+  - url: https://www.cognition.ai/blog?format=rss
+    slug: cognition
+    domain: ai
+    tags: [agents, devin]
+    enabled: false  # 2026-04-30: returns HTML not RSS; no public RSS endpoint found
+  - url: https://benkuhn.net/rss.xml
+    slug: benkuhn
+    domain: ai
+    tags: [anthropic, engineering]
+    enabled: true
+
+  # Commons / civilizational / meta-crisis (named authors from existing reading)
+  - url: https://indyjohar.substack.com/feed
+    slug: indyjohar
+    domain: commons
+    tags: [dark-matter-labs, civic-design, institutional-form]
+    enabled: true
+  - url: https://www.consilienceproject.org/feed
+    slug: consilience
+    domain: commons
+    tags: [meta-crisis, schmachtenberger, civilizational]
+    enabled: true
+  - url: https://medium.com/feed/@danielschmachtenberger
+    slug: schmachtenberger
+    domain: commons
+    tags: [meta-crisis, civilization-emerging]
+    enabled: true
+  - url: https://natehagens.substack.com/feed
+    slug: greatsimplification
+    domain: commons
+    tags: [energy, civilization, hagens]
+    enabled: true
+  - url: https://perspecteeva.substack.com/feed
+    slug: perspectiva
+    domain: commons
+    tags: [meta-crisis, philosophy]
+    enabled: true
+  - url: https://subconscious.substack.com/feed
+    slug: subconscious
+    domain: commons
+    tags: [protocol-design, brander, computing]
+    enabled: true
+
+  # Regen / ReFi (named author from essay-trilogy mining)
+  - url: https://willruddick.substack.com/feed
+    slug: willruddick
+    domain: regen
+    tags: [grassroots-economics, commitment-pools, ruddick]
+    enabled: true

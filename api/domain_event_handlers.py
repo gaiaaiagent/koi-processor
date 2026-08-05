@@ -27,7 +27,6 @@ from typing import Any, Dict, Mapping, Optional
 import asyncpg
 
 from api.utils import parse_ts
-from api.resolution_primitives import normalize_alias_list
 
 logger = logging.getLogger(__name__)
 
@@ -117,27 +116,97 @@ async def _handle_forget(conn, domain: str, rid: str, payload: Dict[str, Any]):
     logger.info(f"domain.forget domain={domain} rid={rid_val}")
 
 
+# Entity-domain embedding columns. Entity events do NOT carry a vector today
+# (entity events run ~22k/30d at ~241 bytes; a 3072-float vector is ~60 kB,
+# which would take this domain from ~5 MB to ~1.3 GB/month). This set exists so
+# an inbound event that DOES carry one is honoured rather than silently dropped.
+_ENTITY_EMBEDDING_COLS = frozenset({"embedding", "embedding_3072"})
+
+
 async def _apply_entity(conn, rid: str, event_type: str, payload: Dict[str, Any], source_node: str):
-    """UPSERT entity into entity_registry."""
+    """UPSERT entity into entity_registry with NON-DESTRUCTIVE merge semantics.
+
+    A peer's copy of an entity is frequently *thinner* than ours — until
+    2026-08-03 both emit sites sent hardcoded ``aliases: []`` / ``metadata: {}``,
+    so an inbound event did not merely fail to teach us anything, it actively
+    ERASED locally-computed values via ``SET metadata = EXCLUDED.metadata``.
+    Measured at the time of the fix: 964 rows on THIS node had
+    ``first_seen_rid IS NOT NULL`` (proof store_new_entity ran locally and wrote
+    a populated metadata JSON) yet held ``metadata = '{}'``. No audit table
+    exists, so those are unrecoverable and that count is a lower bound.
+
+    NOTE (NUC-local drift): this tree has no ``normalize_alias_list`` — a prior
+    session removed the import because api/resolution_primitives.py here defines
+    only ``normalize_alias``. Alias handling stays pass-through, matching what
+    this node already does. Consequence: the MacBook lowercases aliases and this
+    node does not, so a union can accumulate both cases until the trees converge.
+    """
+    _assert_embedding_format(payload, rid)
+
     fuseki_uri = payload.get("fuseki_uri", rid)
     entity_text = payload.get("entity_text", "")
     entity_type = payload.get("entity_type", "")
     normalized_text = payload.get("normalized_text", entity_text.lower().strip())
-    aliases = normalize_alias_list(payload.get("aliases", []))
-    metadata = payload.get("metadata", {})
+    aliases = payload.get("aliases", [])
 
-    await conn.execute("""
-        INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text, aliases, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-        ON CONFLICT (fuseki_uri) DO UPDATE SET
-            entity_text = EXCLUDED.entity_text,
-            entity_type = EXCLUDED.entity_type,
-            normalized_text = EXCLUDED.normalized_text,
-            aliases = EXCLUDED.aliases,
-            metadata = EXCLUDED.metadata,
-            updated_at = NOW()
-    """, fuseki_uri, entity_text, entity_type, normalized_text,
-        aliases or [], json.dumps(metadata) if isinstance(metadata, dict) else metadata)
+    metadata = payload.get("metadata", {})
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    description = payload.get("description") or None
+    phonetic_code = payload.get("phonetic_code") or None
+
+    emb_col = payload.get("embedding_column")
+    emb_literal = None
+    if emb_col in _ENTITY_EMBEDDING_COLS:
+        emb_literal = _format_vector(payload.get("embedding_value"))
+    if emb_literal is None:
+        emb_col = None
+
+    cols = [
+        "fuseki_uri", "entity_text", "entity_type", "normalized_text",
+        "aliases", "metadata", "description", "phonetic_code",
+    ]
+    casts = ["", "", "", "", "", "::jsonb", "", ""]
+    args = [
+        fuseki_uri, entity_text, entity_type, normalized_text,
+        aliases or [], json.dumps(metadata), description, phonetic_code,
+    ]
+    if emb_col:
+        cols.append(emb_col)
+        casts.append("::vector")
+        args.append(emb_literal)
+
+    placeholders = ", ".join(f"${i + 1}{casts[i]}" for i in range(len(cols)))
+
+    set_clauses = [
+        "entity_text = EXCLUDED.entity_text",
+        "entity_type = EXCLUDED.entity_type",
+        "normalized_text = EXCLUDED.normalized_text",
+        "aliases = (SELECT COALESCE(array_agg(DISTINCT a), '{}'::text[]) "
+        "FROM unnest(COALESCE(entity_registry.aliases, '{}'::text[]) "
+        "|| COALESCE(EXCLUDED.aliases, '{}'::text[])) AS a)",
+        "metadata = COALESCE(entity_registry.metadata, '{}'::jsonb) "
+        "|| COALESCE(EXCLUDED.metadata, '{}'::jsonb)",
+        "description = COALESCE(NULLIF(EXCLUDED.description, ''), entity_registry.description)",
+        "phonetic_code = COALESCE(entity_registry.phonetic_code, EXCLUDED.phonetic_code)",
+        "updated_at = NOW()",
+    ]
+    if emb_col:
+        set_clauses.append(
+            f"{emb_col} = COALESCE(entity_registry.{emb_col}, EXCLUDED.{emb_col})"
+        )
+
+    await conn.execute(
+        f"INSERT INTO entity_registry ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT (fuseki_uri) DO UPDATE SET {', '.join(set_clauses)}",
+        *args,
+    )
 
     # Upsert relationships if included
     relationships = payload.get("relationships", [])

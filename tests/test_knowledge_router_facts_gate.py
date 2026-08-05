@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sys
 from pathlib import Path
@@ -80,19 +79,6 @@ class _RouterConn:
         normalized = self._check_forbidden(query)
         self.execute_calls.append((normalized, args))
         return "OK"
-
-
-class _SlowSessionProbeConn(_RouterConn):
-    async def fetchval(self, query, *args):
-        normalized = self._check_forbidden(query)
-        self.fetchval_calls.append((normalized, args))
-        if "table_name = 'session_chunks'" in normalized:
-            await asyncio.sleep(0.05)
-            return True
-        for needle, value in self.fetchval_values.items():
-            if needle in normalized:
-                return value
-        return None
 
 
 def _build_app(
@@ -236,54 +222,6 @@ async def test_unified_search_skips_facts_when_surface_unavailable():
     body = response.json()
     assert body["facts"] == []
     assert body["results"] == []
-
-
-@pytest.mark.anyio
-async def test_unified_search_times_out_slow_sessions_surface(monkeypatch):
-    from api.routers import knowledge_router
-
-    async def query_embed(_query):
-        return [0.1, 0.2, 0.3]
-
-    monkeypatch.setattr(
-        knowledge_router,
-        "UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS",
-        0.01,
-    )
-    conn = _SlowSessionProbeConn(
-        fetch_rows={
-            "FROM knowledge_facts f": [
-                {
-                    "id": "fact-1",
-                    "subject_uri": "entity:test-subject",
-                    "predicate": "SUPPORTS",
-                    "object_uri": "entity:test-object",
-                    "fact_text": "Test subject supports test object.",
-                    "episode_name": "Episode One",
-                    "score": 0.91,
-                }
-            ]
-        }
-    )
-    app = _build_app(
-        conn,
-        facts_surface_available=True,
-        query_embed=query_embed,
-    )
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/knowledge/unified-search",
-            params={"query": "supports", "include": "facts,sessions", "limit": 5},
-        )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["facts"]
-    assert body["results"][0]["source"] == "fact"
-    assert body["surface_errors"] == {"sessions": "timeout"}
-    assert all(result["source"] != "session" for result in body["results"])
 
 
 @pytest.mark.anyio
