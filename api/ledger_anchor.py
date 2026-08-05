@@ -7,7 +7,9 @@ Graph IRI generation (Phase 3): JSON-LD → URDNA2015 canonicalization → BLAKE
 → base58check → regen:*.rdf IRI. Mirrors regen-server's generateIRIFromGraph.
 """
 
+import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -349,6 +351,39 @@ def derive_ledger_iri(content_hash: str) -> str:
                 pass
 
 
+class _CompletedProc:
+    """Mirror of subprocess.CompletedProcess so call sites need no reshaping."""
+    __slots__ = ("returncode", "stdout", "stderr")
+
+    def __init__(self, returncode: int, stdout: str, stderr: str):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+async def _run_async(cmd, *, timeout: float):
+    """Non-blocking `subprocess.run(capture_output=True, text=True, timeout=…)`.
+
+    #15: broadcast_anchor / broadcast_attest are `async def` but called
+    subprocess.run() plus time.sleep(5) in a 6-attempt poll loop — blocking the ENTIRE
+    event loop for up to 30s per anchor. On the shared :8351 service that stalls every
+    other request, which is the same class of defect as the sync Anthropic SDK call
+    fixed in #36 (claim_extractor).
+
+    Raises subprocess.TimeoutExpired on timeout so existing except-clauses still match.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    return _CompletedProc(proc.returncode or 0,
+                          out.decode(errors="replace"), err.decode(errors="replace"))
+
+
 async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
     """Broadcast content hash to Regen Ledger via MsgAnchor using CLI.
 
@@ -367,7 +402,7 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
     logger.info(f"ledger_anchor.broadcast rid={claim_rid} iri={iri}")
 
     # 2. Broadcast MsgAnchor
-    tx_result = subprocess.run(
+    tx_result = await _run_async(
         [regen_bin, "tx", "data", "anchor", iri,
          "--from", REGEN_KEY_NAME,
          "--chain-id", REGEN_CHAIN_ID,
@@ -376,7 +411,7 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
          "--fees", "5000uregen",
          "--output", "json",
          "--yes"],
-        capture_output=True, text=True, timeout=30,
+        timeout=30,
     )
 
     if tx_result.returncode != 0:
@@ -412,12 +447,12 @@ async def broadcast_anchor(claim_rid: str, content_hash: str) -> dict:
     # 3. Poll for tx confirmation (up to 30s)
     ledger_timestamp = None
     for attempt in range(6):
-        time.sleep(5)
-        query_result = subprocess.run(
+        await asyncio.sleep(5)
+        query_result = await _run_async(
             [regen_bin, "query", "tx", tx_hash,
              "--node", REGEN_RPC_URL,
              "--output", "json"],
-            capture_output=True, text=True, timeout=15,
+            timeout=15,
         )
         if query_result.returncode == 0:
             query_data = json.loads(query_result.stdout)
@@ -474,7 +509,7 @@ async def broadcast_attest(attestation_rid: str, graph_iri: str,
 
     logger.info(f"ledger_anchor.broadcast_attest att={attestation_rid} iri={graph_iri} signer={signer}")
 
-    tx_result = subprocess.run(
+    tx_result = await _run_async(
         [regen_bin, "tx", "data", "attest", graph_iri,
          "--from", signer,
          "--chain-id", REGEN_CHAIN_ID,
@@ -483,7 +518,7 @@ async def broadcast_attest(attestation_rid: str, graph_iri: str,
          "--fees", "5000uregen",
          "--output", "json",
          "--yes"],
-        capture_output=True, text=True, timeout=30,
+        timeout=30,
     )
 
     if tx_result.returncode != 0:
@@ -516,12 +551,12 @@ async def broadcast_attest(attestation_rid: str, graph_iri: str,
     # Poll for tx confirmation (up to 30s)
     ledger_timestamp = None
     for attempt in range(6):
-        time.sleep(5)
-        query_result = subprocess.run(
+        await asyncio.sleep(5)
+        query_result = await _run_async(
             [regen_bin, "query", "tx", tx_hash,
              "--node", REGEN_RPC_URL,
              "--output", "json"],
-            capture_output=True, text=True, timeout=15,
+            timeout=15,
         )
         if query_result.returncode == 0:
             query_data = json.loads(query_result.stdout)
