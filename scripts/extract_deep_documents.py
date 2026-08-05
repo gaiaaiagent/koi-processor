@@ -330,14 +330,61 @@ async def _call_openai(prompt: str, http: httpx.AsyncClient, *,
     raise ExtractionError("extract_http_error", f"openai api failed after {max_retries} attempts: {last}")
 
 
-async def _extract_window(prompt: str, http: httpx.AsyncClient, *, model: str,
-                          temperature: float = 0.0) -> str:
-    """Dispatch a window extraction to the configured transport (openai / api / subscription CLI)."""
-    if DOC_EXTRACTOR_TRANSPORT == "openai":
+# Transport fallback chain (#34). A TRANSPORT-level failure — the CLI hung past its
+# timeout, the provider 5xx'd, the key is missing — is precisely when you want the next
+# transport, not an aborted run. #34 describes a fallback loop that excluded
+# `extract_timeout`; that loop no longer exists (there was NO fallback at all), so this
+# implements the behaviour the issue actually asked for.
+#
+# Empty by default: single-transport behaviour is unchanged unless an operator opts in,
+# because the transports are not interchangeable in cost or quality (claude_p is the $0
+# subscription, `api` bills per token, `openai` may point at a different model entirely).
+#   e.g. DOC_EXTRACTOR_TRANSPORT_FALLBACK=openai
+DOC_EXTRACTOR_TRANSPORT_FALLBACK = [
+    x.strip().lower() for x in os.getenv("DOC_EXTRACTOR_TRANSPORT_FALLBACK", "").split(",")
+    if x.strip()
+]
+
+# Reasons that mean "this TRANSPORT is unusable right now" — worth trying the next one.
+# Deliberately EXCLUDES the content-level failures (extract_parse_error, empty_completion,
+# extract_truncated): those mean the model answered and the answer was wrong, so another
+# transport would likely answer wrong too, and the repair loop + per-window dead-lettering
+# already handle them. Including them would turn one bad window into N provider calls.
+TRANSPORT_FALLBACK_REASONS = {
+    "claude_p_error",     # includes the timeout path — the exact case #34 was filed for
+    "extract_http_error",
+    "no_api_key",
+    "no_claude_bin",
+}
+
+
+async def _dispatch_transport(name: str, prompt: str, http: httpx.AsyncClient, *,
+                              model: str, temperature: float) -> str:
+    if name == "openai":
         return await _call_openai(prompt, http, temperature=temperature)
-    if DOC_EXTRACTOR_TRANSPORT == "api":
+    if name == "api":
         return await _call_anthropic(prompt, http, model=model)
     return await _call_claude_p(prompt, model=model)
+
+
+async def _extract_window(prompt: str, http: httpx.AsyncClient, *, model: str,
+                          temperature: float = 0.0) -> str:
+    """Dispatch a window extraction, degrading through the configured fallback chain."""
+    chain = [DOC_EXTRACTOR_TRANSPORT] + [t for t in DOC_EXTRACTOR_TRANSPORT_FALLBACK
+                                         if t != DOC_EXTRACTOR_TRANSPORT]
+    last_err: Optional[ExtractionError] = None
+    for i, name in enumerate(chain):
+        try:
+            return await _dispatch_transport(name, prompt, http, model=model,
+                                             temperature=temperature)
+        except ExtractionError as e:
+            last_err = e
+            if i + 1 >= len(chain) or e.reason not in TRANSPORT_FALLBACK_REASONS:
+                raise
+            logger.warning("transport %r failed (%s) — falling back to %r",
+                           name, e.reason, chain[i + 1])
+    assert last_err is not None
+    raise last_err
 
 
 # How many repair passes to attempt when the model returns malformed / schema-invalid
@@ -977,6 +1024,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
 
             # Plan windows (idempotent); load cached extractions for resume.
             per_window: List[Optional[dict]] = [None] * len(windows)
+            cached_windows = 0
             for w in windows:
                 await conn.execute(
                     """INSERT INTO document_window_extractions
@@ -989,6 +1037,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                     "WHERE document_rid=$1 AND window_index=$2", document_rid, w.index)
                 if cached and cached["status"] in ("extracted", "imported") and cached["raw_json"] and not force:
                     per_window[w.index] = json.loads(cached["raw_json"])
+                    cached_windows += 1
 
             # Extract any window not already cached.
             #
@@ -1048,6 +1097,23 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
 
             # Merge + write facts through /episodes.
             merged = merge_extractions([d for d in per_window if d], windows)
+
+            # POISONED-CACHE GUARD (#33). A resume that extracts NOTHING new because every
+            # window was cache-skipped, and whose cached content yields zero facts AND zero
+            # entities, is not a successful no-op — it is a prior failed pass having left
+            # empty rows behind, and it used to report success with exit 0. Note a single
+            # empty window is perfectly legitimate (a table of contents extracts nothing),
+            # so the guard requires ALL THREE conditions before firing, which is what keeps
+            # it off genuine resumes.
+            newly_extracted = len(windows) - cached_windows - len(windows_failed)
+            if (windows and newly_extracted == 0 and cached_windows > 0
+                    and not merged["facts"] and not merged["entities"]):
+                raise ExtractionError(
+                    "cache_poisoned",
+                    f"resume skipped all {cached_windows} window(s) from cache and they "
+                    f"contain zero facts and zero entities — a previous pass cached empty "
+                    f"results. Re-run with --force to re-extract "
+                    f"(document_rid={document_rid})")
             summary = next((d["document"].get("summary") for d in per_window if d and d.get("document")), "")
             payload = facts_to_episode_payload(merged, name=doc_title, summary=summary,
                                                source_document=source_document, group_id=group_id)
