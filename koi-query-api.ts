@@ -94,6 +94,41 @@ async function requireInternalOrSessionAuth(req: any, res: any, next: () => void
   return res.status(401).json(createErrorEnvelope(requestId, koiError));
 }
 
+/**
+ * Optional-auth middleware: same credential recognition as
+ * requireInternalOrSessionAuth, but anonymous requests pass through instead
+ * of 401ing. Downstream handlers gate per-document via is_private
+ * (public docs serve to anyone; private docs need req.isAuthenticated).
+ *
+ * Internal key auth does NOT set isAuthenticated — private docs require a
+ * session token. Invalid/expired Bearer tokens are treated as anonymous.
+ */
+async function optionalSessionAuth(req: any, res: any, next: () => void) {
+  const requestId = generateRequestId();
+  res.setHeader('X-Request-ID', requestId);
+
+  const internalKey = req.headers['x-internal-api-key'];
+  if (internalKey && KOI_INTERNAL_API_KEY && internalKey === KOI_INTERNAL_API_KEY) {
+    req.authMethod = 'internal_key';
+    return next();
+  }
+
+  const authHeader = req.headers['authorization'];
+  const sessionToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+  if (sessionToken) {
+    const userEmail = await validateSessionToken(sessionToken);
+    if (userEmail) {
+      req.userEmail = userEmail;
+      req.isAuthenticated = true;
+      req.authMethod = 'session_token';
+      return next();
+    }
+  }
+
+  req.authMethod = 'anonymous';
+  return next();
+}
+
 const app = express();
 const PORT = 8301;
 
@@ -5455,8 +5490,10 @@ const MIN_DIRECT_TEXT_LENGTH = 50;
  * GET /api/koi/document/full
  * Retrieve full document content by RID
  *
- * INTERNAL ONLY: Requires X-Internal-API-Key header
- * Private documents also require valid Bearer token (session token)
+ * Auth is optional: public documents (is_private = false/null) are served to
+ * anonymous callers, matching /query and /entity/documents behavior.
+ * Private documents require a valid Bearer session token (internal API key
+ * alone does NOT unlock private docs).
  *
  * Query parameters:
  *   rid: Document RID (can be base doc or chunk RID)
@@ -5471,7 +5508,7 @@ const MIN_DIRECT_TEXT_LENGTH = 50;
  *     warnings: ["fallback_used", "partial_results"]
  *   }
  */
-app.get('/api/koi/document/full', requireInternalOrSessionAuth, async (req, res) => {
+app.get('/api/koi/document/full', optionalSessionAuth, async (req, res) => {
   const requestId = res.getHeader('X-Request-ID') as string || generateRequestId();
   const startTime = Date.now();
   console.log(`[Document] GET /document/full auth=${req.authMethod}${req.userEmail ? ` user=${req.userEmail}` : ''}`);

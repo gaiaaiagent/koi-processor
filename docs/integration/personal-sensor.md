@@ -14,11 +14,16 @@ Use these source IDs consistently:
 
 - `email-sensor`
 - `claude-sessions-sensor`
+- `substack-corpus-backfill` — Substack corpus (Johar/Ruddick/Bauwens); RID `substack-corpus:<feed_slug>:<post_slug>`. See the "Substack corpus ingestion" section in the repo `CLAUDE.md`.
+- RSS/Atom feed sensor (`rss-<slug>` access sources)
+- `research-paper-sensor` — arXiv/author paper corpus
+- `proton-email-sensor`
 
 Notes:
 
 - Email documents are stored in `koi_memories` with `source_sensor='email-sensor'`.
 - Claude sessions are stored in dedicated `session_ingestion_log`, `session_chunks`, and `session_tool_usage` tables.
+- **Deployment topology:** the personal-KOI sensor launchd jobs (`com.personal-koi.substack-*`, `research-author-sensor`, etc.) run from the dedicated **`~/projects/koi-processor-runtime`** clone pinned to `regen-prod` — NOT the dev checkout. To update sensor code: commit to `regen-prod`, then `git -C ~/projects/koi-processor-runtime pull`. (See DEPLOY TOPOLOGY in the repo `CLAUDE.md`.)
 
 ## Required Migration for Email Metadata
 
