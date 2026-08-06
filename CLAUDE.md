@@ -12,6 +12,22 @@
 > | **`stable`** | **RegenAI public production** (`darren@202.61.196.119`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep this branch clean. |
 > | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. The old `koi-server` worktree was removed when `server/stable→regen-prod` merged. |
 >
+> **CHECKOUT TOPOLOGY — which DIRECTORY serves what (added 2026-08-05).** The table above
+> is about BRANCHES. The dimension that has actually caused incidents is which physical
+> checkout each consumer reads, because several exist and they are NOT interchangeable:
+>
+> | Directory | Role | Rule |
+> |---|---|---|
+> | `~/projects/koi-processor-service` | **SERVES :8351** (uvicorn cwd; `start.sh` `WORKTREE=`) | ⛔ never switch branches here — the live API becomes whatever you leave it on. `start.sh` now REFUSES to serve a non-deployable branch. |
+> | `~/projects/koi-processor-runtime` | **launchd sensor jobs** (incl. chunk-embedder) | ⛔ never switch branches here — a job's script can vanish and it exits 78 silently. |
+> | `~/projects/RegenAI/koi-processor` | shared DEV checkout | sessions switch this freely; assume it moves under you. |
+> | `~/projects/koi-wt-*` | per-topic **worktrees** | ✅ do multi-step work here. `git worktree add ~/projects/koi-wt-<topic> <branch>` |
+>
+> Two incidents from getting this wrong: a branch switch orphaned the `chunk-embedder`
+> LaunchAgent for **two days** (334 chunks written with NO embedding, nothing alerted),
+> and the SERVING checkout was found on a feature branch with a critical fix present only
+> in the running process's memory — the next restart would have silently regressed it.
+>
 > Translation: edits committed on `regen-prod` reach personal-koi + NUC immediately. Only RegenAI public production needs an explicit cherry-pick + push to `stable`, on operator's promotion cadence.
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
