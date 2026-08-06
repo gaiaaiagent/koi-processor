@@ -10,8 +10,11 @@ Part of the unified thorough content-ingestion plan
 
 Reads a document's RAG chunks (koi_memory_chunks, written by ingest_document.py),
 packs them into windows (well under the claude -p char cap), runs the document
-extractor prompt per window via `claude -p` (Sonnet — forced for extraction
-quality), then MERGES entities (type-priority coercion) + facts (dedup) across
+extractor prompt per window (transport + model are BOTH env-tunable — see
+DOC_EXTRACTOR_TRANSPORT / DOC_EXTRACTOR_MODEL below; the old "Sonnet, forced for
+extraction quality" wording was an unexamined default, and Haiku matched
+fact-density at ~3.6x the speed in measurement — issue #37), then MERGES entities
+(type-priority coercion) + facts (dedup) across
 windows deterministically. Facts are written through POST /knowledge/episodes —
 NOT the session raw-INSERT — so they land in fact_embedding_3072 and get 3-tier
 resolution + cosine>0.95 dedup + type-mismatch detection. Type-mismatches are
@@ -45,6 +48,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncpg
 import httpx
 from jsonschema import Draft202012Validator
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from api.provider_http import provider_async_client  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -93,6 +99,11 @@ WINDOW_CHARS = int(os.getenv("DOC_WINDOW_CHARS", "45000"))   # proper window siz
                                                              # so no need to shrink windows to beat a CLI timeout
 WINDOW_OVERLAP_CHUNKS = int(os.getenv("DOC_WINDOW_OVERLAP_CHUNKS", "2"))
 MAX_WINDOWS = int(os.getenv("DOC_MAX_WINDOWS", "12"))        # per-invocation budget cap (plan §Q3)
+# Was the cap CHOSEN by the caller, or is it just the default? A default 12 x 45k = 540k
+# chars, which SILENTLY truncated every book-length source (2026-07-31: the 227-post blog
+# lost 8 of 86 windows and still passed every gate floor). An explicit cap is a real cost
+# guard and is honoured; an unset one now auto-raises instead of quietly dropping the tail.
+MAX_WINDOWS_EXPLICIT = "DOC_MAX_WINDOWS" in os.environ
 # Semantic dedup threshold: the exact-triple sweep misses PARAPHRASES (a re-extraction's
 # fresh phrasings resolve to distinct triples). After it, retract the later of any
 # same-subject + same-predicate fact pair whose fact_text embeddings exceed this cosine
@@ -319,14 +330,61 @@ async def _call_openai(prompt: str, http: httpx.AsyncClient, *,
     raise ExtractionError("extract_http_error", f"openai api failed after {max_retries} attempts: {last}")
 
 
-async def _extract_window(prompt: str, http: httpx.AsyncClient, *, model: str,
-                          temperature: float = 0.0) -> str:
-    """Dispatch a window extraction to the configured transport (openai / api / subscription CLI)."""
-    if DOC_EXTRACTOR_TRANSPORT == "openai":
+# Transport fallback chain (#34). A TRANSPORT-level failure — the CLI hung past its
+# timeout, the provider 5xx'd, the key is missing — is precisely when you want the next
+# transport, not an aborted run. #34 describes a fallback loop that excluded
+# `extract_timeout`; that loop no longer exists (there was NO fallback at all), so this
+# implements the behaviour the issue actually asked for.
+#
+# Empty by default: single-transport behaviour is unchanged unless an operator opts in,
+# because the transports are not interchangeable in cost or quality (claude_p is the $0
+# subscription, `api` bills per token, `openai` may point at a different model entirely).
+#   e.g. DOC_EXTRACTOR_TRANSPORT_FALLBACK=openai
+DOC_EXTRACTOR_TRANSPORT_FALLBACK = [
+    x.strip().lower() for x in os.getenv("DOC_EXTRACTOR_TRANSPORT_FALLBACK", "").split(",")
+    if x.strip()
+]
+
+# Reasons that mean "this TRANSPORT is unusable right now" — worth trying the next one.
+# Deliberately EXCLUDES the content-level failures (extract_parse_error, empty_completion,
+# extract_truncated): those mean the model answered and the answer was wrong, so another
+# transport would likely answer wrong too, and the repair loop + per-window dead-lettering
+# already handle them. Including them would turn one bad window into N provider calls.
+TRANSPORT_FALLBACK_REASONS = {
+    "claude_p_error",     # includes the timeout path — the exact case #34 was filed for
+    "extract_http_error",
+    "no_api_key",
+    "no_claude_bin",
+}
+
+
+async def _dispatch_transport(name: str, prompt: str, http: httpx.AsyncClient, *,
+                              model: str, temperature: float) -> str:
+    if name == "openai":
         return await _call_openai(prompt, http, temperature=temperature)
-    if DOC_EXTRACTOR_TRANSPORT == "api":
+    if name == "api":
         return await _call_anthropic(prompt, http, model=model)
     return await _call_claude_p(prompt, model=model)
+
+
+async def _extract_window(prompt: str, http: httpx.AsyncClient, *, model: str,
+                          temperature: float = 0.0) -> str:
+    """Dispatch a window extraction, degrading through the configured fallback chain."""
+    chain = [DOC_EXTRACTOR_TRANSPORT] + [t for t in DOC_EXTRACTOR_TRANSPORT_FALLBACK
+                                         if t != DOC_EXTRACTOR_TRANSPORT]
+    last_err: Optional[ExtractionError] = None
+    for i, name in enumerate(chain):
+        try:
+            return await _dispatch_transport(name, prompt, http, model=model,
+                                             temperature=temperature)
+        except ExtractionError as e:
+            last_err = e
+            if i + 1 >= len(chain) or e.reason not in TRANSPORT_FALLBACK_REASONS:
+                raise
+            logger.warning("transport %r failed (%s) — falling back to %r",
+                           name, e.reason, chain[i + 1])
+    assert last_err is not None
+    raise last_err
 
 
 # How many repair passes to attempt when the model returns malformed / schema-invalid
@@ -339,17 +397,27 @@ DOC_EXTRACTOR_REPAIR_PASSES = int(os.getenv("DOC_EXTRACTOR_REPAIR_PASSES", "2"))
 
 async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema: dict,
                                    *, model: str) -> dict:
-    """Extract one window and parse+validate it, with a repair loop for the free
-    OpenAI-compatible transport. On a parse/schema failure, re-ask the model with the
-    broken output and the exact validator error, nudging temperature up each pass so
-    the retry isn't identical. api / claude_p keep single-shot behaviour (they rarely
-    emit invalid JSON, and re-prompting claude -p is slow)."""
+    """Extract one window and parse+validate it, with a repair loop on EVERY transport.
+
+    On a parse/schema failure, re-ask the model with the broken output and the exact
+    validator error, nudging temperature up each pass so the retry isn't identical.
+    Set DOC_EXTRACTOR_REPAIR_PASSES=0 for single-shot behaviour.
+
+    If repair is still exhausted, the caller dead-letters this WINDOW and continues over
+    the rest of the document (#40) — a bad window no longer costs the whole book."""
     raw = await _extract_window(prompt, http, model=model)
     try:
         return parse_and_validate(raw, schema)
     except ExtractionError as first_err:
         repairable = first_err.reason in ("extract_parse_error", "empty_completion")
-        if DOC_EXTRACTOR_TRANSPORT != "openai" or not repairable or DOC_EXTRACTOR_REPAIR_PASSES <= 0:
+        # #40: the repair loop used to be gated to the 'openai' transport, on the reasoning
+        # that api/claude_p "rarely emit invalid JSON" and re-prompting claude -p is slow.
+        # Measured otherwise: on the Kurtz corpus the DEFAULT claude_p transport hit four
+        # separate schema failures, each of which discarded a whole document (30-50 min of
+        # extraction) because it had no repair path at all. One extra ~2 min repair call is
+        # obviously cheaper than that. Repair now runs on every transport; set
+        # DOC_EXTRACTOR_REPAIR_PASSES=0 to restore single-shot behaviour.
+        if not repairable or DOC_EXTRACTOR_REPAIR_PASSES <= 0:
             raise
         last_err = first_err
         for i in range(DOC_EXTRACTOR_REPAIR_PASSES):
@@ -395,6 +463,24 @@ def parse_and_validate(raw: str, schema: dict) -> dict:
                                  if x and str(x).strip())
                 if synth:
                     f["fact_text"] = synth
+    # Same spirit as the fact_text repair above. `chunk_range` must be EXACTLY two ints —
+    # the cross-window merge indexes cr[0] and cr[1] — but when a fact's evidence sits in a
+    # single chunk the extractor reasonably answers `[990]`, and that one slip discarded a
+    # whole document (2026-07-31: the 227-post blog died at window 78 of 86 on
+    # `['facts', 2, 'chunk_range']: [990] is too short`). Normalise BEFORE validating so the
+    # len==2 invariant the merge relies on stays enforced, rather than relaxing minItems
+    # (which would turn a clean validation error into an IndexError downstream).
+    for _key in ("facts", "discourse"):
+        if isinstance(data.get(_key), list):
+            for _item in data[_key]:
+                if not isinstance(_item, dict):
+                    continue
+                _cr = _item.get("chunk_range")
+                if isinstance(_cr, list) and all(isinstance(n, int) for n in _cr):
+                    if len(_cr) == 1:
+                        _item["chunk_range"] = [_cr[0], _cr[0]]
+                    elif len(_cr) > 2:
+                        _item["chunk_range"] = [min(_cr), max(_cr)]
     errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda e: list(e.path))
     if errors:
         msgs = [f"{list(e.path)}: {e.message}" for e in errors[:5]]
@@ -637,9 +723,90 @@ async def post_episode(http: httpx.AsyncClient, payload: dict) -> dict:
     headers = {}
     if KOI_EPISODES_SERVICE_TOKEN:
         headers["Authorization"] = f"Bearer {KOI_EPISODES_SERVICE_TOKEN}"
-    r = await http.post(f"{KOI_BASE_URL}/knowledge/episodes", json=payload, headers=headers, timeout=180.0)
+    # 180s was hardcoded and is a hard SCALE CEILING: a book-length document merges into a
+    # single episode (WWS 4th edition = 296 entities + 299 facts), and 3-tier entity
+    # resolution with embeddings for that many entities exceeds 180s. The client then
+    # raises ReadTimeout and the whole ingest aborts AFTER all windows extracted — while
+    # uvicorn keeps working server-side, leaving a partially-written episode. Env-tunable,
+    # default unchanged at 180 so nothing else shifts behaviour.
+    # (Added 2026-07-31 during the Kurtz corpus drain — separate from the uncommitted
+    # transport work already in this file.)
+    _ep_timeout = float(os.getenv("DOC_EPISODE_TIMEOUT", "180"))
+    r = await http.post(f"{KOI_BASE_URL}/knowledge/episodes", json=payload, headers=headers,
+                        timeout=_ep_timeout)
     r.raise_for_status()
     return r.json()
+
+
+# Episode request-size cap (#41). `EpisodeCreateRequest.facts` has no max_items and the
+# write path has no chunking anywhere, so request duration scaled with DOCUMENT size,
+# unbounded: a book merges into ONE call (WWS 4th edition 296 entities/299 facts; the
+# blog 1,502/1,323). Two coupled failures followed. (a) The request outran the client
+# timeout. (b) Worse, a client disconnect does NOT cancel the server request —
+# create_episode runs to completion and COMMITS — so the client's retry then lock-waited
+# on the ORIGINAL request's own uncommitted tuples, blew asyncpg's 60s per-statement
+# command_timeout, and surfaced as a bare TimeoutError + HTTP 500. A request colliding
+# with itself.
+#
+# Batching converts request duration from a function of document size (unbounded) into a
+# function of batch size (bounded, tunable). Batches share (source_document, group_id), and
+# the server's episode-reuse path keys on exactly that pair (knowledge_router ~line 813),
+# so they collapse into ONE episode — same episode_id, so the post-episode dedup sweeps
+# (which key on episode_id) still see the whole document and now also catch CROSS-BATCH
+# duplicates that a single mega-request would have merged internally.
+#
+# ATOMICITY TRADE, stated plainly: P4's "every write commits together or not at all"
+# narrows from per-DOCUMENT to per-BATCH. Acceptable because it still holds for every
+# individual request; resume state lives in document_window_extractions, so a failure
+# costs a re-POST and never a re-extraction; episode reuse plus the dedup sweeps make a
+# re-POST convergent; and deep_extracted_at is only set after the LAST batch, so a
+# partially-written document is retried rather than marked done. The status quo was
+# strictly worse — the retry collision above already produced 489 facts from a ~299-fact
+# payload.
+DOC_EPISODE_BATCH_SIZE = int(os.getenv("DOC_EPISODE_BATCH_SIZE", "100"))
+
+
+async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
+    """POST an episode, splitting oversized fact lists into sequential same-episode calls.
+
+    Returns one aggregated response shaped like a single post_episode() result.
+    A payload at or under the cap takes the single-POST path, byte-identical to before;
+    set DOC_EPISODE_BATCH_SIZE=0 to force that path always.
+    """
+    facts = payload.get("facts") or []
+    if DOC_EPISODE_BATCH_SIZE <= 0 or len(facts) <= DOC_EPISODE_BATCH_SIZE:
+        return await post_episode(http, payload)
+
+    n = DOC_EPISODE_BATCH_SIZE
+    chunks = [facts[i:i + n] for i in range(0, len(facts), n)]
+    logger.info("episode: %d facts > cap %d → %d sequential batches sharing one episode",
+                len(facts), n, len(chunks))
+
+    agg = {"facts_created": 0, "facts_skipped": 0, "facts_null_embed": 0,
+           "entities_created": 0, "entities_resolved": 0}
+    mismatches: List[dict] = []
+    episode_id = None
+    for i, batch in enumerate(chunks):
+        sub = {**payload, "facts": batch}
+        ep = await post_episode(http, sub)
+        for k in agg:
+            agg[k] += int(ep.get(k) or 0)
+        mismatches.extend(ep.get("type_mismatches") or [])
+        eid = ep.get("episode_id")
+        if episode_id is None:
+            episode_id = eid
+        elif eid and eid != episode_id:
+            # The whole design rests on episode reuse collapsing these. If it did not,
+            # the document is now split across episodes and the dedup sweeps (which key on
+            # a single episode_id) would silently only clean the first one. Fail loud.
+            raise ExtractionError(
+                "episode_split",
+                f"batch {i + 1}/{len(chunks)} landed in episode {eid}, not {episode_id} — "
+                f"episode reuse by (source_document, group_id) did not hold; refusing to "
+                f"continue with a document split across episodes")
+        logger.info("  episode batch %d/%d: %d facts (created=%s skipped=%s)",
+                    i + 1, len(chunks), len(batch), ep.get("facts_created"), ep.get("facts_skipped"))
+    return {**agg, "episode_id": episode_id, "type_mismatches": mismatches}
 
 
 async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: str, tm: dict) -> None:
@@ -669,6 +836,126 @@ async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: s
 
 # ── Orchestration ──────────────────────────────────────────────────────────────────
 
+# ── Deep-extract lease: liveness + identity around the per-document advisory lock (#35) ──
+# The advisory lock is still the mutex. What it cannot express is "is the holder ALIVE or
+# WEDGED": a process that hangs rather than crashes keeps its session-level lock forever
+# (the `finally` never runs), and the contended caller just gets `skipped_locked`, which
+# naive callers read as "nothing to do". These helpers add a heartbeat + holder identity
+# so contention is diagnosable and a reclaim can be identity-checked.
+#
+# NOTE the GLOBAL lock #35 describes no longer exists — only `deep-extract-doc:<rid>` is
+# taken, so distinct documents already extract concurrently (verified 2026-08-05). Scope
+# of a wedged holder is one document, not the fleet.
+DOC_EXTRACT_LEASE_TTL = float(os.getenv("DOC_EXTRACT_LEASE_TTL", "300"))
+DOC_EXTRACT_HEARTBEAT_INTERVAL = float(os.getenv("DOC_EXTRACT_HEARTBEAT_INTERVAL", "30"))
+
+
+async def _lease_acquire(conn, document_rid: str, run_id: Optional[str]) -> None:
+    """Record who holds this document's lock. Call right after the advisory lock is taken."""
+    await conn.execute(
+        """
+        INSERT INTO deep_extract_lease
+            (document_rid, holder_pid, holder_backend_start, run_id, acquired_at, last_heartbeat)
+        SELECT $1, pg_backend_pid(), a.backend_start, $2, now(), now()
+          FROM pg_stat_activity a WHERE a.pid = pg_backend_pid()
+        ON CONFLICT (document_rid) DO UPDATE SET
+            holder_pid = EXCLUDED.holder_pid,
+            holder_backend_start = EXCLUDED.holder_backend_start,
+            run_id = EXCLUDED.run_id,
+            acquired_at = now(),
+            last_heartbeat = now()
+        """, document_rid, run_id)
+
+
+async def _lease_heartbeat(pool, document_rid: str) -> None:
+    """Background task: prove liveness until cancelled.
+
+    Uses its OWN pooled connection — the run's connection is busy inside the extract, so
+    a heartbeat sharing it would only ever tick between statements and would go silent
+    during exactly the long provider call we most need to distinguish from a hang.
+    """
+    try:
+        while True:
+            await asyncio.sleep(DOC_EXTRACT_HEARTBEAT_INTERVAL)
+            try:
+                async with pool.acquire() as hb:
+                    await hb.execute(
+                        "UPDATE deep_extract_lease SET last_heartbeat = now() WHERE document_rid = $1",
+                        document_rid)
+            except Exception as e:  # noqa: BLE001
+                # A failed heartbeat must not kill the extraction it is only observing.
+                logger.warning("lease heartbeat failed for %s: %s", document_rid, e)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _lease_release(conn, document_rid: str) -> None:
+    with contextlib.suppress(Exception):
+        await conn.execute("DELETE FROM deep_extract_lease WHERE document_rid = $1", document_rid)
+
+
+async def lease_status(conn, document_rid: str) -> dict:
+    """Who holds this document, for how long, and does it look wedged?"""
+    row = await conn.fetchrow(
+        """
+        SELECT l.holder_pid, l.holder_backend_start, l.run_id, l.acquired_at, l.last_heartbeat,
+               EXTRACT(EPOCH FROM (now() - l.last_heartbeat))::float AS heartbeat_age_s,
+               EXTRACT(EPOCH FROM (now() - l.acquired_at))::float    AS held_for_s,
+               (a.pid IS NOT NULL) AS holder_alive,
+               a.state AS holder_state, a.wait_event_type, a.wait_event
+          FROM deep_extract_lease l
+          LEFT JOIN pg_stat_activity a
+                 ON a.pid = l.holder_pid AND a.backend_start = l.holder_backend_start
+         WHERE l.document_rid = $1
+        """, document_rid)
+    if row is None:
+        return {"lease": None,
+                "note": "advisory lock is held but no lease row — holder predates this "
+                        "feature, or crashed between lock and lease insert"}
+    d = dict(row)
+    d["stale"] = bool(d["heartbeat_age_s"] is not None
+                      and d["heartbeat_age_s"] > DOC_EXTRACT_LEASE_TTL)
+    d["verdict"] = ("holder gone (lock will clear when its session ends)" if not d["holder_alive"]
+                    else "WEDGED — no heartbeat past TTL" if d["stale"]
+                    else "healthy, actively extracting")
+    return d
+
+
+async def reclaim_stale_lease(conn, document_rid: str, *, ttl: Optional[float] = None) -> dict:
+    """Terminate a provably-wedged holder so its lock clears. Explicit, never automatic.
+
+    #35 warns that reclaiming by PID off a stale pg_stat_activity snapshot can kill a
+    HEALTHY backend that has since reused the PID. This does the staleness check and the
+    identity check (pid AND backend_start) inside ONE transaction against
+    pg_stat_activity, so the process being terminated is provably the same one recorded in
+    the lease and provably still stale at the moment of the kill.
+    """
+    ttl = DOC_EXTRACT_LEASE_TTL if ttl is None else ttl
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT l.holder_pid, EXTRACT(EPOCH FROM (now() - l.last_heartbeat))::float AS age,
+                   (a.pid IS NOT NULL) AS alive
+              FROM deep_extract_lease l
+              LEFT JOIN pg_stat_activity a
+                     ON a.pid = l.holder_pid AND a.backend_start = l.holder_backend_start
+             WHERE l.document_rid = $1
+             FOR UPDATE OF l
+            """, document_rid)
+        if row is None:
+            return {"reclaimed": False, "reason": "no lease row"}
+        if not row["alive"]:
+            await conn.execute("DELETE FROM deep_extract_lease WHERE document_rid = $1", document_rid)
+            return {"reclaimed": True, "reason": "holder already gone; cleared orphan lease row"}
+        if row["age"] is None or row["age"] <= ttl:
+            return {"reclaimed": False, "reason": f"holder is live (heartbeat {row['age']:.0f}s "
+                                                  f"<= ttl {ttl:.0f}s) — refusing to terminate"}
+        killed = await conn.fetchval("SELECT pg_terminate_backend($1)", row["holder_pid"])
+        await conn.execute("DELETE FROM deep_extract_lease WHERE document_rid = $1", document_rid)
+        return {"reclaimed": bool(killed), "terminated_pid": row["holder_pid"],
+                "heartbeat_age_s": row["age"]}
+
+
 async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                                 document_rid: str, tier: str, group_id: Optional[str],
                                 run_id: str, force: bool,
@@ -682,8 +969,18 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
         locked = await conn.fetchval(
             "SELECT pg_try_advisory_lock(hashtext('deep-extract-doc:' || $1));", document_rid)
         if not locked:
-            return {"status": "skipped_locked", "document_rid": document_rid}
+            # #35: a bare `skipped_locked` is indistinguishable from "nothing to do", which
+            # is how a wedged holder used to go unnoticed. Say WHO holds it and whether it
+            # still has a pulse.
+            status = await lease_status(conn, document_rid)
+            logger.warning("document %s is locked by another run — %s",
+                           document_rid, status.get("verdict") or status.get("note"))
+            return {"status": "skipped_locked", "document_rid": document_rid,
+                    "lock_holder": status}
+        heartbeat_task = None
         try:
+            await _lease_acquire(conn, document_rid, run_id)
+            heartbeat_task = asyncio.create_task(_lease_heartbeat(pool, document_rid))
             mem = await conn.fetchrow(
                 "SELECT content->>'title' AS title, "
                 "COALESCE(metadata->>'source_url', metadata->>'url') AS url, "
@@ -700,8 +997,16 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             chunks = await fetch_rag_chunks(conn, document_rid)
             windows = build_windows(chunks, WINDOW_CHARS, WINDOW_OVERLAP_CHUNKS)
             budget_exhausted = len(windows) > MAX_WINDOWS
-            if budget_exhausted:
-                logger.warning("window budget: %d windows > MAX_WINDOWS=%d → truncating",
+            if budget_exhausted and not MAX_WINDOWS_EXPLICIT:
+                # No caller-chosen budget → the default must not silently discard the
+                # tail of a long document. Process all windows and do NOT flag truncation.
+                logger.warning("window budget: %d windows > default MAX_WINDOWS=%d → "
+                               "auto-raising (DOC_MAX_WINDOWS unset; set it to cap cost)",
+                               len(windows), MAX_WINDOWS)
+                budget_exhausted = False
+            elif budget_exhausted:
+                logger.warning("window budget: %d windows > MAX_WINDOWS=%d → truncating "
+                               "(explicit cap; document tail NOT extracted)",
                                len(windows), MAX_WINDOWS)
                 windows = windows[:MAX_WINDOWS]
 
@@ -719,6 +1024,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
 
             # Plan windows (idempotent); load cached extractions for resume.
             per_window: List[Optional[dict]] = [None] * len(windows)
+            cached_windows = 0
             for w in windows:
                 await conn.execute(
                     """INSERT INTO document_window_extractions
@@ -731,8 +1037,24 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                     "WHERE document_rid=$1 AND window_index=$2", document_rid, w.index)
                 if cached and cached["status"] in ("extracted", "imported") and cached["raw_json"] and not force:
                     per_window[w.index] = json.loads(cached["raw_json"])
+                    cached_windows += 1
 
-            # Extract any window not already cached (FORCE Sonnet for quality).
+            # Extract any window not already cached.
+            #
+            # PER-WINDOW ISOLATION (#40): a window that cannot be extracted is DEAD-LETTERED
+            # and the run continues over the windows that succeeded. Previously any single
+            # window error propagated out and aborted the whole document, discarding every
+            # window already extracted — during the Kurtz corpus drain that cost four
+            # separate 30-50 minute passes, each losing 7-78 successfully extracted windows
+            # to one stray key or a 1-element chunk_range. The schema already had
+            # status='failed' + last_error for exactly this; nothing used them.
+            #
+            # Prefer "N-1 of N windows, loudly reported" over "0 of N, silently re-run
+            # tomorrow". windows_failed is surfaced in the result and the gate evidence, and
+            # deep_extracted_at is left NULL when any window failed, so a partial document
+            # is retried rather than marked complete. Failed windows stay status='failed'
+            # with their error, so a later run retries only those.
+            windows_failed: List[int] = []
             for w in windows:
                 if per_window[w.index] is not None:
                     logger.info("window %d/%d cached — skip", w.index + 1, len(windows))
@@ -740,22 +1062,64 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 logger.info("window %d/%d: extracting (%d chunks, %d chars) via %s",
                             w.index + 1, len(windows), len(w.chunk_indices), len(w.text), ANTHROPIC_MODEL)
                 prompt = build_prompt(template, w, len(windows))
-                data = await extract_window_validated(prompt, http, schema, model=ANTHROPIC_MODEL)
+                try:
+                    data = await extract_window_validated(prompt, http, schema, model=ANTHROPIC_MODEL)
+                except ExtractionError as e:
+                    windows_failed.append(w.index)
+                    logger.error("window %d/%d FAILED (%s) — dead-lettering the WINDOW and "
+                                 "continuing; the document is not lost: %s",
+                                 w.index + 1, len(windows), e.reason, str(e)[:400])
+                    await conn.execute(
+                        """UPDATE document_window_extractions
+                           SET status='failed', last_error=$3, route_used=$4, updated_at=NOW()
+                           WHERE document_rid=$1 AND window_index=$2""",
+                        document_rid, w.index, str(e)[:2000], ROUTE_USED)
+                    continue
                 per_window[w.index] = data
                 await conn.execute(
                     """UPDATE document_window_extractions
-                       SET status='extracted', route_used=$4, raw_json=$3::jsonb, updated_at=NOW()
+                       SET status='extracted', route_used=$4, raw_json=$3::jsonb,
+                           last_error=NULL, updated_at=NOW()
                        WHERE document_rid=$1 AND window_index=$2""",
                     document_rid, w.index, json.dumps(data), ROUTE_USED)
 
+            # Only a TOTAL loss is fatal — there is nothing to merge, and silently writing an
+            # empty episode would look like success.
+            if windows_failed and not any(d for d in per_window):
+                raise ExtractionError(
+                    "all_windows_failed",
+                    f"all {len(windows)} window(s) failed extraction; nothing to merge "
+                    f"(see document_window_extractions.last_error for {document_rid})")
+            if windows_failed:
+                logger.warning("proceeding with %d/%d windows — %d dead-lettered: %s",
+                               len(windows) - len(windows_failed), len(windows),
+                               len(windows_failed), windows_failed)
+
             # Merge + write facts through /episodes.
             merged = merge_extractions([d for d in per_window if d], windows)
+
+            # POISONED-CACHE GUARD (#33). A resume that extracts NOTHING new because every
+            # window was cache-skipped, and whose cached content yields zero facts AND zero
+            # entities, is not a successful no-op — it is a prior failed pass having left
+            # empty rows behind, and it used to report success with exit 0. Note a single
+            # empty window is perfectly legitimate (a table of contents extracts nothing),
+            # so the guard requires ALL THREE conditions before firing, which is what keeps
+            # it off genuine resumes.
+            newly_extracted = len(windows) - cached_windows - len(windows_failed)
+            if (windows and newly_extracted == 0 and cached_windows > 0
+                    and not merged["facts"] and not merged["entities"]):
+                raise ExtractionError(
+                    "cache_poisoned",
+                    f"resume skipped all {cached_windows} window(s) from cache and they "
+                    f"contain zero facts and zero entities — a previous pass cached empty "
+                    f"results. Re-run with --force to re-extract "
+                    f"(document_rid={document_rid})")
             summary = next((d["document"].get("summary") for d in per_window if d and d.get("document")), "")
             payload = facts_to_episode_payload(merged, name=doc_title, summary=summary,
                                                source_document=source_document, group_id=group_id)
             logger.info("merged: %d entities, %d facts → POST /knowledge/episodes (group=%s)",
                         len(merged["entities"]), len(merged["facts"]), group_id)
-            ep = await post_episode(http, payload)
+            ep = await post_episode_batched(http, payload)
 
             # Type-mismatches → dead-letter + cleanup task.
             mismatches = ep.get("type_mismatches") or []
@@ -863,17 +1227,30 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 logger.info("discourse: merged %d move(s) → wrote %d (source_type=document)",
                             len(merged_moves), discourse_created)
 
+            # Only promote windows that actually extracted. A dead-lettered window must KEEP
+            # status='failed' (with its last_error) so a later run retries just that window.
             for w in windows:
+                if w.index in windows_failed:
+                    continue
                 await conn.execute(
                     "UPDATE document_window_extractions SET status='imported', updated_at=NOW() "
                     "WHERE document_rid=$1 AND window_index=$2", document_rid, w.index)
+            # deep_extracted_at stays NULL when the document is INCOMPLETE for any reason —
+            # a truncated tail OR a dead-lettered window — so a partial document is retried
+            # rather than reported done.
+            incomplete = bool(budget_exhausted) or bool(windows_failed)
+            _err_parts = []
+            if budget_exhausted:
+                _err_parts.append(f"budget_truncated:{MAX_WINDOWS}/{len(chunks)}")
+            if windows_failed:
+                _err_parts.append(f"windows_failed:{len(windows_failed)}/{len(windows)}"
+                                  f":{windows_failed[:20]}")
             await conn.execute(
                 """UPDATE document_ingestion_log
                    SET deep_extracted_at = CASE WHEN $2 THEN NULL ELSE NOW() END,
                        deep_extraction_attempts = 0, deep_extraction_last_error = $3
                    WHERE document_rid = $1""",
-                document_rid, budget_exhausted,
-                (f"budget_truncated:{MAX_WINDOWS}/{len(chunks)}" if budget_exhausted else None))
+                document_rid, incomplete, ("; ".join(_err_parts) if _err_parts else None))
 
             return {
                 "status": "ok", "document_rid": document_rid, "group_id": group_id,
@@ -886,9 +1263,15 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "entities_created": ep.get("entities_created"), "entities_resolved": ep.get("entities_resolved"),
                 "discourse_moves_created": discourse_created,
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,
+                "windows_failed": len(windows_failed), "windows_failed_idx": windows_failed,
                 "episode_id": ep.get("episode_id"),
             }
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await heartbeat_task
+            await _lease_release(conn, document_rid)
             await conn.execute("SELECT pg_advisory_unlock(hashtext('deep-extract-doc:' || $1));", document_rid)
 
 
@@ -912,7 +1295,12 @@ async def amain(args) -> int:
             return 1
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-        async with httpx.AsyncClient() as http:
+        # #36: the pool settings that actually fix CLOSE_WAIT reuse (keepalive_expiry
+        # + TCP keepalive) can only come from the CLIENT — a per-request `timeout=`
+        # scalar does not reliably fire on a half-closed pooled socket (observed: a
+        # 40-minute hang against timeout=300). Per-request overrides below still
+        # apply on top of these per-phase ceilings.
+        async with provider_async_client(read=ANTHROPIC_TIMEOUT) as http:
             result = await extract_deep_document(
                 pool, http, document_rid=document_rid, tier=args.tier,
                 group_id=args.group_id, run_id=run_id, force=args.force,

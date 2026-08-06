@@ -18,6 +18,8 @@ import sys
 import hmac
 import hashlib
 import subprocess
+
+from api.async_proc import run_async
 from pathlib import Path
 from datetime import datetime
 
@@ -113,11 +115,13 @@ async def run_extraction(repo_name: str, repo_path: Path, trigger: str = "webhoo
             return
 
         # Pull latest changes
-        pull_result = subprocess.run(
+        # #15-class defect: this is an `async def`, so a bare subprocess.run() froze the
+        # WHOLE shared :8351 event loop — 60s for the pull and up to 600s for the
+        # extraction below, i.e. ten minutes of every other request stalling on one
+        # GitHub webhook. See api/async_proc.py.
+        pull_result = await run_async(
             ["git", "pull", "--ff-only"],
             cwd=repo_path,
-            capture_output=True,
-            text=True,
             timeout=60,
         )
 
@@ -133,7 +137,7 @@ async def run_extraction(repo_name: str, repo_path: Path, trigger: str = "webhoo
         env = os.environ.copy()
         env["PYTHONPATH"] = str(koi_processor)
 
-        extract_result = subprocess.run(
+        extract_result = await run_async(
             [
                 sys.executable,
                 str(koi_processor / "scripts" / "load_to_staging.py"),
@@ -143,8 +147,6 @@ async def run_extraction(repo_name: str, repo_path: Path, trigger: str = "webhoo
                 str(repo_path),
             ],
             cwd=koi_processor,
-            capture_output=True,
-            text=True,
             env=env,
             timeout=600,
         )

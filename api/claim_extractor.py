@@ -8,6 +8,7 @@ Separate product pipeline from NLP enrichment (llm_enricher.py). Different goals
 - Returns candidates; creation is a separate explicit step
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -147,8 +148,24 @@ async def _llm_complete(prompt: str, *, max_tokens: int = 4096) -> "str | None":
         try:
             import anthropic
 
-            client = anthropic.Anthropic(api_key=anthropic_key)
-            msg = client.messages.create(
+            from api.provider_http import provider_timeout, PROVIDER_MAX_RETRIES
+
+            # #36, and a worse variant than that issue describes. TWO bugs here:
+            #  1. SDK defaults are Timeout(read=600, write=600, pool=600) with
+            #     max_retries=2 -> up to 30 MINUTES on one call.
+            #  2. `client.messages.create` is the SYNCHRONOUS SDK, and this is an
+            #     `async def`. Called bare it BLOCKS THE EVENT LOOP for the whole
+            #     duration — so one slow Anthropic call freezes the entire shared :8351
+            #     service, not merely a thread-pool worker. That matches the "CPU frozen
+            #     (event loop blocked)" symptom recorded in #36 more precisely than the
+            #     embedding path does.
+            client = anthropic.Anthropic(
+                api_key=anthropic_key,
+                timeout=provider_timeout(),
+                max_retries=PROVIDER_MAX_RETRIES,
+            )
+            msg = await asyncio.to_thread(
+                client.messages.create,
                 model=os.getenv("CLAIM_EXTRACTOR_MODEL", "claude-sonnet-4-6"),
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
@@ -164,7 +181,12 @@ async def _llm_complete(prompt: str, *, max_tokens: int = 4096) -> "str | None":
             base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
             model = os.getenv("CLAIM_EXTRACTOR_OPENAI_MODEL",
                               os.getenv("DOC_EXTRACTOR_OPENAI_MODEL", "gpt-4.1"))
-            async with httpx.AsyncClient(timeout=60.0) as http:
+            from api.provider_http import provider_async_client
+
+            # #36: a single scalar timeout does not reliably fire on a half-closed
+            # POOLED socket (observed: 40 min hang against timeout=300). Use per-phase
+            # ceilings + a pool that evicts idle sockets + TCP keepalive.
+            async with provider_async_client(read=60.0) as http:
                 r = await http.post(
                     f"{base}/chat/completions",
                     headers={"Authorization": f"Bearer {openai_key}"},

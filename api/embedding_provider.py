@@ -231,7 +231,22 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     def __init__(self, api_key: str, model: str = "text-embedding-ada-002",
                  dimension: Optional[int] = None):
         from openai import OpenAI
-        self._client = OpenAI(api_key=api_key)
+        from api.provider_http import (
+            provider_sync_client, provider_timeout, PROVIDER_MAX_RETRIES)
+        # #36: SDK defaults are Timeout(read=600, write=600, pool=600) with
+        # max_retries=2 — i.e. up to 600s x 3 = 30 MINUTES hanging on one embed call.
+        # That is what wedged the shared :8351 service fleet-wide on 2026-07-15: these
+        # calls run under asyncio.to_thread, so a stuck provider socket parks a
+        # ThreadPoolExecutor worker, and once the pool is exhausted every to_thread
+        # caller stalls and the service is effectively down. Bound per phase, bound the
+        # retries, and hand the SDK a client whose pool evicts idle (possibly
+        # CLOSE_WAIT) sockets instead of reusing them.
+        self._client = OpenAI(
+            api_key=api_key,
+            timeout=provider_timeout(),
+            max_retries=PROVIDER_MAX_RETRIES,
+            http_client=provider_sync_client(),
+        )
         self.model_name = model
         self.dimension = dimension or self._default_dimension(model)
 

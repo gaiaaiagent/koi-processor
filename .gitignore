@@ -93,6 +93,12 @@ exports/
 *.gz
 config/personal.env
 config/extract-batch.env
+# Rotation/edit backups of the above — these DO contain live secrets
+# (OPENAI_API_KEY, POSTGRES_URL). Two such files were sitting untracked and
+# UNIGNORED on 2026-08-01; one `git add -A` would have pushed them to a shared
+# org repo. Never committed, so no history to scrub.
+config/*.env.bak*
+config/personal.env.bak*
 config/substack_publications.yaml
 config/rss_feeds.yaml
 config/research_author_sensors.yaml
@@ -134,8 +140,6 @@ deep_extract.env
 # Tier-3 migration scripts (intentional, tracked)
 !scripts/tier-3/*.sql
 
-# Rotation/edit backups of the ignored env files — these DO contain live secrets
-# (OPENAI_API_KEY, POSTGRES_URL). Untracked AND unignored is one `git add -A`
-# away from pushing keys to a shared org repo.
-config/*.env.bak*
-config/personal.env.bak*
+# Local staging root for document ingest (DEFAULT_ALLOWED_ROOTS in
+# scripts/ingest_document.py) and the isolation smoke test's fixture.
+tmp/incoming/

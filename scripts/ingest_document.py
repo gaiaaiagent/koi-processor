@@ -50,6 +50,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.embedding_provider import OpenAIEmbeddingProvider  # noqa: E402
 from api.chunker import TextChunker  # noqa: E402
+from api.provider_http import provider_async_client  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -439,6 +440,27 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         "type_mismatches": int(ext.get("type_mismatches") or 0),
         "discourse_moves_created": int(ext.get("discourse_moves_created") or 0),
         "claims_created": int(cl.get("claims_created") or 0),
+        # DERIVED keys the document-ingest gate actually asserts on. Added 2026-07-31:
+        # phase_expectations.yaml floors on `facts_available` and `claims_available`, but
+        # this function never emitted them, so the gate reported "key ABSENT from evidence"
+        # and exited 2 for EVERY standard/thorough ingest — including runs that landed
+        # hundreds of facts and discourse moves with zero null embeds. The gate was
+        # effectively dead above `rag` tier. Derivations follow the catalog's own comments:
+        #   facts_available  = "facts created or intentionally skipped as known duplicates"
+        #   claims_available = "impact claims or document-argument claims" (discourse moves
+        #                      ARE the document-argument taxonomy, per migrations 103/104)
+        # Purely additive — no existing key changes — so nothing downstream can regress.
+        # 1 = the whole document was windowed; 0 = an explicit DOC_MAX_WINDOWS cap cut the
+        # tail off. Truncation previously passed every floor, so a half-ingested book could
+        # be reported complete. Gate floors on this.
+        "not_truncated": 0 if ext.get("budget_exhausted") else 1,
+        # 1 = every window extracted; 0 = one or more were dead-lettered (#40). A
+        # document that lost windows must not pass as complete.
+        "all_windows_ok": 0 if int(ext.get("windows_failed") or 0) > 0 else 1,
+        "windows_failed": int(ext.get("windows_failed") or 0),
+        "facts_available": int(ext.get("facts_created") or 0) + int(ext.get("facts_skipped") or 0),
+        "claims_available": int(cl.get("claims_created") or 0)
+                            + int(ext.get("discourse_moves_created") or 0),
         "embeds_ok": 1 if (rag_null == 0 and facts_null == 0) else 0,
         "dups_ok": 1 if dups == 0 else 0,
         # End-state invariant (the right "0 residual dups" gate floor): 1 = no duplicate
@@ -507,7 +529,12 @@ async def ingest_path(
             return result
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
-        async with httpx.AsyncClient() as http:
+        # #36: the pool settings that actually fix CLOSE_WAIT reuse (keepalive_expiry
+        # + TCP keepalive) can only come from the CLIENT — a per-request `timeout=`
+        # scalar does not reliably fire on a half-closed pooled socket (observed: a
+        # 40-minute hang against timeout=300). Per-request overrides below still
+        # apply on top of these per-phase ceilings.
+        async with provider_async_client(read=900.0) as http:
             # Stage 2 — deep-extract entities + facts (standard/thorough).
             edd = _load_extractor()
             result["extract"] = await edd.extract_deep_document(

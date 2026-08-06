@@ -94,7 +94,7 @@ SELECT_NULL_EMBED_SQL = """
     SELECT id, fact_text
       FROM knowledge_facts
      WHERE fact_embedding_3072 IS NULL
-       AND valid_to IS NULL
+       {validity_filter}
        AND fact_text IS NOT NULL
        AND length(fact_text) > 0
      ORDER BY id
@@ -111,10 +111,20 @@ COUNT_NULL_EMBED_SQL = """
     SELECT COUNT(*)
       FROM knowledge_facts
      WHERE fact_embedding_3072 IS NULL
-       AND valid_to IS NULL
+       {validity_filter}
        AND fact_text IS NOT NULL
        AND length(fact_text) > 0
 """
+
+
+# A superseded fact (valid_to IS NOT NULL) is still a ROW: knowledge_facts has no
+# delete, the row still returns from any query that does not filter validity, and per
+# the router's own warning it still BYPASSES cosine dedup until re-embedded. Excluding
+# those rows made this script (and /health) under-report by 8.4x on 2026-08-01 — 13
+# reported against 109 actually present. Default stays live-only so existing callers
+# are unaffected; --include-superseded repairs the whole backlog.
+VALIDITY_LIVE_ONLY = "AND valid_to IS NULL"
+VALIDITY_ALL = "-- validity filter disabled (--include-superseded)"
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +132,10 @@ def parse_args() -> argparse.Namespace:
         description="Re-embed NULL-embed facts in knowledge_facts.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument(
+        "--include-superseded", action="store_true",
+        help="also re-embed facts whose valid_to is set. They are still rows and still "
+             "bypass cosine dedup; excluding them under-reports the real backlog.")
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -204,13 +218,21 @@ async def get_provider():
 
 async def run(args: argparse.Namespace) -> int:
     db_url = resolve_db_url(args)
+    vf = VALIDITY_ALL if getattr(args, "include_superseded", False) else VALIDITY_LIVE_ONLY
+    count_sql = COUNT_NULL_EMBED_SQL.format(validity_filter=vf)
+    select_sql = SELECT_NULL_EMBED_SQL.format(validity_filter=vf)
+    if getattr(args, "include_superseded", False):
+        print("scope: ALL null-embed facts, INCLUDING superseded (valid_to IS NOT NULL)")
+    else:
+        print("scope: live facts only (valid_to IS NULL) — "
+              "use --include-superseded to repair the full backlog")
 
     if not preflight_health():
         return 1
 
     conn = await asyncpg.connect(db_url)
     try:
-        total = await conn.fetchval(COUNT_NULL_EMBED_SQL)
+        total = await conn.fetchval(count_sql)
         print(f"NULL-embed fact rows found: {total}")
 
         if total == 0:
@@ -218,7 +240,7 @@ async def run(args: argparse.Namespace) -> int:
             return 0
 
         if args.dry_run:
-            preview = await conn.fetch(SELECT_NULL_EMBED_SQL + " LIMIT 3")
+            preview = await conn.fetch(select_sql + " LIMIT 3")
             print("── DRY-RUN preview (first 3 rows) ──")
             for r in preview:
                 snippet = (r["fact_text"] or "")[:100].replace("\n", " ")
@@ -228,7 +250,7 @@ async def run(args: argparse.Namespace) -> int:
 
         provider = await get_provider()
 
-        rows = await conn.fetch(SELECT_NULL_EMBED_SQL)
+        rows = await conn.fetch(select_sql)
         if args.max_records is not None and args.max_records > 0:
             rows = rows[: args.max_records]
 
@@ -270,7 +292,7 @@ async def run(args: argparse.Namespace) -> int:
                     await conn.execute(UPDATE_EMBED_SQL, vec_text, fid)
             batch_buf.clear()
 
-        remaining = await conn.fetchval(COUNT_NULL_EMBED_SQL)
+        remaining = await conn.fetchval(count_sql)
         print(f"DONE. ok={ok} fail={fail} of {n}. NULL-embed remaining: {remaining}")
 
         # Exit 1 only if we attempted >0 and 100% failed.
