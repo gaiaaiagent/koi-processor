@@ -18,6 +18,7 @@ from scripts.seatrees_bloom_export import (
     DEFAULT_API,
     MBS01_PREFIXES,
     MetadataCache,
+    ExportRefusedError,
     build_bloom_row,
     query_retirements_with_fallback,
 )
@@ -70,7 +71,25 @@ def create_router(pool, caps=None):
 
         # Offload entire blocking pipeline to thread pool
         log.info("SeaTrees export: %s to %s (max_pages=%d)", start, end, max_pages)
-        rows = await asyncio.to_thread(_build_export, start, end, max_pages, api_url)
+        try:
+            rows = await asyncio.to_thread(_build_export, start, end, max_pages, api_url)
+        except ExportRefusedError as e:
+            # Refuse the whole export rather than serve a CSV in which some rows
+            # silently carry another product's price. 409: the request is valid,
+            # the server state cannot satisfy it yet.
+            log.error("SeaTrees export refused: %s", e.message())
+            raise HTTPException(409, detail={
+                "error": "export_refused",
+                "reason": e.message(),
+                "project_id": e.project_id,
+                "batch_denom": e.batch_denom,
+                "missing_fields": list(e.missing),
+                "remedy": e.remedy(),
+                "note": (
+                    "No partial CSV is emitted. Every missing field is "
+                    "product-specific, so a default would be another product's value."
+                ),
+            })
         log.info("SeaTrees export: %d rows generated", len(rows))
 
         if format == "json":
