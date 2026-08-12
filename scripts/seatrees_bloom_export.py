@@ -41,16 +41,23 @@ FALLBACK_APIS = [
 # Only known batch: MBS01-001-20240601-20340531-001
 MBS01_PREFIXES = ("MBS01-",)
 
-# Static column values per Bloom template
-STATIC = {
-    "credit_price": 3,
-    "transaction_description": "Purchase of Seatrees+ Biodiversity Blocks",
-    "credit_scheme": "Seatrees+ Biodiversity Blocks",
-    "activity_type": "Uplift, Stewardship",
-    "avg_price_per_hectare_per_year": 3000,
-    "credit_size": 0.0001,
-    "credit_length": 10,
-}
+# Commercial facts the chain cannot supply.
+#
+# A retirement carries no price: price is a sales fact known only to SeaTrees.
+# The same is true of the scheme label and the credit geometry. These values are
+# therefore per-project, NOT global — a second product priced differently is the
+# normal case, not an exception.
+#
+# Everything in COMMERCIAL_FIELDS must be present for a project to be exportable.
+COMMERCIAL_FIELDS = (
+    "credit_price",
+    "transaction_description",
+    "credit_scheme",
+    "activity_type",
+    "avg_price_per_hectare_per_year",
+    "credit_size",
+    "credit_length",
+)
 
 # ISO 3166-1 alpha-2 → country name (subset relevant to MBS01 projects)
 COUNTRY_CODES = {
@@ -65,6 +72,11 @@ COUNTRY_CODES = {
     "TZ": "Tanzania",
     "IN": "India",
     "AU": "Australia",
+    # Added 2026-08-12: MBS01-002 is CR-P (Puntarenas) and MBS01-003 is ES-PM
+    # (Balearic Islands). Both were unmapped, so project_country would have
+    # emitted the raw ISO code and project_region would have been blank.
+    "CR": "Costa Rica",
+    "ES": "Spain",
 }
 
 # Jurisdiction country → region mapping
@@ -80,16 +92,112 @@ REGION_MAP = {
     "India": "South Asia",
     "Australia": "Oceania",
     "United States": "North America",
+    "Costa Rica": "Latin America",
+    "Spain": "Europe",
 }
 
-# Known MBS01 project metadata (fallback when on-chain metadata IRI can't be resolved)
-# The regen: IRI content-addressable metadata requires a data server that isn't publicly accessible.
-KNOWN_PROJECTS = {
+# Per-project registry.
+#
+# Keyed by on-chain project id. Carries the commercial facts above plus the
+# project name and developer, which SHOULD come from the chain but cannot: the
+# regen: IRI content-addressable metadata needs a data server that is not
+# publicly reachable. Until that is fixed, name/developer are hand-maintained
+# here too. Resolving that dependency deletes those two keys, not the table.
+#
+# A retirement for a project absent from this table CANNOT be exported. Every
+# commercial field would otherwise fall back to another product's value, which
+# is silently wrong in a money column. See export_rows().
+PROJECTS = {
     "MBS01-001": {
         "name": "Mangrove Forest: Marereni",
         "developer": "",
+        "credit_price": 3,
+        "transaction_description": "Purchase of Seatrees+ Biodiversity Blocks",
+        "credit_scheme": "Seatrees+ Biodiversity Blocks",
+        "activity_type": "Uplift, Stewardship",
+        "avg_price_per_hectare_per_year": 3000,
+        "credit_size": 0.0001,
+        "credit_length": 10,
     },
 }
+
+
+class ExportRefusedError(RuntimeError):
+    """The export cannot proceed without emitting a value that would be wrong.
+
+    Every subclass carries enough detail to fix the cause, so a refusal is a
+    task rather than a wall. Never downgrade one of these to a warning: the
+    whole point is that the alternative is a plausible-looking wrong number in
+    a partner's spreadsheet.
+    """
+
+    def message(self) -> str:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def remedy(self) -> str:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+
+class UnmappedJurisdictionError(ExportRefusedError):
+    """The project's on-chain jurisdiction has no country mapping.
+
+    Without it, project_country emits a bare ISO code and project_region is
+    blank. Both are silent degradations in a partner-facing column.
+    """
+
+    def __init__(self, project_id: str, batch_denom: str, jurisdiction: str, country_code: str):
+        self.project_id = project_id
+        self.batch_denom = batch_denom
+        self.jurisdiction = jurisdiction
+        self.country_code = country_code
+        self.missing = (f"country for ISO code {country_code!r}",)
+        super().__init__(self.message())
+
+    def message(self) -> str:
+        return (
+            f"project {self.project_id} (batch {self.batch_denom}) has jurisdiction "
+            f"{self.jurisdiction!r}, whose country code {self.country_code!r} is not mapped"
+        )
+
+    def remedy(self) -> str:
+        return (
+            f'Add to COUNTRY_CODES in {Path(__file__).name}:\n\n'
+            f'    "{self.country_code}": "<country name>",\n\n'
+            f"then add that country to REGION_MAP so project_region resolves."
+        )
+
+
+class UnregisteredProjectError(ExportRefusedError):
+    """A retirement references a project with no registry entry.
+
+    Emitting the row instead means shipping another product's price in a
+    partner's accounting column.
+    """
+
+    def __init__(self, project_id: str, batch_denom: str, missing: tuple[str, ...] = ()):
+        self.project_id = project_id
+        self.batch_denom = batch_denom
+        self.missing = missing or ("name",) + COMMERCIAL_FIELDS
+        super().__init__(self.message())
+
+    def message(self) -> str:
+        return (
+            f"project {self.project_id} (batch {self.batch_denom}) is not registered "
+            f"for Bloom export; missing: {', '.join(self.missing)}"
+        )
+
+    def remedy(self) -> str:
+        """A paste-ready registry entry, so the fix is mechanical."""
+        lines = [f'    "{self.project_id}": {{']
+        lines.append('        "name": "",            # project name as SeaTrees refers to it')
+        lines.append('        "developer": "",       # blank falls back to the on-chain admin address')
+        for field in COMMERCIAL_FIELDS:
+            lines.append(f'        "{field}": ...,')
+        lines.append("    },")
+        return (
+            f"Add to PROJECTS in {Path(__file__).name}:\n\n" + "\n".join(lines) +
+            "\n\nThe commercial values must come from SeaTrees. Do not guess them."
+        )
 
 # Bloom spreadsheet columns (23 total)
 BLOOM_COLUMNS = [
@@ -181,52 +289,57 @@ class MetadataCache:
         return self._project_cache[project_id]
 
     def resolve_project_metadata(self, batch_denom: str) -> dict:
-        """Resolve batch → project → metadata. Returns dict with name, developer, country, region."""
+        """Resolve batch → project → full export record.
+
+        Raises UnregisteredProjectError if the project has no registry entry, or
+        if its entry is missing any commercial field. The caller must not
+        substitute defaults: every commercial value is product-specific, so a
+        default is another product's number.
+        """
         batch = self.get_batch_info(batch_denom)
         project_id = batch.get("project_id", "")
         if not project_id:
-            return {"name": "", "developer": "", "country": "", "region": ""}
+            raise UnregisteredProjectError("<unresolved>", batch_denom)
+
+        entry = PROJECTS.get(project_id)
+        if entry is None:
+            raise UnregisteredProjectError(project_id, batch_denom)
+
+        missing = tuple(f for f in COMMERCIAL_FIELDS if entry.get(f) is None)
+        if not entry.get("name"):
+            missing = ("name",) + missing
+        if missing:
+            raise UnregisteredProjectError(project_id, batch_denom, missing)
 
         project = self.get_project_info(project_id)
         jurisdiction = project.get("jurisdiction", "")
 
-        # Parse jurisdiction for country
+        # Country and region genuinely do come from the chain, but only if the
+        # ISO code is mapped. An unmapped code used to fall through as the bare
+        # code with a blank region, which is a silent degradation.
         country_code = jurisdiction.split("-")[0] if jurisdiction else ""
-        country = COUNTRY_CODES.get(country_code, country_code)
+        if country_code not in COUNTRY_CODES:
+            raise UnmappedJurisdictionError(project_id, batch_denom, jurisdiction, country_code)
+        country = COUNTRY_CODES[country_code]
         region = REGION_MAP.get(country, "")
 
-        # Try known project metadata first (regen: IRIs aren't publicly resolvable)
-        known = KNOWN_PROJECTS.get(project_id, {})
-        name = known.get("name", "")
-        developer = known.get("developer", "")
-
-        # If not in known list, try to resolve on-chain metadata IRI
-        if not name:
-            metadata_uri = project.get("metadata", "")
-            if metadata_uri and not metadata_uri.startswith("regen:"):
-                try:
-                    meta = _get(metadata_uri)
-                    name = (
-                        meta.get("schema:name", "")
-                        or meta.get("name", "")
-                        or meta.get("regen:projectName", "")
-                    )
-                    developer = (
-                        meta.get("regen:projectDeveloper", {}).get("schema:name", "")
-                        if isinstance(meta.get("regen:projectDeveloper"), dict)
-                        else meta.get("regen:projectDeveloper", "")
-                    ) or developer
-                except Exception as e:
-                    log.warning("Failed to fetch metadata for project %s: %s", project_id, e)
-
-        # Fallback for developer — use admin address
+        # A blank registered developer falls back to the on-chain admin address,
+        # matching long-standing behaviour for MBS01-001.
+        developer = entry.get("developer", "")
         if not developer:
             admin = project.get("admin", "")
             if admin:
                 log.warning("Using admin address as developer for project %s: %s", project_id, admin)
                 developer = admin
 
-        return {"name": name, "developer": developer, "country": country, "region": region}
+        record = dict(entry)
+        record.update({
+            "project_id": project_id,
+            "developer": developer,
+            "country": country,
+            "region": region,
+        })
+        return record
 
 
 # ── Retirement query ─────────────────────────────────────────────────
@@ -419,20 +532,20 @@ def build_bloom_row(retirement: dict, metadata: MetadataCache) -> dict:
     return {
         "date (RETIREMENT)": retirement["timestamp"][:10],  # YYYY-MM-DD
         "purchase_type": "",  # SeaTrees fills (B2B/B2C)
-        "purchase_amount": round(amount * STATIC["credit_price"], 2),
+        "purchase_amount": round(amount * project["credit_price"], 2),
         "number_of_credits": amount,
-        "credit_price": STATIC["credit_price"],
-        "transaction_description": STATIC["transaction_description"],
+        "credit_price": project["credit_price"],
+        "transaction_description": project["transaction_description"],
         "project_name": project["name"],
         "project_developer": project["developer"],
         "project_country": project["country"],
         "project_region": project["region"],
-        "credit_scheme": STATIC["credit_scheme"],
-        "activity_type": STATIC["activity_type"],
-        "avg_price_per_hectare_per_year": STATIC["avg_price_per_hectare_per_year"],
-        "credit_size": STATIC["credit_size"],
-        "credit_length": STATIC["credit_length"],
-        "land_size": round(amount * STATIC["credit_size"], 6),
+        "credit_scheme": project["credit_scheme"],
+        "activity_type": project["activity_type"],
+        "avg_price_per_hectare_per_year": project["avg_price_per_hectare_per_year"],
+        "credit_size": project["credit_size"],
+        "credit_length": project["credit_length"],
+        "land_size": round(amount * project["credit_size"], 6),
         # Buyer columns — SeaTrees fills from CRM
         "buyer_name": "",
         "buyer_email": "",
@@ -530,11 +643,19 @@ def main():
     print("\nResolving project metadata...")
     cache = MetadataCache(args.api)
     rows = []
-    for i, ret in enumerate(retirements, 1):
-        row = build_bloom_row(ret, cache)
-        rows.append(row)
-        if i % 10 == 0:
-            print(f"  Processed {i}/{len(retirements)} retirements...")
+    try:
+        for i, ret in enumerate(retirements, 1):
+            row = build_bloom_row(ret, cache)
+            rows.append(row)
+            if i % 10 == 0:
+                print(f"  Processed {i}/{len(retirements)} retirements...")
+    except ExportRefusedError as e:
+        # Refuse the whole export. A partial CSV is indistinguishable from a
+        # complete one once it reaches a spreadsheet.
+        print(f"\nEXPORT REFUSED: {e.message()}", file=sys.stderr)
+        print(f"\n{e.remedy()}", file=sys.stderr)
+        print("\nNo file was written.", file=sys.stderr)
+        sys.exit(2)
 
     # Sort by date
     rows.sort(key=lambda r: r["date (RETIREMENT)"])
