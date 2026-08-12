@@ -135,7 +135,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("DOC_EXTRACTOR_MODEL", CLAUDE_P_MODEL)
 ANTHROPIC_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_MAX_TOKENS", "24000"))
 ANTHROPIC_TIMEOUT = int(os.getenv("DOC_EXTRACTOR_TIMEOUT", "300"))
-ANTHROPIC_RETRYABLE = {429, 500, 502, 503, 529}
+# 504/524 added after a live document (`f641b77d...`, a TELUS-Qwen-fronted run) hit a
+# mix of 503/504/524 across repeated attempts at every window size tried — 504 fell
+# through this set entirely and crashed the whole extraction with an unhandled
+# HTTPStatusError instead of retrying; 524 is Cloudflare's upstream-timeout code, seen
+# fronting the same class of gateway.
+ANTHROPIC_RETRYABLE = {429, 500, 502, 503, 504, 524, 529}
 
 # 'openai' transport config — bring-your-own OpenAI-compatible model. Defaults are
 # GENERIC (public OpenAI) so a fork works with just an OPENAI_API_KEY; point BASE_URL
@@ -317,7 +322,12 @@ async def _call_openai(prompt: str, http: httpx.AsyncClient, *,
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
             text = msg.get("content") or msg.get("reasoning") or ""
-            if choice.get("finish_reason") == "length" and not text.strip():
+            # Real truncation almost always returns PARTIAL text, not empty — the old
+            # `and not text.strip()` guard only caught the rare empty case and let
+            # truncated-mid-object JSON fall through to parse_and_validate as a
+            # confusing generic extract_parse_error. Matches _call_anthropic's
+            # stop_reason == "max_tokens" check above, which has no such gate.
+            if choice.get("finish_reason") == "length":
                 raise ExtractionError("extract_truncated",
                                       f"hit max_tokens={OPENAI_MAX_TOKENS}; raise "
                                       f"DOC_EXTRACTOR_OPENAI_MAX_TOKENS or lower DOC_WINDOW_CHARS")
