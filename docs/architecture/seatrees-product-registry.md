@@ -1,6 +1,10 @@
 # SeaTrees Bloom export: product registry and coverage probe
 
-**Status:** design approved 2026-08-12, not yet implemented beyond containment
+**Status:** design approved 2026-08-12, revised same day after review, not yet
+implemented beyond containment. The review changed four things: refusal now stays
+inside the router rather than raising past the mount, probe exit codes moved off 1 and
+2, a fourth refusal condition covers an unwatched credit class, and the legacy registry
+entry declares its provenance unknown instead of borrowing the batch issuance date.
 **Incidents:** INC-20260812-001 (this work), INC-20260812-002 (related, out of scope)
 **Scope owner:** Symbiocene Labs / gaia
 
@@ -97,8 +101,8 @@ products:
     avg_price_per_hectare_per_year: 3000
     credit_size: 0.0001
     credit_length: 10
-    source: "SeaTrees, original 2024 product definition"
-    supplied_on: 2024-10-19
+    source: unknown            # predates this registry; see note below
+    supplied_on: null
 ```
 
 Keyed by on-chain project id. Every field must be present. `developer` is the one
@@ -113,41 +117,88 @@ so they have a live consumer. A field nothing reads is the same dark-surface tra
 produced this incident, which is why there is deliberately no `currency` field: no
 Bloom column consumes one.
 
+**The legacy entry declares its provenance unknown rather than inventing one.** An
+earlier draft of this document filled `supplied_on` with `2024-10-19`, which is the
+`MBS01-001` batch issuance date, not the date SeaTrees supplied the price 3. We do not
+know that date; it is precisely the fact the incident proved we cannot answer. Filling
+a provenance field with the nearest available number defeats the field, because the
+next reader concludes we have a source. The loader therefore accepts `source: unknown`
+with a null `supplied_on` as a valid pair, and *only* as a pair: any entry naming a
+real source must carry a real date. New products get both. That turns a gap into a
+recorded gap instead of a fabricated answer.
+
 ### Validation
 
 The loader validates the entire file at import: every product carries every field, of
-the right type, and non-empty except for `developer` as described above. A malformed
-registry fails at startup and in the test suite rather than mid-export on a partner
-request.
+the right type, and non-empty except for `developer` as described above.
 
-The three refusal conditions, already implemented, are unchanged:
+**The failure must not be raised past the router mount.** `api/personal_ingest_api.py`
+mounts every router inside `try/except Exception`, logging a warning and continuing, so
+that one broken subsystem cannot take down the other twenty. That policy is right for
+the app and wrong for this guard: an import-time validation error would be swallowed,
+the endpoint would simply not exist, and `https://regen.gaiaai.xyz/seatrees/bloom-export`
+would return **404**. SeaTrees reads a 404 as "the service moved", not as "your data is
+broken", and the only evidence would be one warning line on a host we do not control.
+That is the original incident in a different coat.
+
+Therefore the router mounts unconditionally. The loader captures any validation failure
+rather than raising through the mount, and the endpoint returns **503** carrying the
+validation detail. A broken registry then produces a loud, addressed, partner-visible
+error at the same URL. The probe additionally checks that the registry parses, so we
+learn before SeaTrees does.
+
+The refusal conditions are:
 
 1. project absent from the registry
 2. registry entry present but missing a required field
 3. jurisdiction whose ISO country code is unmapped
+4. zero exportable rows for a window in which the ledger is reachable and the watched
+   classes have active batches
+
+Conditions 1 to 3 are implemented. Condition 4 is new and closes the remaining silent
+path: the endpoint filters to `MBS01_PREFIXES`, so a product launched under a *new*
+credit class yields no retirements, `_build_export` returns `[]`, and the response is a
+header-only CSV. No refusal, no alert, because the probe watches the same prefixes. We
+got lucky that coral was `MBS01-002` and therefore inside the watched class. An empty
+export for a live product is a refusal, not a file.
 
 Each raises a subclass of `ExportRefusedError` carrying the project id, the batch
 denom, the specific missing fields, and a paste-ready remedy. The HTTP layer maps any
-of them to 409 with that detail as structured JSON. The CLI prints them to stderr and
-exits 2, writing no file.
+of them to 409 with that detail as structured JSON, except a registry that failed to
+load, which is 503. The CLI prints to stderr and exits with a refusal code, writing no
+file.
 
 ### Probe severities
 
 | Condition | Meaning | Exit |
 |---|---|---|
 | every retired project registered | clean | 0 |
-| retired from an unregistered project | export broken now, rows may be delivered | 1 |
-| ledger unreachable | coverage unknown, never reported as clean | 2 |
-| issued but unregistered, no retirements | will break on first retirement | 3 |
+| issued but unregistered, no retirements | WARN, will break on first retirement | 3 |
+| retired from an unregistered project | ALERT, export broken now, rows may be delivered | 4 |
+| ledger unreachable or registry unparseable | UNKNOWN, never reported as clean | 5 |
 
-Exit 1 and exit 3 are separated so future breakage does not page anyone, while live
-breakage does. Against current state the probe emits ALERT for `MBS01-002` and WARN
-for `MBS01-003`.
+**Exit codes start at 3 because 1 and 2 are already spoken for.** `argparse` exits 2 on
+any usage error, verified by running it. Had UNKNOWN stayed at 2, a single misspelled
+flag in a heartbeat unit would report as a permanent ledger outage, and the correct
+response to a typo and to a provider outage are nothing alike. Shell convention claims
+1 as generic failure for the same reason. This matters now rather than later precisely
+because claude-heartbeat is about to consume this interface.
 
-Exit 2 exists because `query_retirements_with_fallback` returns an empty list both for
+WARN and ALERT are separated so future breakage does not page anyone while live
+breakage does. Against current state the probe emits ALERT for `MBS01-002` and WARN for
+`MBS01-003`.
+
+UNKNOWN exists because `query_retirements_with_fallback` returns an empty list both for
 a genuine zero and for total provider failure. A reachability preflight distinguishes
 them. Reporting "clean" for a window nobody actually checked would reproduce the
 original defect inside the detector.
+
+**WARN requires a data source the probe does not currently have.** The probe iterates
+retirements, and a project with zero retirements produces nothing to iterate over. To
+see `MBS01-003` at all it must enumerate the projects in a credit class, which is a
+different ledger endpoint, and its unit of configuration has to change from batch
+prefixes (`MBS01-`) to credit classes (`MBS01`). This is a second query path, not a
+threshold change, and should be planned as such.
 
 The probe drives every retirement through the real `build_bloom_row`, rather than
 reimplementing the checks, so it cannot drift from what the export actually does.
@@ -185,10 +236,18 @@ reimplementing the checks, so it cannot drift from what the export actually does
 | 4 | Register `MBS01-002` | **SeaTrees commercial values** |
 | 5 | Register `MBS01-003`, or rule it out of scope | identifying what it is |
 | 6 | Promote to `stable` | **Darren, operator-gated** |
-| 7 | Reissue the four affected exports | 4 and 6 |
+| 7 | Confirm SeaTrees re-pulls the corrected date range | 4 and 6 |
 
 Items 1 to 3 are wholly ours. Items 4 and 6 are external dependencies, which is why a
 completion date cannot be set unilaterally.
+
+Item 7 is deliberately not "reissue the four exports". The export is a live endpoint
+queried by date range, not a batch of files we hold. Once the registry is correct,
+re-pulling the same range returns correct rows with no action on our side, so the work
+is telling SeaTrees which range to re-pull and confirming they did. If it turns out
+they received a file by some other route, that route is undocumented and finding it
+becomes the actual task, because it would mean a delivery path exists that this
+incident has not accounted for.
 
 ## Open questions
 
@@ -197,7 +256,12 @@ completion date cannot be set unilaterally.
 - Whether `MBS01-003` is a live SeaTrees product at all. It has never been retired
   from, so no wrong data has been delivered from it.
 - Whether SeaTrees has already entered any of the four affected rows into accounting,
-  which determines whether correction is a reissue or a restatement.
+  which determines whether correction is a re-pull or a restatement.
+- The currency and units of the commercial prices. The registry stores bare numbers,
+  because no Bloom column consumes a currency and inventing an unread field is the trap
+  described above. The consequence is that the registry cannot distinguish 40 USD from
+  40 EUR, and neither can Bloom. This is recorded rather than designed around, because
+  the fix belongs in the Bloom column set and not in our registry.
 
 ## Already implemented
 
@@ -207,7 +271,8 @@ its shape does not change under any option considered here:
 
 - per-project registry as a Python dict, to be replaced by the YAML in item 1
 - all three refusal conditions with paste-ready remedies
-- HTTP 409 on the endpoint, exit 2 on the CLI
+- HTTP 409 on the endpoint, non-zero exit on the CLI (renumbering per the probe
+  severity table above is part of item 2, not yet applied)
 - `CR` and `ES` added to `COUNTRY_CODES`
 - the coverage probe, at single severity
 - 15 tests, with mangrove output proven byte-identical to the previous implementation
