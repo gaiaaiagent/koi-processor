@@ -485,6 +485,53 @@ def create_router(pool) -> APIRouter:
             # A live entity already occupies the new-typed URI — merge into it.
             merged_into_existing = True
             rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
+        elif twin is not None:
+            # A TOMBSTONED row occupies the new-typed URI. The old code fell
+            # through to the INSERT below and died on
+            # entity_registry_fuseki_uri_key, making the retype permanently
+            # impossible — a tombstone squatted the canonical slot forever.
+            # Observed 2026-08-14 on both Signal and Notion.
+            #
+            # Follow the tombstone's merged_into chain. If it leads back to the
+            # row being retyped, the tombstone is this entity's own former self:
+            # an earlier merge ran in the opposite direction (e.g. Concept was
+            # merged INTO SoftwareApplication). Resurrecting it and merging back
+            # is exactly the reversal of that merge, so it is safe.
+            #
+            # If the chain leads anywhere else, the slot belongs to a different
+            # entity's history and we must not guess — fail loudly.
+            survivor_of_twin = twin["merged_into"]
+            seen = {new_uri}
+            while survivor_of_twin is not None and survivor_of_twin not in seen:
+                seen.add(survivor_of_twin)
+                nxt = await conn.fetchrow(
+                    "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1",
+                    survivor_of_twin)
+                if nxt is None or nxt["merged_into"] is None:
+                    break
+                survivor_of_twin = nxt["merged_into"]
+
+            if survivor_of_twin != old_uri:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"cannot retype to {new_uri}: that URI is held by a tombstoned "
+                        f"row whose surviving entity is {survivor_of_twin}, not the row "
+                        f"being retyped ({old_uri}). Merge the two entities explicitly "
+                        f"first if they are the same thing."
+                    ),
+                )
+
+            await conn.execute(
+                "UPDATE entity_registry "
+                "SET merged_into = NULL, merged_at = NULL, merged_by = NULL, "
+                "    entity_type = $1, phonetic_code = $2 "
+                "WHERE fuseki_uri = $3",
+                new_type, phonetic_code, new_uri)
+            merged_into_existing = True
+            rewired = await _do_merge(
+                conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
+            rewired["resurrected_tombstone"] = 1
         else:
             # Mint the new-typed row by copying the source row server-side.
             # koi_rid + wallet_address carry UNIQUE partial indexes and the old

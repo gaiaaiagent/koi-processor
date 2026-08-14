@@ -320,6 +320,88 @@ async def test_retype_into_existing_twin(retype_client):
 
 @_integration_skip
 @pytest.mark.asyncio
+async def test_retype_into_tombstoned_twin_resurrects(retype_client):
+    """Regression: a TOMBSTONED row at the target URI used to block retype forever.
+
+    Observed 2026-08-14 on both Signal and Notion. An earlier merge had run in the
+    now-wrong direction (Concept merged INTO SoftwareApplication), so the canonical
+    concept-* URI was occupied by that merge's tombstone. The retype path fell
+    through to its INSERT and died on entity_registry_fuseki_uri_key, meaning the
+    entity could never be moved back to its canonical type.
+
+    When the tombstone's survivor chain leads back to the row being retyped, the
+    tombstone is that row's own former self, so resurrecting it and merging back
+    is precisely the reversal of the earlier merge.
+    """
+    client, pool = retype_client
+    from api.personal_ingest_api import generate_entity_uri
+    name = "Retype Tombstone Epsilon"
+    async with pool.acquire() as conn:
+        concept_uri = await _seed_entity(conn, name, "Concept")
+        sa_uri = await _seed_entity(conn, name, "Project")
+        # Simulate the historical wrong-direction merge: Concept -> Project.
+        await conn.execute(
+            "UPDATE entity_registry SET merged_into = $2, merged_at = NOW(), "
+            "merged_by = 'historical' WHERE fuseki_uri = $1", concept_uri, sa_uri)
+
+    resp = await client.post(
+        "/entities/retype",
+        json={"uri": sa_uri, "new_type": "Concept"}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["new_uri"] == concept_uri == generate_entity_uri(name, "Concept")
+    assert body["merged_into_existing"] is True
+    assert body["rewired"].get("resurrected_tombstone") == 1
+
+    async with pool.acquire() as conn:
+        # The resurrected row is live again and correctly typed.
+        row = await conn.fetchrow(
+            "SELECT merged_into, entity_type FROM entity_registry WHERE fuseki_uri = $1",
+            concept_uri)
+        assert row["merged_into"] is None
+        assert row["entity_type"] == "Concept"
+        # ...and the row we retyped is now the tombstone pointing at it.
+        assert await conn.fetchval(
+            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1",
+            sa_uri) == concept_uri
+
+
+@_integration_skip
+@pytest.mark.asyncio
+async def test_retype_into_foreign_tombstone_409(retype_client):
+    """A tombstone belonging to a DIFFERENT entity must not be resurrected.
+
+    Guessing here would silently hand one entity's canonical slot to another.
+    """
+    client, pool = retype_client
+    name = "Retype Tombstone Zeta"
+    async with pool.acquire() as conn:
+        concept_uri = await _seed_entity(conn, name, "Concept")
+        unrelated = await _seed_entity(conn, "Retype Unrelated Survivor", "Person")
+        sa_uri = await _seed_entity(conn, name, "Project")
+        # The Concept slot was merged into some OTHER entity entirely.
+        await conn.execute(
+            "UPDATE entity_registry SET merged_into = $2, merged_at = NOW(), "
+            "merged_by = 'historical' WHERE fuseki_uri = $1", concept_uri, unrelated)
+
+    resp = await client.post(
+        "/entities/retype",
+        json={"uri": sa_uri, "new_type": "Concept"}, headers=AUTH)
+    assert resp.status_code == 409, resp.text
+    assert "tombstoned" in resp.json()["detail"]
+
+    async with pool.acquire() as conn:
+        # Nothing moved.
+        assert await conn.fetchval(
+            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1",
+            concept_uri) == unrelated
+        assert await conn.fetchval(
+            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1",
+            sa_uri) is None
+
+
+@_integration_skip
+@pytest.mark.asyncio
 async def test_retype_unknown_type_422(retype_client):
     client, pool = retype_client
     async with pool.acquire() as conn:
