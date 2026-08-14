@@ -1,7 +1,9 @@
 # SeaTrees Bloom export: product registry and coverage probe
 
-**Status:** design approved 2026-08-12, revised same day after review, not yet
-implemented beyond containment. The review changed four things: refusal now stays
+**Status:** design approved 2026-08-12 and revised after review. Containment is
+implemented; `MBS01-002` was registered on the fix branch on 2026-08-13 from the
+SeaTrees values relayed by Dave. Production remains unchanged until Darren promotes
+the branch to `stable`. The review changed four things: refusal now stays
 inside the router rather than raising past the mount, probe exit codes moved off 1 and
 2, a fourth refusal condition covers an unwatched credit class, and the legacy registry
 entry declares its provenance unknown instead of borrowing the batch issuance date.
@@ -36,13 +38,13 @@ Ledger state confirmed 2026-08-12 via `rest.cosmos.directory/regen`:
 | Project | Jurisdiction | First batch issued | Retirements | Status |
 |---|---|---|---|---|
 | MBS01-001 | KE | 2024-10-19 | 23 | registered, correct |
-| MBS01-002 | CR-P (Costa Rica) | 2026-05-13 | 4 | unregistered, **wrong rows delivered** |
+| MBS01-002 | CR-P (Costa Rica) | 2026-05-13 | 4 | registered on fix branch, **wrong historical rows delivered** |
 | MBS01-003 | ES-PM (Balearic Is.) | 2026-06-01 | 0 | unregistered, latent |
 
 Four delivered rows, dated 2026-06-22 (x2), 2026-07-03 and 2026-08-10, totalling six
 credits. `purchase_amount` emitted $18.00 in total; at the reported price of 40 the
-correct figure is $240.00, an understatement of $222.00. The reported price of 40 is
-from the partner and is not independently confirmed.
+correct figure is $240.00, an understatement of $222.00. SeaTrees confirmed the price
+as 40 on 2026-08-13; the public product page independently lists `$40.00 USD`.
 
 The exporter was last modified 2026-05-04, nine days before `MBS01-002` was issued.
 
@@ -101,6 +103,7 @@ products:
     avg_price_per_hectare_per_year: 3000
     credit_size: 0.0001
     credit_length: 10
+    land_size_per_credit: 0.0001 # retired credits × this value
     source: unknown            # predates this registry; see note below
     supplied_on: null
 ```
@@ -110,6 +113,13 @@ field permitted to be an empty string, which explicitly means "fall back to the
 on-chain admin address" and preserves long-standing `MBS01-001` behaviour. Every other
 field must be present and non-empty; in particular an empty `name` is a validation
 failure, because a blank project name was one of the two originally reported symptoms.
+
+Land size has two explicit modes because the products define it differently. A product
+must carry exactly one of `land_size` (fixed project area) or
+`land_size_per_credit` (retired credits multiplied by an area). `MBS01-001` uses the
+multiplier to preserve byte-identical legacy output. `MBS01-002` uses the fixed `0.1`
+hectares supplied by SeaTrees and corroborated by the May 2026 Project Description,
+which calls the 1,000 m² / 0.1 ha outplanting and monitoring area the project area.
 
 `source` and `supplied_on` record where a commercial value came from, which the
 incident showed we could not answer for the number 3. They are reported by the probe,
@@ -210,7 +220,7 @@ reimplementing the checks, so it cannot drift from what the export actually does
 - **Golden row regression:** `MBS01-001` output byte-identical, now sourced from YAML.
   This has been verified against the pre-change implementation by running both and
   comparing, not by asserting a transcribed expectation.
-- **Refusal contract:** the 15 tests already written, covering all three conditions,
+- **Refusal contract:** the 17 tests already written, covering all three conditions,
   each commercial field individually, and a correctly registered second product.
 - **Probe:** fixture-driven with no network, covering each severity and the
   unreachable-ledger path.
@@ -233,13 +243,13 @@ reimplementing the checks, so it cannot drift from what the export actually does
 | 1 | YAML registry, loader, validation, tests | nothing |
 | 2 | Probe two-severity upgrade, tests | nothing |
 | 3 | claude-heartbeat integration on legion2 | nothing |
-| 4 | Register `MBS01-002` | **SeaTrees commercial values** |
+| 4 | Register `MBS01-002` | complete on fix branch (2026-08-13) |
 | 5 | Register `MBS01-003`, or rule it out of scope | identifying what it is |
 | 6 | Promote to `stable` | **Darren, operator-gated** |
 | 7 | Confirm SeaTrees re-pulls the corrected date range | 4 and 6 |
 
-Items 1 to 3 are wholly ours. Items 4 and 6 are external dependencies, which is why a
-completion date cannot be set unilaterally.
+Items 1 to 3 are wholly ours. Item 4 is complete. Item 6 remains operator-gated, which
+is why a production completion date cannot be set unilaterally.
 
 Item 7 is deliberately not "reissue the four exports". The export is a live endpoint
 queried by date range, not a batch of files we hold. Once the registry is correct,
@@ -251,17 +261,14 @@ incident has not accounted for.
 
 ## Open questions
 
-- The correct commercial values for `MBS01-002`. Only SeaTrees can supply them; the
-  price of 40 is reported, not confirmed.
 - Whether `MBS01-003` is a live SeaTrees product at all. It has never been retired
   from, so no wrong data has been delivered from it.
 - Whether SeaTrees has already entered any of the four affected rows into accounting,
   which determines whether correction is a re-pull or a restatement.
-- The currency and units of the commercial prices. The registry stores bare numbers,
-  because no Bloom column consumes a currency and inventing an unread field is the trap
-  described above. The consequence is that the registry cannot distinguish 40 USD from
-  40 EUR, and neither can Bloom. This is recorded rather than designed around, because
-  the fix belongs in the Bloom column set and not in our registry.
+- The Bloom schema still has no currency column. USD is now independently confirmed
+  for the coral price, but the registry continues to store the bare number because no
+  export column consumes a currency. If Bloom needs currency represented, that belongs
+  in the column contract rather than as unread registry metadata.
 
 ## Already implemented
 
@@ -275,4 +282,5 @@ its shape does not change under any option considered here:
   severity table above is part of item 2, not yet applied)
 - `CR` and `ES` added to `COUNTRY_CODES`
 - the coverage probe, at single severity
-- 15 tests, with mangrove output proven byte-identical to the previous implementation
+- 17 tests, with mangrove output proven byte-identical to the previous implementation
+  and the complete coral row pinned to the SeaTrees-supplied values
