@@ -146,12 +146,25 @@ class TaskPatchRequest(BaseModel):
 
 
 class TaskStatsResponse(BaseModel):
+    """Aggregate counts for the *personal task view*.
+
+    Every field below excludes ``source_type`` of ``test`` and ``outbound-comm``,
+    matching what ``GET /tasks/`` shows by default. That is deliberate — the comms
+    outbox is not a to-do list — but it means these are NOT registry-wide totals,
+    and reading ``total_done`` as "how many tasks are done" was wrong by 138 rows
+    on 2026-08-13 (404 reported, 542 in the table).
+
+    ``excluded`` makes the gap visible instead of silent: counts of what these
+    numbers leave out, keyed by source_type.
+    """
+
     total_open: int
     total_done: int
     by_status: Dict[str, int]
     overdue: int
     due_today: int
     due_this_week: int
+    excluded: Dict[str, Dict[str, int]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +319,14 @@ def create_router(pool, caps) -> APIRouter:
                     $11, $12, $13, $14,
                     $15, COALESCE($16, 'meeting'), $17, $18,
                     $19, $20,
-                    NOW(), NOW()
+                    -- UTC, not NOW(). created_at/updated_at are `timestamp without time
+                    -- zone`, so a bare NOW() is cast using the session TimeZone
+                    -- (America/Vancouver) and lands in LOCAL time, while PATCH writes the
+                    -- same columns from Python as naive UTC. One row could therefore carry
+                    -- created_at 2026-08-13T18:44:13 and updated_at 2026-08-14T02:00:55 for
+                    -- events 7 hours apart in wall-clock but simultaneous in fact, and the
+                    -- updated_before/updated_after filters compared the two clocks directly.
+                    NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC'
                 )
                 ON CONFLICT (task_key) DO UPDATE SET
                     uuid            = COALESCE(EXCLUDED.uuid, task_registry.uuid),
@@ -336,7 +356,7 @@ def create_router(pool, caps) -> APIRouter:
                                           ELSE task_registry.tags END,
                     validity_start  = COALESCE(EXCLUDED.validity_start, task_registry.validity_start),
                     validity_end    = COALESCE(EXCLUDED.validity_end,   task_registry.validity_end),
-                    updated_at      = NOW()
+                    updated_at      = NOW() AT TIME ZONE 'UTC'   -- see the INSERT branch above
                 RETURNING id, task_key,
                     (xmax = 0) AS was_inserted
                 """,
@@ -398,9 +418,18 @@ def create_router(pool, caps) -> APIRouter:
     ):
         """List tasks with optional filters. Default excludes done and cancelled.
 
+        **Also excluded by default: ``source_type='outbound-comm'``** (the comms
+        outbox). This applies to every request that omits ``source_type``,
+        *including* one that passes an explicit ``status`` — so ``?status=done``
+        alone does NOT return every done row. Pass ``?source_type=outbound-comm``
+        for the outbox alone, or ``?source_type=all`` to disable the exclusion
+        and get everything.
+
         Sets an ``X-Total-Count`` response header with the number of rows
         matching the filters (before LIMIT/OFFSET) so paginating clients can
-        size their loop without re-querying.
+        size their loop without re-querying. Note that the header counts the
+        rows the filters actually select, so under the default exclusion it
+        counts the visible subset, not the whole registry.
         """
         async with pool.acquire() as conn:
             conditions = []
@@ -473,12 +502,18 @@ def create_router(pool, caps) -> APIRouter:
             # Source filters
             if source_note:
                 add("LOWER(source_note) LIKE LOWER(?)", f"%{source_note}%")
-            if source_type:
+            if source_type and source_type != "all":
                 add("source_type = ?", source_type)
-            else:
+            elif source_type != "all":
                 # Comms outbox (source_type='outbound-comm') is a distinct category, not a
                 # personal to-do — hidden from the default task view like done/cancelled are.
                 # Query it explicitly with ?source_type=outbound-comm. (comms-outbox MVP 2026-07-04)
+                #
+                # `?source_type=all` opts out of the exclusion entirely (2026-08-13). Without it
+                # there was NO way to retrieve every row: this predicate fired on any request that
+                # merely omitted source_type, including an explicit `?status=done`, which returned
+                # 404 of the 542 done rows and reported 404 in X-Total-Count. The exclusion is
+                # intended and stays the default; being unable to see past it was not.
                 conditions.append("source_type IS DISTINCT FROM 'outbound-comm'")
 
             # Opt-in validity filter — only emits SQL when t_now is set.
@@ -687,7 +722,22 @@ def create_router(pool, caps) -> APIRouter:
                 today
             )
 
+            # What the four aggregates above leave out. Reported rather than hidden:
+            # the counts are filtered by design, but a caller reading total_done as a
+            # registry total was silently wrong by every outbound-comm row.
+            excluded_rows = await conn.fetch(
+                """
+                SELECT source_type, status, COUNT(*) AS cnt FROM task_registry
+                WHERE source_type IN ('test', 'outbound-comm')
+                GROUP BY source_type, status
+                """
+            )
+            excluded: Dict[str, Dict[str, int]] = {}
+            for r in excluded_rows:
+                excluded.setdefault(r["source_type"], {})[r["status"]] = r["cnt"]
+
         return TaskStatsResponse(
+            excluded=excluded,
             total_open=total_open,
             total_done=total_done,
             by_status=by_status,
