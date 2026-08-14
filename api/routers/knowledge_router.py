@@ -264,6 +264,11 @@ class EpisodeCreateResponse(BaseModel):
     # facts BYPASS future cosine dedup, so this count surfaces silent-fail
     # episodes immediately at write-time.
     facts_null_embed: int = 0
+    # Entities created in this request with NO type hint from the caller, so typed
+    # "Concept" by default. The type is hashed into the URI and cannot be corrected
+    # in place, so a sustained non-zero here means the extractor is emitting facts
+    # whose subject/object are absent from its own entities[] list.
+    entities_typed_by_default: int = 0
     # Type-hint divergence list — empty unless caller provided subject_type
     # or object_type that conflicted with an existing entity. See TypeMismatch.
     type_mismatches: List[TypeMismatch] = Field(default_factory=list)
@@ -865,6 +870,10 @@ def create_router(
                 facts_skipped = 0
                 facts_superseded = 0
                 facts_null_embed = 0  # Wave A A2: silent-fail surface
+                # Same shape as facts_null_embed: a write that succeeded while
+                # quietly guessing. An entity minted with no type hint got "Concept"
+                # by default, and that guess is hashed into its URI permanently.
+                entities_typed_by_default = 0
                 emit_facts = []  # Federation 2e: per-fact bundled-emit payloads
                 # Collect type mismatches across all facts in this request
                 type_mismatches: List[TypeMismatch] = []
@@ -881,6 +890,8 @@ def create_router(
                     entities_resolved += 1
                     if is_new:
                         entities_created += 1
+                        if not fact.subject_type:
+                            entities_typed_by_default += 1
                     # Flag type mismatch (caller provided hint, resolved type differs,
                     # and this wasn't a cache hit which returns None for resolved_type)
                     if (fact.subject_type and subj_resolved_type
@@ -903,6 +914,8 @@ def create_router(
                             entities_resolved += 1
                             if obj_new:
                                 entities_created += 1
+                                if not fact.object_type:
+                                    entities_typed_by_default += 1
                             if (fact.object_type and obj_resolved_type
                                     and fact.object_type != obj_resolved_type):
                                 type_mismatches.append(TypeMismatch(
@@ -1065,6 +1078,7 @@ def create_router(
                     entities_resolved=entities_resolved,
                     entities_created=entities_created,
                     facts_null_embed=facts_null_embed,
+                    entities_typed_by_default=entities_typed_by_default,
                     type_mismatches=type_mismatches,
                 )
 
@@ -1226,6 +1240,16 @@ def create_router(
 
         # Tier 3: create new entity. Use type_hint when provided; default to
         # "Concept" only when caller has no idea (matches legacy behavior).
+        #
+        # The default is recorded, not just applied. entity_type is hashed into the
+        # URI by generate_entity_uri and prefixed onto it, so a guess cannot be
+        # corrected in place afterwards — updating the column would leave the URI
+        # permanently wrong. What CAN be recovered is whether it was a guess, and
+        # until 2026-08-13 nothing distinguished "the extractor said Concept" from
+        # "nobody said anything", which made the guess rate unmeasurable by
+        # construction. Concept is also the largest bucket (8,603 of 13,625
+        # knowledge-add rows), so a wrong guess disappears into the crowd.
+        typed_by_default = type_hint is None
         entity_type = type_hint if type_hint else "Concept"
         new_uri = generate_entity_uri(name, entity_type)
 
@@ -1238,11 +1262,12 @@ def create_router(
         await conn.execute("""
             INSERT INTO entity_registry
                 (fuseki_uri, entity_text, normalized_text, entity_type,
-                 source, embedding_3072)
-            VALUES ($1, $2, $3, $4, $5, $6::vector)
+                 source, embedding_3072, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::vector, $7::jsonb)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """, new_uri, name, normalized, entity_type,
-            'knowledge-add', str(embedding) if embedding else None)
+            'knowledge-add', str(embedding) if embedding else None,
+            '{"type_source": "default"}' if typed_by_default else '{}')
 
         seen[normalized] = new_uri
         logger.info(f"Created new entity: {name} -> {new_uri}")

@@ -2244,6 +2244,7 @@ async def health_check(request: Request):
         null_embed_count_db = 0
         null_embed_count_live = 0
         null_embed_count_chunks = 0
+        null_embed_count_entities = 0
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
             try:
@@ -2264,10 +2265,26 @@ async def health_check(request: Request):
                     SELECT COUNT(*) FROM koi_memory_chunks
                     WHERE embedding_3072 IS NULL
                 """) or 0
+                # ENTITIES were the third surface, and the lesson above was never swept
+                # to them: the chunk gauge was added after a dead embedder went unnoticed
+                # for three days, and entity_registry kept the same blind spot for months.
+                # A failed embed here returns None at the create sites in
+                # knowledge_router.py and this file, and the row is committed anyway with
+                # embedding_3072 NULL and no warning. It is not merely degraded: every
+                # semantic entity read filters `embedding_3072 IS NOT NULL`, so such a row
+                # is invisible to Tier-2 resolution and to semantic search entirely, and
+                # will be silently duplicated the next time the same name arrives.
+                # 2026-08-13: 3,464 of 29,460 rows (11.8%) — incl. 164 Person, 117
+                # Organization, 1,230 Claim — and still accruing (83 on 2026-08-12).
+                null_embed_count_entities = await conn.fetchval("""
+                    SELECT COUNT(*) FROM entity_registry
+                    WHERE embedding_3072 IS NULL
+                """) or 0
             except Exception:
                 null_embed_count_db = -1  # signal "query failed"
                 null_embed_count_live = -1
                 null_embed_count_chunks = -1
+                null_embed_count_entities = -1
 
         # Get loaded entity types from schema
         schemas = get_entity_schemas()
@@ -2299,6 +2316,11 @@ async def health_check(request: Request):
             # RAG chunks with no vector — sustained non-zero = the
             # com.personal-koi.chunk-embedder LaunchAgent is not running.
             "null_embed_chunk_count": null_embed_count_chunks,
+            # Entities with no vector. Unlike facts and chunks this is not just
+            # degraded retrieval: semantic entity reads filter IS NOT NULL, so these
+            # rows are unreachable by Tier-2 resolution and will re-duplicate on the
+            # next mention. Repair with scripts/backfill_entity_embeddings.py.
+            "null_embed_entity_count": null_embed_count_entities,
             "null_embed_fact_counter_process": process_counter,
         }
     except Exception as e:
