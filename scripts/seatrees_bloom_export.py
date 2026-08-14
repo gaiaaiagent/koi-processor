@@ -59,6 +59,13 @@ COMMERCIAL_FIELDS = (
     "credit_length",
 )
 
+# Bloom's land_size is not derived the same way for every product. The legacy
+# mangrove export reports the area represented by the retired credits, while
+# SeaTrees defines the coral value as the project's fixed 0.1 ha outplanting
+# and monitoring area. Every project must therefore declare exactly one mode:
+# a fixed ``land_size`` or a ``land_size_per_credit`` multiplier.
+LAND_SIZE_FIELDS = ("land_size", "land_size_per_credit")
+
 # ISO 3166-1 alpha-2 → country name (subset relevant to MBS01 projects)
 COUNTRY_CODES = {
     "KE": "Kenya",
@@ -92,7 +99,7 @@ REGION_MAP = {
     "India": "South Asia",
     "Australia": "Oceania",
     "United States": "North America",
-    "Costa Rica": "Latin America",
+    "Costa Rica": "Central America",
     "Spain": "Europe",
 }
 
@@ -118,6 +125,22 @@ PROJECTS = {
         "avg_price_per_hectare_per_year": 3000,
         "credit_size": 0.0001,
         "credit_length": 10,
+        # Preserve the pre-incident output: retired credits × 0.0001 ha.
+        "land_size_per_credit": 0.0001,
+    },
+    "MBS01-002": {
+        "name": "Coral Reef: Golfo Dulce",
+        "developer": "regen1a3g9wfm33l80eek2jwrhnfctr7vslfw7k7y83dvc6guy8cp9444q5d7vx0",
+        "credit_price": 40,
+        "transaction_description": "Purchase of Seatrees+ Biodiversity Blocks",
+        "credit_scheme": "Seatrees+ Biodiversity Blocks",
+        "activity_type": "Uplift, Stewardship",
+        "avg_price_per_hectare_per_year": 3200,
+        "credit_size": 0.25,
+        "credit_length": 5,
+        # Fixed project area supplied by SeaTrees and corroborated by the
+        # May 2026 Project Description Document (1,000 m² / 0.1 ha).
+        "land_size": 0.1,
     },
 }
 
@@ -177,7 +200,9 @@ class UnregisteredProjectError(ExportRefusedError):
     def __init__(self, project_id: str, batch_denom: str, missing: tuple[str, ...] = ()):
         self.project_id = project_id
         self.batch_denom = batch_denom
-        self.missing = missing or ("name",) + COMMERCIAL_FIELDS
+        self.missing = missing or (
+            ("name",) + COMMERCIAL_FIELDS + ("land_size or land_size_per_credit",)
+        )
         super().__init__(self.message())
 
     def message(self) -> str:
@@ -193,6 +218,8 @@ class UnregisteredProjectError(ExportRefusedError):
         lines.append('        "developer": "",       # blank falls back to the on-chain admin address')
         for field in COMMERCIAL_FIELDS:
             lines.append(f'        "{field}": ...,')
+        lines.append('        "land_size": ...,       # fixed project area, OR')
+        lines.append('        "land_size_per_credit": ...,  # retired credits multiplier')
         lines.append("    },")
         return (
             f"Add to PROJECTS in {Path(__file__).name}:\n\n" + "\n".join(lines) +
@@ -308,6 +335,12 @@ class MetadataCache:
         missing = tuple(f for f in COMMERCIAL_FIELDS if entry.get(f) is None)
         if not entry.get("name"):
             missing = ("name",) + missing
+
+        land_size_fields = tuple(f for f in LAND_SIZE_FIELDS if entry.get(f) is not None)
+        if not land_size_fields:
+            missing += ("land_size or land_size_per_credit",)
+        elif len(land_size_fields) > 1:
+            missing += ("exactly one of land_size or land_size_per_credit",)
         if missing:
             raise UnregisteredProjectError(project_id, batch_denom, missing)
 
@@ -528,6 +561,10 @@ def build_bloom_row(retirement: dict, metadata: MetadataCache) -> dict:
     """Build a single Bloom spreadsheet row from a retirement record."""
     amount = float(retirement["amount"])
     project = metadata.resolve_project_metadata(retirement["batch_denom"])
+    if project.get("land_size") is not None:
+        land_size = project["land_size"]
+    else:
+        land_size = round(amount * project["land_size_per_credit"], 6)
 
     return {
         "date (RETIREMENT)": retirement["timestamp"][:10],  # YYYY-MM-DD
@@ -545,7 +582,7 @@ def build_bloom_row(retirement: dict, metadata: MetadataCache) -> dict:
         "avg_price_per_hectare_per_year": project["avg_price_per_hectare_per_year"],
         "credit_size": project["credit_size"],
         "credit_length": project["credit_length"],
-        "land_size": round(amount * project["credit_size"], 6),
+        "land_size": land_size,
         # Buyer columns — SeaTrees fills from CRM
         "buyer_name": "",
         "buyer_email": "",

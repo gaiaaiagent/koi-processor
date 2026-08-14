@@ -32,6 +32,14 @@ RETIREMENT = {
     "timestamp": "2026-08-02T12:00:00Z",
 }
 
+CORAL_RETIREMENT = {
+    "amount": "2",
+    "batch_denom": "MBS01-002-20251201-20301231-001",
+    "timestamp": "2026-08-10T20:53:35Z",
+}
+
+UNKNOWN_PROJECT_ID = "MBS01-999"
+
 
 class FakeCache(MetadataCache):
     """MetadataCache with the two chain lookups stubbed, so no network is used."""
@@ -93,28 +101,31 @@ def test_blank_registered_developer_still_falls_back_to_admin():
 # ── The reported failure: a second product must not inherit the first ─
 
 def test_unregistered_project_is_refused():
-    """The coral case. Previously this emitted price 3 and a blank name."""
+    """The next unknown product must refuse instead of inheriting coral values."""
     with pytest.raises(UnregisteredProjectError) as err:
-        build_bloom_row(RETIREMENT, FakeCache(project_id="MBS01-002"))
-    assert err.value.project_id == "MBS01-002"
+        build_bloom_row(RETIREMENT, FakeCache(project_id=UNKNOWN_PROJECT_ID))
+    assert err.value.project_id == UNKNOWN_PROJECT_ID
+    assert "land_size or land_size_per_credit" in err.value.missing
 
 
 def test_refusal_names_the_project_and_the_batch():
     """The operator must be able to act without reading the source."""
     with pytest.raises(UnregisteredProjectError) as err:
-        build_bloom_row(RETIREMENT, FakeCache(project_id="MBS01-002"))
+        build_bloom_row(RETIREMENT, FakeCache(project_id=UNKNOWN_PROJECT_ID))
     message = err.value.message()
-    assert "MBS01-002" in message
+    assert UNKNOWN_PROJECT_ID in message
     assert RETIREMENT["batch_denom"] in message
 
 
 def test_refusal_carries_a_paste_ready_remedy():
     with pytest.raises(UnregisteredProjectError) as err:
-        build_bloom_row(RETIREMENT, FakeCache(project_id="MBS01-002"))
+        build_bloom_row(RETIREMENT, FakeCache(project_id=UNKNOWN_PROJECT_ID))
     remedy = err.value.remedy()
-    assert '"MBS01-002": {' in remedy
+    assert f'"{UNKNOWN_PROJECT_ID}": {{' in remedy
     for field in COMMERCIAL_FIELDS:
         assert field in remedy, f"remedy omits {field}, so a fix from it would be incomplete"
+    assert "land_size" in remedy
+    assert "land_size_per_credit" in remedy
     assert "Do not guess" in remedy
 
 
@@ -149,24 +160,44 @@ def test_registry_entry_without_a_name_is_refused(monkeypatch):
     assert "name" in err.value.missing
 
 
-def test_a_fully_registered_second_product_exports_with_its_own_price(monkeypatch):
-    """The fix must not make new products impossible, only unregistered ones."""
-    coral = {
-        "name": "Coral Reef: Example",
-        "developer": "Example Developer",
-        "credit_price": 40,
-        "transaction_description": "Purchase of Coral Blocks",
-        "credit_scheme": "Coral Blocks",
-        "activity_type": "Uplift, Stewardship",
-        "avg_price_per_hectare_per_year": 5000,
-        "credit_size": 0.0002,
-        "credit_length": 15,
-    }
-    monkeypatch.setitem(PROJECTS, "MBS01-002", coral)
+def test_registry_entry_without_a_land_size_mode_is_refused(monkeypatch):
+    no_area = {k: v for k, v in PROJECTS["MBS01-002"].items() if k != "land_size"}
+    monkeypatch.setitem(PROJECTS, "MBS01-002", no_area)
 
-    row = build_bloom_row(RETIREMENT, FakeCache(project_id="MBS01-002"))
+    with pytest.raises(UnregisteredProjectError) as err:
+        build_bloom_row(CORAL_RETIREMENT, FakeCache(project_id="MBS01-002", jurisdiction="CR-P"))
+    assert "land_size or land_size_per_credit" in err.value.missing
+
+
+def test_registry_entry_with_two_land_size_modes_is_refused(monkeypatch):
+    ambiguous = dict(PROJECTS["MBS01-002"], land_size_per_credit=0.1)
+    monkeypatch.setitem(PROJECTS, "MBS01-002", ambiguous)
+
+    with pytest.raises(UnregisteredProjectError) as err:
+        build_bloom_row(CORAL_RETIREMENT, FakeCache(project_id="MBS01-002", jurisdiction="CR-P"))
+    assert "exactly one of land_size or land_size_per_credit" in err.value.missing
+
+
+def test_coral_project_exports_with_seatrees_supplied_values():
+    """MBS01-002 must export the values SeaTrees supplied on 2026-08-13."""
+    row = build_bloom_row(
+        CORAL_RETIREMENT,
+        FakeCache(project_id="MBS01-002", jurisdiction="CR-P", admin="wrong-admin"),
+    )
+
     assert row["credit_price"] == 40
-    assert row["purchase_amount"] == 40000.0
-    assert row["project_name"] == "Coral Reef: Example"
-    assert row["project_developer"] == "Example Developer"
-    assert row["land_size"] == 0.2
+    assert row["purchase_amount"] == 80.0
+    assert row["project_name"] == "Coral Reef: Golfo Dulce"
+    assert row["project_developer"] == (
+        "regen1a3g9wfm33l80eek2jwrhnfctr7vslfw7k7y83dvc6guy8cp9444q5d7vx0"
+    )
+    assert row["project_country"] == "Costa Rica"
+    assert row["project_region"] == "Central America"
+    assert row["transaction_description"] == "Purchase of Seatrees+ Biodiversity Blocks"
+    assert row["credit_scheme"] == "Seatrees+ Biodiversity Blocks"
+    assert row["activity_type"] == "Uplift, Stewardship"
+    assert row["avg_price_per_hectare_per_year"] == 3200
+    assert row["credit_size"] == 0.25
+    assert row["credit_length"] == 5
+    # Coral's 0.1 ha is the fixed project area, not two credits × credit_size.
+    assert row["land_size"] == 0.1
