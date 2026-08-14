@@ -2245,6 +2245,7 @@ async def health_check(request: Request):
         null_embed_count_live = 0
         null_embed_count_chunks = 0
         null_embed_count_entities = 0
+        null_embed_count_sessions = 0
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
             try:
@@ -2280,11 +2281,25 @@ async def health_check(request: Request):
                     SELECT COUNT(*) FROM entity_registry
                     WHERE embedding_3072 IS NULL
                 """) or 0
+                # FOURTH surface, ungauged until 2026-08-14 — the same sweep gap
+                # again. Read with the identical hard IS NOT NULL filter (this
+                # file :4976, 4996, 5011, 5038, 5050; knowledge_router.py :1677,
+                # 1927, 1938), but its ONLY writer lives in a different repo
+                # (RegenAI/koi-sensors .../claude_session_sensor.py:640) on a
+                # dev-area checkout. It reads 0/442,890 today only because that
+                # sensor DELETEs and reinserts per session — a partial write, or
+                # that sensor stopping mid-run, would leave rows unreachable with
+                # nothing reporting it.
+                null_embed_count_sessions = await conn.fetchval("""
+                    SELECT COUNT(*) FROM session_chunks
+                    WHERE embedding_3072 IS NULL
+                """) or 0
             except Exception:
                 null_embed_count_db = -1  # signal "query failed"
                 null_embed_count_live = -1
                 null_embed_count_chunks = -1
                 null_embed_count_entities = -1
+                null_embed_count_sessions = -1
 
         # Get loaded entity types from schema
         schemas = get_entity_schemas()
@@ -2321,6 +2336,9 @@ async def health_check(request: Request):
             # rows are unreachable by Tier-2 resolution and will re-duplicate on the
             # next mention. Repair with scripts/backfill_entity_embeddings.py.
             "null_embed_entity_count": null_embed_count_entities,
+            # Session-transcript chunks with no vector. Same invisibility as the
+            # three above; see the query comment for why this reads 0 today.
+            "null_embed_session_chunk_count": null_embed_count_sessions,
             "null_embed_fact_counter_process": process_counter,
         }
     except Exception as e:

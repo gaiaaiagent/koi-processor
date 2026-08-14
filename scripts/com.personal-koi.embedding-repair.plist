@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/darrenzal</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>TIKTOKEN_CACHE_DIR</key>
+		<string>/Users/darrenzal/.cache/tiktoken</string>
+	</dict>
+	<!-- DELIBERATELY NO KeepAlive.
+	     KeepAlive{SuccessfulExit:false} + no ThrottleInterval is what turned
+	     2026-08-12's OpenAI credit exhaustion into 3,040 consecutive runs in
+	     9h06m (~10.8 s/cycle) where StartInterval=300 intended 109 — 27.8x.
+	     StartInterval alone gives a strict 300s cadence regardless of exit code.
+	     ThrottleInterval is set to 300 as belt-and-braces: if someone re-adds
+	     KeepAlive, launchd's minimum runtime becomes 300, not the default 10. -->
+	<key>Label</key>
+	<string>com.personal-koi.embedding-repair</string>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/darrenzal/projects/koi-processor-runtime/scripts/run_embedding_repair.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime/logs/embedding-repair.error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime/logs/embedding-repair.log</string>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>ThrottleInterval</key>
+	<integer>300</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime</string>
+</dict>
+</plist>

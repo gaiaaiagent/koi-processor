@@ -106,6 +106,7 @@ async def main(args):
 
     for batch_start in range(0, len(rows), BATCH_SIZE):
         batch = rows[batch_start:batch_start + BATCH_SIZE]
+        written = 0
         texts = []
         uris = []
 
@@ -144,12 +145,18 @@ async def main(args):
         async with pool.acquire() as conn:
             async with conn.transaction():
                 for uri, emb in zip(uris, embeddings):
-                    await conn.execute(
-                        "UPDATE entity_registry SET embedding_3072 = $1 WHERE fuseki_uri = $2",
+                    # AND embedding_3072 IS NULL: the fact and chunk repair paths
+                    # both re-check under row lock; this one did not, making it
+                    # "idempotent by luck" rather than by construction.
+                    status = await conn.execute(
+                        "UPDATE entity_registry SET embedding_3072 = $1 "
+                        "WHERE fuseki_uri = $2 AND embedding_3072 IS NULL",
                         str(emb), uri
                     )
+                    if status.endswith(" 1"):
+                        written += 1
 
-        embedded += len(batch)
+        embedded += written  # was len(batch) — counted rows, not writes
         elapsed = time.time() - start_time
         rate = embedded / elapsed * 60 if elapsed > 0 else 0
         logger.info(

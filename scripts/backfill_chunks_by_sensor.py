@@ -41,6 +41,8 @@ from typing import List, Optional
 import asyncpg
 import tiktoken
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # api.provider_http import
+
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
 OPENAI_MODEL = "text-embedding-3-large"
 OPENAI_DIMENSIONS = 3072
@@ -167,7 +169,18 @@ async def main():
             print("ERROR: OPENAI_API_KEY not set", file=sys.stderr)
             return 2
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        # #36: SDK defaults are Timeout(read=600, write=600, pool=600) with
+        # max_retries=2 = up to 30 MINUTES on one embed call — the shape that
+        # wedged :8351 fleet-wide on 2026-07-15. api/provider_http.py exists to
+        # bound this; this script was the last scheduled caller that bypassed it.
+        from api.provider_http import (
+            provider_sync_client, provider_timeout, PROVIDER_MAX_RETRIES)
+        client = OpenAI(
+            api_key=api_key,
+            timeout=provider_timeout(),
+            max_retries=PROVIDER_MAX_RETRIES,
+            http_client=provider_sync_client(),
+        )
 
         run_log_dir = Path(args.run_log_dir)
         run_log_dir.mkdir(parents=True, exist_ok=True)
