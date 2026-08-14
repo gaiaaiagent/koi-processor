@@ -1251,6 +1251,26 @@ def create_router(
         # knowledge-add rows), so a wrong guess disappears into the crowd.
         typed_by_default = type_hint is None
         entity_type = type_hint if type_hint else "Concept"
+
+        # Nothing validated entity_type on the way in, so the registry accumulated 25
+        # non-canonical variants across 561 rows before anyone looked: namespace
+        # duplicates of canonical types (schema:Person, bkc:Concept, schema:Place),
+        # unregistered-but-consistent types (Document 240, Event 150,
+        # SoftwareApplication 100), and lowercase one-offs (paper, gist, article).
+        # Each variant partitions the registry -- a name stored as `Place` cannot be
+        # found by a Tier-1 lookup for `Location`, so it silently duplicates instead.
+        # Warn rather than reject: a caller with a genuinely new type should not have
+        # its write fail, but the drift must not be silent. A recurring name here is
+        # a prompt to add the type to DEFAULT_SCHEMAS or to fix the caller.
+        try:
+            from api.entity_schema import DEFAULT_SCHEMAS
+            if entity_type not in DEFAULT_SCHEMAS:
+                logger.warning(
+                    f"entity_type {entity_type!r} is not in DEFAULT_SCHEMAS "
+                    f"(creating {name!r} anyway) — add it to the schema or fix the caller"
+                )
+        except Exception:
+            pass  # never let a schema-introspection failure block a write
         new_uri = generate_entity_uri(name, entity_type)
 
         embedding = None
