@@ -24,6 +24,14 @@
 > | **`stable`** | **RegenAI public production** (`darren@202.61.196.119`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep clean. |
 > | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. |
 >
+> **`regen-prod` takes direct pushes — this is intended (2026-08-14).** The branch carried a
+> PR requirement that was decorative: `required_approving_review_count: 0` and
+> `enforce_admins: false`, so the repo admin bypassed it by design and each direct push got
+> logged as a "bypass" that needed explaining. The requirement was removed rather than
+> enforced, because for a solo operator it added a step and no review. Force-push and branch
+> deletion are still blocked. Deploy discipline lives where it always did: the deliberate
+> `regen-prod` → `stable` promotion, not a self-approved PR.
+>
 > **CHECKOUT TOPOLOGY — which DIRECTORY serves what (added 2026-08-05).** The table above
 > is about BRANCHES. The dimension that has actually caused incidents is which physical
 > checkout each consumer reads, because several exist and they are NOT interchangeable:
