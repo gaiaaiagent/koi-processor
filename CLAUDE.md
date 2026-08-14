@@ -39,7 +39,7 @@
 > | Directory | Role | Rule |
 > |---|---|---|
 > | `~/projects/koi-processor-service` | **SERVES :8351** (uvicorn cwd; `start.sh` `WORKTREE=`) | ⛔ never switch branches here — the live API becomes whatever you leave it on. `start.sh` now REFUSES to serve a non-deployable branch. |
-> | `~/projects/koi-processor-runtime` | **launchd sensor jobs** (incl. chunk-embedder) | ⛔ never switch branches here — a job's script can vanish and it exits 78 silently. |
+> | `~/projects/koi-processor-runtime` | **launchd sensor jobs** (incl. `embedding-repair`) | ⛔ never switch branches here — a job's script can vanish and it exits 78 silently. |
 > | `~/projects/RegenAI/koi-processor` | shared DEV checkout | sessions switch this freely; assume it moves under you. |
 > | `~/projects/koi-wt-*` | per-topic **worktrees** | ✅ do multi-step work here. `git worktree add ~/projects/koi-wt-<topic> <branch>` |
 >
@@ -49,6 +49,32 @@
 > in the running process's memory — the next restart would have silently regressed it.
 >
 > Translation: commit to `regen-prod` → NUC gets it via Dobby's deploy; the local backend needs `restart.sh`; the local sensors need a `git pull` in the runtime clone. RegenAI public production needs an explicit cherry-pick + push to `stable`.
+>
+> **EMBEDDING SELF-HEAL (2026-08-14).** `com.personal-koi.chunk-embedder` is **retired**
+> (plist kept as `.retired-20260814`). Its replacement is
+> **`com.personal-koi.embedding-repair`** → `scripts/run_embedding_repair.sh` →
+> `scripts/backfill_null_embeddings.py`, every 300s from the runtime clone, covering **all
+> four** surfaces that semantic search reads: chunks, facts, entities, `session_chunks`.
+> Previously only chunks self-healed, so 103 fact rows sat invisible for two days.
+>
+> Two things about it are load-bearing and easy to undo by accident:
+>
+> - **The plist has no `KeepAlive`, deliberately.** `KeepAlive{SuccessfulExit:false}` with
+>   no `ThrottleInterval` is what turned the 2026-08-12 OpenAI credit exhaustion into
+>   **3,040 consecutive runs in 9h06m** where `StartInterval=300` intended 109 — launchd's
+>   10s *minimum runtime* governs every crash. Each run made a failed provider call and the
+>   pending queue **grew 10 → 144**. `ThrottleInterval 300` is belt-and-braces. There is a
+>   test (`tests/test_embedding_repair.py::test_the_plist_cannot_storm`) that fails if
+>   `KeepAlive` comes back, which is why the plist is committed to the repo at
+>   `scripts/com.personal-koi.embedding-repair.plist` rather than living only in
+>   `~/Library/LaunchAgents`.
+> - **The job exits 0 when the provider is down.** That is not sloppiness — a nonzero exit
+>   is precisely what launchd respawned on. Observability is the log line and the state
+>   file (`logs/embedding-repair-state.json`), never the exit code. Exit 2 means a genuine
+>   config error, 3 means the cost guard tripped.
+>
+> Manual run: `~/projects/koi-processor-runtime/scripts/run_embedding_repair.sh --dry-run`.
+> To force a run inside an open circuit breaker, add `--ignore-backoff`.
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
 **Status**: ✅ COMPLETE - Production Deployed (2025-12-25)
