@@ -331,11 +331,18 @@ async def run_health_checks(
 
         # ── 3. Drift ────────────────────────────────────────────────────────
 
-        # 3a. Docs with non-null embeddings vs total indexed
+        # 3a. Docs with non-null embeddings vs total indexed.
+        #
+        # Counts embedding_3072, the column search actually reads. This measured the
+        # legacy 1024-dim `embedding` column until 2026-08-14, which the 2026-04-23
+        # OpenAI migration left permanently NULL — so the weekly report published to the
+        # vault said "2964 of 3296 doc chunks have no embedding vector" when the true
+        # figure was 0 of 3296, and advised re-running doc_scanner.py to fix it. A
+        # monitor reading a column nothing writes reports 90% breakage forever.
         chunk_stats = await conn.fetchrow("""
             SELECT
                 COUNT(*) AS total_chunks,
-                SUM(CASE WHEN mc.embedding IS NULL THEN 1 ELSE 0 END) AS missing_embeddings
+                SUM(CASE WHEN mc.embedding_3072 IS NULL THEN 1 ELSE 0 END) AS missing_embeddings
             FROM koi_memory_chunks mc
             JOIN koi_memories m ON mc.document_rid = m.rid
             WHERE m.source_sensor = 'doc-scanner'
@@ -540,7 +547,8 @@ def render_report(results: dict, stale_days: int) -> str:
         lines += [
             "## Missing Embeddings",
             "",
-            f"{missing_emb} of {total_chunks} doc chunks have no embedding vector — text-fallback only for these.",
+            f"{missing_emb} of {total_chunks} doc chunks have no embedding vector — these are "
+            f"INVISIBLE to semantic search, not merely ranked lower.",
             "",
         ]
     else:
@@ -563,7 +571,15 @@ def render_report(results: dict, stale_days: int) -> str:
     if missing_deps:
         actions.append(f"- Add depends_on to {missing_deps} non-root docs")
     if missing_emb:
-        actions.append(f"- Re-run `doc_scanner.py --force` to fix {missing_emb} chunk(s) without embeddings")
+        # doc_scanner --force re-scans and re-chunks the source, which is the heavy
+        # remedy for a column-level gap; the chunk-embedder job fills embedding_3072
+        # in place on a 300s retry, and is what actually cleared the 2026-08-12
+        # provider outage without anyone intervening.
+        actions.append(
+            f"- {missing_emb} chunk(s) missing embedding_3072. Check the chunk-embedder job first: "
+            f"`launchctl list | grep chunk-embedder` — it backfills in place every 300s. "
+            f"Only re-run `doc_scanner.py --force` if the chunks themselves are wrong."
+        )
     if stale_facts > 10:
         actions.append(f"- Review {stale_facts} stale facts — consider adding a knowledge episode to refresh context")
     if not actions:
