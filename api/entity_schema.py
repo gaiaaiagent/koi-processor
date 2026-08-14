@@ -134,7 +134,15 @@ DEFAULT_SCHEMAS = {
         folder='Locations',
         phonetic_matching=False,
         similarity_threshold=0.90,
-        require_token_overlap=True
+        require_token_overlap=True,
+        # 'Place' is schema.org's name for this type and kept arriving from vault
+        # frontmatter. It was NOT an alias, so canonicalize_entity_type('Place')
+        # returned 'Place', Tier-1 filters entity_type = $2, and every Place write
+        # created a duplicate of an existing Location instead of resolving to it —
+        # 27 rows before anyone looked. Verified before adding: all 12 remaining
+        # Place rows have a Location twin on the same normalized_text, so aliasing
+        # strands none of them and sends the lookup to the canonical row.
+        type_aliases=['Place']
     ),
     'Concept': EntityTypeConfig(
         type_key='Concept',
@@ -510,9 +518,16 @@ _schema_version: Optional[str] = None
 
 
 def compute_schema_version(schemas: Dict[str, EntityTypeConfig]) -> str:
-    """Compute etag from schema content for cache invalidation."""
+    """Compute etag from schema content for cache invalidation.
+
+    Includes type_aliases: adding `Place` as an alias of Location changes which
+    rows a lookup reaches, but left this hash — and therefore schema_version —
+    identical, so nothing downstream knew to invalidate. A cache key that omits a
+    field which changes resolution reports "unchanged" through a real change.
+    """
     content = ''.join(
         f"{s.type_key}:{s.folder}:{s.phonetic_matching}:{s.similarity_threshold}"
+        f":{','.join(sorted(s.type_aliases))}"
         for s in sorted(schemas.values(), key=lambda x: x.type_key)
     )
     return hashlib.md5(content.encode()).hexdigest()[:8]
@@ -581,6 +596,31 @@ def get_schema_for_type(type_hint: str) -> EntityTypeConfig:
         if any(a.casefold() == type_hint_lower for a in schema.type_aliases):
             return schema
 
+    # Last resort before the unknown fallback: strip a schema:/bkc: prefix and retry.
+    #
+    # The WRITE path canonicalizes (personal_ingest_api.store_new_entity) but the READ
+    # path did not — resolve_entity passes entity.type through raw. So a request typed
+    # `schema:Person` selected UNKNOWN_TYPE_SCHEMA, whose thresholds are STRICTER than
+    # any real type (0.95 with require_token_overlap=True, vs Person's 0.92 with it
+    # off). The failure is silent and backwards: a namespaced type does not error, it
+    # just under-merges, leaving duplicates that look like ordinary distinct entities.
+    #
+    # Only ever converts an UNKNOWN result into a real schema, so it cannot change a
+    # lookup that already matched above.
+    try:
+        canonical = canonicalize_entity_type(type_hint)
+    except Exception:
+        canonical = type_hint
+    if canonical and canonical != type_hint:
+        if canonical in schemas:
+            return schemas[canonical]
+        canonical_lower = canonical.casefold()
+        for key, schema in schemas.items():
+            if key.casefold() == canonical_lower:
+                return schema
+            if any(a.casefold() == canonical_lower for a in schema.type_aliases):
+                return schema
+
     logger.warning(f"Unknown entity type '{type_hint}', using safe default")
     return UNKNOWN_TYPE_SCHEMA
 
@@ -639,6 +679,46 @@ def canonicalize_entity_type(raw: str) -> str:
             return hit
 
     return stripped
+
+
+def canonicalize_entity_type_checked(
+    raw: str,
+    *,
+    name: Optional[str] = None,
+    source: Optional[str] = None,
+) -> str:
+    """Canonicalize a type for a WRITE, and make an unregistered one audible.
+
+    Use this at every entity create path. ``canonicalize_entity_type`` alone is not
+    enough: it strips ``schema:``/``bkc:`` prefixes and resolves registered aliases,
+    but an unregistered type passes through silently, which is how ``Document`` (240
+    rows), ``Event`` (150) and ``SoftwareApplication`` (100) accumulated unnoticed.
+
+    Every non-canonical variant partitions the registry. Tier-1 exact match filters
+    ``entity_type = $2``, so a name stored as ``Place`` can never be found by a
+    ``Location`` lookup and the next mention creates a duplicate instead of resolving.
+
+    Warn, never reject: a caller with a genuinely new type should not have its write
+    fail. But a name recurring in this log is the prompt to add it to DEFAULT_SCHEMAS
+    or fix the caller. Never raises — a schema-introspection failure must not block a
+    write.
+    """
+    try:
+        canonical = canonicalize_entity_type(raw)
+    except Exception:
+        return raw
+
+    try:
+        if canonical and canonical not in get_entity_schemas():
+            logger.warning(
+                "entity_type %r is not a registered type (canonicalized from %r) — "
+                "creating %r from source=%r anyway; add it to DEFAULT_SCHEMAS or fix the caller",
+                canonical, raw, name, source,
+            )
+    except Exception:
+        pass
+
+    return canonical
 
 
 def get_all_entity_types() -> List[str]:

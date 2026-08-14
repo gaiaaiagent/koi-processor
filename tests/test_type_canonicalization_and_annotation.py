@@ -34,6 +34,12 @@ CANON_CASES = [
     ("Person", "Person"),                                    # already canonical
     ("FooBar", "FooBar"),                                    # unknown passthrough
     ("", ""),                                                # empty passthrough
+    # 'Place' is schema.org's name for Location. It was NOT registered as an alias,
+    # so it canonicalized to itself, Tier-1 filtered entity_type = 'Place', and every
+    # Place write duplicated an existing Location instead of resolving to it.
+    ("Place", "Location"),
+    ("schema:Place", "Location"),
+    ("places", "Location"),                                  # plural + alias
 ]
 
 
@@ -232,3 +238,45 @@ def test_resolve_get_annotation_null_mapping_does_not_gate(monkeypatch, tmp_path
     assert cand["vault_path"] is None
     assert cand["vault_note_exists"] is False
     assert cand["vault_folder"] == "Organizations"
+
+
+# ---------------------------------------------------------------------------
+# get_schema_for_type — namespaced types must not fall through to _unknown
+#
+# The WRITE path canonicalized (store_new_entity) but the READ path did not:
+# resolve_entity passes entity.type through raw. A request typed `schema:Person`
+# therefore selected UNKNOWN_TYPE_SCHEMA, whose thresholds are STRICTER than any
+# real type (semantic_threshold 0.95, require_token_overlap=True) rather than
+# Person's (0.92 similarity, token overlap OFF). Failing strict is silent and
+# backwards: it does not error, it under-merges, leaving duplicates that look
+# like ordinary distinct entities.
+# ---------------------------------------------------------------------------
+
+from api.entity_schema import get_schema_for_type  # noqa: E402
+
+
+@pytest.mark.parametrize("type_hint,expected_key", [
+    ("Person", "Person"),
+    ("schema:Person", "Person"),
+    ("bkc:Concept", "Concept"),
+    ("Place", "Location"),
+    ("schema:Place", "Location"),
+    ("Location", "Location"),
+])
+def test_namespaced_types_select_the_real_schema(type_hint, expected_key):
+    assert get_schema_for_type(type_hint).type_key == expected_key
+
+
+@pytest.mark.parametrize("type_hint", ["Bogus", "schema:Bogus", ""])
+def test_genuinely_unknown_types_still_get_the_safe_default(type_hint):
+    """The fallback must survive — this is a widening, not a removal."""
+    assert get_schema_for_type(type_hint).type_key == "_unknown"
+
+
+def test_namespaced_person_is_not_resolved_under_stricter_unknown_rules(caplog):
+    """The regression in thresholds, stated directly rather than via type_key."""
+    person = get_schema_for_type("Person")
+    namespaced = get_schema_for_type("schema:Person")
+    assert namespaced.similarity_threshold == person.similarity_threshold
+    assert namespaced.require_token_overlap == person.require_token_overlap
+    assert namespaced.semantic_threshold == person.semantic_threshold
