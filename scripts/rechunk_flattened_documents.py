@@ -67,7 +67,12 @@ SELECT m.rid,
        (SELECT count(*) FROM koi_memory_chunks c WHERE c.document_rid = m.rid) AS n_chunks
 FROM koi_memories m
 WHERE m.rid LIKE 'document:%'
-  AND m.content->>'text' LIKE '%' || chr(10) || '%'
+  -- an INTERIOR newline, not merely a trailing one. A transcript that is one
+  -- continuous line ending in a single newline is genuinely flat rather than
+  -- damaged: re-chunking recovers nothing and still costs embedding spend.
+  -- Caught on the 2026-08-14 run, where exactly one of 303 documents was this
+  -- case and tripped the script's own "still no newlines after re-chunk" warning.
+  AND position(chr(10) in rtrim(m.content->>'text', chr(10) || chr(13) || ' ')) > 0
   AND EXISTS (SELECT 1 FROM koi_memory_chunks c WHERE c.document_rid = m.rid)
   AND NOT EXISTS (
         SELECT 1 FROM koi_memory_chunks c
