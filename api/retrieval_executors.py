@@ -24,8 +24,38 @@ logger = logging.getLogger(__name__)
 # Entity types excluded from /chat entity_lookup to reduce noise.
 # These are governance/project-management artifacts that dilute results
 # for knowledge questions about ecology, organizations, and mechanisms.
+#
+# 2026-08-15: Document and Event added. Both are UNREGISTERED types produced by
+# finished one-shot backfills, and both are things the entity graph should not be
+# answering knowledge questions with:
+#
+#   Document (240 rows, johar-corpus-intake-v1 + knowledge-add) is Substack post and
+#   essay TITLES. 227 of them exact-title-match a row that already exists in
+#   koi_memories, so /chat can already reach that content through the document
+#   surface; reaching it a second time as an entity just returns a headline where a
+#   fact belongs. Zero of the 240 carry a vault_rid — they are graph-only.
+#
+#   Event (150 rows, extract-session-entities) is ~34 real gatherings, 25 BARE DATE
+#   STRINGS like "2026-04-05", and ~28 fragments of plan scaffolding. A bare date
+#   embedded in an ANN matches a great many unrelated queries.
+#
+# 390 of 27,122 embedded entities, so ~1.4% of the candidate pool.
+#
+# This is a RETRIEVAL decision, not an ontology one, and deliberately not a data
+# change. The rows stay: entity_relationships carries ON DELETE CASCADE on both
+# subject and object, so deleting the 240 Documents would silently destroy 598
+# relationship rows including 371 sourced_from edges that are the sole provenance of
+# the Claims citing them. Excluding a type from one ANN is reversible with git
+# revert; a cascade is not reversible at all.
+#
+# None of the three is registered in the vault Ontology, and that is also deliberate
+# rather than pending: entity_type is a RESOLUTION KEY, not a semantic label (see the
+# type_aliases comment in Ontology/schema-concept.md). Registering a type that shares
+# a folder with an existing one is what partitioned GitHub, Signal, Otter and six
+# others across duplicate rows.
 CHAT_EXCLUDE_TYPES = [
     "Claim", "WorkItem", "Milestone", "Metric", "Risk", "Initiative", "Decision",
+    "Document", "Event",
 ]
 
 
