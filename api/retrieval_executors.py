@@ -53,6 +53,27 @@ logger = logging.getLogger(__name__)
 # type_aliases comment in Ontology/schema-concept.md). Registering a type that shares
 # a folder with an existing one is what partitioned GitHub, Signal, Otter and six
 # others across duplicate rows.
+# Tombstones are still embedded, so without this they compete in the ANN as
+# duplicates of the very rows they were merged into. /entities/merge tombstones
+# via merged_into rather than deleting, and deliberately leaves embedding_3072
+# intact, so every merge ever performed has been adding a decoy here.
+#
+# Measured 2026-08-16: 202 tombstones in the /chat candidate pool, 167 of them
+# sharing a normalized_text with a live, also-embedded survivor. "Polis" alone
+# has two dead rows (Concept and Project) both merged into the live "Pol.is", so
+# the model is handed one entity three times and can cite the dead fuseki_uri.
+# There is no downstream dedup: merged_into appeared ZERO times in this file.
+#
+# 25 other query sites in api/ already filter it. This one did not, which is why
+# the type-exclusion work in 278f527 sat directly on top of a larger contamination
+# than the one it removed.
+LIVE_FILTER = "AND merged_into IS NULL"
+#
+# Module level, not a local: _keyword_entity_search is a separate function and the
+# first version of this fix left the name unresolvable there. It is the FALLBACK
+# path, reached only when vector search has already failed, so a NameError would
+# have surfaced only during an already-degraded state and turned a soft failure
+# into a hard one.
 CHAT_EXCLUDE_TYPES = [
     "Claim", "WorkItem", "Milestone", "Metric", "Risk", "Initiative", "Decision",
     "Document", "Event",
@@ -80,6 +101,7 @@ async def entity_lookup(
     """
     privacy_filter = "" if include_node_private else "AND NOT node_private"
 
+
     # Build type exclusion filter with dynamic param offsets
     type_filter = ""
     type_params: list[Any] = []
@@ -103,7 +125,7 @@ async def entity_lookup(
                        1 - (embedding_3072::halfvec(3072)
                             <=> $1::halfvec(3072)) AS similarity
                 FROM entity_registry
-                WHERE embedding_3072 IS NOT NULL {privacy_filter} {type_filter}
+                WHERE embedding_3072 IS NOT NULL {privacy_filter} {LIVE_FILTER} {type_filter}
                 ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                 LIMIT $2
             """, embedding_str, max_results, *type_params)
@@ -169,7 +191,7 @@ async def _keyword_entity_search(
         SELECT fuseki_uri, entity_text, entity_type, metadata,
                ({match_score})::float / {len(words)} AS similarity
         FROM entity_registry
-        WHERE ({conditions}) {privacy_filter} {type_filter}
+        WHERE ({conditions}) {privacy_filter} {LIVE_FILTER} {type_filter}
         ORDER BY ({match_score}) DESC, created_at DESC
         LIMIT ${len(words)+1}
     """, *params)
@@ -708,6 +730,8 @@ async def _structured_sql_roadmap(
             FROM entity_registry er
             WHERE er.entity_type IN ('Initiative', 'WorkItem', 'Milestone', 'Outcome',
                                      'Decision', 'Metric', 'Risk')
+              -- same reason as the ANN above: a merged WorkItem is not a work item
+              AND er.merged_into IS NULL
               AND (er.node_private IS NULL OR er.node_private = false)
               AND ($1::text[] IS NULL OR er.fuseki_uri = ANY($1))
             ORDER BY er.last_seen_at DESC NULLS LAST
