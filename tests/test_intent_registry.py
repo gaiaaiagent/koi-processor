@@ -1,9 +1,25 @@
 """
 Regression tests for the intent_registry API (intent_router.py).
 
-Runs against the live backend on localhost:8351.
-Each test uses unique intent keys prefixed with "reg-test-intent-" and cleans up
-after itself by setting status=archived so real intent data is never touched.
+Runs against the live backend on localhost:8351 — which means the LIVE personal_koi
+database, not a fixture one. That is a deliberate trade (these are contract tests against
+a real server) and it has a cost the original cleanup missed.
+
+Each test uses unique intent keys prefixed with "reg-test-intent-" and archives the intent
+afterwards. Archiving keeps the intent out of real intent LISTS. It does not touch the
+`entity_registry` row that ingesting an intent creates as a side effect, and that row is
+embedded, so it competes in every entity ANN from then on.
+
+By 2026-08-17 that had put 631 Intent rows in `entity_registry`, of which 547 joined to an
+intent whose landscape_group is literally "test-group" and whose publisher is literally
+"Test Publisher". Nine looked genuine. None of the fixtures was referenced by any fact,
+relationship or document link — they were pure ballast in the semantic search pool of a
+personal knowledge graph, accumulating since 2026-03-24.
+
+The `cleanup()` docstring said "so it doesn't pollute real intent lists", which was true
+and was the whole problem: the author saw the pollution, fixed the surface they were
+looking at, and the sibling surface went unswept for five months. Cleanup now removes the
+entity row too.
 
 Usage:
     pytest tests/test_intent_registry.py -v
@@ -11,6 +27,7 @@ Usage:
     KOI_API_URL=http://localhost:8351 pytest tests/test_intent_registry.py -v
 """
 
+import hashlib
 import os
 import uuid
 
@@ -26,9 +43,27 @@ def client():
         yield c
 
 
+CREATED_KEYS: set[str] = set()
+
+
 def make_key(suffix: str) -> str:
-    """Generate a unique test intent key."""
-    return f"reg-test-intent-{suffix}-{uuid.uuid4().hex[:6]}"
+    """Generate a unique test intent key, and remember it for teardown."""
+    key = f"reg-test-intent-{suffix}-{uuid.uuid4().hex[:6]}"
+    CREATED_KEYS.add(key)
+    return key
+
+
+def intent_rid(key: str) -> str:
+    """Mirror of intent_router._generate_intent_rid.
+
+    The entity row's fuseki_uri IS the intent RID, and that RID is a blake2b hash of the
+    key with nothing recoverable in it — so teardown cannot pattern-match a URI and cannot
+    safely pattern-match the entity_text either ("Test firewood offer", "Looking for
+    salmon", "Intent: OFFER" are all indistinguishable from real entries in this graph).
+    Recomputing the hash from the keys this run generated is the only way to delete
+    exactly what it created.
+    """
+    return f"orn:koi-net.intent:{hashlib.blake2b(key.encode('utf-8'), digest_size=16).hexdigest()}"
 
 
 def ingest(client, key: str, **kwargs) -> dict:
@@ -48,6 +83,45 @@ def ingest(client, key: str, **kwargs) -> dict:
 def cleanup(client, key: str):
     """Mark a test intent as archived so it doesn't pollute real intent lists."""
     client.patch(f"/intents/{key}", json={"status": "archived"})
+
+
+@pytest.fixture(scope="module", autouse=True)
+def purge_test_entities():
+    """Delete the entity_registry rows this module's ingests create as a side effect.
+
+    Deletes by exact fuseki_uri, recomputed from the keys THIS RUN generated. Two weaker
+    designs were tried and rejected against the live data:
+
+      - match the entity_text: `_build_entity_text` names the row after the description or
+        the asset, giving "Test firewood offer", "Looking for salmon", "Keep this",
+        "Intent: OFFER". None is reliably distinguishable from a real entry in this graph
+        and some are entirely plausible ones. It also missed three whole families.
+      - match a prefix in the URI: there is none. The RID is a bare blake2b hash.
+
+    Archiving an intent does not remove its entity row, and the row gets embedded, so an
+    un-purged fixture competes in every entity ANN from then on. Five months of runs left
+    256 of them in the live graph before anyone looked.
+
+    Runs after the module rather than per-test, so a failing test can still be inspected
+    mid-run. Skips silently without POSTGRES_URL — this is hygiene, not an assertion, and
+    must never be the reason a contract test fails.
+    """
+    yield
+    dsn = os.getenv("POSTGRES_URL")
+    if not dsn:
+        return
+    try:
+        import psycopg2
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM entity_registry "
+                "WHERE entity_type = 'Intent' AND fuseki_uri = ANY(%s)",
+                ([intent_rid(k) for k in CREATED_KEYS],),
+            )
+            if cur.rowcount:
+                print(f"\n[cleanup] purged {cur.rowcount} test Intent entity row(s)")
+    except Exception as exc:  # noqa: BLE001 — hygiene must not fail the suite
+        print(f"\n[cleanup] could not purge test Intent entities: {exc}")
 
 
 # ---------------------------------------------------------------------------
