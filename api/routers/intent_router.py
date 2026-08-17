@@ -284,7 +284,11 @@ def create_router(pool) -> APIRouter:
             name.lower().strip(), entity_type
         )
         if row:
-            return row["fuseki_uri"]
+            # Follow a merge: this is a RESOLUTION path (the uri is persisted as an
+            # owner / subject), so excluding a tombstone would lose the binding entirely
+            # while following it attaches to the entity the caller meant.
+            from api.resolution_primitives import resolve_to_live_uri
+            return await resolve_to_live_uri(conn, row["fuseki_uri"])
 
         return None
 

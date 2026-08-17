@@ -340,6 +340,27 @@ async def batch_resolve_entities(
             if untyped_key in unresolved:
                 result[untyped_key] = row['fuseki_uri']
 
+    # A wikilink target may resolve to a row that has since been merged away. All three
+    # tiers above are exposed: the typed join and the untyped DISTINCT ON both match on
+    # normalized_text, and merges keep it; the alias tier matches on aliases, which merges
+    # also keep, deliberately, so old names stay resolvable.
+    #
+    # The untyped tier is the worst of them — `ORDER BY occurrence_count DESC` actively
+    # PREFERS the tombstone, which typically has the higher count because it accumulated
+    # mentions before being merged and the survivor started fresh.
+    #
+    # Follow rather than exclude: this feeds document_entity_links, so excluding would drop
+    # the backlink entirely, whereas following attaches it to the entity the note meant.
+    # Resolved once per distinct URI — a note can reference the same entity many times.
+    from api.resolution_primitives import resolve_to_live_uri
+    live_by_uri: Dict[str, str] = {}
+    for key, uri in list(result.items()):
+        if uri not in live_by_uri:
+            live_by_uri[uri] = await resolve_to_live_uri(conn, uri)
+        if live_by_uri[uri] != uri:
+            logger.info("wikilink target %s was merged into %s", uri, live_by_uri[uri])
+            result[key] = live_by_uri[uri]
+
     return result
 
 

@@ -90,6 +90,33 @@ def sql_statement(src: str, fragment: str) -> str:
     return src[start + 3:end]
 
 
+def enclosing_function(src: str, anchor: str) -> str:
+    """The full body of the function containing `anchor`.
+
+    Resolution happens in PYTHON, after the query returns, and often dozens of lines
+    below the SQL — `batch_resolve_entities` runs three tiers and follows merges at the
+    end. A fixed line window around the query would miss it, and a window around the fix
+    would be circular. The honest claim is "this function does not return a URI without
+    resolving it", so the function is the unit.
+    """
+    idx = src.find(anchor)
+    assert idx != -1, f"anchor vanished: {anchor!r}"
+    lines = src.split("\n")
+    at = src[:idx].count("\n")
+    start = next((i for i in range(at, -1, -1)
+                  if re.match(r"\s*(async def|def)\s", lines[i])), None)
+    assert start is not None, f"no enclosing def for {anchor!r}"
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent and \
+                re.match(r"\s*(async def|def|class)\s", ln):
+            end = i
+            break
+    return "\n".join(lines[start:end])
+
+
 @pytest.mark.parametrize("rel,fragment,why", RETRIEVAL_SITES,
                          ids=[f"{s[0].split('/')[-1]}:{s[2][:34]}" for s in RETRIEVAL_SITES])
 def test_retrieval_sites_exclude_tombstones(rel: str, fragment: str, why: str) -> None:
@@ -136,6 +163,42 @@ def test_the_chain_walker_is_transitive_and_cycle_safe() -> None:
     fn = statement_around(src, "async def resolve_to_live_uri", before=0, after=35)
     assert "for _ in range(MAX_MERGE_CHAIN)" in fn, "the follow is not transitive"
     assert "seen" in fn and "cycle" in fn.lower(), "no cycle guard: A->B->A would spin in-request"
+
+
+# Name -> uri lookups whose result is PERSISTED. Excluding a tombstone here would drop the
+# binding; following it attaches to the entity the caller meant. Each entry names the
+# function that must call resolve_to_live_uri before returning.
+RESOLUTION_SITES = [
+    ("api/personal_ingest_api.py", "async def _resolve_entity_uri",
+     "POST /chat structured graph query — runs on every request"),
+    ("api/vault_parser.py", "async def batch_resolve_entities",
+     "wikilink -> document_entity_links; its untyped tier PREFERS the tombstone, which "
+     "usually has the higher occurrence_count"),
+    ("api/routers/claims_router.py", "WHERE normalized_text = $1 OR entity_text ILIKE $2",
+     "claimant on an auto-created claim — can be attested, verified and anchored on chain"),
+    ("api/routers/commitment_router.py", "candidate.pledger_organization or candidate.pledger_name",
+     "pledger on an auto-created commitment"),
+    ("api/routers/task_router.py", 'AND (entity_type = $2 OR entity_type IS NULL)',
+     "task ownerWikilink resolution"),
+    ("api/routers/intent_router.py", 'AND (entity_type = $2 OR entity_type IS NULL)',
+     "intent subject resolution"),
+]
+
+
+@pytest.mark.parametrize("rel,anchor,why", RESOLUTION_SITES,
+                         ids=[f"{s[0].split('/')[-1]}" for s in RESOLUTION_SITES])
+def test_resolution_sites_follow_merges(rel: str, anchor: str, why: str) -> None:
+    """Every name->uri lookup whose result is stored resolves through to the live row.
+
+    Deliberately a window rather than a SQL literal: the follow happens in PYTHON after
+    the query, so bounding to the SQL would look at the wrong thing entirely.
+    """
+    region = enclosing_function(read(rel), anchor)
+    assert "resolve_to_live_uri" in region, (
+        f"{rel} — {why}\n"
+        f"This lookup can return a tombstoned row and its URI is persisted. Excluding "
+        f"would lose the binding; it must FOLLOW merged_into instead."
+    )
 
 
 def test_write_paths_never_persist_a_tombstoned_uri() -> None:

@@ -424,7 +424,11 @@ def create_router(pool, caps=None):
                         })
                         continue
 
-                    pledger_uri = pledger_row["fuseki_uri"]
+                    # Follow a merge, so the commitment lands under the surviving org
+                    # rather than its pre-merge row (20 Organization tombstones exist).
+                    from api.resolution_primitives import resolve_to_live_uri
+                    pledger_uri = await resolve_to_live_uri(
+                        conn, pledger_row["fuseki_uri"])
 
                     # Resolve bioregion URI
                     bioregion_uri = ""

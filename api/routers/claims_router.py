@@ -1367,6 +1367,14 @@ def create_router(pool, caps=None):
 
                         if not claimant:
                             continue
+                        # Follow a merge: the claimant name may be the pre-merge identity
+                        # of a live entity, and this URI is persisted on the claim. See
+                        # resolution_primitives.resolve_to_live_uri — 25 Person and 20
+                        # Organization tombstones exist, and a claim bound to one can then
+                        # be attested, verified and ANCHORED ON CHAIN against a dead URI.
+                        from api.resolution_primitives import resolve_to_live_uri
+                        claimant_uri_live = await resolve_to_live_uri(
+                            conn, claimant["fuseki_uri"])
 
                         # Resolve about_uri from extracted metadata (Finding 4)
                         about_uri = None
@@ -1384,7 +1392,7 @@ def create_router(pool, caps=None):
                                 about_uri = loc["fuseki_uri"]
 
                         create_body = ClaimCreateRequest(
-                            claimant_uri=claimant["fuseki_uri"],
+                            claimant_uri=claimant_uri_live,
                             statement=candidate["statement"],
                             claim_type=candidate.get("claim_type", "ecological"),
                             about_uri=about_uri,
