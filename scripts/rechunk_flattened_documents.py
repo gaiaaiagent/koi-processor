@@ -30,10 +30,26 @@ chunks untouched rather than leaving it chunkless. The pre-existing
 `upsert_document_chunks` is reused so chunk rids, metadata and the 3072-dim
 column match exactly what a normal ingest writes.
 
+SCOPE. `--rid-like` defaults to `document:%`, which is what the 2026-08-14 run used.
+That run reported COMPLETE and was complete for that namespace: 303 documents, and
+0 remain. It was NOT complete for the corpus. Re-measured 2026-08-17 with the prefix
+removed: 12,798 further damaged documents / 46,793 chunks, under
+
+    orn:              7,607   (gmail + sensor ingests)
+    mediawiki:        4,201   (P2P Foundation wiki)
+    doc-scanner:        604
+    substack-corpus:    386
+
+Spot-checked by hand on the largest (orn:gmail.message:0b85114133132933, 364 KB): its
+stored text carries paragraph breaks and its first chunk has them collapsed to single
+spaces, which is the signature exactly. Pass `--rid-like '%'` to scan everything;
+the dry run prints a cost estimate before anything is spent.
+
     python3 scripts/rechunk_flattened_documents.py --dry-run
+    python3 scripts/rechunk_flattened_documents.py --dry-run --rid-like '%'
     python3 scripts/rechunk_flattened_documents.py --rid document:f4d6bdee...
     python3 scripts/rechunk_flattened_documents.py --limit 5
-    python3 scripts/rechunk_flattened_documents.py --all
+    python3 scripts/rechunk_flattened_documents.py --all --rid-like '%'
 """
 from __future__ import annotations
 
@@ -66,7 +82,7 @@ SELECT m.rid,
        length(m.content->>'text')                                    AS src_len,
        (SELECT count(*) FROM koi_memory_chunks c WHERE c.document_rid = m.rid) AS n_chunks
 FROM koi_memories m
-WHERE m.rid LIKE 'document:%'
+WHERE m.rid LIKE $1
   -- an INTERIOR newline, not merely a trailing one. A transcript that is one
   -- continuous line ending in a single newline is genuinely flat rather than
   -- damaged: re-chunking recovers nothing and still costs embedding spend.
@@ -97,6 +113,18 @@ async def main() -> None:
     ap.add_argument("--rid", help="re-chunk exactly this document rid")
     ap.add_argument("--limit", type=int, help="process at most N documents")
     ap.add_argument("--all", action="store_true", help="process every candidate")
+    ap.add_argument(
+        "--rid-like", default="document:%",
+        help=(
+            "SQL LIKE pattern for which RID namespace to scan. Defaults to the "
+            "'document:%%' scope the 2026-08-14 run used. That run reported COMPLETE and "
+            "was complete FOR THAT NAMESPACE ONLY: re-measuring on 2026-08-17 with the "
+            "prefix removed found 12,798 further damaged documents / 46,793 chunks under "
+            "orn: (7,607), mediawiki: (4,201), doc-scanner: (604) and substack-corpus: "
+            "(386). Verified by hand on the largest — its stored text has paragraph "
+            "breaks and its first chunk has them collapsed to single spaces. Use '%%' to "
+            "scan everything."
+        ))
     a = ap.parse_args()
 
     if not (a.dry_run or a.rid or a.limit or a.all):
@@ -105,7 +133,7 @@ async def main() -> None:
 
     conn = await asyncpg.connect(DB)
     try:
-        rows = await conn.fetch(CANDIDATES)
+        rows = await conn.fetch(CANDIDATES, a.rid_like)
         if a.rid:
             rows = [r for r in rows if r["rid"] == a.rid]
             if not rows:
@@ -113,8 +141,13 @@ async def main() -> None:
                       f"text has no newlines, or its chunks already retain them.")
                 return
 
-        print(f"{len(rows)} damaged document(s); "
-              f"{sum(r['n_chunks'] for r in rows)} chunks would be re-embedded\n")
+        n_chunks = sum(r["n_chunks"] for r in rows)
+        # ~$0.13 per 1M tokens for text-embedding-3-large; a CHUNK_SIZE-char chunk is
+        # roughly CHUNK_SIZE/4 tokens. Rough by design — the point is to make an
+        # order-of-magnitude decision visible before spending, not to be exact.
+        est_usd = n_chunks * (CHUNK_SIZE / 4) / 1_000_000 * 0.13
+        print(f"{len(rows)} damaged document(s) matching rid LIKE {a.rid_like!r}; "
+              f"{n_chunks} chunks would be re-embedded (~${est_usd:.2f})\n")
         for r in rows[:20]:
             print(f"   {r['n_chunks']:>5} chunks  {r['src_len']:>9,} chars  {r['title'][:62]}")
         if len(rows) > 20:
