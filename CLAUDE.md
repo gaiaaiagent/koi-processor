@@ -43,10 +43,22 @@
 > | `~/projects/RegenAI/koi-processor` | shared DEV checkout | sessions switch this freely; assume it moves under you. |
 > | `~/projects/koi-wt-*` | per-topic **worktrees** | ✅ do multi-step work here. `git worktree add ~/projects/koi-wt-<topic> <branch>` |
 >
-> Two incidents from getting this wrong: a branch switch orphaned the `chunk-embedder`
+> Three incidents from getting this wrong: a branch switch orphaned the `chunk-embedder`
 > LaunchAgent for **two days** (334 chunks written with NO embedding, nothing alerted),
-> and the SERVING checkout was found on a feature branch with a critical fix present only
-> in the running process's memory — the next restart would have silently regressed it.
+> the SERVING checkout was found on a feature branch with a critical fix present only
+> in the running process's memory — the next restart would have silently regressed it —
+> and `calendar-export` ran off the DEV checkout and was **dead for sixteen days**
+> (2026-07-31 → 08-16), silently freezing the calendar feed Obsidian reads. It wrote 892 KB
+> of the identical error and showed exit 2 in `launchctl list` the whole time.
+>
+> **The rule is now mechanically enforced.** `tests/test_launchd_job_targets.py` reads the
+> plists **installed** in `~/Library/LaunchAgents` (never the copies committed here — the
+> divergence between the two IS the bug) and fails if any `com.personal-koi.*` job names a
+> path that does not exist, or loads code from the shared dev checkout. It fails if the
+> enumeration comes back empty, because a silent skip is what sixteen days looked like.
+> Run it after touching any plist: `venv/bin/python -m pytest tests/test_launchd_job_targets.py`.
+> Note the venv is `/Users/darrenzal/venvs/koi-server`; bare `python3` has no `asyncpg` and
+> most of this repo's tests do not even collect under it.
 >
 > Translation: commit to `regen-prod` → NUC gets it via Dobby's deploy; the local backend needs `restart.sh`; the local sensors need a `git pull` in the runtime clone. RegenAI public production needs an explicit cherry-pick + push to `stable`.
 >
