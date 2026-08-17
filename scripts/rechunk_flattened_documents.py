@@ -98,6 +98,42 @@ ORDER BY length(m.content->>'text') DESC
 """
 
 
+class ProviderExhausted(RuntimeError):
+    """The embedding account is out of credit or the key is rejected.
+
+    Deliberately its own type, because it is the one failure that must NOT be treated
+    as a per-document hiccup. On 2026-08-17 this run hit `credit_balance_exhausted`
+    partway through and kept going: the batch call failed, the per-chunk fallback
+    retried every chunk against the same dead account, each one appended None, and any
+    document under the half-failed threshold was rewritten with NULL embeddings. 104
+    chunks were written that way before the processes were stopped, and the retries
+    were pure waste — an exhausted balance does not recover on the next call.
+
+    Same shape as the launchd rule recorded in CLAUDE.md: retrying an EXTERNAL
+    dependency that is down is not resilience, it is a busy loop with a log file.
+    """
+
+
+TERMINAL_PROVIDER_SIGNS = (
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "no credits remaining",
+    "invalid_api_key",
+    "incorrect api key",
+)
+
+
+def _is_terminal(exc: Exception) -> bool:
+    """True when retrying cannot possibly help — account state, not a transient fault.
+
+    Matched on the message rather than the exception class because the provider SDK
+    raises the same RateLimitError for a genuine per-minute rate limit (retry helps)
+    and for an exhausted balance (retry never helps). The distinction is only in the
+    body, so that is where it has to be read.
+    """
+    return any(s in str(exc).lower() for s in TERMINAL_PROVIDER_SIGNS)
+
+
 async def structure_counts(conn, rid: str) -> dict:
     row = await conn.fetchrow("""
         SELECT count(*) AS n,
@@ -200,12 +236,16 @@ async def main() -> None:
             try:
                 embeddings = list(await embedder.embed_batch([c["text"] for c in chunks]))
             except Exception as e:                          # noqa: BLE001
+                if _is_terminal(e):
+                    raise ProviderExhausted(str(e)) from e
                 print(f"   batch embed failed on {rid[:36]} ({e}); falling back per-chunk")
                 embeddings = []
                 for c in chunks:
                     try:
                         embeddings.append(await embedder.embed(c["text"]))
                     except Exception as e2:                 # noqa: BLE001
+                        if _is_terminal(e2):
+                            raise ProviderExhausted(str(e2)) from e2
                         print(f"   embed failed on {rid[:36]} chunk {c['index']}: {e2}")
                         embeddings.append(None)
             if sum(1 for e in embeddings if e is None) > len(embeddings) // 2:
@@ -223,9 +263,22 @@ async def main() -> None:
                   f"newlines {before['nl']}->{after['nl']}  columns {before['cols']}->{after['cols']}")
             if after["nl"] == 0:
                 print(f"      ⚠ still no newlines after re-chunk — investigate {rid}")
+    except ProviderExhausted as e:
+        # Stop the whole run, loudly and immediately. Everything committed so far is
+        # complete and correct — the transaction is per document — and the candidate
+        # query only ever selects still-damaged rows, so re-running after a top-up
+        # resumes exactly where this stopped with no bookkeeping.
+        print(f"\nSTOPPED — the embedding account is exhausted or the key is rejected:\n"
+              f"  {e}\n"
+              f"Documents already rewritten are complete and stay repaired. Top up, then\n"
+              f"re-run the same command; it resumes from what is still damaged.\n"
+              f"Exiting 3 so a caller can tell this apart from a normal finish.",
+              file=sys.stderr)
+        return 3
     finally:
         await conn.close()
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))
