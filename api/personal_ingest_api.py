@@ -2223,6 +2223,53 @@ async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
     logger.info("Schema verified/created (including relationship tables)")
 
 
+EMBED_REPAIR_STATE = os.getenv(
+    "EMBED_REPAIR_STATE_FILE",
+    os.path.expanduser("~/projects/koi-processor-runtime/logs/embedding-repair-state.json"),
+)
+# A canary older than this is not evidence. The repair job runs every 300s, so three
+# missed passes means the only scheduled probe on this machine has stopped.
+EMBED_EVIDENCE_MAX_AGE_S = 1200
+
+
+def _embedding_health() -> dict:
+    """Whether embeddings ACTUALLY work, with the provenance of that claim.
+
+    Reads the embedding-repair job's state file rather than calling the provider here:
+    /health is polled by restart.sh and by monitoring, and must stay fast and never
+    fail. That job already probes the provider with a one-token canary every 300s and
+    records the result, so the measurement exists — it simply was not being surfaced.
+
+    Fails CLOSED. Absent, unreadable, or stale state reports available=false with a
+    reason, rather than falling back to "a provider object exists", because that
+    fallback is precisely the bug being fixed: it answers a question about capacity
+    with evidence about configuration. A preflight that cannot confirm should stop.
+    """
+    import json as _json
+    import time as _time
+    try:
+        age = _time.time() - os.path.getmtime(EMBED_REPAIR_STATE)
+        st = _json.loads(open(EMBED_REPAIR_STATE).read())
+    except Exception as e:
+        return {"embedding_available": False,
+                "embedding_check": {"source": "unavailable", "reason": f"{type(e).__name__}"}}
+
+    backoff_until = st.get("backoff_until")
+    if backoff_until:
+        return {"embedding_available": False,
+                "embedding_check": {"source": "repair-canary", "reason": st.get("backoff_reason"),
+                                    "backoff_until": backoff_until,
+                                    "consecutive_failed_runs": st.get("consecutive_failed_runs", 0)}}
+    if age > EMBED_EVIDENCE_MAX_AGE_S:
+        return {"embedding_available": False,
+                "embedding_check": {"source": "stale", "age_seconds": round(age),
+                                    "reason": "no canary within the last 20 minutes; is "
+                                              "com.personal-koi.embedding-repair running?"}}
+    return {"embedding_available": True,
+            "embedding_check": {"source": "repair-canary", "age_seconds": round(age),
+                                "last_success_at": st.get("last_success_at")}}
+
+
 @app.get("/health")
 async def health_check(request: Request):
     """Health check endpoint.
@@ -2312,7 +2359,18 @@ async def health_check(request: Request):
             "status": "healthy",
             "mode": KOI_MODE,
             "database": "connected",
-            "embedding_available": embedding_provider is not None,
+            # `embedding_available` now means "embeddings actually work", which is what
+            # the name promises and what its two consumers already assume — both
+            # tests/eval/run_eval.py and scripts/koi_sustained_write.py use it as a
+            # PREFLIGHT GATE. It used to be `embedding_provider is not None`, i.e.
+            # whether a Python object had been constructed at startup, so during the
+            # 45-minute credit exhaustion on 2026-08-17 it reported true throughout and
+            # both preflights would have passed into a run that could not embed anything.
+            #
+            # The honest handling already existed one file over: knowledge_router sets
+            # "embedding_available": not degraded from real observed degradation.
+            **_embedding_health(),
+            "embedding_configured": embedding_provider is not None,
             "embedding_model": embedding_provider.model_name if embedding_provider else None,
             "embedding_dimension": embedding_provider.dimension if embedding_provider else None,
             "semantic_matching": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,

@@ -432,14 +432,7 @@ async def run(args) -> int:
               "  ".join(f"{k}={v}" for k, v in counts.items()))
 
         selected = [SURFACES[k] for k in (args.surface or list(SURFACES))]
-        if not any(counts[s.key] for s in selected):
-            st["consecutive_failed_runs"] = 0
-            st.pop("backoff_until", None)
-            st.pop("backoff_reason", None)
-            maybe_alert(st, counts, canary_ok=True)
-            save_state(state_path, st)
-            print("Nothing to do.")
-            return 0
+        nothing_to_do = not any(counts[s.key] for s in selected)
 
         provider, err = build_provider()
         if provider is None:
@@ -447,9 +440,17 @@ async def run(args) -> int:
             return 2
 
         if not args.dry_run:
-            # ONE-TOKEN CANARY. During the 2026-08-12 event every run burned a
-            # full batch discovering the provider was down; the fact script would
-            # have burned 103 single-row calls per run. This costs exactly one.
+            # ONE-TOKEN CANARY, RUN ON EVERY PASS — including when there is nothing to
+            # repair. It used to be skipped on the empty-queue path, which then called
+            # maybe_alert(canary_ok=True) and cleared consecutive_failed_runs having
+            # never touched the provider. During a quiet period the provider could be
+            # dead for hours while this file recorded a clean bill of health.
+            #
+            # That matters beyond this job now: /health derives `embedding_available`
+            # from this state file, so an unprobed "fine" propagates to the endpoint
+            # everything else trusts. One token per 300s is ~288 calls a day, which is
+            # far below the cost of not knowing. It is also the ONLY thing on the
+            # machine that probes the provider on a schedule.
             try:
                 await provider.embed("koi embedding repair canary")
             except Exception as e:
@@ -459,6 +460,16 @@ async def run(args) -> int:
             st["consecutive_failed_runs"] = 0
             st.pop("backoff_until", None)
             st.pop("backoff_reason", None)
+            # Positive evidence, with a timestamp. A reader can then distinguish
+            # "verified working 2 minutes ago" from "nobody has checked since Friday",
+            # which `consecutive_failed_runs: 0` alone cannot express.
+            st["last_success_at"] = datetime.now(timezone.utc).isoformat()
+
+        if nothing_to_do:
+            maybe_alert(st, counts, canary_ok=True)
+            save_state(state_path, st)
+            print("Nothing to do.")
+            return 0
 
         run_dir = Path(args.run_log_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
