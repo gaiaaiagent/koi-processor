@@ -142,10 +142,20 @@ async def main() -> None:
                 return
 
         n_chunks = sum(r["n_chunks"] for r in rows)
-        # ~$0.13 per 1M tokens for text-embedding-3-large; a CHUNK_SIZE-char chunk is
-        # roughly CHUNK_SIZE/4 tokens. Rough by design — the point is to make an
-        # order-of-magnitude decision visible before spending, not to be exact.
-        est_usd = n_chunks * (CHUNK_SIZE / 4) / 1_000_000 * 0.13
+        # ~$0.13 per 1M tokens for text-embedding-3-large.
+        #
+        # MEASURED, not derived. The first version of this line read CHUNK_SIZE (500) as
+        # CHARACTERS and divided by 4 to get tokens, giving 125 tokens/chunk and an
+        # estimate of $0.76 for the whole corpus. CHUNK_SIZE is TOKENS, and with overlap
+        # the chunks this script actually wrote on 2026-08-17 averaged 3,466 characters,
+        # about 867 tokens. The estimate was ~7x low, the real figure is nearer $7, and
+        # the run exhausted the account's remaining credit at 32% complete — which took
+        # embeddings down service-wide, not just for this job.
+        #
+        # So: measure the source text, do not infer from a constant whose units you have
+        # not checked. src_len is already in the candidate query.
+        est_tokens = sum(r["src_len"] for r in rows) / 4.0
+        est_usd = est_tokens / 1_000_000 * 0.13
         print(f"{len(rows)} damaged document(s) matching rid LIKE {a.rid_like!r}; "
               f"{n_chunks} chunks would be re-embedded (~${est_usd:.2f})\n")
         for r in rows[:20]:
@@ -175,13 +185,29 @@ async def main() -> None:
             chunks = chunker.chunk_text(text)
             # Embed everything BEFORE touching the existing rows, so a failure here
             # leaves the document's current chunks in place rather than deleting them.
-            embeddings = []
-            for c in chunks:
-                try:
-                    embeddings.append(await embedder.embed(c["text"]))
-                except Exception as e:                      # noqa: BLE001
-                    print(f"   embed failed on {rid[:36]} chunk {c['index']}: {e}")
-                    embeddings.append(None)
+            #
+            # ONE request per document, not one per chunk. The original loop made a
+            # round trip per chunk, which is fine for the 303-document run this was
+            # written for and is 46,793 sequential round trips (~20 hours) across the
+            # rest of the corpus. `embed_batch` puts the whole document in a single
+            # embeddings call — a 40-chunk document is ~20k tokens, far under the
+            # per-request limit — and returns them in order.
+            #
+            # Falls back to per-chunk on a batch failure rather than losing the whole
+            # document to one bad chunk, which is what the per-chunk loop bought and
+            # is worth keeping.
+            embeddings: list = []
+            try:
+                embeddings = list(await embedder.embed_batch([c["text"] for c in chunks]))
+            except Exception as e:                          # noqa: BLE001
+                print(f"   batch embed failed on {rid[:36]} ({e}); falling back per-chunk")
+                embeddings = []
+                for c in chunks:
+                    try:
+                        embeddings.append(await embedder.embed(c["text"]))
+                    except Exception as e2:                 # noqa: BLE001
+                        print(f"   embed failed on {rid[:36]} chunk {c['index']}: {e2}")
+                        embeddings.append(None)
             if sum(1 for e in embeddings if e is None) > len(embeddings) // 2:
                 print(f"   ABORT {rid[:40]} — over half of embeddings failed, "
                       f"leaving existing chunks untouched")
