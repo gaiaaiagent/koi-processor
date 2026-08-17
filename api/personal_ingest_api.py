@@ -162,6 +162,7 @@ from api.resolution_primitives import (
     passes_person_name_guard,
     passes_distinctive_token_check,
     passes_semantic_match_guard,
+    resolve_to_live_uri,
 )
 
 # Configure logging
@@ -2997,6 +2998,7 @@ async def list_entities(
                 SELECT fuseki_uri, entity_text, entity_type, source, wallet_address, created_at
                 FROM entity_registry
                 WHERE entity_type = $1 AND NOT node_private
+                  AND merged_into IS NULL
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
             """, entity_type, limit, offset)
@@ -3005,6 +3007,7 @@ async def list_entities(
                 SELECT fuseki_uri, entity_text, entity_type, source, wallet_address, created_at
                 FROM entity_registry
                 WHERE NOT node_private
+                  AND merged_into IS NULL
                 ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
             """, limit, offset)
@@ -5892,6 +5895,7 @@ async def _graph_guided_retrieval(
                    1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
             FROM entity_registry
             WHERE embedding_3072 IS NOT NULL AND NOT node_private
+              AND merged_into IS NULL
             ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
             LIMIT $2
         """, embedding_str, top_k)
@@ -5914,6 +5918,7 @@ async def _graph_guided_retrieval(
                        ({match_score})::float / {len(words)} AS similarity
                 FROM entity_registry
                 WHERE ({conditions}) AND NOT node_private
+                  AND merged_into IS NULL
                 ORDER BY ({match_score}) DESC, created_at DESC
                 LIMIT ${len(words)+1}
             """, *params)
@@ -6166,19 +6171,30 @@ _GRAPH_QUERY_PATTERNS = [
 
 
 async def _resolve_entity_uri(name: str, conn) -> Optional[str]:
-    """Resolve a free-text entity name to its fuseki_uri."""
+    """Resolve a free-text entity name to its fuseki_uri.
+
+    Called by `_try_structured_graph_query`, which runs unconditionally on every POST
+    /chat, so this is the widest-traffic name lookup in the service.
+
+    Both queries are `ILIKE ... LIMIT 1` with no ORDER BY on the first, and merges keep
+    the tombstoned row's entity_text — so for any merged name the winner was arbitrary.
+    "Talk to the City" resolved to a tombstone this way. Following merged_into rather than
+    filtering it out is deliberate: a tombstone hit means the name IS this entity, just
+    under its pre-merge identity, and excluding it would turn a correct-but-stale answer
+    into no answer at all.
+    """
     row = await conn.fetchrow(
         "SELECT fuseki_uri FROM entity_registry WHERE entity_text ILIKE $1 AND NOT node_private LIMIT 1",
         name.strip()
     )
     if row:
-        return row["fuseki_uri"]
+        return await resolve_to_live_uri(conn, row["fuseki_uri"])
     # Try fuzzy match with %
     row = await conn.fetchrow(
         "SELECT fuseki_uri FROM entity_registry WHERE entity_text ILIKE $1 AND NOT node_private ORDER BY LENGTH(entity_text) LIMIT 1",
         f"%{name.strip()}%"
     )
-    return row["fuseki_uri"] if row else None
+    return await resolve_to_live_uri(conn, row["fuseki_uri"]) if row else None
 
 
 async def _try_structured_graph_query(query: str, conn, db_pool) -> str:

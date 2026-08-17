@@ -1134,6 +1134,7 @@ def create_router(
             normalize_entity_text, generate_entity_uri
         )
         from api.entity_schema import canonicalize_entity_type
+        from api.resolution_primitives import resolve_to_live_uri
 
         # Canonicalize the caller's type hint (strip schema:/bkc:, resolve
         # plural/case) so type-gated exact/alias/fuzzy queries and Tier-3
@@ -1148,6 +1149,35 @@ def create_router(
         if normalized in seen:
             return seen[normalized], False, None
 
+        async def _accept(row):
+            """Take a matched row, but never hand back a tombstone.
+
+            `/entities/merge` keeps the loser's row, name and aliases, so all four tiers
+            below can match one. Skipping it would be worse than returning it: the lookup
+            would miss, fall through to create_new, and mint a THIRD row for a name that
+            already has a canonical home. A tombstone match is positive evidence that this
+            name belongs to the survivor, so follow it.
+
+            This is a WRITE path — the URI returned here is stored on knowledge_facts — and
+            53 fact rows (21 subject, 32 object) are already bound to tombstoned URIs
+            because it did not. Those are damage on disk, not just a degraded response.
+
+            Re-reads entity_type when the URI moves: the tombstone's type is not the
+            survivor's. Pol.is was merged schema:SoftwareApplication -> Concept, so
+            returning the matched row's type would report the type of a dead row.
+            """
+            uri = await resolve_to_live_uri(conn, row["fuseki_uri"])
+            etype = row["entity_type"]
+            if uri != row["fuseki_uri"]:
+                live = await conn.fetchrow(
+                    "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1", uri)
+                if live:
+                    etype = live["entity_type"]
+                logger.info("knowledge-add followed tombstone %s -> %s for %r",
+                            row["fuseki_uri"], uri, name)
+            seen[normalized] = uri
+            return uri, False, etype
+
         # Tier 1: exact match on normalized_text. When the caller supplies a type
         # hint, prefer same-type exact matches before considering cross-type
         # rows; this avoids resolving paper-local concepts such as "discord" to
@@ -1159,8 +1189,7 @@ def create_router(
                 LIMIT 1
             """, normalized, type_hint)
             if row:
-                seen[normalized] = row["fuseki_uri"]
-                return row["fuseki_uri"], False, row["entity_type"]
+                return await _accept(row)
 
         row = await conn.fetchrow("""
             SELECT fuseki_uri, entity_type FROM entity_registry
@@ -1171,8 +1200,7 @@ def create_router(
             if type_hint == "Concept" and row["entity_type"] != "Concept":
                 row = None
             else:
-                seen[normalized] = row["fuseki_uri"]
-                return row["fuseki_uri"], False, row["entity_type"]
+                return await _accept(row)
 
         # Tier 1b: case-insensitive alias match
         if type_hint:
@@ -1183,8 +1211,7 @@ def create_router(
                 LIMIT 1
             """, normalized, type_hint)
             if row:
-                seen[normalized] = row["fuseki_uri"]
-                return row["fuseki_uri"], False, row["entity_type"]
+                return await _accept(row)
 
         row = await conn.fetchrow("""
             SELECT fuseki_uri, entity_type FROM entity_registry
@@ -1195,8 +1222,7 @@ def create_router(
             if type_hint == "Concept" and row["entity_type"] != "Concept":
                 row = None
             else:
-                seen[normalized] = row["fuseki_uri"]
-                return row["fuseki_uri"], False, row["entity_type"]
+                return await _accept(row)
 
         # Tier 2: fuzzy + semantic match against same-type entities.
         # 2026-05-19 root-cause fix: previously knowledge-add only ran Tier 1
@@ -1595,6 +1621,7 @@ def create_router(
                                 ORDER BY last_synced DESC NULLS LAST LIMIT 1
                             ) erm ON true
                             WHERE ({conditions}) AND NOT er.node_private
+                              AND er.merged_into IS NULL
                             ORDER BY LENGTH(er.entity_text)
                             LIMIT ${len(words) + 1}
                         """, *e_params)
@@ -1769,6 +1796,7 @@ def create_router(
                             ORDER BY last_synced DESC NULLS LAST LIMIT 1
                         ) erm ON true
                         WHERE er.embedding_3072 IS NOT NULL AND NOT er.node_private
+                          AND er.merged_into IS NULL
                         ORDER BY er.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
                         LIMIT 20
                     """, emb_str)

@@ -21,6 +21,53 @@ logger = logging.getLogger(__name__)
 MIN_TOKEN_OVERLAP_RATIO = 0.5
 MIN_TOKEN_OVERLAP_COUNT = 2
 
+# `/entities/merge` TOMBSTONES the loser (sets merged_into) rather than deleting it, and
+# deliberately keeps its embedding and its aliases so history stays resolvable. That makes
+# every merge ever performed leave a row that still matches by name and still competes in
+# the ANN. 202 of them exist; 167 share normalized_text with the live survivor.
+#
+# There are TWO correct responses and picking the wrong one causes a different bug:
+#
+#   RETRIEVAL (ANN, search results, list endpoints) -> EXCLUDE. The live row is in the same
+#   index, so a tombstone is a pure duplicate that costs a slot and can be cited by an LLM.
+#
+#   RESOLUTION (name -> uri, before writing) -> FOLLOW. Excluding here is actively worse
+#   than doing nothing: the lookup misses, falls through to create_new, and mints a THIRD
+#   row for a name that already has a canonical home. A tombstone match is positive
+#   evidence that this name belongs to the survivor.
+#
+# Follows transitively, because merges chain. 14 rows in the live registry are two hops
+# from a live entity (project-pol.is -> softwareapplication-polis -> concept-pol.is), so a
+# single-hop follow lands on another tombstone and looks like it worked.
+MAX_MERGE_CHAIN = 10
+
+
+async def resolve_to_live_uri(conn, uri: Optional[str]) -> Optional[str]:
+    """Walk merged_into to the surviving entity. Returns `uri` unchanged if it is live.
+
+    Cycle-safe: a merge cycle (A -> B -> A) would otherwise spin forever inside a request.
+    On a cycle or an over-long chain it returns the last URI reached rather than raising —
+    a slightly-wrong URI degrades a result, an exception fails a whole ingest.
+    """
+    if not uri:
+        return uri
+    seen = {uri}
+    current = uri
+    for _ in range(MAX_MERGE_CHAIN):
+        row = await conn.fetchrow(
+            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1", current
+        )
+        if row is None or not row["merged_into"]:
+            return current
+        nxt = row["merged_into"]
+        if nxt in seen:
+            logger.warning("merge cycle at %s; stopping on %s", nxt, current)
+            return current
+        seen.add(nxt)
+        current = nxt
+    logger.warning("merge chain from %s exceeded %d hops", uri, MAX_MERGE_CHAIN)
+    return current
+
 
 def normalize_entity_text(text: str) -> str:
     """Normalize entity text for comparison."""
@@ -300,7 +347,40 @@ async def resolve_entity_multi_tier(
     mode: str = "exact_alias",
     embed_fn: Optional[Callable[[str], Awaitable[Optional[List[float]]]]] = None,
 ) -> Tuple[Optional[str], float, str]:
+    """Multi-tier resolution, guaranteed to return a LIVE uri.
+
+    Deliberately a wrapper rather than four edits inside the tiers. Every tier below can
+    match a tombstone — merges keep the loser's normalized_text, aliases and embedding, so
+    exact, alias, fuzzy and semantic are all equally exposed — and patching them
+    individually is how the next tier added quietly reintroduces the bug. One choke point
+    at the exit cannot be forgotten.
+
+    Confidence and relationship pass through untouched: following a merge does not make
+    the match weaker, it makes the answer current.
+    """
+    uri, confidence, relationship = await _resolve_entity_multi_tier_raw(
+        conn, entity_name, entity_type, mode=mode, embed_fn=embed_fn
+    )
+    if uri:
+        live = await resolve_to_live_uri(conn, uri)
+        if live != uri:
+            logger.info("resolution followed tombstone %s -> %s for %r",
+                        uri, live, entity_name)
+        return live, confidence, relationship
+    return uri, confidence, relationship
+
+
+async def _resolve_entity_multi_tier_raw(
+    conn,
+    entity_name: str,
+    entity_type: str,
+    mode: str = "exact_alias",
+    embed_fn: Optional[Callable[[str], Awaitable[Optional[List[float]]]]] = None,
+) -> Tuple[Optional[str], float, str]:
     """Multi-tier entity resolution against entity_registry.
+
+    Tombstone-unaware by design; call `resolve_entity_multi_tier` instead unless you
+    specifically need the matched row rather than the surviving one.
 
     Tiers enabled by mode:
     - "exact": Tier 1 only
