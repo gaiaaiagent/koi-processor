@@ -53,7 +53,8 @@ _TOKENIZER = tiktoken.encoding_for_model(OPENAI_MODEL)
 
 # Set in main() from --substack-domain
 SUBSTACK_DOMAIN = ""       # e.g. willruddick.substack.com
-DOMAIN_TOKEN = ""          # e.g. willruddick (subdomain label; used for dedup ILIKE)
+DOMAIN_TOKEN = ""          # e.g. willruddick (subdomain label; currently unused, kept
+                           # in case a future caller needs the bare subdomain token)
 
 
 def canonical_slug(url_or_text: str) -> Optional[str]:
@@ -96,24 +97,28 @@ def chunk_text(text: str) -> List[Dict[str, str]]:
     return chunks
 
 
-async def fetch_existing_slugs(conn) -> Set[str]:
-    """Slugs already present via email-sensor (for this author) or prior backfill."""
+async def fetch_existing_slugs(conn, feed_slug: str) -> Set[str]:
+    """Slugs already present in the substack-corpus for this feed.
+
+    Must check the corpus itself (source_sensor == SOURCE_SENSOR), not whether
+    some unrelated sensor has ever seen a copy of the post. This previously
+    also matched any 'email-sensor' row whose raw text mentioned the domain —
+    the generic Gmail sensor independently mirrors every inbound Substack
+    notification email, so it always had a copy, which made every paid-only
+    post look "already covered" and permanently blocked it from ever being
+    promoted into the corpus. Corpus rows store a clean canonical_slug in
+    metadata (100% populated as of 2026-08-20), so no text-regex needed.
+    """
     rows = await conn.fetch(
         """
-        SELECT content->>'text' AS body, rid, source_sensor
+        SELECT metadata->>'canonical_slug' AS slug
         FROM koi_memories
-        WHERE (source_sensor = 'email-sensor' AND content::text ILIKE $2)
-           OR source_sensor = $1
+        WHERE source_sensor = $1 AND metadata->>'feed_slug' = $2
         """,
         SOURCE_SENSOR,
-        f"%{DOMAIN_TOKEN}%",
+        feed_slug,
     )
-    slugs: Set[str] = set()
-    for r in rows:
-        slug = canonical_slug(r["body"] or r["rid"] or "")
-        if slug:
-            slugs.add(slug)
-    return slugs
+    return {r["slug"] for r in rows if r["slug"]}
 
 
 async def embed_batch(client, texts: List[str]) -> List[List[float]]:
@@ -174,8 +179,8 @@ async def main():
     conn = await asyncpg.connect(args.db_url)
     skip_log_path = Path(f"/tmp/{feed_slug}-ingest-skipped-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.log")
     try:
-        existing_slugs = await fetch_existing_slugs(conn)
-        print(f"[{feed_slug}] Existing slugs (email-sensor + prior backfill): {len(existing_slugs)}")
+        existing_slugs = await fetch_existing_slugs(conn, feed_slug)
+        print(f"[{feed_slug}] Existing slugs already in corpus: {len(existing_slugs)}")
 
         by_slug: Dict[str, Dict] = {}
         skipped_no_slug = []
