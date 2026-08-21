@@ -94,10 +94,32 @@ def anyio_backend():
     return "asyncio"
 
 
+# ---------------------------------------------------------------------------
+# Service-token auth for the test client.
+#
+# POST /knowledge/episodes carries `Depends(require_service_auth)`
+# (api/routers/knowledge_router.py:729). Tests written before that dependency
+# existed posted with no Authorization header and began failing `401 != 201`.
+# The endpoint is behaving correctly; the tests were not sending credentials.
+#
+# `make_service_token_auth` reads the env var at REQUEST time
+# (api/auth_deps.py:212 `os.getenv(env_var, "")`), so setting it from a fixture
+# is sufficient — no import-time ordering concern.
+#
+# Defined here, above the fixtures that use it, so there is exactly one auth
+# path in this module. The P4 section below aliases these rather than defining
+# a second token.
+# ---------------------------------------------------------------------------
+SVC_TOKEN = "test-p4-service-token"
+SVC_AUTH = {"Authorization": f"Bearer {SVC_TOKEN}"}
+
+
 @pytest.fixture
-async def harness():
+async def harness(monkeypatch):
     """Yield (client, conn, fake_queue, pool) wired against a rolled-back txn."""
     from api.routers.knowledge_router import create_router
+
+    monkeypatch.setenv("KOI_CLAIMS_SERVICE_TOKEN", SVC_TOKEN)
 
     conn = await asyncpg.connect(DB_URL)
     tx = conn.transaction()
@@ -115,7 +137,9 @@ async def harness():
     app.include_router(router, prefix="/knowledge")
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=SVC_AUTH
+    ) as client:
         yield client, conn, fake_queue, pool
 
     federation_events.set_event_queue(prev_queue)
@@ -597,8 +621,9 @@ class TestTypeMismatch:
 # P4: batch-embed prefetch + single transaction + request_id idempotency
 # ---------------------------------------------------------------------------
 
-P4_SVC_TOKEN = "test-p4-service-token"
-P4_AUTH = {"Authorization": f"Bearer {P4_SVC_TOKEN}"}
+# Aliases of the single auth path defined at the top of this module.
+P4_SVC_TOKEN = SVC_TOKEN
+P4_AUTH = SVC_AUTH
 
 
 def _fake_vec(text):
