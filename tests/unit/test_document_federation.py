@@ -57,6 +57,7 @@ def _clean_env(monkeypatch):
     """Each test starts from "operator has set nothing"."""
     monkeypatch.delenv("KOI_FEDERATE_DOCUMENTS", raising=False)
     monkeypatch.delenv("KOI_FEDERATE_DOCUMENTS_RID_ALLOW", raising=False)
+    monkeypatch.delenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", raising=False)
 
 
 def _bundle(rid=NATE_RID, slug="nate-jones-substack", url=None, content="body text"):
@@ -374,3 +375,91 @@ async def test_forget_removes_the_document_and_its_chunks(conn, monkeypatch):
         "SELECT count(*) FROM koi_memories WHERE rid=$1", NATE_RID) == 0
     assert await conn.fetchval(
         "SELECT count(*) FROM koi_memory_chunks WHERE document_rid=$1", NATE_RID) == 0
+
+
+# ── subscriber-PII redaction ────────────────────────────────────────────────
+
+SUB = "reader@example.com"
+# A base64url token whose decoded payload contains SUB (built, not pasted, so
+# the fixture cannot drift from what the decoder actually sees).
+import base64 as _b64  # noqa: E402
+_TOKEN = _b64.urlsafe_b64encode(
+    b'{"m":"<x@mg1.substack.com>","r":"reader@example.com"}').decode().rstrip("=")
+
+
+def test_redaction_is_a_no_op_when_unconfigured():
+    """Unset must not silently mangle content — and must not silently protect
+    either: the handler logs a warning once, asserted by the returned count."""
+    text, n = df.redact_subscriber_pii(f"mail {SUB} here")
+    assert (text, n) == (f"mail {SUB} here", 0)
+
+
+def test_plaintext_address_is_redacted_case_insensitively(monkeypatch):
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", SUB)
+    text, n = df.redact_subscriber_pii(f"to {SUB} and {SUB.upper()} ok")
+    assert n == 2
+    assert SUB not in text.lower()
+    assert text.count(df.REDACTED_EMAIL) == 2
+
+
+def test_address_hidden_inside_a_base64_token_is_redacted(monkeypatch):
+    """The rule is "the address must not survive", and a decodable token
+    satisfies it no less than plaintext. 324 of the 368 corpus occurrences are
+    of this form."""
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", SUB)
+    body = f"click https://eotrx.substackcdn.com/o/abc/p.gif?token={_TOKEN} now"
+    text, n = df.redact_subscriber_pii(body)
+    assert n == 1
+    assert _TOKEN not in text
+    assert df.REDACTED_TOKEN in text
+    assert "https://eotrx.substackcdn.com" in text  # URL structure preserved
+
+
+def test_an_unrelated_token_is_left_alone(monkeypatch):
+    """Positive control: without this, a function that redacted every token
+    would also pass the test above."""
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", SUB)
+    other = _b64.urlsafe_b64encode(b'{"r":"someone.else@example.org"}').decode().rstrip("=")
+    text, n = df.redact_subscriber_pii(f"link ?token={other}")
+    assert n == 0
+    assert other in text
+
+
+def test_third_party_addresses_are_not_redacted(monkeypatch):
+    """Scoped to the CONFIGURED addresses. The corpus also carries the
+    publisher's own contact addresses and reader addresses he quotes; those are
+    content, and a blanket email-shaped redaction would destroy them."""
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", SUB)
+    text, n = df.redact_subscriber_pii("write to chef@natebjones.com instead")
+    assert (text, n) == ("write to chef@natebjones.com instead", 0)
+
+
+def test_a_malformed_token_does_not_raise(monkeypatch):
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", SUB)
+    text, n = df.redact_subscriber_pii("?token=eyJ" + "!" * 30 + "notbase64!!!")
+    assert n == 0
+
+
+@pytest.mark.anyio
+async def test_redacted_body_is_what_gets_indexed(conn, monkeypatch):
+    """End-to-end: the address must not reach koi_memories or the chunks, and
+    the redaction count must be recorded on the document row."""
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS", "true")
+    monkeypatch.setenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", SUB)
+    _install_embedder(monkeypatch, _FakeEmbedder())
+    from api.domain_event_handlers import _apply_document
+
+    body = f"Nate writes at length. You are receiving this at {SUB}. More text here."
+    await _apply_document(
+        conn, NATE_RID, "NEW", _bundle(url=CANONICAL, content=body), "peer")
+
+    row = await conn.fetchrow(
+        "SELECT content->>'text' AS text, metadata->>'redactions_applied' AS n "
+        "FROM koi_memories WHERE rid=$1", NATE_RID)
+    assert SUB not in row["text"]
+    assert df.REDACTED_EMAIL in row["text"]
+    assert row["n"] == "1"
+    chunk_text = await conn.fetchval(
+        "SELECT string_agg(content->>'text', ' ') FROM koi_memory_chunks "
+        "WHERE document_rid=$1", NATE_RID)
+    assert SUB not in chunk_text

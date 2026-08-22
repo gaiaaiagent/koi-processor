@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from api.koi_poller import KOIPoller  # noqa: E402
 from api import koi_net_router  # noqa: E402
+from api import document_federation  # noqa: E402
 
 SNAPSHOT = Path.home() / ".local/share/personal-koi/nate-jones-bundles"
 POSTGRES_URL = os.getenv(
@@ -170,6 +171,21 @@ async def main() -> int:
             legacy_1024 = await conn.fetchval(
                 "SELECT count(embedding) FROM koi_memory_chunks "
                 "WHERE document_rid = ANY($1::text[])", rids)
+            # Subscriber PII must not survive into either table.
+            addrs = list(document_federation.redaction_addresses())
+            pii_docs = pii_chunks = total_redactions = 0
+            if addrs:
+                pats = [f"%{a}%" for a in addrs]
+                pii_docs = await conn.fetchval(
+                    "SELECT count(*) FROM koi_memories WHERE rid = ANY($1::text[]) "
+                    "AND lower(content->>'text') LIKE ANY($2::text[])", rids, pats)
+                total_redactions = await conn.fetchval(
+                    "SELECT COALESCE(sum((metadata->>'redactions_applied')::int), 0) "
+                    "FROM koi_memories WHERE rid = ANY($1::text[])", rids)
+                pii_chunks = await conn.fetchval(
+                    "SELECT count(*) FROM koi_memory_chunks "
+                    "WHERE document_rid = ANY($1::text[]) "
+                    "AND lower(content->>'text') LIKE ANY($2::text[])", rids, pats)
 
         print("\n── landed rows ──")
         for r in rows:
@@ -190,6 +206,15 @@ async def main() -> int:
             # code. Writing it would be invisible waste.
             ("     legacy 1024 column untouched", legacy_1024 == 0,
              f"non-null embedding={legacy_1024}"),
+            # Two halves, deliberately. "No PII found" alone would pass if the
+            # trial set simply had none — so the run must also show that
+            # redaction actually FIRED on this set.
+            ("     no subscriber PII in landed content",
+             bool(addrs) and pii_docs == 0 and pii_chunks == 0,
+             f"docs={pii_docs} chunks={pii_chunks} "
+             f"(redacting {len(addrs)} address(es))"),
+            ("     redaction demonstrably fired", total_redactions > 0,
+             f"{total_redactions} redaction(s) across the trial set"),
             # `rows` is required non-empty in each: all([]) is True, and a
             # vacuous pass on an empty result set is exactly the shape that
             # reports a broken ingest as healthy.

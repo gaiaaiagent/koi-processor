@@ -1109,7 +1109,19 @@ async def _apply_document(
         return
 
     markdown = payload["document"]["content"]
+
+    # Strip the subscriber's own address from the body before it is chunked,
+    # embedded and indexed. This MODIFIES STORED CONTENT (~0.74% of characters
+    # corpus-wide); the verbatim original stays in the Phase-1 snapshot and the
+    # bundle's sha256_hash is computed over the untouched bundle, so provenance
+    # is unaffected. See document_federation.redact_subscriber_pii.
+    markdown, redactions = document_federation.redact_subscriber_pii(markdown)
+
     source_meta = build_document_source_meta(rid, payload)
+    if redactions:
+        # Recorded so a redacted document is identifiable later without
+        # re-deriving it from the snapshot.
+        source_meta["redactions_applied"] = redactions
 
     ingest_document_rag_conn = _load_document_sink()
     embedder, chunker = _document_embedder_and_chunker()
@@ -1136,9 +1148,10 @@ async def _apply_document(
             )
 
     logger.info(
-        "domain.document.apply rid=%s author=%s is_private=%s chunks=%d source_node=%s",
+        "domain.document.apply rid=%s author=%s is_private=%s chunks=%d "
+        "redactions=%d source_node=%s",
         rid, source_meta.get("author"), source_meta.get("is_private"),
-        result.get("chunks_written", 0), source_node,
+        result.get("chunks_written", 0), redactions, source_node,
     )
 
 

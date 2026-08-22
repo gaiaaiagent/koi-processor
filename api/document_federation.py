@@ -24,8 +24,13 @@ None of these fail open. An empty allowlist allows nothing; an unmapped slug
 raises; an unset flag disables the path entirely.
 """
 
+import base64
+import logging
 import os
+import re
 from typing import Any, Dict, Mapping, Optional
+
+logger = logging.getLogger(__name__)
 
 # The domain name used on the wire and in the handler registry.
 DOCUMENT_DOMAIN = "document"
@@ -211,3 +216,100 @@ def canonical_url(slug: Optional[str], contents: Mapping[str, Any]) -> Optional[
         if url.startswith(f"https://{host}/"):
             return url
     return None
+
+
+# ── subscriber-PII redaction ────────────────────────────────────────────────
+#
+# Operator decision 2026-08-22: redact the subscriber's own address from
+# federated document bodies at ingest. This MODIFIES STORED CONTENT — see
+# `redact_subscriber_pii` for the fidelity tradeoff and what preserves the
+# original.
+
+REDACTED_EMAIL = "[redacted-subscriber-email]"
+REDACTED_TOKEN = "[redacted-tracking-token]"
+
+_B64_TOKEN = re.compile(r"eyJ[A-Za-z0-9_-]{20,}")
+
+_warned_no_redaction_configured = False
+
+
+def redaction_addresses() -> tuple[str, ...]:
+    """Addresses to strip from federated document bodies.
+
+    Read from `KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS` (comma-separated) and
+    NEVER hardcoded: `regen-prod` pushes to `gaiaaiagent/koi-processor`, so a
+    literal address in this file would be published. The operator's addresses
+    live in the gitignored `config/personal.env`.
+    """
+    raw = os.getenv("KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS", "")
+    return tuple(a.strip().lower() for a in raw.split(",") if a.strip())
+
+
+def redact_subscriber_pii(text: str) -> tuple[str, int]:
+    """Remove the subscriber's own address from a document body, in any encoding.
+
+    Returns `(text, n_redactions)`.
+
+    **Measured across the 448-bundle corpus (2026-08-21):** the subscriber
+    address appears in plaintext **44 times in 44 documents**, and inside
+    base64 tracking tokens **324 times in 112 documents**. Both forms are
+    handled, because "the address must not survive ingestion" is one rule and a
+    decodable token satisfies it no less than plaintext does.
+
+    **FIDELITY TRADEOFF — this changes what is stored.** 121,064 of 16,412,636
+    characters (**0.74%**) differ from what the publisher sent. What that costs
+    and what protects against it:
+
+    - The **verbatim original is preserved** in the Phase-1 snapshot at
+      `~/.local/share/personal-koi/nate-jones-bundles/`, and the bundle's
+      `manifest.sha256_hash` is computed over the untouched bundle, so
+      provenance and integrity checking are unaffected. Only the INDEXED copy
+      is redacted.
+    - A quotation that happened to include the address will read with a
+      placeholder. In this corpus every occurrence is Substack's own
+      "you're receiving this at <address>" furniture, not authored prose.
+    - Redacting a tracking token leaves the surrounding URL intact but inert.
+      Those URLs are already refused as `source_url` (see `canonical_url`).
+
+    Scoped deliberately to the CONFIGURED addresses. A blanket email-shaped
+    redaction would be wrong: the corpus also contains the publisher's own
+    contact addresses and reader addresses he quotes, which are content.
+    """
+    global _warned_no_redaction_configured
+    addresses = redaction_addresses()
+    if not addresses:
+        if not _warned_no_redaction_configured:
+            _warned_no_redaction_configured = True
+            logger.warning(
+                "KOI_FEDERATE_DOCUMENTS_REDACT_EMAILS is unset — federated document "
+                "bodies will be indexed verbatim, including any subscriber address "
+                "the publisher embedded in them."
+            )
+        return text, 0
+
+    n = 0
+    for addr in addresses:
+        pattern = re.compile(re.escape(addr), re.IGNORECASE)
+        text, hits = pattern.subn(REDACTED_EMAIL, text)
+        n += hits
+
+    # `subn` counts every token EXAMINED, not every one replaced, and counting
+    # the placeholder in the output would miscount if it ever appeared in the
+    # source. Count replacements at the point of replacement.
+    replaced = 0
+
+    def _scrub(match: "re.Match[str]") -> str:
+        nonlocal replaced
+        tok = match.group(0)
+        try:
+            payload = base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4))
+        except Exception:  # noqa: BLE001 — a non-decodable lookalike is not a token
+            return tok
+        lowered = payload.lower()
+        if any(addr.encode() in lowered for addr in addresses):
+            replaced += 1
+            return REDACTED_TOKEN
+        return tok
+
+    text = _B64_TOKEN.sub(_scrub, text)
+    return text, n + replaced

@@ -161,6 +161,7 @@ async def upsert_document_memory(
         "group_id": source_meta.get("group_id", "personal"),
         "char_count": len(markdown),
         "tier": source_meta.get("tier", "rag"),
+        "redactions_applied": source_meta.get("redactions_applied"),
     }
     # Drop None-valued provenance keys for a clean metadata blob.
     doc_metadata = {k: v for k, v in doc_metadata.items() if v is not None}
