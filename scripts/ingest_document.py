@@ -128,7 +128,24 @@ async def upsert_document_memory(
     markdown: str,
     source_meta: Dict[str, Any],
 ) -> str:
-    """Upsert the document row into koi_memories (source_sensor='document-ingest')."""
+    """Upsert the document row into koi_memories (source_sensor='document-ingest').
+
+    Optional `source_meta` keys, all defaulting to today's behaviour when absent
+    (this is a shared path — `doc_scanner`, the documents router and the
+    federation handler all reach it):
+
+    - ``author``        → written to `metadata.author`. Omitted when absent, so
+      an existing caller's metadata blob is byte-identical.
+    - ``is_private``    → the `koi_memories.is_private` COLUMN, which this
+      function previously never wrote. The column defaults to ``false``, so a
+      federated private document would otherwise land flagged PUBLIC. ``None``
+      means "caller did not say": on INSERT that becomes ``false`` (the schema
+      default, i.e. unchanged), and on UPDATE it PRESERVES whatever the row
+      already had rather than coercing it back to ``false``.
+    - ``access_source`` → the `koi_memories.access_source` COLUMN, same
+      unspecified-preserves semantics.
+    - ``source_sensor`` → provenance stamp, default ``document-ingest``.
+    """
     doc_content = {
         "title": source_meta.get("name") or source_meta.get("slug") or document_rid,
         "text": markdown,
@@ -137,6 +154,7 @@ async def upsert_document_memory(
     doc_metadata: Dict[str, Any] = {
         "slug": source_meta.get("slug"),
         "source_url": source_meta.get("source_url"),
+        "author": source_meta.get("author"),
         "retrieval_method": source_meta.get("retrieval_method"),
         "retrieved_at": source_meta.get("retrieved_at"),
         "content_hash": source_meta.get("content_hash"),
@@ -147,22 +165,37 @@ async def upsert_document_memory(
     # Drop None-valued provenance keys for a clean metadata blob.
     doc_metadata = {k: v for k, v in doc_metadata.items() if v is not None}
 
+    # None = "caller did not specify" for both privacy columns. Distinguishing
+    # that from an explicit False is the whole point: COALESCE on UPDATE keeps
+    # an existing True from being silently downgraded by a caller that simply
+    # does not model privacy.
+    is_private = source_meta.get("is_private")
+    if is_private is not None:
+        is_private = bool(is_private)
+    access_source = source_meta.get("access_source")
+    source_sensor = source_meta.get("source_sensor") or SOURCE_SENSOR
+
     existing = await conn.fetchrow("SELECT id FROM koi_memories WHERE rid = $1", document_rid)
     event_type = "NEW" if existing is None else "UPDATE"
 
     memory_id = await conn.fetchval(
         """
-        INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata)
-        VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb)
+        INSERT INTO koi_memories
+            (id, rid, event_type, source_sensor, content, metadata, is_private, access_source)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb,
+                COALESCE($6::boolean, false), $7)
         ON CONFLICT (rid) DO UPDATE SET
             event_type = EXCLUDED.event_type,
             content = EXCLUDED.content,
             metadata = EXCLUDED.metadata,
+            is_private = COALESCE($6::boolean, koi_memories.is_private),
+            access_source = COALESCE($7, koi_memories.access_source),
             updated_at = NOW()
         RETURNING id
         """,
-        document_rid, event_type, SOURCE_SENSOR,
+        document_rid, event_type, source_sensor,
         json.dumps(doc_content), json.dumps(doc_metadata),
+        is_private, access_source,
     )
     return str(memory_id)
 
@@ -183,10 +216,19 @@ async def upsert_document_chunks(
     await conn.execute("DELETE FROM koi_memory_chunks WHERE document_rid = $1", document_rid)
 
     context = source_meta.get("name") or source_meta.get("slug") or document_rid
+    # `title`/`author`/`source_url` are document-level, but they are duplicated
+    # onto every chunk deliberately: the `memories` surface of
+    # /knowledge/unified-search reads koi_memory_chunks WITHOUT joining
+    # koi_memories (knowledge_router.py ~:2101), so anything not on the chunk row
+    # is unreachable from a search result. This mirrors how the `docs` surface
+    # already surfaces title/source_url out of `mc.metadata`.
     base_meta = {
         "slug": source_meta.get("slug"),
         "group_id": source_meta.get("group_id", "personal"),
-        "source_sensor": SOURCE_SENSOR,
+        "source_sensor": source_meta.get("source_sensor") or SOURCE_SENSOR,
+        "title": context,
+        "author": source_meta.get("author"),
+        "source_url": source_meta.get("source_url"),
     }
     base_meta = {k: v for k, v in base_meta.items() if v is not None}
 
@@ -271,6 +313,97 @@ async def upsert_field_membership(
 
 # ── RAG core ─────────────────────────────────────────────────────────────────────
 
+async def _chunk_and_embed(
+    document_rid: str,
+    markdown: str,
+    embedder: OpenAIEmbeddingProvider,
+    chunker: TextChunker,
+) -> tuple[List[Dict[str, Any]], List[Optional[List[float]]], int]:
+    """Chunk then embed, with no database involvement.
+
+    Split out so the embedding round-trips happen OUTSIDE any held connection or
+    open transaction — a long document is minutes of network I/O and holding a
+    pooled connection across it is how a pool gets exhausted.
+    """
+    chunks = chunker.chunk_text(markdown)
+    if not chunks:
+        logger.warning("No chunks produced for %s", document_rid)
+        return [], [], 0
+
+    # Embed one at a time (batch calls can time out on long docs) — mirror doc_scanner.
+    embeddings: List[Optional[List[float]]] = []
+    null_embeds = 0
+    for idx, chunk in enumerate(chunks):
+        try:
+            emb = await embedder.embed(chunk["text"])
+            embeddings.append(emb)
+        except Exception as e:  # noqa: BLE001 — match doc_scanner's null-on-fail policy
+            logger.warning("Embedding failed for %s chunk %d: %s", document_rid, idx, e)
+            embeddings.append(None)
+            null_embeds += 1
+    return chunks, embeddings, null_embeds
+
+
+async def _write_document(
+    conn: asyncpg.Connection,
+    document_rid: str,
+    markdown: str,
+    chunks: List[Dict[str, Any]],
+    embeddings: List[Optional[List[float]]],
+    source_meta: Dict[str, Any],
+) -> int:
+    """Transactionally upsert the parent row, the chunk set and field membership."""
+    async with conn.transaction():
+        await upsert_document_memory(conn, document_rid, markdown, source_meta)
+        written = await upsert_document_chunks(conn, document_rid, chunks, embeddings, source_meta)
+        # Additive field membership (Option B): never deletes other fields' rows.
+        await upsert_field_membership(conn, document_rid, source_meta)
+    return written
+
+
+def _rag_result(document_rid: str, written: int, total: int, null_embeds: int) -> Dict[str, Any]:
+    return {
+        "document_rid": document_rid,
+        "chunks_written": written,
+        "chunks_total": total,
+        "null_embeds": null_embeds,
+    }
+
+
+async def ingest_document_rag_conn(
+    conn: asyncpg.Connection,
+    *,
+    document_rid: str,
+    markdown: str,
+    source_meta: Dict[str, Any],
+    embedder: OpenAIEmbeddingProvider,
+    chunker: TextChunker,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """`ingest_document_rag` against an already-acquired connection.
+
+    Same contract and same return shape; exists for callers that are handed a
+    connection rather than a pool — notably the koi-net document federation
+    handler, which runs inside the poller's `pool.acquire()` block and must not
+    open a second connection to write.
+    """
+    chunks, embeddings, null_embeds = await _chunk_and_embed(
+        document_rid, markdown, embedder, chunker)
+    if not chunks:
+        return _rag_result(document_rid, 0, 0, 0)
+    if dry_run:
+        logger.info("DRY-RUN: %s → %d chunks (no DB write)", document_rid, len(chunks))
+        return _rag_result(document_rid, 0, len(chunks), 0)
+
+    written = await _write_document(
+        conn, document_rid, markdown, chunks, embeddings, source_meta)
+    logger.info(
+        "Ingested %s: %d chunks written (%d null embeds)",
+        document_rid, written, null_embeds,
+    )
+    return _rag_result(document_rid, written, len(chunks), null_embeds)
+
+
 async def ingest_document_rag(
     pool: asyncpg.Pool,
     *,
@@ -286,44 +419,23 @@ async def ingest_document_rag(
     Returns {document_rid, chunks_written, chunks_total, null_embeds}.
     This is the `--tier rag` core; higher tiers compose on top of it.
     """
-    chunks = chunker.chunk_text(markdown)
+    chunks, embeddings, null_embeds = await _chunk_and_embed(
+        document_rid, markdown, embedder, chunker)
     if not chunks:
-        logger.warning("No chunks produced for %s", document_rid)
-        return {"document_rid": document_rid, "chunks_written": 0, "chunks_total": 0, "null_embeds": 0}
-
+        return _rag_result(document_rid, 0, 0, 0)
     if dry_run:
         logger.info("DRY-RUN: %s → %d chunks (no DB write)", document_rid, len(chunks))
-        return {"document_rid": document_rid, "chunks_written": 0, "chunks_total": len(chunks), "null_embeds": 0}
-
-    # Embed one at a time (batch calls can time out on long docs) — mirror doc_scanner.
-    embeddings: List[Optional[List[float]]] = []
-    null_embeds = 0
-    for idx, chunk in enumerate(chunks):
-        try:
-            emb = await embedder.embed(chunk["text"])
-            embeddings.append(emb)
-        except Exception as e:  # noqa: BLE001 — match doc_scanner's null-on-fail policy
-            logger.warning("Embedding failed for %s chunk %d: %s", document_rid, idx, e)
-            embeddings.append(None)
-            null_embeds += 1
+        return _rag_result(document_rid, 0, len(chunks), 0)
 
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            await upsert_document_memory(conn, document_rid, markdown, source_meta)
-            written = await upsert_document_chunks(conn, document_rid, chunks, embeddings, source_meta)
-            # Additive field membership (Option B): never deletes other fields' rows.
-            await upsert_field_membership(conn, document_rid, source_meta)
+        written = await _write_document(
+            conn, document_rid, markdown, chunks, embeddings, source_meta)
 
     logger.info(
         "Ingested %s: %d chunks written (%d null embeds)",
         document_rid, written, null_embeds,
     )
-    return {
-        "document_rid": document_rid,
-        "chunks_written": written,
-        "chunks_total": len(chunks),
-        "null_embeds": null_embeds,
-    }
+    return _rag_result(document_rid, written, len(chunks), null_embeds)
 
 
 # ── Claims + extractor composition (Phase 2 orchestration) ───────────────────────
