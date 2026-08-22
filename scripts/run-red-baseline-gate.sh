@@ -89,8 +89,24 @@ if [[ -n "$NEW" ]]; then
 fi
 
 if [[ -n "$GONE" ]]; then
-  echo "NOTE: baseline node(s) no longer failing -- if genuinely fixed, re-cut the baseline:"
-  echo "$GONE" | sed 's/^/  - /'
+  # A DISAPPEARING failure is not automatically good news, and treating it as a
+  # mere note is how the gate this replaces produced a false PASS. A node leaves
+  # the failure set for two very different reasons: it was fixed, or it never
+  # ran. Only one of those is worth celebrating and the gate cannot tell them
+  # apart, so it fails and makes a human look.
+  #
+  # Concretely: only test_cross_type_alias_dedup.py carries a backend guard. If
+  # the backend is slow, that file alone errors, its 4 nodes vanish, and the
+  # remaining 6 still match -- so a "NOTE" here would exit 0 on a run that
+  # silently lost 40% of its coverage. Observed 2026-08-22: /health took 8.95s
+  # in one sample, and one gate run returned 0 nodes where the same command
+  # returned 10 moments later.
+  echo "FAIL: baseline node(s) are no longer failing:" >&2
+  echo "$GONE" | sed 's/^/  - /' >&2
+  echo "      Either they were fixed -- in which case RE-CUT the baseline and" >&2
+  echo "      commit it -- or they did not run. Check for skips/errors first:" >&2
+  echo "        KOI_REQUIRE_BACKEND=1 pytest <the node set> -rsE" >&2
+  STATUS=1
 fi
 
 # The property-based half. Unlike the node set above, this finds offenders that

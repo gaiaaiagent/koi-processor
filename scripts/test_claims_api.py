@@ -13,6 +13,7 @@ Tests:
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -677,12 +678,122 @@ def test_proof_pack_hash_verified():
                   f"hash_verified={att.get('hash_verified')}")
 
 
+NO_CLEANUP = False
+
+
+def purge_created_claims(skip: bool = False) -> None:
+    """Remove the claims this run created from the LIVE database.
+
+    WHY THIS EXISTS. This script writes over HTTP to a running server, so its
+    rows land in the live database and nothing in tests/ can redirect them --
+    it is not even collected by pytest (`testpaths = tests`), so no conftest,
+    no DSN redirect and no tripwire apply. Left uncleaned it accumulated
+    fixture claims under dedicated identities (`project-claims-engine`,
+    `organization-claims-engine-test-org`, `person-eval-pipeline-verifier`);
+    62 such rows plus 32 attestations were purged by hand on 2026-08-22.
+
+    ORDER MATTERS: claim_attestations references claims with NO ACTION, not
+    CASCADE, so deleting claims first aborts partway and leaves a half-purge.
+
+    NEVER deletes a ledger-anchored claim. A snapshot restores a row; it does
+    not restore the fact that something was published on-chain while the local
+    record went missing. Anchored rows are reported and left alone.
+
+    The claimant/reviewer ENTITIES are deliberately not purged: setup is
+    idempotent ("ensure exists"), so they are a fixed handful reused across
+    runs rather than per-run growth.
+    """
+    if skip:
+        print("\n[cleanup] skipped (--no-cleanup)")
+        return
+    if not CREATED_RIDS:
+        return
+
+    dsn = os.getenv("KOI_LIVE_POSTGRES_URL") or os.getenv("POSTGRES_URL")
+    if not dsn or "personal_koi_test" in dsn:
+        print(
+            f"\n*** CLAIM FIXTURE LEAK — CANNOT PURGE ***\n"
+            f"{len(CREATED_RIDS)} claim(s) were written to the live database via "
+            f"{BASE_URL}, but no live DSN is available "
+            f"(KOI_LIVE_POSTGRES_URL unset, POSTGRES_URL absent or pointing at the "
+            f"test database).\nPurge manually:\n"
+            f"  psql -d personal_koi -c \"DELETE FROM claim_attestations WHERE claim_rid IN "
+            f"({', '.join(repr(r) for r in CREATED_RIDS)}); "
+            f"DELETE FROM claims WHERE claim_rid IN "
+            f"({', '.join(repr(r) for r in CREATED_RIDS)}) AND ledger_iri IS NULL;\"",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        import psycopg2
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("SELECT current_database()")
+            landed = cur.fetchone()[0]
+            if landed.endswith("_test"):
+                print(
+                    f"\n*** CLEANUP POINTED AT THE WRONG DATABASE ***\n"
+                    f"Writes went to {BASE_URL} (live) but the purge connected to "
+                    f"'{landed}'. It would delete nothing and report success.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            cur.execute(
+                "SELECT claim_rid FROM claims WHERE claim_rid = ANY(%s) "
+                "AND ledger_iri IS NOT NULL",
+                (CREATED_RIDS,),
+            )
+            anchored = [r[0] for r in cur.fetchall()]
+            deletable = [r for r in CREATED_RIDS if r not in anchored]
+
+            cur.execute(
+                "DELETE FROM claim_attestations WHERE claim_rid = ANY(%s)", (deletable,)
+            )
+            att = cur.rowcount
+            cur.execute("DELETE FROM claims WHERE claim_rid = ANY(%s)", (deletable,))
+            purged = cur.rowcount
+
+            cur.execute(
+                "SELECT count(*) FROM claims WHERE claim_rid = ANY(%s)", (deletable,)
+            )
+            remaining = cur.fetchone()[0]
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(
+            f"\n*** CLAIM FIXTURE LEAK — PURGE FAILED ***\n"
+            f"{len(CREATED_RIDS)} claim(s) written via {BASE_URL}; cleanup raised "
+            f"{type(exc).__name__}: {exc}\nRows may remain in the live database.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if remaining:
+        print(
+            f"\n*** CLAIM FIXTURE LEAK — ROW(S) SURVIVED PURGE ***\n"
+            f"Against {landed}: deleted {purged} of {len(deletable)}; "
+            f"{remaining} still match.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    note = f", {len(anchored)} anchored claim(s) retained" if anchored else ""
+    print(f"\n[cleanup] purged {purged} claim(s), {att} attestation(s) from {landed}{note}")
+
+
 def main():
     global BASE_URL
     parser = argparse.ArgumentParser(description="Claims Engine V1 smoke tests")
     parser.add_argument("--base-url", default="http://localhost:8351")
+    parser.add_argument(
+        "--no-cleanup", action="store_true",
+        help="Leave created claims in the live database (for debugging a failed run).",
+    )
     args = parser.parse_args()
     BASE_URL = args.base_url
+    global NO_CLEANUP
+    NO_CLEANUP = args.no_cleanup
 
     print(f"Claims Engine V2 — Smoke Tests")
     print(f"Base URL: {BASE_URL}")
@@ -746,6 +857,8 @@ def main():
 
     print("\n" + "=" * 50)
     print(f"Results: {PASS} passed, {FAIL} failed")
+
+
     if FAIL > 0:
         sys.exit(1)
     print("All tests passed!")
@@ -753,4 +866,10 @@ def main():
 
 if __name__ == "__main__":
     import urllib.parse
-    main()
+    # finally, not a trailing call: main() sys.exit(1)s on several failure paths,
+    # and a run that dies partway is exactly the one whose rows must still be
+    # purged. SystemExit propagates through finally, so the exit code survives.
+    try:
+        main()
+    finally:
+        purge_created_claims(skip=NO_CLEANUP)

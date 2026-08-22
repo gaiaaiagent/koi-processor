@@ -145,17 +145,20 @@ KNOWN_UNGOVERNED: dict[str, str] = {
         "Same shape: one POST site at :50-58, to /entity/resolve, non-persisting "
         "for the same reason as tests/test_contract.py."
     ),
-    # --- Real, unfixed leakers ---------------------------------------------
+    # --- Latent: writes with no teardown, but currently cannot reach the DB --
+    # Measured 2026-08-22 rather than inferred. Both were previously described
+    # here as "REAL LEAK, UNFIXED", which overstated them: a static scan sees the
+    # write calls but not whether they execute. Kept in the allowlist because the
+    # teardown is genuinely absent — the moment the blocker below is removed,
+    # these leak.
     "tests/test_interop_matrix.py": (
-        "REAL LEAK, UNFIXED. 18 write calls against BASE_URL incl. POST /ingest, "
-        "/web/ingest, /koi-net/share, /koi-net/events/broadcast. No teardown of any "
-        "kind. Fix with the template in 148fcc6 / bcc6386."
-    ),
-    "scripts/test_claims_api.py": (
-        "REAL LEAK, UNFIXED, AND UNGOVERNED BY ANY CONFTEST — it sits outside "
-        "tests/, so no DSN redirect and no tripwire apply to it. Writes claims via "
-        "urllib to the live API. 157 rows in `claims` matched a test signature on "
-        "2026-08-22."
+        "LATENT. 18 write calls incl. POST /ingest, /koi-net/share, "
+        "/koi-net/events/broadcast, and no teardown of any kind. But 7 of its 11 "
+        "tests skip without a peer on :8355 (plus admin-token and BKC-profile "
+        "skips), and a full run on 2026-08-22 left 0 rows: entity_text LIKE "
+        "'Handler Pipeline Test%' = 0, fuseki_uri LIKE 'orn:test:%' = 1 (dated "
+        "2026-01-21, unrelated). Bring up a peer and it leaks. Fix with the "
+        "template in 148fcc6 / bcc6386."
     ),
     # --- Dormant shell scripts: unreachable by pytest, hence by any fixture --
     "tests/test_consent_leakage.sh": "curl writes to the live API, no cleanup; last touched 2026-03-11.",
