@@ -2098,18 +2098,47 @@ def create_router(
                 # embedding_3072 populated by the chunk-embedder but had no read
                 # path before (fix 2026-06-01: retrieval-chunk-surfaces).
                 if "memories" in surfaces:
+                    # ANN + LIMIT inside the CTE, THEN join the parent for the
+                    # 20 surviving rows — one indexed lookup each on
+                    # koi_memories_rid_key. Verified by EXPLAIN that the HNSW
+                    # index is still used; measured at +5.5ms p50 on a frozen
+                    # 15-query set. The alternative was copying title/author/
+                    # source_url onto 61k chunk rows, which is how the existing
+                    # metadata got stale in the first place.
+                    #
+                    # LEFT, not INNER: the FK makes a missing parent impossible
+                    # today, but an inner join would make result-set membership
+                    # depend on that staying true forever.
+                    #
+                    # The outer ORDER BY is NOT redundant. hnsw.iterative_scan is
+                    # set to `relaxed_order`, so the index returns rows only
+                    # APPROXIMATELY sorted and the previous query trusted that
+                    # order: measured 15 out-of-order adjacent pairs across
+                    # 10 of 15 queries. Since each row's fused score is
+                    # 1.0/(k+rank+1), a wrong order is a wrong RRF weight.
                     rows = await conn.fetch("""
-                        SELECT mc.chunk_rid,
-                               mc.document_rid,
-                               mc.content->>'text' AS chunk_text,
-                               mc.content->>'title' AS title,
-                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
-                        FROM koi_memory_chunks mc
-                        WHERE mc.embedding_3072 IS NOT NULL
-                          AND mc.document_rid NOT LIKE 'mediawiki:%'
-                          AND mc.document_rid NOT LIKE 'doc-scanner:%'
-                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
-                        LIMIT 20
+                        WITH hits AS (
+                            SELECT mc.chunk_rid,
+                                   mc.document_rid,
+                                   mc.content->>'text' AS chunk_text,
+                                   mc.content->>'title' AS title,
+                                   mc.metadata,
+                                   1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
+                            FROM koi_memory_chunks mc
+                            WHERE mc.embedding_3072 IS NOT NULL
+                              AND mc.document_rid NOT LIKE 'mediawiki:%'
+                              AND mc.document_rid NOT LIKE 'doc-scanner:%'
+                            ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                            LIMIT 20
+                        )
+                        SELECT h.chunk_rid, h.document_rid, h.chunk_text,
+                               h.metadata, h.score,
+                               COALESCE(h.title, m.content->>'title') AS title,
+                               m.metadata->>'author'     AS parent_author,
+                               m.metadata->>'source_url' AS parent_source_url
+                        FROM hits h
+                        LEFT JOIN koi_memories m ON m.rid = h.document_rid
+                        ORDER BY h.score DESC
                     """, emb_str)
                     for rank, row in enumerate(rows):
                         drid = row["document_rid"] or ""
@@ -2121,14 +2150,31 @@ def create_router(
                             _src = "calendar"
                         else:
                             _src = "memory"
+                        # This surface reads koi_memory_chunks WITHOUT joining
+                        # koi_memories, so anything not on the chunk row cannot
+                        # reach a caller. It previously returned only
+                        # {vector_score} and dropped mc.metadata entirely, which
+                        # is why `title` was null on EVERY result it has ever
+                        # served (measured: 0 of 61,730 chunks carry a
+                        # chunk-level content title; the writers put it in
+                        # metadata). Mirrors the `docs` surface above, which
+                        # already returns the whole mc.metadata blob.
+                        meta = _parse_jsonb(row["metadata"])
+                        meta["vector_score"] = float(row["score"])
                         all_results.append({
                             "text": (row["chunk_text"] or "")[:500],
                             "score": 1.0 / (k + rank + 1),
                             "source": _src,
+                            # chunk metadata first (it is the more specific
+                            # record), parent row as the fallback that actually
+                            # has the data for the 61k legacy chunks.
                             "title": row["title"],
+                            "author": meta.get("author") or row["parent_author"],
+                            "source_url": (meta.get("source_url")
+                                           or row["parent_source_url"]),
                             "document_rid": drid,
                             "chunk_rid": row["chunk_rid"],
-                            "metadata": {"vector_score": float(row["score"])},
+                            "metadata": meta,
                         })
 
         # Vault BM25 (pageindex — Mac only, graceful skip if venv not present)
