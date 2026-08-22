@@ -421,15 +421,24 @@ def create_router(pool) -> APIRouter:
             # every 300s. The columns below are what store_new_entity would have set
             # that actually matter for attribution.
             #
+            # resolution_tier='manual' closes the migration-111 diagnostic on this path.
+            # That instrumentation is how this leak was found: every instrumented create
+            # path stamps a tier, so a population that is entirely NULL identifies an
+            # uninstrumented direct-INSERT. Leaving this path NULL after fixing it would
+            # hand the next investigator the same false signal. 'manual' (not
+            # 'tier3_created') because an intent is keyed by its RID, so two intents
+            # sharing a description are not a minted duplicate and must not be counted
+            # as tier3_created_ambiguous.
+            #
             # merged_into is deliberately untouched on conflict: reviving a tombstoned
             # row here would silently undo an operator's disposition.
             await conn.execute(
                 """
                 INSERT INTO entity_registry
                     (entity_type, entity_text, normalized_text, fuseki_uri,
-                     source, first_seen_rid, metadata, created_at)
+                     source, first_seen_rid, metadata, resolution_tier, created_at)
                 VALUES ('Intent', $1, LOWER($1), $2,
-                        'intent-registry', $2, $3::jsonb, NOW())
+                        'intent-registry', $2, $3::jsonb, 'manual', NOW())
                 ON CONFLICT (fuseki_uri) DO UPDATE SET
                     entity_text = EXCLUDED.entity_text,
                     normalized_text = EXCLUDED.normalized_text,

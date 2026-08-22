@@ -149,6 +149,7 @@ def purge_test_entities():
         )
 
     expected = [intent_rid(k) for k in CREATED_KEYS]
+    keys = sorted(CREATED_KEYS)
     try:
         import psycopg2
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
@@ -158,6 +159,23 @@ def purge_test_entities():
                 (expected,),
             )
             purged = cur.rowcount
+
+            # The intent rows themselves, and their state log. Archiving via
+            # cleanup() only sets status; it leaves the row. That is the other half
+            # of this same leak and it is why 1,360 archived reg-test-intent-* rows
+            # had piled up in intent_registry by 2026-08-22, polluting
+            # /intents/stats' by_landscape_group with dedup-group-*/match-group-*.
+            # No table has a foreign key onto intent_registry (verified), so order
+            # here is a matter of tidiness, not integrity.
+            cur.execute(
+                "DELETE FROM intent_state_log WHERE intent_rid = ANY(%s)", (expected,)
+            )
+            purged_log = cur.rowcount
+            cur.execute(
+                "DELETE FROM intent_registry WHERE intent_key = ANY(%s)", (keys,)
+            )
+            purged_intents = cur.rowcount
+
             # Confirm the purge rather than trusting it: rowcount can be right while the
             # connection points somewhere harmless. Ask the same database what survived.
             cur.execute(
@@ -166,6 +184,10 @@ def purge_test_entities():
                 (expected,),
             )
             remaining = cur.fetchone()[0]
+            cur.execute(
+                "SELECT count(*) FROM intent_registry WHERE intent_key = ANY(%s)", (keys,)
+            )
+            remaining_intents = cur.fetchone()[0]
     except Exception as exc:  # noqa: BLE001 — reported, never swallowed
         pytest.fail(
             f"\n*** INTENT FIXTURE LEAK — PURGE FAILED ***\n"
@@ -175,16 +197,19 @@ def purge_test_entities():
             pytrace=False,
         )
 
-    if remaining:
+    if remaining or remaining_intents:
         pytest.fail(
-            f"\n*** INTENT FIXTURE LEAK — {remaining} ROW(S) SURVIVED PURGE ***\n"
-            f"Deleted {purged} of {len(expected)} expected Intent entity rows from "
-            f"{dsn.rsplit('/', 1)[-1]}, but {remaining} still match.\n"
-            f"These are embedded and will compete in every entity ANN until removed.",
+            f"\n*** INTENT FIXTURE LEAK — ROW(S) SURVIVED PURGE ***\n"
+            f"Against {dsn.rsplit('/', 1)[-1]}: deleted {purged} of {len(expected)} "
+            f"expected entity_registry rows ({remaining} still match) and "
+            f"{purged_intents} of {len(keys)} intent_registry rows "
+            f"({remaining_intents} still match).\n"
+            f"Entity rows are embedded and compete in every entity ANN until removed.",
             pytrace=False,
         )
 
-    print(f"\n[cleanup] purged {purged} test Intent entity row(s) from "
+    print(f"\n[cleanup] purged {purged} Intent entity row(s), {purged_intents} "
+          f"intent_registry row(s), {purged_log} state-log row(s) from "
           f"{dsn.rsplit('/', 1)[-1]}")
 
 
