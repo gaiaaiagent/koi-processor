@@ -55,15 +55,28 @@ WRITE_VERB = re.compile(
     r'|-X\s*(POST|PATCH|PUT|DELETE)',
     re.I,
 )
-# Some mechanism capable of reaching another process.
-HTTP_MECH = re.compile(
-    r'httpx|requests\.|urllib|http\.client|aiohttp|curl\b|TestClient|ASGITransport'
+# A client that leaves this process. TestClient/ASGITransport are deliberately
+# NOT here: those drive the app in-process, where the conftest redirect moves the
+# writes and the teardown together.
+OUT_OF_PROCESS_CLIENT = re.compile(
+    r'httpx|requests\.|urllib|http\.client|aiohttp|curl\b'
 )
-# Aimed at a real server rather than an in-process app.
+# Advisory only — reported, never required. An earlier version REQUIRED a literal
+# live URL, which a test could evade simply by assembling its base URL from a
+# fixture, a helper or an env var. Measured on 2026-08-22: requiring it and
+# ignoring it flag the identical 9 files, so the requirement bought no precision
+# and cost a whole class of false negatives. An out-of-process HTTP client in a
+# test is suspicious wherever it points.
 LIVE_URL = re.compile(
     r'8351|KOI_API_URL|BASE_URL|PEER_URL|localhost:\d+|127\.0\.0\.1:\d+'
 )
-# Evidence the module removes what it wrote, from the database it reached.
+# Evidence the module DECLARES cleanup. This proves intent, not efficacy: a file
+# with an unrelated `DELETE FROM` in a helper would satisfy it. That limit is
+# deliberate and layered, not an oversight -- efficacy is proven at runtime by
+# live_graph_tripwire in tests/conftest.py and by the per-suite row delta
+# (tests/test_task_registry.py runs net zero), which a static scan cannot do.
+# This gate answers "did anyone even try?", which is the question that was going
+# unasked while 627 rows accumulated.
 CLEANUP = re.compile(r'KOI_LIVE_POSTGRES_URL|purge_test|DELETE\s+FROM')
 # Drives the app in-process, so tests/conftest.py's redirect moves its writes
 # AND its teardown together — not a live writer.
@@ -94,12 +107,14 @@ def _scan() -> dict[str, dict]:
         except OSError:
             continue
         writes = len(WRITE_VERB.findall(text))
-        if not writes or not HTTP_MECH.search(text) or not LIVE_URL.search(text):
+        if not writes or not OUT_OF_PROCESS_CLIENT.search(text):
             continue
         out[str(path.relative_to(REPO_ROOT))] = {
             "writes": writes,
             "cleanup": bool(CLEANUP.search(text)),
             "in_process": bool(IN_PROCESS.search(text)),
+            # Advisory: recorded for triage, never used to include or exclude.
+            "live_url": bool(LIVE_URL.search(text)),
         }
     return out
 
