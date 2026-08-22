@@ -276,7 +276,7 @@ async def process_entity_bearing_page(
     canonical, is_new = await resolve_entity(conn, page_entity)
 
     if is_new:
-        await store_new_entity(conn, page_entity, canonical, source_rid, source="mediawiki_import")
+        await store_new_entity(conn, page_entity, canonical, source_rid, source="mediawiki_import", origin="import")
         counters["entities_created"] += 1
         _write_log(log_file, source_rid, title, None, canonical.uri, canonical.name,
                     "created", None, run_id)
@@ -330,7 +330,7 @@ async def process_entity_bearing_page(
         if target_is_new:
             await store_new_entity(
                 conn, target_entity, target_canonical, source_rid,
-                source="mediawiki_import"
+                source="mediawiki_import", origin="import"
             )
             counters["entities_created"] += 1
 
@@ -395,7 +395,7 @@ async def process_entity_bearing_page(
         if target_is_new:
             await store_new_entity(
                 conn, target_entity, target_canonical, source_rid,
-                source="mediawiki_import"
+                source="mediawiki_import", origin="import"
             )
             counters["entities_created"] += 1
 

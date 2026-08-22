@@ -147,15 +147,22 @@ async def _apply_entity(conn, rid: str, event_type: str, payload: Dict[str, Any]
     aliases = normalize_alias_list(payload.get("aliases", []))
     metadata = payload.get("metadata", {})
 
+    # migration 111: resolution_tier records WHY a row was minted.
+    # COALESCE on conflict, deliberately: never overwrite a non-NULL tier, or the
+    # record of how the row was ORIGINALLY minted is erased — the one thing the
+    # column exists to preserve. Filling a NULL is desirable: it labels a
+    # pre-instrumentation row that federation later touched.
     await conn.execute("""
-        INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text, aliases, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+        INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text, aliases, metadata,
+                                     resolution_tier)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'federation')
         ON CONFLICT (fuseki_uri) DO UPDATE SET
             entity_text = EXCLUDED.entity_text,
             entity_type = EXCLUDED.entity_type,
             normalized_text = EXCLUDED.normalized_text,
             aliases = EXCLUDED.aliases,
             metadata = EXCLUDED.metadata,
+            resolution_tier = COALESCE(entity_registry.resolution_tier, EXCLUDED.resolution_tier),
             updated_at = NOW()
     """, fuseki_uri, entity_text, entity_type, normalized_text,
         aliases or [], json.dumps(metadata) if isinstance(metadata, dict) else metadata)

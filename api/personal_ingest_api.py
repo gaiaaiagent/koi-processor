@@ -1431,9 +1431,21 @@ async def store_new_entity(
     entity: ExtractedEntity,
     canonical: CanonicalEntity,
     document_rid: str,
-    source: str = 'personal-vault'
+    source: str = 'personal-vault',
+    origin: Optional[str] = None,
 ) -> None:
-    """Store a new entity in the registry with embedding and phonetic code"""
+    """Store a new entity in the registry with embedding and phonetic code.
+
+    `origin` sets entity_registry.resolution_tier (migration 111). Precedence:
+    if supplied it is used verbatim and the local classification below is
+    SKIPPED; if None, this function classifies the create locally. That keeps
+    resolver-driven callers at zero lines changed — only bulk importers, which
+    traverse no resolver tier, pass an origin ('import').
+
+    SCOPE: this records why THIS ROW was minted. It is not a resolver hit rate —
+    store_new_entity runs only on creation, so matching tiers resolve to existing
+    rows and stamp nothing. See the column comment in migration 111.
+    """
     normalized = normalize_entity_text(entity.name)
     # Canonicalize the persisted type (strip schema:/bkc:, resolve plural/case)
     # so entity_registry never accumulates prefixed/variant type spellings.
@@ -1445,6 +1457,37 @@ async def store_new_entity(
         'context': entity.context,
         'confidence': entity.confidence
     })
+
+    # --- migration 111: classify WHY this row is being minted -----------------
+    # Only when the caller did not supply an origin. One extra read on the
+    # create path; no branch changes, no behaviour change.
+    #
+    # Threshold is >= 1 live row, NOT >= 2. Two is Tier 1.1b's *decline*
+    # threshold (it binds at exactly one, declines at two) — a different
+    # question. Here: if ANY live row already carries this name and we are
+    # creating anyway, a duplicate has just been minted, and that is the
+    # population worth counting.
+    resolution_tier = origin
+    if resolution_tier is None:
+        try:
+            async with conn.transaction():  # SAVEPOINT: a failed probe must not
+                                            # poison the caller's transaction
+                _existing = await conn.fetchval("""
+                    -- 111 create-path classification
+                    SELECT count(*) FROM entity_registry
+                     WHERE merged_into IS NULL AND normalized_text = $1
+                """, normalized)
+        except Exception as _cls_exc:
+            logger.warning(
+                "resolution_tier classification failed for %r: %s", entity.name, _cls_exc
+            )
+            _existing = None
+        if _existing is None:
+            resolution_tier = None          # unknown stays NULL, never a guess
+        elif _existing >= 1:
+            resolution_tier = 'tier3_created_ambiguous'
+        else:
+            resolution_tier = 'tier3_created'
 
     # Generate embedding for new entity (enables future Tier 2 matching)
     embedding = None
@@ -1470,8 +1513,9 @@ async def store_new_entity(
         await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
-                source, first_seen_rid, metadata, embedding_3072, phonetic_code
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector(3072), $9)
+                source, first_seen_rid, metadata, embedding_3072, phonetic_code,
+                resolution_tier
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector(3072), $9, $10)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """,
             canonical.uri,
@@ -1482,14 +1526,16 @@ async def store_new_entity(
             document_rid,
             metadata,
             str(embedding),
-            phonetic_code
+            phonetic_code,
+            resolution_tier
         )
     else:
         await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
-                source, first_seen_rid, metadata, phonetic_code
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                source, first_seen_rid, metadata, phonetic_code,
+                resolution_tier
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """,
             canonical.uri,
@@ -1499,7 +1545,8 @@ async def store_new_entity(
             source,
             document_rid,
             metadata,
-            phonetic_code
+            phonetic_code,
+            resolution_tier
         )
 
     # Enqueue entity to TerminusDB outbox (same transaction as PG write)
