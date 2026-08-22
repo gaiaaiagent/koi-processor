@@ -2034,17 +2034,32 @@ def create_router(
                     if repo:
                         d_params_vec.append(repo)
                         d_filter += f" AND mc.metadata->>'repo' = ${len(d_params_vec)}"
+                    # hnsw.iterative_scan is `relaxed_order` (set deliberately by
+                    # migrations/109_pgvector_cost_model.sql, where it is
+                    # load-bearing for FILTERED ANN correctness — do not turn it
+                    # off). It returns rows only APPROXIMATELY sorted, and this
+                    # query previously trusted that order. Each row's fused score
+                    # is 1.0/(k+rank+1) and the list is then truncated, so a
+                    # mis-ranked chunk falls off the end rather than merely
+                    # ranking lower. The outer ORDER BY costs one sort of 20 rows.
+                    # Measured on a frozen 15-query set over this surface's own
+                    # corpus: 18 inversions across 9/15 queries -> 0, no change
+                    # of membership, kept top-10 similarity improved on 5
+                    # queries and degraded on 0.
                     rows = await conn.fetch(f"""
-                        SELECT mc.chunk_rid,
-                               mc.content->>'text' AS chunk_text,
-                               mc.metadata,
-                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
-                        FROM koi_memory_chunks mc
-                        WHERE mc.embedding_3072 IS NOT NULL
-                          AND mc.metadata->>'repo' IS NOT NULL
-                          {d_filter}
-                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
-                        LIMIT 20
+                        WITH hits AS (
+                            SELECT mc.chunk_rid,
+                                   mc.content->>'text' AS chunk_text,
+                                   mc.metadata,
+                                   1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
+                            FROM koi_memory_chunks mc
+                            WHERE mc.embedding_3072 IS NOT NULL
+                              AND mc.metadata->>'repo' IS NOT NULL
+                              {d_filter}
+                            ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                            LIMIT 20
+                        )
+                        SELECT * FROM hits ORDER BY score DESC
                     """, *d_params_vec)
                     for rank, row in enumerate(rows):
                         meta = _parse_jsonb(row["metadata"])
@@ -2064,19 +2079,34 @@ def create_router(
 
                 # Wiki (vector similarity on koi_memory_chunks from mediawiki-sensor)
                 if "wiki" in surfaces:
+                    # hnsw.iterative_scan is `relaxed_order` (set deliberately by
+                    # migrations/109_pgvector_cost_model.sql, where it is
+                    # load-bearing for FILTERED ANN correctness — do not turn it
+                    # off). It returns rows only APPROXIMATELY sorted, and this
+                    # query previously trusted that order. Each row's fused score
+                    # is 1.0/(k+rank+1) and the list is then truncated, so a
+                    # mis-ranked chunk falls off the end rather than merely
+                    # ranking lower. The outer ORDER BY costs one sort of 20 rows.
+                    # Measured on a frozen 15-query set over the 99,034-chunk
+                    # P2P Foundation corpus: 7 inversions across 4/15 queries
+                    # -> 0, no change of membership, kept top-10 similarity
+                    # unchanged (those reorderings sat below the cutoff).
                     rows = await conn.fetch("""
-                        SELECT mc.chunk_rid,
-                               mc.document_rid,
-                               mc.content->>'text' AS chunk_text,
-                               mc.content->>'title' AS title,
-                               mc.content->>'wiki_url' AS wiki_url,
-                               mc.content->>'section_title' AS section_title,
-                               1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
-                        FROM koi_memory_chunks mc
-                        WHERE mc.embedding_3072 IS NOT NULL
-                          AND mc.document_rid LIKE 'mediawiki:%'
-                        ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
-                        LIMIT 20
+                        WITH hits AS (
+                            SELECT mc.chunk_rid,
+                                   mc.document_rid,
+                                   mc.content->>'text' AS chunk_text,
+                                   mc.content->>'title' AS title,
+                                   mc.content->>'wiki_url' AS wiki_url,
+                                   mc.content->>'section_title' AS section_title,
+                                   1 - (mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS score
+                            FROM koi_memory_chunks mc
+                            WHERE mc.embedding_3072 IS NOT NULL
+                              AND mc.document_rid LIKE 'mediawiki:%'
+                            ORDER BY mc.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+                            LIMIT 20
+                        )
+                        SELECT * FROM hits ORDER BY score DESC
                     """, emb_str)
                     for rank, row in enumerate(rows):
                         all_results.append({
