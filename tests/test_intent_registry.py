@@ -170,6 +170,20 @@ def purge_test_entities():
     try:
         import psycopg2
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            # Ask the connection which database it is actually in. Trusting the DSN
+            # string is how this teardown broke in the first place: it named a variable
+            # whose value changed underneath it.
+            cur.execute("SELECT current_database()")
+            connected_db = cur.fetchone()[0]
+            if connected_db.endswith("_test"):
+                pytest.fail(
+                    f"\n*** INTENT FIXTURE LEAK — CLEANUP POINTED AT THE WRONG DATABASE ***\n"
+                    f"The ingests went to the live graph via {BASE_URL}, but this cleanup "
+                    f"connected to '{connected_db}'. Deleting there removes nothing and "
+                    f"reports success.",
+                    pytrace=False,
+                )
+
             cur.execute(
                 "DELETE FROM entity_registry "
                 "WHERE entity_type = 'Intent' AND fuseki_uri = ANY(%s)",
@@ -211,6 +225,24 @@ def purge_test_entities():
             f"{len(CREATED_KEYS)} intent(s) ingested via {BASE_URL}; the cleanup against "
             f"{dsn.rsplit('/', 1)[-1]} raised {type(exc).__name__}: {exc}\n"
             f"Entity rows may remain in the live graph.",
+            pytrace=False,
+        )
+
+    # ZERO PURGED IS THE ERROR CONDITION, and the first version of this fix missed it.
+    # Reading back only what survived cannot distinguish "deleted them all" from
+    # "connected somewhere that never had them": both return remaining == 0, so a
+    # cleanup aimed at an empty database passed while printing "purged 0 row(s)".
+    # That is the same fail-open shape as the silent `return` this fixture replaced.
+    # CREATED_KEYS is non-empty here, and ingest() asserts HTTP 200, so at least one
+    # row existed unless every ingest failed -- in which case the run is red anyway
+    # and a second explicit error is better than a quiet zero.
+    if purged == 0:
+        pytest.fail(
+            f"\n*** INTENT FIXTURE LEAK — NOTHING WAS PURGED ***\n"
+            f"{len(expected)} intent(s) were ingested via {BASE_URL}, but the cleanup "
+            f"against '{connected_db}' deleted 0 entity_registry rows.\n"
+            f"Either every ingest failed, or this connection is not the database the "
+            f"backend writes to. Both mean the live graph is unverified.",
             pytrace=False,
         )
 

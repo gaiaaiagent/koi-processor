@@ -2,8 +2,22 @@
 Regression tests for the task_registry API (task_router.py).
 
 Runs against the live backend on localhost:8351.
-Each test uses unique task keys prefixed with "reg-test-" and cleans up after itself
-by setting status=cancelled so real task data is never touched.
+Each test uses unique task keys prefixed with "reg-test-".
+
+THESE WRITES LAND IN THE LIVE DATABASE AND NO ENV VAR CAN REDIRECT THEM.
+The requests go over HTTP to a server that holds its own connection, so
+tests/conftest.py's POSTGRES_URL redirect moves this file's *teardown* without
+moving its *writes*. Cleanup must therefore target the database the writes
+actually reached, which conftest publishes as KOI_LIVE_POSTGRES_URL.
+
+This docstring previously claimed each test "cleans up after itself by setting
+status=cancelled". That was false in the way that matters: a status change
+leaves the row. By 2026-08-22 that had accumulated 627 reg-test-* rows in the
+live task_registry, 135 of them in a single day, where they pollute GET /tasks,
+/tasks/stats and the morning brief. cleanup() below still exists because
+several tests assert on cancelled-status semantics -- it is a state transition,
+not a purge. The purge is purge_test_tasks() at the foot of this module, and it
+fails the run rather than leaking silently.
 
 Usage:
     pytest tests/test_task_registry.py -v
@@ -18,6 +32,12 @@ import httpx
 
 BASE_URL = os.getenv("KOI_API_URL", "http://localhost:8351")
 
+# Every key minted by make_key(), so teardown can purge exactly what this run
+# created and nothing a concurrent session created. Populated at mint time
+# rather than after a successful ingest: a test that dies mid-request may
+# already have written the row.
+CREATED_KEYS: set[str] = set()
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -26,8 +46,10 @@ def client():
 
 
 def make_key(suffix: str) -> str:
-    """Generate a unique test task key."""
-    return f"reg-test-{suffix}-{uuid.uuid4().hex[:6]}"
+    """Generate a unique test task key, recorded for teardown."""
+    key = f"reg-test-{suffix}-{uuid.uuid4().hex[:6]}"
+    CREATED_KEYS.add(key)
+    return key
 
 
 def ingest(client, key: str, sourceType: str = "test", **kwargs) -> dict:
@@ -38,8 +60,81 @@ def ingest(client, key: str, sourceType: str = "test", **kwargs) -> dict:
 
 
 def cleanup(client, key: str):
-    """Mark a test task as cancelled so it doesn't pollute real task lists."""
+    """Transition a test task to cancelled.
+
+    NOT a purge -- the row survives. Kept because several tests assert on
+    cancelled-status semantics. Removal is purge_test_tasks() below.
+    """
     client.patch(f"/tasks/{key}", json={"status": "cancelled"})
+
+
+@pytest.fixture(scope="module", autouse=True)
+def purge_test_tasks():
+    """Delete every task this module created from the LIVE database.
+
+    Fails the run if it cannot purge, or if rows survive the purge. Both are
+    deliberate: the failure mode this replaces was a cleanup that returned
+    quietly while 627 rows accumulated, and a teardown that cannot prove it
+    acted is indistinguishable from one that did nothing.
+
+    Verified before writing this: nothing holds a foreign key onto
+    task_registry, so the DELETE cascades nowhere.
+    """
+    yield
+
+    if not CREATED_KEYS:
+        return
+
+    dsn = os.getenv("KOI_LIVE_POSTGRES_URL")
+    if not dsn:
+        candidate = os.getenv("POSTGRES_URL")
+        dsn = candidate if candidate and "personal_koi_test" not in candidate else None
+    if not dsn:
+        keys = ", ".join(repr(k) for k in sorted(CREATED_KEYS))
+        pytest.fail(
+            f"\n*** TASK FIXTURE LEAK — CANNOT PURGE ***\n"
+            f"{len(CREATED_KEYS)} task(s) were written to the live registry via "
+            f"{BASE_URL}, but no live DSN is available to remove them "
+            f"(KOI_LIVE_POSTGRES_URL unset, POSTGRES_URL absent or pointing at the "
+            f"test database).\n"
+            f"They will surface in GET /tasks, /tasks/stats and the morning brief.\n"
+            f"Purge manually:\n"
+            f"  psql -d personal_koi -c \"DELETE FROM task_registry "
+            f"WHERE task_key IN ({keys});\"",
+            pytrace=False,
+        )
+
+    keys = sorted(CREATED_KEYS)
+    try:
+        import psycopg2
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM task_registry WHERE task_key = ANY(%s)", (keys,))
+            purged = cur.rowcount
+            # Confirm rather than trust: rowcount can be correct while the
+            # connection points somewhere harmless. Ask the same database.
+            cur.execute(
+                "SELECT count(*) FROM task_registry WHERE task_key = ANY(%s)", (keys,)
+            )
+            remaining = cur.fetchone()[0]
+    except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+        pytest.fail(
+            f"\n*** TASK FIXTURE LEAK — PURGE FAILED ***\n"
+            f"{len(keys)} task(s) written via {BASE_URL}; cleanup against "
+            f"{dsn.rsplit('/', 1)[-1]} raised {type(exc).__name__}: {exc}\n"
+            f"Rows may remain in the live task registry.",
+            pytrace=False,
+        )
+
+    if remaining:
+        pytest.fail(
+            f"\n*** TASK FIXTURE LEAK — ROW(S) SURVIVED PURGE ***\n"
+            f"Against {dsn.rsplit('/', 1)[-1]}: deleted {purged} of {len(keys)} "
+            f"expected rows; {remaining} still match.",
+            pytrace=False,
+        )
+
+    print(f"\n[cleanup] purged {purged} reg-test task row(s) from "
+          f"{dsn.rsplit('/', 1)[-1]}")
 
 
 def get_task(client, key: str, status_filter: str = "open,inbox,in-progress,waiting,cancelled") -> dict | None:
