@@ -108,6 +108,20 @@ def purge_test_tasks():
     try:
         import psycopg2
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            # Where did we actually land? A read-back on the same cursor as the
+            # DELETE is circular: a purge aimed at an empty database reports
+            # "deleted 0, 0 remaining" and goes green. Name the database first.
+            cur.execute("SELECT current_database()")
+            landed = cur.fetchone()[0]
+            if landed.endswith("_test"):
+                pytest.fail(
+                    f"\n*** TASK FIXTURE LEAK — PURGE AIMED AT THE WRONG DATABASE ***\n"
+                    f"{len(keys)} task(s) were written over HTTP to {BASE_URL}, which "
+                    f"writes to the LIVE database, but the purge connected to "
+                    f"'{landed}'. Deleting there would remove nothing and report success.",
+                    pytrace=False,
+                )
+
             cur.execute("DELETE FROM task_registry WHERE task_key = ANY(%s)", (keys,))
             purged = cur.rowcount
             # Confirm rather than trust: rowcount can be correct while the
@@ -125,10 +139,22 @@ def purge_test_tasks():
             pytrace=False,
         )
 
+    if purged == 0:
+        # Not a neutral outcome. CREATED_KEYS is non-empty here and ingest()
+        # asserts 200, so at least one row existed unless every ingest failed --
+        # in which case the run is already red. Deleting nothing means we were
+        # pointed somewhere that never had the rows.
+        pytest.fail(
+            f"\n*** TASK FIXTURE LEAK — PURGE DELETED NOTHING ***\n"
+            f"{len(keys)} task(s) were ingested via {BASE_URL} but the DELETE against "
+            f"'{landed}' removed 0 rows. The rows are somewhere else and are still live.",
+            pytrace=False,
+        )
+
     if remaining:
         pytest.fail(
             f"\n*** TASK FIXTURE LEAK — ROW(S) SURVIVED PURGE ***\n"
-            f"Against {dsn.rsplit('/', 1)[-1]}: deleted {purged} of {len(keys)} "
+            f"Against {landed}: deleted {purged} of {len(keys)} "
             f"expected rows; {remaining} still match.",
             pytrace=False,
         )

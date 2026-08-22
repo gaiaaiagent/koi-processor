@@ -95,13 +95,26 @@ _MARKER_SQL = "SELECT clock_timestamp()::timestamp"
 # api/routers/intent_router.py now stamps metadata->>'intent_key' on every intent
 # entity it mints, which is the exact, zero-false-positive handle these rows
 # always lacked. A fixture key is 'reg-test-intent-<suffix>-<hex>'.
+#
+# THE TRIPWIRE ENUMERATES TABLES, WHICH IS THE SAME WEAKNESS ONE LEVEL DOWN.
+# It counted entity_registry alone until 2026-08-22, so it reported
+# "0 test-signature rows written" while tests/test_task_registry.py put 135 rows
+# into task_registry in a single day. A leak into any table not named here is
+# invisible to this check, and the check's silence reads as safety. When a test
+# is found writing fixtures into a new table, add it here in the same commit.
 _TEST_SIGNATURE_SQL = """
-    SELECT count(*) FROM entity_registry
-    WHERE created_at > $1::timestamp
-      AND (fuseki_uri ILIKE '%test%'
-           OR entity_text ILIKE '%test%'
-           OR source IN ('pytest', 'test')
-           OR metadata->>'intent_key' ILIKE '%test%')
+    SELECT (
+        SELECT count(*) FROM entity_registry
+        WHERE created_at > $1::timestamp
+          AND (fuseki_uri ILIKE '%test%'
+               OR entity_text ILIKE '%test%'
+               OR source IN ('pytest', 'test')
+               OR metadata->>'intent_key' ILIKE '%test%')
+    ) + (
+        SELECT count(*) FROM task_registry
+        WHERE created_at > $1::timestamp
+          AND task_key LIKE 'reg-test%'
+    )
 """
 
 _LIVE_DSN = f"postgresql://darrenzal:@localhost:5432/{LIVE_DB_NAME}"
@@ -109,8 +122,8 @@ _LIVE_DSN = f"postgresql://darrenzal:@localhost:5432/{LIVE_DB_NAME}"
 # --------------------------------------------------------------------------
 # 1b. The live DSN, published for tests that write to the live graph ON PURPOSE.
 # --------------------------------------------------------------------------
-# The redirect above is the right default, but it silently broke the one thing
-# that was cleaning up after the tests it cannot redirect.
+# The redirect above is the right default, but it silently neutralised the one
+# thing that was cleaning up after the tests it cannot redirect.
 #
 # A test that drives the API over HTTP (tests/test_intent_registry.py ->
 # POST http://localhost:8351/intents/ingest) writes through a SEPARATE uvicorn
@@ -121,8 +134,26 @@ _LIVE_DSN = f"postgresql://darrenzal:@localhost:5432/{LIVE_DB_NAME}"
 # test DSN on 2026-08-21. From that moment its ingests went to personal_koi and
 # its DELETE went to personal_koi_test, removing nothing.
 #
-# Result: the isolation fix converted a working teardown into a no-op, and 225
-# orphaned Intent rows landed in the live graph over the following 30 hours.
+# Result: 225 orphaned Intent rows landed in the live graph over the following
+# 30 hours.
+#
+# CORRECTED 2026-08-22 — this comment previously read "the isolation fix
+# converted a WORKING teardown into a no-op". Too strong, and misleading in the
+# way that matters: it invites a reader to think reverting the redirect above
+# would restore safety. It would not. The teardown has never demonstrably purged
+# a leaking burst. 85 of the 310 orphans predate this file entirely, including
+# 75 on 2026-08-17 — and purge_test_entities was added at 6237a57 that same
+# morning at 10:53:00, while the burst ran 10:54:27-11:13:59 from a worktree
+# pinned at 00a3049 where it did not exist. Before the redirect the teardown was
+# absent from the leaking checkout; after it, the redirect neutralised it. Both
+# modes share one shape: a teardown that returns quietly when it cannot act is
+# indistinguishable from one that worked. The fail-closed teardowns are what
+# carry the guarantee, not the DSN below.
+#
+# (The corrected text was applied to tests/test_intent_registry.py in 5d0f783 but
+# not here, leaving the retracted claim live in the isolation machinery a reader
+# hits first. Found by a cross-verification sweep, 2026-08-22.)
+#
 # Publishing the live DSN under its own name is what lets those teardowns target
 # the database their writes actually reached, without weakening the redirect.
 os.environ["KOI_LIVE_POSTGRES_URL"] = _LIVE_DSN
