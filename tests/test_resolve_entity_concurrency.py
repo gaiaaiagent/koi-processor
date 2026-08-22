@@ -93,6 +93,15 @@ async def _create_minimal_schema(pool, schema: str) -> None:
     ``vector(1024)``) so the test does not require the pgvector extension
     on the test DB. The embedding column is never written by this test
     because we force ``embedding_provider = None``.
+
+    THIS TABLE MUST CARRY EVERY COLUMN ``store_new_entity`` WRITES. It is a
+    hand-maintained mirror in its own schema, so no migration ever reaches it
+    and nothing fails until the INSERT does. Migration 111 added
+    ``resolution_tier`` to the write path and this mirror was not updated,
+    which broke the test with ``UndefinedColumnError`` -- and went unnoticed
+    because this file is outside the 8-file red-baseline node set. If you add
+    a column to the ``store_new_entity`` INSERT, add it here in the same
+    commit.
     """
     async with pool.acquire() as conn:
         await conn.execute(f'CREATE SCHEMA "{schema}"')
@@ -113,6 +122,7 @@ async def _create_minimal_schema(pool, schema: str) -> None:
                 aliases         TEXT[],
                 node_private    BOOLEAN DEFAULT false,
                 merged_into     TEXT,
+                resolution_tier TEXT,
                 created_at      TIMESTAMP DEFAULT now(),
                 updated_at      TIMESTAMP DEFAULT now()
             )
