@@ -111,12 +111,29 @@ def purge_test_entities():
     process writes to whatever database IT is configured for — the LIVE one. No environment
     variable can redirect an HTTP call, so the cleanup has to target the live database too.
 
-    This fixture used to read POSTGRES_URL, which was the live DSN, and it worked. On
-    2026-08-21 tests/conftest.py began rewriting POSTGRES_URL to personal_koi_test to stop
-    the suite writing to the live graph. From then on the ingests still went to
-    personal_koi over HTTP while this DELETE went to personal_koi_test and matched nothing.
-    The isolation fix silently disabled the teardown, and 225 orphaned Intent rows landed
-    in the live graph in the next 30 hours. Read the live DSN under its own name.
+    This fixture reads POSTGRES_URL. That WAS the live DSN, so it addressed the right
+    database. On 2026-08-21 13:55 tests/conftest.py (ca6234f) began rewriting POSTGRES_URL
+    to personal_koi_test to stop the suite writing to the live graph. From then on the
+    ingests still went to personal_koi over HTTP while this DELETE went to
+    personal_koi_test and matched nothing. 225 orphaned Intent rows landed in the live
+    graph in the next 30 hours. Read the live DSN under its own name.
+
+    Do NOT read that as "reverting the redirect would make this safe again" — the leak has
+    two distinct causes and the redirect is only the newer one. Verified histogram of the
+    300 fixture rows:
+
+        2026-08-17 10:54-11:14   75   teardown committed 10:53, 87s earlier, but these
+                                      runs executed from a worktree pinned at 00a3049,
+                                      which has no teardown at all
+        -- ca6234f authored 2026-08-21 13:55:45 --
+        2026-08-21 19:00        125   teardown present, neutralised by the redirect
+        2026-08-21 20:00         75   same
+        2026-08-22 10:52         25   same
+
+    So this fixture has never demonstrably purged a leaking burst: before the redirect it
+    was four days old and the leaking runs came from checkouts that predated it. A
+    teardown that returns silently when it cannot act is indistinguishable from one that
+    worked, which is why the version below fails the run instead of printing.
 
     FAILS LOUD. The previous version returned silently when the DSN was missing and printed
     on error. Both are how five months of leakage went unnoticed; a teardown that cannot
