@@ -515,6 +515,50 @@ def _assert_embedding_format(payload: Mapping[str, Any], rid: str) -> None:
         )
 
 
+def _strip_conflict_assignments(clause: str, dropped_col: str) -> str:
+    """Remove `dropped_col = ...` assignments from an ON CONFLICT DO UPDATE SET.
+
+    Splits the SET list on TOP-LEVEL commas only. A naive split breaks on
+    `group_id = COALESCE(EXCLUDED.group_id, knowledge_episodes.group_id)`, whose
+    inner comma is not an assignment boundary -- and that exact shape is live at
+    the knowledge_episodes call site.
+
+    Also drops assignments whose right-hand side references the column (e.g.
+    `x = COALESCE(EXCLUDED.dropped_col, ...)`), since those fail identically.
+
+    Returns the clause unchanged when there is no SET list (e.g. DO NOTHING).
+    """
+    upper = clause.upper()
+    idx = upper.find("DO UPDATE SET")
+    if idx == -1:
+        return clause
+    head = clause[: idx + len("DO UPDATE SET")]
+    body = clause[idx + len("DO UPDATE SET"):]
+
+    parts, depth, cur = [], 0, ""
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        parts.append(cur)
+
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(dropped_col)}(?![A-Za-z0-9_])")
+    kept = [p for p in parts if p.strip() and not pattern.search(p)]
+    if not kept:
+        # Every assignment referenced the dropped column; an empty SET is invalid
+        # SQL, so degrade to DO NOTHING rather than emit a syntax error.
+        conflict_target = head[: head.upper().find("DO UPDATE SET")].rstrip()
+        return f"{conflict_target} DO NOTHING"
+    return f"{head}{','.join(kept)}"
+
+
 async def _insert_with_drift_retry(
     conn,
     table: str,
@@ -534,6 +578,7 @@ async def _insert_with_drift_retry(
     """
     cv = dict(columns_values)
     casts = dict(cast_map or {})
+    clause = conflict_clause
     retries = 0
     while True:
         cols = list(cv.keys())
@@ -544,7 +589,7 @@ async def _insert_with_drift_retry(
         sql = (
             f"INSERT INTO {table} ({', '.join(cols)}) "
             f"VALUES ({', '.join(placeholders)}) "
-            f"{conflict_clause}"
+            f"{clause}"
         )
         await conn.execute("SAVEPOINT drift_retry")
         try:
@@ -568,6 +613,18 @@ async def _insert_with_drift_retry(
                 raise
             retries += 1
             del cv[col]
+            # The ON CONFLICT clause names columns too, and it is re-interpolated
+            # verbatim on every retry. Dropping the column ONLY from the value
+            # list leaves `col = EXCLUDED.col` in the clause, so the retry raises
+            # the identical UndefinedColumnError -- and because `col` is no longer
+            # in cv, the `col not in cv` branch above re-raises it as unparseable.
+            # Net effect before 2026-08-22: drift-retry silently protected only
+            # columns ABSENT from the conflict clause, which for both existing
+            # callers is almost none. Verified with a scratch table: a missing
+            # column named only in the INSERT recovered; the same column also
+            # named in ON CONFLICT failed with "column excluded.<col> does not
+            # exist".
+            clause = _strip_conflict_assignments(clause, col)
             logger.warning(
                 f"federation.drift.drop_col table={table} col={col} "
                 f"retry={retries}/{_DRIFT_MAX_RETRIES}"
