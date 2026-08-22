@@ -13,6 +13,7 @@ Routes are prefix-relative — prefix "/intents" is applied at mount in personal
 """
 
 import hashlib
+import json
 import re
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -397,17 +398,52 @@ def create_router(pool) -> APIRouter:
                 conn, req.publisherName, "Person"
             ) if req.publisherName else None
 
-            # Ensure entity_registry row exists for this intent
+            # Ensure entity_registry row exists for this intent.
+            #
+            # PROVENANCE IS LOAD-BEARING HERE, not decoration. This INSERT bypasses
+            # store_new_entity, so before 2026-08-22 it named no `source` and no
+            # `metadata`: every row it wrote inherited the column default
+            # source='personal-vault' and was indistinguishable from a vault entity.
+            # The fuseki_uri is a bare blake2b hash and the entity_text is built from
+            # the description ("Test firewood offer", "Intent: OFFER"), so there was
+            # nothing to match on either — see the comment on tests/test_intent_registry.py
+            # intent_rid(), which had to recompute the hash per key to clean up after itself.
+            # 300 fixture rows accumulated in the live graph, and because the every-300s
+            # embedding-repair job is type-agnostic it embedded all of them, after which
+            # they ranked #1 in /knowledge/unified-search for need- and offer-shaped
+            # queries. Stamping source + intent_key makes the population identifiable by
+            # a plain WHERE clause instead of a hash recomputation.
+            #
+            # Deliberately NOT routed through store_new_entity: that would add a
+            # synchronous embedding round-trip to this request (+369ms median, 17s
+            # observed worst case) inside `async with pool.acquire()`, and buy nothing,
+            # because backfill_null_embeddings.py already covers the entity surface
+            # every 300s. The columns below are what store_new_entity would have set
+            # that actually matter for attribution.
+            #
+            # merged_into is deliberately untouched on conflict: reviving a tombstoned
+            # row here would silently undo an operator's disposition.
             await conn.execute(
                 """
                 INSERT INTO entity_registry
-                    (entity_type, entity_text, normalized_text, fuseki_uri, created_at)
-                VALUES ('Intent', $1, LOWER($1), $2, NOW())
+                    (entity_type, entity_text, normalized_text, fuseki_uri,
+                     source, first_seen_rid, metadata, created_at)
+                VALUES ('Intent', $1, LOWER($1), $2,
+                        'intent-registry', $2, $3::jsonb, NOW())
                 ON CONFLICT (fuseki_uri) DO UPDATE SET
                     entity_text = EXCLUDED.entity_text,
-                    normalized_text = EXCLUDED.normalized_text
+                    normalized_text = EXCLUDED.normalized_text,
+                    source = EXCLUDED.source,
+                    metadata = COALESCE(entity_registry.metadata, '{}'::jsonb)
+                               || EXCLUDED.metadata,
+                    updated_at = NOW()
                 """,
                 entity_text, intent_rid,
+                json.dumps({
+                    "intent_key": req.intentKey,
+                    "intent_type": req.intentType,
+                    "landscape_group": req.landscapeGroup,
+                }),
             )
 
             # Upsert intent_registry row

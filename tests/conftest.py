@@ -83,15 +83,49 @@ def pytest_configure(config):
 # in-DB, so no client-side timezone can enter the comparison at all.
 _MARKER_SQL = "SELECT clock_timestamp()::timestamp"
 
+# The signature has to match how the leaking writer actually labels its rows,
+# and the name-based clauses below do not. Measured against the 25 rows one
+# tests/test_intent_registry.py run wrote to the live graph on 2026-08-22:
+# only 3 matched ("Test firewood offer" and friends). The other 22 were named
+# from their description ("Intent: OFFER", "Looking for salmon"), carry a bare
+# blake2b fuseki_uri with no prefix, and inherited source='personal-vault' from
+# the column default. The tripwire fired, but reported 3 where the truth was 25 —
+# it would have gone fully silent had the three happened to be named differently.
+#
+# api/routers/intent_router.py now stamps metadata->>'intent_key' on every intent
+# entity it mints, which is the exact, zero-false-positive handle these rows
+# always lacked. A fixture key is 'reg-test-intent-<suffix>-<hex>'.
 _TEST_SIGNATURE_SQL = """
     SELECT count(*) FROM entity_registry
     WHERE created_at > $1::timestamp
       AND (fuseki_uri ILIKE '%test%'
            OR entity_text ILIKE '%test%'
-           OR source IN ('pytest', 'test'))
+           OR source IN ('pytest', 'test')
+           OR metadata->>'intent_key' ILIKE '%test%')
 """
 
 _LIVE_DSN = f"postgresql://darrenzal:@localhost:5432/{LIVE_DB_NAME}"
+
+# --------------------------------------------------------------------------
+# 1b. The live DSN, published for tests that write to the live graph ON PURPOSE.
+# --------------------------------------------------------------------------
+# The redirect above is the right default, but it silently broke the one thing
+# that was cleaning up after the tests it cannot redirect.
+#
+# A test that drives the API over HTTP (tests/test_intent_registry.py ->
+# POST http://localhost:8351/intents/ingest) writes through a SEPARATE uvicorn
+# process holding its own pool against the LIVE database. No environment
+# variable can redirect that. Such a test must therefore clean up in the live
+# database — and tests/test_intent_registry.py's purge fixture did exactly that,
+# reading POSTGRES_URL, until this file started rewriting POSTGRES_URL to the
+# test DSN on 2026-08-21. From that moment its ingests went to personal_koi and
+# its DELETE went to personal_koi_test, removing nothing.
+#
+# Result: the isolation fix converted a working teardown into a no-op, and 225
+# orphaned Intent rows landed in the live graph over the following 30 hours.
+# Publishing the live DSN under its own name is what lets those teardowns target
+# the database their writes actually reached, without weakening the redirect.
+os.environ["KOI_LIVE_POSTGRES_URL"] = _LIVE_DSN
 
 
 def _live_marker():
@@ -195,7 +229,8 @@ def live_graph_tripwire(request):
             f"Find them with:\n"
             f"  psql -d {LIVE_DB_NAME} -c \"select fuseki_uri, entity_text, source, created_at \"\n"
             f"    \"from entity_registry where created_at > '{marker}' \"\n"
-            f"    \"and (fuseki_uri ilike '%test%' or entity_text ilike '%test%');\"",
+            f"    \"and (fuseki_uri ilike '%test%' or entity_text ilike '%test%' \"\n"
+            f"    \"or metadata->>'intent_key' ilike '%test%');\"",
             pytrace=False,
         )
 

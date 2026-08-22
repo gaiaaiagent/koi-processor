@@ -103,25 +103,89 @@ def purge_test_entities():
     256 of them in the live graph before anyone looked.
 
     Runs after the module rather than per-test, so a failing test can still be inspected
-    mid-run. Skips silently without POSTGRES_URL — this is hygiene, not an assertion, and
-    must never be the reason a contract test fails.
+    mid-run.
+
+    WHICH DATABASE — this is the whole bug, twice over.
+    ---------------------------------------------------
+    These tests do not talk to a database. They POST to BASE_URL, and a separate uvicorn
+    process writes to whatever database IT is configured for — the LIVE one. No environment
+    variable can redirect an HTTP call, so the cleanup has to target the live database too.
+
+    This fixture used to read POSTGRES_URL, which was the live DSN, and it worked. On
+    2026-08-21 tests/conftest.py began rewriting POSTGRES_URL to personal_koi_test to stop
+    the suite writing to the live graph. From then on the ingests still went to
+    personal_koi over HTTP while this DELETE went to personal_koi_test and matched nothing.
+    The isolation fix silently disabled the teardown, and 225 orphaned Intent rows landed
+    in the live graph in the next 30 hours. Read the live DSN under its own name.
+
+    FAILS LOUD. The previous version returned silently when the DSN was missing and printed
+    on error. Both are how five months of leakage went unnoticed; a teardown that cannot
+    confirm it cleaned up must say so, not shrug.
     """
     yield
-    dsn = os.getenv("POSTGRES_URL")
-    if not dsn:
+
+    if not CREATED_KEYS:
         return
+
+    # The database the BACKEND writes to, not the one this process was redirected to.
+    # conftest publishes it; fall back to POSTGRES_URL only when it is not the test DSN
+    # (i.e. running this module without conftest, as CI or a bare pytest would).
+    dsn = os.getenv("KOI_LIVE_POSTGRES_URL")
+    if not dsn:
+        candidate = os.getenv("POSTGRES_URL")
+        dsn = candidate if candidate and "personal_koi_test" not in candidate else None
+    if not dsn:
+        pytest.fail(
+            f"\n*** INTENT FIXTURE LEAK — CANNOT PURGE ***\n"
+            f"{len(CREATED_KEYS)} intent(s) were ingested into the live graph via "
+            f"{BASE_URL}, but no live DSN is available to purge their entity_registry "
+            f"rows (KOI_LIVE_POSTGRES_URL unset, POSTGRES_URL absent or pointing at the "
+            f"test database).\n"
+            f"Those rows carry embeddings and compete in every entity ANN from now on.\n"
+            f"Purge manually:\n"
+            f"  psql -d personal_koi -c \"DELETE FROM entity_registry WHERE entity_type='Intent' "
+            f"AND fuseki_uri IN ({', '.join(repr(intent_rid(k)) for k in sorted(CREATED_KEYS))});\"",
+            pytrace=False,
+        )
+
+    expected = [intent_rid(k) for k in CREATED_KEYS]
     try:
         import psycopg2
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM entity_registry "
                 "WHERE entity_type = 'Intent' AND fuseki_uri = ANY(%s)",
-                ([intent_rid(k) for k in CREATED_KEYS],),
+                (expected,),
             )
-            if cur.rowcount:
-                print(f"\n[cleanup] purged {cur.rowcount} test Intent entity row(s)")
-    except Exception as exc:  # noqa: BLE001 — hygiene must not fail the suite
-        print(f"\n[cleanup] could not purge test Intent entities: {exc}")
+            purged = cur.rowcount
+            # Confirm the purge rather than trusting it: rowcount can be right while the
+            # connection points somewhere harmless. Ask the same database what survived.
+            cur.execute(
+                "SELECT count(*) FROM entity_registry "
+                "WHERE entity_type = 'Intent' AND fuseki_uri = ANY(%s)",
+                (expected,),
+            )
+            remaining = cur.fetchone()[0]
+    except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+        pytest.fail(
+            f"\n*** INTENT FIXTURE LEAK — PURGE FAILED ***\n"
+            f"{len(CREATED_KEYS)} intent(s) ingested via {BASE_URL}; the cleanup against "
+            f"{dsn.rsplit('/', 1)[-1]} raised {type(exc).__name__}: {exc}\n"
+            f"Entity rows may remain in the live graph.",
+            pytrace=False,
+        )
+
+    if remaining:
+        pytest.fail(
+            f"\n*** INTENT FIXTURE LEAK — {remaining} ROW(S) SURVIVED PURGE ***\n"
+            f"Deleted {purged} of {len(expected)} expected Intent entity rows from "
+            f"{dsn.rsplit('/', 1)[-1]}, but {remaining} still match.\n"
+            f"These are embedded and will compete in every entity ANN until removed.",
+            pytrace=False,
+        )
+
+    print(f"\n[cleanup] purged {purged} test Intent entity row(s) from "
+          f"{dsn.rsplit('/', 1)[-1]}")
 
 
 # ---------------------------------------------------------------------------
