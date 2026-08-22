@@ -68,13 +68,31 @@ from api.node_identity import (
 from api.event_queue import EventQueue
 from api.vault_sync import VaultSyncManager, VaultUnavailableError
 
+# RFC 8785 (JCS) canonicalization. Pinned at requirements.txt:91. Imported at
+# module scope on purpose: a missing pinned dependency should fail loudly at
+# startup rather than silently degrade the hash back to the non-JCS form this
+# import replaced (see _jcs_sha256 below).
+from rid_lib.ext.utils import sha256_hash_json as _rid_lib_sha256_hash_json
+
 logger = logging.getLogger(__name__)
 
 def _jcs_sha256(data) -> str:
-    """JCS-canonical SHA256 hash (inlined from rid_lib to avoid dependency)."""
-    # JSON Canonicalization Scheme: sort keys, no whitespace, ensure consistent output
-    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """JCS-canonical (RFC 8785) SHA-256 hash, via rid-lib.
+
+    Previously this was inlined as ``json.dumps(sort_keys=True,
+    separators=(",", ":"), ensure_ascii=False)`` with the comment "inlined from
+    rid_lib to avoid dependency" — but rid-lib is a pinned, installed dependency
+    (requirements.txt:91) and `koi_protocol.WireManifest` already documents this
+    field as "JCS-canonical hash via rid-lib". The inlined form is not JCS:
+    measured against the 448 coordinator newsletter bundles, it disagreed with
+    the peer-computed `manifest.sha256_hash` on **336 of 448 (75%)**, while
+    `rid_lib.ext.utils.sha256_hash_json` agreed on **448 of 448**.
+
+    No code path in this repo verifies a *received* sha256_hash (grep for
+    `sha256_hash` across api/ scripts/ shows emit sites only), so correcting the
+    implementation changes what this node emits and breaks no comparison.
+    """
+    return _rid_lib_sha256_hash_json(data)
 
 rid_sha256_hash_json = _jcs_sha256
 

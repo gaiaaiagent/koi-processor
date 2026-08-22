@@ -28,6 +28,8 @@ import asyncpg
 
 from api.utils import parse_ts
 from api.resolution_primitives import normalize_alias_list
+from api import document_federation
+from api.document_federation import DOCUMENT_DOMAIN  # re-exported for the poller
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,13 @@ async def apply_domain_event(
         "knowledge_fact": _apply_knowledge_fact,
         "document_entity_link": _apply_doclink,
     }
+    # Document federation is registered only while KOI_FEDERATE_DOCUMENTS is on.
+    # With the flag off the key is ABSENT, so a document event falls through to
+    # the "Unknown _koi_domain" warning below — byte-identical to this node's
+    # behaviour before the domain existed. That matters because `regen-prod`
+    # rsyncs to the NUC, whose operator has not opted in.
+    if document_federation.document_federation_enabled():
+        handlers[document_federation.DOCUMENT_DOMAIN] = _apply_document
     handler = handlers.get(domain)
     if not handler:
         logger.warning(f"Unknown _koi_domain '{domain}' in event {rid}")
@@ -109,6 +118,18 @@ async def _handle_forget(conn, domain: str, rid: str, payload: Dict[str, Any]):
         "task": ("task_registry", "task_key"),
         "intent": ("intent_discovery_cache", "intent_rid"),
     }
+    if domain == document_federation.DOCUMENT_DOMAIN:
+        # A document spans two tables; the generic single-table delete below
+        # cannot express it. Gated identically to the apply path.
+        if not document_federation.document_federation_enabled():
+            logger.warning(
+                "domain.document.forget_skip rid=%s reason=KOI_FEDERATE_DOCUMENTS_disabled",
+                rid,
+            )
+            return
+        await _forget_document(conn, rid, payload)
+        return
+
     table, col = table_rid_map.get(domain, (None, None))
     if not table:
         return
@@ -946,3 +967,210 @@ async def _apply_intent(conn, rid: str, event_type: str, payload: Dict[str, Any]
         payload.get("asset_wanted"),
         payload.get("quantity"),
     )
+
+
+# ── document domain ─────────────────────────────────────────────────────────────
+#
+# The receive side of KOI-net document federation. Federation moves bytes; it
+# does not answer questions — so a federated document only becomes searchable
+# once it is chunked and embedded at 3072-dim into the two tables local
+# retrieval actually reads. This handler is a thin adapter from a koi-net bundle
+# onto the sink that already does that (`scripts/ingest_document.ingest_document_rag`).
+#
+# Gated by KOI_FEDERATE_DOCUMENTS (default OFF) — see api/document_federation.py.
+
+
+def _load_document_sink():
+    """Import the RAG sink, bootstrapping sys.path if `scripts` is not visible.
+
+    The serving process runs with the repo root as cwd (verified: uvicorn
+    `api.personal_ingest_api:app` from ~/projects/koi-processor-service), so the
+    plain import resolves. The fallback exists because an ImportError raised
+    inside a poll handler would leave the event unconfirmed forever with only a
+    log line to show for it — the silent-stall shape this codebase keeps hitting.
+    """
+    try:
+        from scripts.ingest_document import ingest_document_rag_conn  # noqa: PLC0415
+    except ImportError:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from scripts.ingest_document import ingest_document_rag_conn  # noqa: PLC0415
+    return ingest_document_rag_conn
+
+
+def _document_embedder_and_chunker():
+    """Build the 3072-dim embedder + chunker used by the document sink.
+
+    Constructed explicitly rather than taken from the federation subsystem:
+    `setup_koi_net` is called with no `embed_fn` (personal_ingest_api.py:1895),
+    so koi-net has no embedding capability of its own. Reads the key at call
+    time so a rotated key is picked up without a restart.
+    """
+    from api.embedding_provider import OpenAIEmbeddingProvider  # noqa: PLC0415
+    from api.chunker import TextChunker  # noqa: PLC0415
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY not set — federated documents cannot be embedded. "
+            "Refusing to land unembedded chunks, which are invisible to search "
+            "and indistinguishable from a healthy ingest by row count."
+        )
+    embedder = OpenAIEmbeddingProvider(
+        api_key=api_key,
+        model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
+        dimension=int(os.getenv("EMBEDDING_DIMENSION", "3072")),
+    )
+    chunker = TextChunker(chunk_size=500, chunk_overlap=50)
+    return embedder, chunker
+
+
+def build_document_source_meta(rid: str, contents: Mapping[str, Any]) -> Dict[str, Any]:
+    """Map a koi-net document bundle onto the sink's `source_meta` contract.
+
+    Split out from the handler so the mapping — which is where the author,
+    privacy and URL fields are actually decided — is testable without a database
+    or an OpenAI key.
+    """
+    doc = contents.get("document") or {}
+    meta = contents.get("metadata") or {}
+
+    slug = document_federation.newsletter_slug(contents)
+    # Raises UnmappedNewsletterSlug rather than defaulting. `doc.get("author")`
+    # is deliberately never consulted: it is null in all 448 measured bundles.
+    author = document_federation.resolve_author(slug)
+
+    # NOT `doc.get("url") or meta.get("url")`: 112/448 bundles carry a
+    # tracking-pixel URL in BOTH fields, 224 of those values decode to the
+    # subscriber's email address. `canonical_url` returns None rather than
+    # storing one — see its docstring for the measurement.
+    url = document_federation.canonical_url(slug, contents)
+    title = doc.get("title") or meta.get("title")
+
+    is_private = meta.get("is_private")
+    access_source = meta.get("access_source")
+
+    return {
+        "name": title,
+        "slug": doc.get("id") or slug,
+        "source_url": url,
+        "author": author,
+        "is_private": is_private,
+        "access_source": access_source,
+        "source_sensor": document_federation.FEDERATION_SOURCE_SENSOR,
+        "retrieval_method": "koi-net/bundles.fetch",
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "group_id": os.getenv("KOI_FEDERATE_DOCUMENTS_GROUP", "personal"),
+        "tier": "rag",
+    }
+
+
+async def _apply_document(
+    conn,
+    rid: str,
+    event_type: str,
+    payload: Dict[str, Any],
+    source_node: str,
+):
+    """Land a federated document as locally-searchable RAG content.
+
+    `payload` is the bundle's `contents` object: {document, metadata, processing}.
+
+    Containment (AC10) is enforced HERE, not on the edge: `extract_rid_type()`
+    returns None for `regen.newsletter:` RIDs, so the poll-side `rid_types`
+    filter — which only skips when a type *is* extracted — cannot scope them. A
+    disallowed RID is logged and dropped cleanly (it is confirmed, not
+    redelivered: redelivering something we will always reject is a loop).
+
+    Failures that a retry could fix — a missing API key, an embedding outage —
+    raise, so the poller leaves the event unconfirmed and it redelivers.
+    """
+    if not document_federation.document_federation_enabled():
+        logger.warning(
+            "domain.document.skip rid=%s reason=KOI_FEDERATE_DOCUMENTS_disabled", rid
+        )
+        return
+
+    if not document_federation.rid_allowed(rid):
+        logger.warning(
+            "domain.document.reject rid=%s source_node=%s reason=rid_not_in_allowlist "
+            "allowlist=%s",
+            rid, source_node, list(document_federation.rid_allowlist()),
+        )
+        return
+
+    if not document_federation.is_document_payload(payload):
+        logger.warning(
+            "domain.document.skip rid=%s reason=no_document_body — refusing to "
+            "write a parent row with no text (it would look ingested and return "
+            "nothing)", rid,
+        )
+        return
+
+    markdown = payload["document"]["content"]
+
+    # Strip the subscriber's own address from the body before it is chunked,
+    # embedded and indexed. This MODIFIES STORED CONTENT (~0.74% of characters
+    # corpus-wide); the verbatim original stays in the Phase-1 snapshot and the
+    # bundle's sha256_hash is computed over the untouched bundle, so provenance
+    # is unaffected. See document_federation.redact_subscriber_pii.
+    markdown, redactions = document_federation.redact_subscriber_pii(markdown)
+
+    source_meta = build_document_source_meta(rid, payload)
+    if redactions:
+        # Recorded so a redacted document is identifiable later without
+        # re-deriving it from the snapshot.
+        source_meta["redactions_applied"] = redactions
+
+    ingest_document_rag_conn = _load_document_sink()
+    embedder, chunker = _document_embedder_and_chunker()
+
+    # The whole landing is one transaction so that a partial embed leaves NO
+    # trace. A chunk with a null embedding is invisible to retrieval but counts
+    # as a healthy row under count(*) — the precedent is 3,464 entities (11.8%)
+    # that sat unsearchable with null embeds. Raising AFTER the write committed
+    # would both persist that half-visible document and redeliver it; raising
+    # inside the transaction rolls it back, so the redelivery starts clean.
+    async with conn.transaction():
+        result = await ingest_document_rag_conn(
+            conn,
+            document_rid=rid,
+            markdown=markdown,
+            source_meta=source_meta,
+            embedder=embedder,
+            chunker=chunker,
+        )
+        if result.get("null_embeds"):
+            raise FederationDeferred(
+                f"{rid}: {result['null_embeds']}/{result['chunks_total']} chunks "
+                f"failed to embed — rolled back, not confirming, will redeliver"
+            )
+
+    logger.info(
+        "domain.document.apply rid=%s author=%s is_private=%s chunks=%d "
+        "redactions=%d source_node=%s",
+        rid, source_meta.get("author"), source_meta.get("is_private"),
+        result.get("chunks_written", 0), redactions, source_node,
+    )
+
+
+async def _forget_document(conn, rid: str, payload: Dict[str, Any]):
+    """Delete a federated document and its chunks.
+
+    Not routed through `_handle_forget`'s generic table map because that map
+    deletes from a single table by a single column, and a document spans
+    koi_memories + koi_memory_chunks. The FK is ON DELETE CASCADE so the parent
+    delete suffices, but the chunks are deleted explicitly so the count is
+    observable and the behaviour does not depend on a schema property.
+    """
+    if not document_federation.rid_allowed(rid):
+        logger.warning(
+            "domain.document.forget_reject rid=%s reason=rid_not_in_allowlist", rid
+        )
+        return
+    chunks = await conn.execute(
+        "DELETE FROM koi_memory_chunks WHERE document_rid = $1", rid
+    )
+    await conn.execute("DELETE FROM koi_memories WHERE rid = $1", rid)
+    logger.info("domain.document.forget rid=%s chunks=%s", rid, chunks)
