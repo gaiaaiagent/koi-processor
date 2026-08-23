@@ -586,6 +586,38 @@ async def generate_embedding(text: str) -> Optional[List[float]]:
 # Entity Resolution
 # =============================================================================
 
+_LEADING_DATE_RE = re.compile(r'^\s*(\d{4})[-\s](\d{2})[-\s](\d{2})(?![\d])')
+
+
+def _extract_leading_date(text: str) -> Optional[str]:
+    """Return a leading YYYY-MM-DD from a title, or None.
+
+    Matches BOTH the raw form ('2026-01-28 Pete Corke Meeting') and the
+    post-normalization form ('2026 01 28 pete corke meeting'), because
+    normalize_entity_text replaces '-' with ' ' before this ever runs and the
+    guard must work on either.
+
+    LEADING only, deliberately. 335 of 337 meeting notes carry the date at the
+    front of the title, so a leading match covers the corpus; scanning anywhere
+    in the string would match dates that appear in a subject ("2026 budget
+    review") and reject two meetings that are genuinely the same series. A title
+    with several dates yields the first -- a simplification, and any pair it
+    misfires on falls through to the existing matching logic rather than being
+    rejected, because the caller only acts when BOTH sides parse.
+    """
+    if not text:
+        return None
+    m = _LEADING_DATE_RE.match(text)
+    if not m:
+        return None
+    year, month, day = m.group(1), m.group(2), m.group(3)
+    # Reject impossible dates rather than treating them as a discriminator: a
+    # bad parse that yields a confident-looking value is worse than no value.
+    if not (1 <= int(month) <= 12 and 1 <= int(day) <= 31):
+        return None
+    return f"{year}-{month}-{day}"
+
+
 def normalize_entity_text(text: str) -> str:
     """Normalize entity text for comparison"""
     return (
@@ -765,6 +797,33 @@ def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool
     # Cascadia" vs "DWeb Camp"). Shared implementation in resolution_primitives.
     if entity_type in ("Organization", "Project", "Concept"):
         if not passes_distinctive_token_check(text1, text2):
+            return False
+
+    # Date guard for Meeting. Two meetings on different dates are different
+    # meetings, full stop.
+    #
+    # WHY MEETING IS NOT IN THE TUPLE ABOVE: it was tried and it does not work.
+    # passes_distinctive_token_check catches one name being a qualified
+    # EXTENSION of another; two titles differing only by date have distinct
+    # tokens on BOTH sides, so it never fires. Measured 2026-08-22 against the
+    # repo's own implementation: it ACCEPTS all three known collapse pairs,
+    # including '2026 01 30 parteck meeting' vs '2026 01 28 pete corke meeting'
+    # -- two unrelated meetings.
+    #
+    # The date is the discriminator, and normalize_entity_text has already
+    # destroyed it as such: .replace('-', ' ') at :589 turns 2026-01-28 into
+    # three ordinary tokens that then INFLATE the Jaro-Winkler prefix bonus and
+    # count toward token overlap. So the very field that separates two meetings
+    # is what makes them look alike. Measured damage before this guard existed:
+    # entity_rid_mappings held 70 Meeting rows collapsed onto 27 canonical URIs
+    # (2.59x), and 93 of 163 attended edges pointed at a meeting whose date
+    # disagreed with their source note.
+    #
+    # Falls through when either side has no parseable date -- never reject on
+    # absence, only on disagreement.
+    if entity_type == "Meeting":
+        d1, d2 = _extract_leading_date(text1), _extract_leading_date(text2)
+        if d1 and d2 and d1 != d2:
             return False
 
     # Get schema-driven config for multi-word token overlap
