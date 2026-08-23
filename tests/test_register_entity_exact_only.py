@@ -40,10 +40,18 @@ class _Pool:
 async def _register(monkeypatch, *, exact_only=None):
     calls = []
 
-    async def fake_resolve(conn, entity, context=None, skip_fuzzy=False, skip_cross_type=False):
+    async def fake_resolve(
+        conn,
+        entity,
+        context=None,
+        skip_fuzzy=False,
+        skip_cross_type=False,
+        resolution_caller=None,
+    ):
         calls.append({
             "skip_fuzzy": skip_fuzzy,
             "skip_cross_type": skip_cross_type,
+            "resolution_caller": resolution_caller,
             "name": entity.name,
             "type": entity.type,
         })
@@ -75,6 +83,7 @@ async def test_negative_default_registration_keeps_full_resolution(monkeypatch):
     assert calls == [{
         "skip_fuzzy": False,
         "skip_cross_type": True,
+        "resolution_caller": "personal_ingest_api.register_vault_entity",
         "name": "2026-08-22 Alpha Meeting",
         "type": "Meeting",
     }]
@@ -85,3 +94,4 @@ async def test_exact_only_registration_sets_existing_skip_fuzzy_switch(monkeypat
     calls = await _register(monkeypatch, exact_only=True)
     assert calls[0]["skip_fuzzy"] is True
     assert calls[0]["skip_cross_type"] is True
+    assert calls[0]["resolution_caller"] == "personal_ingest_api.register_vault_entity"
