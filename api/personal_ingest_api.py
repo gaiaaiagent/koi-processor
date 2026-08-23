@@ -450,6 +450,12 @@ class RegisterEntityResponse(BaseModel):
     collision_warning: Optional[str] = None
     cross_type_warning: Optional[str] = None
     koi_rid: Optional[str] = None
+    # Non-null means the entity registered but its frontmatter relationships did NOT.
+    # This field exists because that failure used to be invisible: the handler caught
+    # every exception from sync_vault_relationships, logged one line with no note name,
+    # and returned success=True. success stays True — registration genuinely succeeded —
+    # so callers must read this field to know the graph is incomplete for this note.
+    relationship_sync_error: Optional[str] = None
 
 
 class VaultEntityMapping(BaseModel):
@@ -4236,6 +4242,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
             # Sync relationships from frontmatter if provided
             # Accept frontmatter OR properties (for older MCP clients)
             rel_stats = None
+            relationship_sync_error: Optional[str] = None
             frontmatter_data = request.frontmatter or request.properties
             if frontmatter_data:
                 # Relationship sync needs a vault_path; alias merge (below) does not.
@@ -4254,7 +4261,18 @@ async def register_vault_entity(request: RegisterEntityRequest):
                             await _enqueue_relationship_outbox(
                                 conn, canonical.uri, eff_vault_path)
                     except Exception as e:
-                        logger.warning(f"Failed to sync relationships: {e}")
+                        # Do NOT re-raise: registering the entity succeeded and is worth
+                        # keeping. But this is a whole-note failure, not a per-edge one —
+                        # sync_vault_relationships resolves every target in one batch, so
+                        # one bad target loses every relationship in the note. Name the
+                        # note and the exception type; "Failed to sync relationships: ..."
+                        # with no path was unattributable across thousands of notes.
+                        relationship_sync_error = f"{type(e).__name__}: {e}"
+                        logger.warning(
+                            "Relationship sync FAILED for %s (%s) — entity registered, "
+                            "but every frontmatter relationship in this note was dropped: %s",
+                            eff_vault_path, canonical.uri, relationship_sync_error,
+                        )
 
                 # Update aliases in entity_registry if provided in frontmatter
                 raw_aliases = frontmatter_data.get('aliases', [])
@@ -4279,7 +4297,16 @@ async def register_vault_entity(request: RegisterEntityRequest):
                             """, normalized_aliases, canonical.uri)
                             logger.info(f"Updated aliases for {canonical.uri}: {normalized_aliases}")
                         except Exception as e:
-                            logger.warning(f"Failed to update aliases: {e}")
+                            # Same shape as the relationship-sync handler above, smaller
+                            # blast radius: this loses the aliases for one entity, not
+                            # every relationship in the note, so it stays out of the
+                            # response model. It must still be attributable.
+                            logger.warning(
+                                "Alias update FAILED for %s (%s) — aliases %s were not "
+                                "written: %s: %s",
+                                eff_vault_path, canonical.uri, normalized_aliases,
+                                type(e).__name__, e,
+                            )
 
             # Resolve any pending relationships that match this new entity
             pending_promoted = 0
@@ -4294,7 +4321,13 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     if pending_promoted > 0:
                         logger.info(f"Promoted {pending_promoted} pending relationship(s)")
                 except Exception as e:
-                    logger.warning(f"Failed to resolve pending relationships: {e}")
+                    # Leaves the pending rows in place, so this is recoverable on a later
+                    # registration rather than lost — hence log-only. Attributable anyway.
+                    logger.warning(
+                        "Pending-relationship promotion FAILED for %s (%s) — rows remain "
+                        "pending: %s: %s",
+                        eff_vault_path, canonical.uri, type(e).__name__, e,
+                    )
 
             result = RegisterEntityResponse(
                 success=True,
@@ -4304,7 +4337,8 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 merged_with=canonical.merged_with,
                 collision_warning=collision_warning,
                 cross_type_warning=cross_type_warning,
-                koi_rid=final_koi_rid if request.publication_scope == "federated" else None
+                koi_rid=final_koi_rid if request.publication_scope == "federated" else None,
+                relationship_sync_error=relationship_sync_error,
             )
 
             # Emit federation event for entity replication

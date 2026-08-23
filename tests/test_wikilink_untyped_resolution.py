@@ -175,3 +175,60 @@ def test_nested_meeting_wikilink_survives_the_full_target_build() -> None:
         "sourceNote wikilinks to nested meeting folders resolve untyped, which is how "
         "1,944 declared sourced_from edges became 0 in the graph"
     )
+
+
+# --------------------------------------------------------------------------------------
+# The swallow must be visible (fix (c)).
+#
+# sync_vault_relationships resolves every target in ONE batch, so a single unresolvable
+# target loses every relationship in the note — a whole-note failure. The handler caught
+# it, logged "Failed to sync relationships: <exc>" with no note name, and returned
+# success=True. Nothing downstream could tell a note with no relationships from a note
+# whose relationships were dropped.
+# --------------------------------------------------------------------------------------
+
+INGEST_API = REPO / "api" / "personal_ingest_api.py"
+
+
+def test_register_entity_response_can_report_a_relationship_sync_failure() -> None:
+    from api.personal_ingest_api import RegisterEntityResponse
+
+    fields = RegisterEntityResponse.model_fields
+    assert "relationship_sync_error" in fields, (
+        "RegisterEntityResponse cannot express partial failure, so a note whose "
+        "relationships were all dropped is indistinguishable from a clean success"
+    )
+    ok = RegisterEntityResponse(
+        success=True, canonical_uri="orn:x", is_new=False, vault_rid="v"
+    )
+    assert ok.relationship_sync_error is None, "must default to None on the clean path"
+
+
+def test_the_relationship_sync_handler_records_and_attributes_its_failure() -> None:
+    src = INGEST_API.read_text()
+    idx = src.find("await sync_vault_relationships(")
+    assert idx != -1, "call site vanished — re-anchor this test"
+    block = src[idx: idx + 2000]
+
+    handler = block[block.find("except Exception"):]
+    assert handler, "the call is no longer wrapped — check whether that is intended"
+
+    assert "relationship_sync_error =" in handler, (
+        "the handler logs but does not record the failure, so the response cannot "
+        "report it and the caller still sees an unqualified success"
+    )
+    assert "eff_vault_path" in handler, (
+        "the warning does not name the note. 'Failed to sync relationships: <exc>' is "
+        "unattributable across thousands of notes"
+    )
+
+
+def test_the_response_actually_carries_the_error() -> None:
+    """Recording it into a local that never reaches the response would be worse than nothing."""
+    src = INGEST_API.read_text()
+    idx = src.find("result = RegisterEntityResponse(")
+    assert idx != -1, "response construction vanished — re-anchor this test"
+    ctor = src[idx: src.find(")", src.find("koi_rid=", idx)) + 1]
+    assert "relationship_sync_error=relationship_sync_error" in ctor, (
+        "the error is recorded but not returned"
+    )
