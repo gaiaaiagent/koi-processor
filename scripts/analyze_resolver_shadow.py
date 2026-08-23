@@ -68,15 +68,30 @@ def analyze(
     observed_callers = {r.get("caller", "") for r in records}
     missing_callers = sorted(expected_callers - observed_callers - fixture_callers)
     divergences = [r for r in records if r.get("outcome_diverged")]
+    # Overhead is a LIVE-TRAFFIC question and only live records can answer it. In a
+    # replay the shadow comparison is the entire workload, so the ratio approaches 1.0;
+    # including replays would fail the gate on exit 4 "overhead_failed" for a reason
+    # unrelated to the policy, and would do so precisely when a replay large enough to
+    # satisfy the attempt bar was supplied. Divergence, by contrast, is a property of
+    # the two policies and is equally true whoever produced the record — so replays DO
+    # count toward attempts, callers and divergences below.
+    live_records = [r for r in records if not r.get("replay")]
+    replay_records = [r for r in records if r.get("replay")]
     ratios = [
         float(r.get("shadow_overhead_ms", 0))
         / float(r.get("resolver_elapsed_ms", 1))
-        for r in records
+        for r in live_records
         if float(r.get("resolver_elapsed_ms", 0)) > 0
     ]
+    # Live records only: a replay runs in one burst, so its timestamps describe how long
+    # the script took, not how long the policy was observed under real traffic. Mixing
+    # them in would let a large replay masquerade as elapsed soak. A replay-based
+    # evaluation therefore has to pass --minimum-days 0 explicitly, which is the point:
+    # the operator states that the days requirement is being waived rather than having a
+    # burst of records quietly satisfy it.
     timestamps = sorted(
         datetime.fromisoformat(r["observed_at"])
-        for r in records
+        for r in live_records
         if r.get("observed_at")
     )
     observed_days = (
@@ -93,7 +108,11 @@ def analyze(
         or observed_days < minimum_days
         or bool(missing_callers)
     )
-    overhead_failed = p95_ratio > max_overhead_ratio
+    # No live records means no overhead evidence. Reporting p95 0.0 as a pass would be
+    # the "populated is not conformant" failure again: an empty measurement is not a
+    # clean one. It does not fail the run, but it is stated, and observed_days below is
+    # computed over live records for the same reason.
+    overhead_failed = bool(ratios) and p95_ratio > max_overhead_ratio
     if overhead_failed:
         exit_code = 4
         verdict = "overhead_failed"
@@ -119,6 +138,9 @@ def analyze(
         ),
         "p95_shadow_overhead_ratio": round(p95_ratio, 6),
         "max_shadow_overhead_ratio": max_overhead_ratio,
+        "overhead_measured_on_live_records": len(ratios),
+        "live_attempts": len(live_records),
+        "replay_attempts": len(replay_records),
         "observed_callers": dict(sorted(by_caller.items())),
         "fixture_callers": sorted(fixture_callers),
         "missing_callers": missing_callers,

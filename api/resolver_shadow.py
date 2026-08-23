@@ -157,6 +157,12 @@ class ResolverShadowAttempt:
     entity_type: str
     query_norm: str
     active_policy: str
+    # Replayed attempts carry real counterfactual data but meaningless latency: in a
+    # replay the shadow comparison IS the work, so shadow_overhead_ms/resolver_elapsed_ms
+    # approaches 1.0. Untagged, a replay large enough to satisfy the attempt bar would
+    # drag the p95 overhead ratio past its threshold and fail the gate for a reason that
+    # has nothing to do with the policy being measured.
+    replay: bool = False
     started_ns: int = field(default_factory=time.perf_counter_ns)
     shadow_ns: int = 0
     candidates_observed: int = 0
@@ -201,6 +207,7 @@ class ResolverShadowAttempt:
         strict_uri, strict_outcome = self.strict.outcome(strict_fallback)
         record = {
             "observed_at": datetime.now(timezone.utc).isoformat(),
+            "replay": self.replay,
             "attempt_id": self.attempt_id,
             "caller": self.caller,
             "engine": self.engine,
@@ -235,6 +242,7 @@ def start_attempt(
     active_policy: str,
     attempt_id: Optional[str] = None,
     sampled_override: Optional[bool] = None,
+    replay: bool = False,
 ) -> ResolverShadowAttempt:
     attempt_id = attempt_id or uuid.uuid4().hex
     sampled = (
@@ -250,4 +258,5 @@ def start_attempt(
         entity_type=entity_type,
         query_norm=query_norm,
         active_policy=active_policy,
+        replay=replay,
     )
