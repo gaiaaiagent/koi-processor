@@ -190,3 +190,71 @@ def test_the_replay_does_not_pad_the_attempt_count() -> None:
         "attempts that reached no candidate are emitted, which inflates the 1,000-attempt "
         "bar with inputs that tested nothing"
     )
+
+
+# --------------------------------------------------------------------------------------
+# The flip itself (2026-08-23). Pinned so it cannot silently revert, and so the tier that
+# was deliberately NOT flipped cannot be flipped by accident either.
+# --------------------------------------------------------------------------------------
+
+PRIMITIVES = REPO / "api" / "resolution_primitives.py"
+INGEST = REPO / "api" / "personal_ingest_api.py"
+
+
+def _active_gate(src: str, anchor: str) -> str:
+    """The guard actually used in the accept/continue decision after `anchor`."""
+    idx = src.find(anchor)
+    assert idx != -1, f"anchor vanished: {anchor!r}"
+    # Generous window: the flip carries a long rationale comment above the call.
+    window = src[idx: idx + 3000]
+    for line in window.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if "passes_token_overlap_" in stripped and ("if not" in stripped or "= passes" in stripped):
+            return "strict" if "strict" in stripped else "legacy"
+    raise AssertionError(f"no policy call found after {anchor!r}")
+
+
+def test_the_fuzzy_tier_uses_strict() -> None:
+    """Measured: on Meeting, legacy was wrong on 89.2% of 259 attempts, strict on 6.6%."""
+    gate = _active_gate(PRIMITIVES.read_text(), "if score >= threshold and score > best_score:")
+    assert gate == "strict", (
+        "the shared multi-tier fuzzy gate is back on the legacy policy. That policy "
+        "resolves a meeting name to a DIFFERENT-DATED meeting in the same series most of "
+        "the time — it is what produced the cross-date collapse this repo repaired in the "
+        "data on 2026-08-22."
+    )
+
+
+def test_the_semantic_tier_was_deliberately_left_on_legacy() -> None:
+    """Not an oversight, and not to be 'tidied up' into strict without evidence.
+
+    The replay observes fuzzy candidates only (tier="fuzzy"), so nothing in
+    evidence/resolver-shadow/ says anything about the semantic tier. Flipping it would be
+    a claim the measurement does not support. Measure it first — the registry already
+    stores embedding_3072, so a semantic replay needs no provider calls.
+    """
+    src = PRIMITIVES.read_text()
+    idx = src.find("passes_semantic_match_guard_with_policy")
+    assert idx != -1, "semantic guard call vanished — re-anchor this test"
+    window = src[idx: idx + 400]
+    assert "passes_token_overlap_legacy" in window, (
+        "the semantic tier changed policy. If that was deliberate, it needs its own "
+        "replay evidence and this test should be updated in the same commit."
+    )
+
+
+def test_the_two_resolvers_agree_on_the_fuzzy_policy() -> None:
+    """personal_ingest_api's Tier 2a was already strict; the shared resolver was not.
+
+    A single graph resolved by two policies depending on which entry point the caller
+    used is the drift this pins.
+    """
+    ingest_gate = _active_gate(INGEST.read_text(), "if similarity >= threshold" ) \
+        if "if similarity >= threshold" in INGEST.read_text() else None
+    src = INGEST.read_text()
+    assert "if not passes_token_overlap_strict(normalized, cand_norm, entity.type):" in src, (
+        "personal_ingest_api Tier 2a is no longer strict; it and the shared resolver "
+        "would now disagree about the same graph."
+    )

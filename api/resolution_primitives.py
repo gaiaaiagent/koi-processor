@@ -559,7 +559,7 @@ async def _resolve_entity_multi_tier_raw(
         engine="shared_multi_tier",
         entity_type=entity_type,
         query_norm=normalized,
-        active_policy="legacy",
+        active_policy="strict_fuzzy+legacy_semantic",
     )
 
     for c in candidates:
@@ -594,7 +594,27 @@ async def _resolve_entity_multi_tier_raw(
                 elapsed_ns=time.perf_counter_ns() - shadow_started,
             )
         if score >= threshold and score > best_score:
-            if not passes_token_overlap_legacy(normalized, cand_norm, entity_type):
+            # STRICT since 2026-08-23. This tier ran `legacy` until a replay of 1,110
+            # resolution attempts across all 13 call sites measured what that cost:
+            # on Meeting, legacy was wrong on 89.2% of attempts against strict's 6.6%,
+            # because it is greedy best-by-score and a wrong-date meeting in the same
+            # series outscores the right one. Person and SpecDoc conflated distinct
+            # people and distinct documents the same way (clark/clare, joel/joe,
+            # "...open civics"/"...hyperstition").
+            #
+            # Location and Organization were the counter-argument: strict declines
+            # legitimate short/long merges. That was fixed at the DATA layer instead —
+            # the duplicate pairs (victoria/victoria bc, mcgill/mcgill university, ...)
+            # were merged, so the short form now resolves at Tier 1 via the tombstone
+            # and never reaches this tier. Afterwards every residual Location divergence
+            # was legacy accepting something wrong (sidney/sydney, colorado/colorado
+            # river, two different IP addresses).
+            #
+            # NOTE the semantic tier below still uses `legacy`, deliberately: the replay
+            # observed fuzzy candidates only, so there is no evidence about semantic and
+            # flipping it here would be a claim the measurement does not support.
+            # Evidence: evidence/resolver-shadow/, koi task 8294.
+            if not passes_token_overlap_strict(normalized, cand_norm, entity_type):
                 continue
             # Shared P1 guards (same as personal_ingest_api Tier 2a).
             if entity_type == "Person" and not passes_person_name_guard(normalized, cand_norm):
