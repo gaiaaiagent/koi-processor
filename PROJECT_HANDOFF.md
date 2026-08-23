@@ -1,8 +1,8 @@
 # Project handoff
 
-**Updated:** 2026-08-22 19:58 PDT
-**Session:** Claude Code · ffb7988e-3224-4372-8b24-e54e2d083a09 · Ontology safety rails → Meeting promotion
-**Status:** Meeting promotion shipped end-to-end — 28 → 262 Meeting entities and 70 → 1,081 `attended` edges with **zero** date-mismatched, after a same-day resolver fix; all work pushed, working tree clean, 0 ahead.
+**Updated:** 2026-08-23 00:10 PDT
+**Session:** Claude Code · ffb7988e-3224-4372-8b24-e54e2d083a09 · Ontology safety rails → Meeting promotion → historical repair
+**Status:** All executable priorities are done and pushed (`38c11fe`). Meeting graph is 302 entities / 1,261 edges with **zero** cross-date groups and **zero** date-mismatched edges. Only two clock-gated items remain, plus one design decision on the resolver shadow gate.
 
 ## Completed this session
 
@@ -13,15 +13,15 @@ Three concurrent sessions worked this repo today (this one, `abb2c016`/d9, and `
 - **Meeting backfill** (`3cbee4d`, session d9) — +234 Meeting entities, +1,011 edges from a frozen 1,365-slot corpus. Independently verified here: **0 date-mismatched of 1,076 determinable**, mapping excess unchanged at 43 (zero new collapse, ratio 2.59× → 1.16×), 0 NULL embeddings.
 - **Live-write gate expressed as a property** (`8eb0e32`, `0d21ec8`, `988da21`) — `tests/test_live_write_governance.py` derives its population from the filesystem and fails on any new ungoverned live writer. `pytest.ini` gained `testpaths`; `scripts/run-red-baseline-gate.sh` makes the gate a runnable command and gave `KOI_REQUIRE_BACKEND` its first caller.
 - **Two fixture leaks closed** — `test_task_registry` (627 rows) and the intent suite; three backlogs purged with snapshots (612 tasks, 1,310 intents, 62 claims). The claims purge used a **claimant-identity** signature, not text: a naive `ILIKE '%test%'` would have deleted 93 genuine claims including six of Darren's own.
+- **Historical Meeting repair + resolver split** (`38c11fe`, a later session) — 262 → **302** Meetings, 1,081 → **1,261** edges, 379 pending; mappings 304 rows / **301** URIs / 3 intentional same-date excess. The duplicated resolver guard now has explicit `legacy`/`strict` names with caller behavior preserved, and bounded shadow measurement runs at 10% sampling behind a 1,024-entry non-blocking queue. All six latent live-writers governed; allowlist down to the two non-persisting exceptions. Independently re-derived here: every figure exact, 0 cross-date groups, 0 date-mismatched edges.
 - **Migration 111 propagated** to `personal_koi_test` and to the NUC (`dobby@192.168.1.69`) — the NUC had neither column on a live 14,435-row registry, so a push before migrating would have broken its federation write path.
 
 ## Next steps
 
-1. **koi 7878 — AC1's 24-hour window** on the intent-leak fix. Mechanism is proven; elapsed time is not. Resolves 2026-08-23 by observation. Deliberately left open.
-2. **Historical Meeting mapping collapse** — 43 excess mappings from before the guard remain. Decide split-vs-leave now that correct entities exist alongside.
-3. **`passes_token_overlap_check` is defined twice with DIFFERENT bodies** (`resolution_primitives.py:194` vs `personal_ingest_api.py:728`, the latter shadowing the import at `:160`). Eleven modules import the primitives. Two divergent implementations of the guard that decides entity identity.
-4. Migration 112 (type consolidation) — needs ~1 week of `resolution_tier` data; ~Aug 29. Constraint from B0's refutation: **keep `Organization` a distinct core type**.
-5. Two latent leakers in the gate allowlist (`test_interop_matrix.py`, and the 5 dormant `tests/*.sh`).
+1. **koi 7878 — AC1's 24-hour window.** Evaluate no earlier than **2026-08-23 13:47 PDT**. Currently 0 nonconforming and 0 orphaned Intents. Pass = no post-cutover rows, or every new row has non-null `resolution_tier`, `source='intent-registry'`, and an `intent_key`. Positive control: the 225-row backup cohort.
+2. **DECIDE: make replay the primary evidence for the resolver shadow gate.** Phase 6 requires 1,000 sampled attempts reaching a permissive guard boundary, at 10% sampling. Organic entity creation runs **~60/day** (the 620/713/1,018 days were backfills, not organic), so that is **~6 observations/day → roughly 170 days**; zero have been emitted so far. The plan already contemplates "a deterministic replay fixture" — promoting replay to primary evidence produces the same counterfactual outcome data in a day, at no production cost, and covers zero-traffic callers that live sampling will never reach. Otherwise the gate never fires and the legacy/strict wrapper state becomes permanent **by default rather than by choice** — which is an acceptable outcome, but should be chosen.
+3. **Migration 112** — eligible after **2026-08-29 10:05 PDT**, after 7 days of organic `resolution_tier` data. Report the Meeting backfill burst separately from organic traffic. Constraint from B0's refutation: **keep `Organization` a distinct core type**; no Person deduplication.
+4. Minor: confirm the backup for the four stamped knowledge-add rows — the end state is verifiable (310 rows, zero NULL tiers) but no matching backup table was locatable.
 
 ## Open questions
 
@@ -33,13 +33,16 @@ Three concurrent sessions worked this repo today (this one, `abb2c016`/d9, and `
 ## Verification and working tree
 
 - **Branch/status:** `regen-prod`, 0 uncommitted, **0 ahead of origin**, `git diff --check` clean.
-- **Verification:** red-baseline gate **10/10 PASS** (`scripts/run-red-baseline-gate.sh`); live-write governance gate 4/4; Meeting identity 20/20; drift-retry 10/10. API healthy (PID 2535, restarted 18:58 to load the guard). Graph: 262 Meetings / 1,081 `attended` / 31,661 registry.
+- **Verification:** red-baseline gate **10/10 PASS** (`scripts/run-red-baseline-gate.sh`); live-write governance 4/4; Meeting identity 20/20; drift-retry 10/10; 78 focused tests pass. API healthy (PID 22784). Graph as of 2026-08-23 00:10: **302** Meetings / **1,261** `attended` / **379** pending / 31701 registry rows.
 - **Canon validator:** not applicable — no `scripts/validate_spec_dag.py` in this repo.
 - **Snapshots retained** (all deletes reversible): `entity_relationships_backup_meeting_identity_20260822`, `task_registry_backup_fixtures_20260822`, `intent_registry_backup_fixtures_20260822`, `intent_state_log_backup_fixtures_20260822`, `claims_backup_fixtures_20260822`, `claim_attestations_backup_fixtures_20260822`, `entity_registry_backup_intent_fixtures_20260822`.
 - **Re-measure before acting.** Concurrent sessions write this database; `document_entity_links` grew 6,820 → 6,870 during one measurement window.
+- **The 3 residual excess Meeting mappings are INTENTIONAL, not debt.** After the repair, `entity_rid_mappings` is 304 rows / 301 URIs. The excess of 3 is three `(canonical_uri, date)` groups holding more than one artifact for the *same* meeting on the *same* date — transcripts and note variants — which correctly share one Meeting entity. Anyone seeing "excess: 3" should not try to drive it to zero. Verified 0 cross-date groups and 0 date-mismatched edges as of 2026-08-23 00:07.
+- **Two dateless Meeting mappings are preserved deliberately:** `Meetings/Bioregioning/Bioregional Learning.md` and `Meetings/Cascadia Canada/Cascadia Canada Sync Sept 24.md`. Both are singletons. Do not infer a year from partial text like "Sept 24".
 
 ## Recent sessions
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
 | 2026-08-22 | Claude Code | ffb7988e | Ontology safety rails → Meeting identity fix + promotion; 26 commits across 3 sessions |
+| 2026-08-23 | Claude Code | (fresh) | Historical Meeting repair, resolver legacy/strict split, live-writer governance (`38c11fe`) |

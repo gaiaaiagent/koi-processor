@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-08-22 19:58 PDT
+**Updated:** 2026-08-23 00:10 PDT
 
-**Current status:** Meeting promotion shipped end-to-end — 28 → 262 Meeting entities and 70 → 1,081 `attended` edges with ZERO date-mismatched, after a same-day resolver fix; all work pushed, tree clean, 0 ahead.
+**Current status:** All executable priorities done and pushed (`38c11fe`). Meeting graph 302 entities / 1,261 edges, ZERO cross-date groups and ZERO date-mismatched edges. Two clock-gated items remain plus one design decision.
 
-**Next:** 1) koi 7878 — the intent fix's 24h observation window, resolves 2026-08-23. 2) Decide split-vs-leave on the 43 historical Meeting mapping collapses. 3) `passes_token_overlap_check` is defined TWICE with DIFFERENT bodies (`resolution_primitives.py:194` vs `personal_ingest_api.py:728`, the latter shadowing the import at `:160`).
+**Next:** 1) koi 7878 — evaluate no earlier than 2026-08-23 13:47 PDT; currently 0 nonconforming. 2) DECIDE: make replay the primary evidence for the resolver shadow gate — at 10% sampling and ~60 organic entity creations/day it needs ~170 days to reach its 1,000-attempt bar, and 0 have been emitted. 3) Migration 112 eligible after 2026-08-29 10:05 PDT; keep `Organization` a distinct core type.
 
-**Watch:** Do NOT de-dup Person rows naively — `Dave Bronner` carries the registered alias `dave`, so clearing fragment rows would route all 22 "Dave" attendees to him at confidence 1.0 while the vault says 20 are David Fortson. Re-measure before acting; concurrent sessions write this DB.
+**Watch:** The 3 residual excess Meeting mappings are INTENTIONAL (same meeting, same date, multiple artifacts) — do not drive them to zero. Never de-dup Person rows naively; the `dave` alias would misroute 20 of 22 "Dave" attendees away from David Fortson. Re-measure before acting; concurrent sessions write this DB.
 
-**Verification:** regen-prod, 0 uncommitted, 0 ahead, `git diff --check` clean. Red-baseline gate 10/10 PASS (`scripts/run-red-baseline-gate.sh`); live-write governance 4/4; Meeting identity 20/20. API healthy, PID 2535. Every delete has a `*_backup_*_20260822` snapshot.
+**Verification:** regen-prod, 0 uncommitted, 0 ahead. Red-baseline gate 10/10 PASS; live-write governance 4/4; 78 focused tests pass. API healthy. Every delete has a timestamped backup table.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
