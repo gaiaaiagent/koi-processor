@@ -61,6 +61,7 @@ from api.resolution_primitives import (  # noqa: E402
     normalize_entity_text,
     passes_distinctive_token_check,
     passes_person_name_guard,
+    passes_semantic_match_guard_with_policy,
     passes_token_overlap_legacy,
     passes_token_overlap_strict,
 )
@@ -113,7 +114,8 @@ async def load_corpus(conn, sample: int, entity_type: str | None) -> list[dict]:
         args.append(entity_type)
     rows = await conn.fetch(
         f"""
-        SELECT fuseki_uri, normalized_text, entity_type
+        SELECT fuseki_uri, normalized_text, entity_type,
+               embedding_3072 IS NOT NULL AS has_embedding
         FROM entity_registry
         {where}
           AND merged_into IS NULL
@@ -199,6 +201,67 @@ def replay_one(target: dict, candidates: list[dict], caller: str) -> dict | None
     )
 
 
+async def replay_semantic(conn, target: dict, caller: str) -> dict | None:
+    """Mirror of resolve_entity_multi_tier Tier 2b.
+
+    The query embedding is the target row's OWN stored embedding_3072, so this needs no
+    provider call: whatever the embedder produced for that name is what production would
+    send. The row itself is excluded — it is its own nearest neighbour at similarity 1.0,
+    and production never reaches this tier for a name Tier 1 already matched.
+
+    Production only reaches Tier 2b when the fuzzy tier found nothing, so a semantic
+    observation is only emitted under that condition. Emitting for every name would
+    measure a tier that does not run.
+    """
+    normalized = normalize_entity_text(target["normalized_text"])
+    entity_type = target["entity_type"]
+    schema = get_schema_for_type(entity_type)
+
+    row = await conn.fetchrow(
+        """
+        SELECT fuseki_uri, normalized_text,
+               1 - (embedding_3072::halfvec(3072)
+                    <=> (SELECT embedding_3072 FROM entity_registry WHERE fuseki_uri = $1)
+                        ::halfvec(3072)) AS similarity
+        FROM entity_registry
+        WHERE entity_type = $2 AND embedding_3072 IS NOT NULL
+          AND merged_into IS NULL AND fuseki_uri <> $1
+        ORDER BY embedding_3072::halfvec(3072)
+                 <=> (SELECT embedding_3072 FROM entity_registry WHERE fuseki_uri = $1)
+                     ::halfvec(3072)
+        LIMIT 1
+        """,
+        target["fuseki_uri"], entity_type,
+    )
+    if not row or float(row["similarity"]) < schema.semantic_threshold:
+        return None
+
+    sem_norm = row["normalized_text"] or ""
+    similarity = float(row["similarity"])
+    shadow = start_attempt(
+        caller=caller, engine="shared_multi_tier", entity_type=entity_type,
+        query_norm=normalized, active_policy="strict_fuzzy+legacy_semantic",
+        sampled_override=True, replay=True,
+    )
+    started = time.perf_counter_ns()
+    legacy_accepts = not sem_norm or passes_semantic_match_guard_with_policy(
+        entity_type, normalized, sem_norm, similarity,
+        schema.semantic_threshold, passes_token_overlap_legacy)
+    strict_accepts = not sem_norm or passes_semantic_match_guard_with_policy(
+        entity_type, normalized, sem_norm, similarity,
+        schema.semantic_threshold, passes_token_overlap_strict)
+    shadow.observe_candidate(
+        uri=row["fuseki_uri"], score=similarity, tier="semantic",
+        legacy_accepts=legacy_accepts, strict_accepts=strict_accepts,
+        elapsed_ns=time.perf_counter_ns() - started,
+    )
+    return shadow.finish(
+        active_uri=row["fuseki_uri"] if legacy_accepts else None,
+        active_outcome="semantic" if legacy_accepts else "unresolved",
+        legacy_fallback="unresolved", strict_fallback="unresolved",
+    )
+
+
 async def main_async(args) -> int:
     configure_log(Path(args.out))
     # The observer no-ops unless enabled; a replay is explicit, so force it on for
@@ -217,13 +280,27 @@ async def main_async(args) -> int:
 
     emitted = 0
     reached = 0
+    semantic_reached = 0
     callers = args.caller or REPLAY_CALLERS
-    for i, target in enumerate(corpus):
-        caller = callers[i % len(callers)]
-        record = replay_one(target, by_type[target["entity_type"]], caller)
-        if record is not None:
-            reached += 1
-            emitted += 1
+    conn2 = await asyncpg.connect(args.dsn) if args.tier in ("semantic", "both") else None
+    try:
+        for i, target in enumerate(corpus):
+            caller = callers[i % len(callers)]
+            record = None
+            if args.tier in ("fuzzy", "both"):
+                record = replay_one(target, by_type[target["entity_type"]], caller)
+                if record is not None:
+                    reached += 1
+                    emitted += 1
+            # Tier 2b runs only when fuzzy resolved nothing, as in production.
+            if conn2 is not None and record is None and target.get("has_embedding"):
+                sem = await replay_semantic(conn2, target, caller)
+                if sem is not None:
+                    semantic_reached += 1
+                    emitted += 1
+    finally:
+        if conn2 is not None:
+            await conn2.close()
 
     shutdown_emitter(timeout=10.0)
     status = resolver_shadow.emitter_status()
@@ -232,6 +309,8 @@ async def main_async(args) -> int:
         "database": db,
         "corpus_size": len(corpus),
         "reached_guard_boundary": reached,
+        "semantic_observations": semantic_reached,
+        "tier": args.tier,
         "emitted": status["emitted"],
         "dropped": status["dropped"],
         "out": str(args.out),
@@ -258,6 +337,8 @@ def main() -> int:
     p.add_argument("--caller", action="append", default=[])
     p.add_argument("--out", default="/tmp/resolver_shadow_replay.log")
     p.add_argument("--dsn", default=DEFAULT_DSN)
+    p.add_argument("--tier", choices=("fuzzy", "semantic", "both"), default="fuzzy",
+                   help="which resolution tier to replay (default: fuzzy, as shipped)")
     return asyncio.run(main_async(p.parse_args()))
 
 

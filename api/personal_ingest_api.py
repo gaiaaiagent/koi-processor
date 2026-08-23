@@ -156,14 +156,19 @@ from api.entity_schema import (
 )
 
 # Shared resolver name guards (single source of truth in resolution_primitives).
-# Wired into Tier 1.5 (Person), Tier 2a (via passes_token_overlap_strict) and
-# Tier 2b (via passes_semantic_match_guard) below.
+# Wired into Tier 1.5 (Person), Tier 2a and Tier 2b — both of the latter via
+# passes_semantic_match_guard_with_policy / passes_token_overlap_strict.
+#
+# NOT via passes_semantic_match_guard: that convenience wrapper hardcodes the LEGACY
+# token policy and no production path calls it (only tests do). The comment here used to
+# say Tier 2b went through it, which stopped being true and would have made the legacy
+# default look sanctioned. tests/test_resolver_shadow_replay.py pins that no production
+# module calls it.
 from api.resolution_primitives import (
     GENERIC_NAME_TOKENS,
     extract_leading_meeting_date,
     passes_person_name_guard,
     passes_distinctive_token_check,
-    passes_semantic_match_guard,
     passes_semantic_match_guard_with_policy,
     passes_token_overlap_legacy,
     passes_token_overlap_strict,
@@ -1265,7 +1270,7 @@ async def resolve_entity(
         engine="personal_ingest",
         entity_type=entity.type or "",
         query_norm=normalized,
-        active_policy="strict_fuzzy+legacy_semantic",
+        active_policy="strict",
     )
 
     for candidate in candidates:
@@ -1384,7 +1389,10 @@ async def resolve_entity(
                     match_norm,
                     similarity,
                     semantic_threshold,
-                    passes_token_overlap_legacy,
+                    # STRICT since 2026-08-23; see api/resolution_primitives.py Tier 2b.
+                    # 17 of 17 measured semantic divergences were legacy accepting a
+                    # different-dated meeting. 0% divergence on every other type.
+                    passes_token_overlap_strict,
                 )
                 if shadow.sampled:
                     shadow_started = time.perf_counter_ns()

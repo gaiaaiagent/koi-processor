@@ -227,21 +227,47 @@ def test_the_fuzzy_tier_uses_strict() -> None:
     )
 
 
-def test_the_semantic_tier_was_deliberately_left_on_legacy() -> None:
-    """Not an oversight, and not to be 'tidied up' into strict without evidence.
+def test_the_semantic_tier_also_uses_strict() -> None:
+    """Flipped 2026-08-23 AFTER measuring it, not alongside the fuzzy tier.
 
-    The replay observes fuzzy candidates only (tier="fuzzy"), so nothing in
-    evidence/resolver-shadow/ says anything about the semantic tier. Flipping it would be
-    a claim the measurement does not support. Measure it first — the registry already
-    stores embedding_3072, so a semantic replay needs no provider calls.
+    It was deliberately left on legacy for one round because the fuzzy replay said
+    nothing about it. A semantic replay (--tier semantic, 204 observations) then found 17
+    divergences, ALL Meeting, and all 17 were legacy accepting a match with a DIFFERENT
+    DATE. Zero same-date counter-examples; every other entity type diverged 0%, so the
+    flip is a no-op outside Meeting.
     """
     src = PRIMITIVES.read_text()
-    idx = src.find("passes_semantic_match_guard_with_policy")
+    idx = src.find("legacy_accepts = not sem_norm or passes_semantic_match_guard_with_policy")
     assert idx != -1, "semantic guard call vanished — re-anchor this test"
     window = src[idx: idx + 400]
-    assert "passes_token_overlap_legacy" in window, (
-        "the semantic tier changed policy. If that was deliberate, it needs its own "
-        "replay evidence and this test should be updated in the same commit."
+    assert "passes_token_overlap_strict" in window, (
+        "the semantic tier is back on the legacy policy, which accepted a "
+        "different-dated meeting in 17 of 17 measured divergences."
+    )
+
+
+def test_no_production_path_uses_the_legacy_defaulting_wrapper() -> None:
+    """`passes_semantic_match_guard` hardcodes the LEGACY policy.
+
+    It survives because tests call it directly, but a production caller adopting it would
+    silently reintroduce legacy semantics after both tiers were deliberately moved off
+    them. personal_ingest_api imported it and carried a comment claiming Tier 2b went
+    through it — which had stopped being true.
+    """
+    import re
+    offenders = []
+    for path in (REPO / "api").rglob("*.py"):
+        if path.name == "resolution_primitives.py":
+            continue  # defines it
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue  # prose about the wrapper is not a call to it
+            if re.search(r"\bpasses_semantic_match_guard\b(?!_with_policy)", line):
+                offenders.append(f"{path.relative_to(REPO)}:{n}: {line.strip()}")
+    assert not offenders, (
+        "production code references the legacy-defaulting guard wrapper:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse passes_semantic_match_guard_with_policy and pass the policy explicitly."
     )
 
 

@@ -559,7 +559,7 @@ async def _resolve_entity_multi_tier_raw(
         engine="shared_multi_tier",
         entity_type=entity_type,
         query_norm=normalized,
-        active_policy="strict_fuzzy+legacy_semantic",
+        active_policy="strict",
     )
 
     for c in candidates:
@@ -695,13 +695,19 @@ async def _resolve_entity_multi_tier_raw(
         # accept it (matches personal_ingest_api Tier 2b).
         sem_norm = sem_row["normalized_text"] or ""
         similarity = float(sem_row["similarity"])
+        # STRICT since 2026-08-23, on the same evidence as the fuzzy tier above and
+        # measured separately: a semantic replay of 204 observations found 17 divergences,
+        # ALL of them Meeting, and all 17 were legacy accepting a match with a DIFFERENT
+        # DATE (2026-07-07 BKC COP -> 2026-06-23 BKC COP, and so on). Zero same-date
+        # counter-examples. Every other entity type diverged 0%, so this is a no-op
+        # outside Meeting. Evidence: evidence/resolver-shadow/semantic-20260823.log.
         legacy_accepts = not sem_norm or passes_semantic_match_guard_with_policy(
             entity_type,
             normalized,
             sem_norm,
             similarity,
             semantic_threshold,
-            passes_token_overlap_legacy,
+            passes_token_overlap_strict,
         )
         if shadow.sampled:
             shadow_started = time.perf_counter_ns()
