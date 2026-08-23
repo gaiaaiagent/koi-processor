@@ -1,8 +1,8 @@
 # Project handoff
 
-**Updated:** 2026-08-23 12:30 PDT
+**Updated:** 2026-08-23 13:52 PDT
 **Session:** Claude Code · c1defaa8-ad3c-4de2-9e54-47361c370b33 · Wikilink silent-rollback defect → intent leak → resolver replay
-**Status:** Six commits pushed (`763ede4..2169721`). Two defects that were NOT on yesterday's list are fixed and deployed (API restarted 12:05:33, PID 82263). The resolver shadow gate has returned a real verdict — `explicit_policy_split`, 36 outcome divergences — instead of the ~170-day wait. One clock-gated item and one operator decision remain.
+**Status:** Seven commits pushed. Two defects that were NOT on yesterday's list are fixed and deployed (API restarted 12:05:33, PID 82263). **koi 7878 PASSED and is closed.** The resolver shadow gate returned a real verdict instead of a ~170-day wait, and both remaining items are now decisions with evidence behind them rather than open questions.
 
 > ## ⚠ START KOI SESSIONS IN THIS CHECKOUT
 >
@@ -97,26 +97,70 @@ a reason unrelated to the policy. Tests carry the live-record control for each e
 
 ## Next steps
 
-1. **koi 7878 — AC1.** Evaluate at/after **2026-08-23 13:47 PDT**:
-   `venv/bin/python scripts/check_intent_leak_observation.py`. As of 12:30 it reads
-   `nonconforming: 0, orphaned: 0, orphaned_proposals: 0` and correctly refuses to close
-   (`window_elapsed: false`). Positive controls: 225 entity rows, 256 proposal rows.
-2. **DECIDE: flip the resolver policy from legacy to strict (koi task 8294).** Every one of the
-   36 divergences inspected favours strict. **18 of them are the cross-date Meeting collapse this
-   repo repaired in the DATA yesterday** — `active_policy` is still `legacy`, so the guard that
-   caused it would recreate it on the next resolution. Yesterday fixed the symptom, not the
-   cause. But strict refuses matches legacy accepts, so expect fewer auto-merges and **more new
-   entities** — measure before and after; it interacts with migration 112.
-3. **Migration 112** — eligible after **2026-08-29 10:05 PDT**, but the date is not the real
-   blocker: there is no specification anywhere (no SQL, no ADR, no task), only a two-line
-   parking-lot entry and `scripts/check_migration_112_evidence.py`. Also 274 of 314 stamped rows
-   (87%) are the Meeting backfill burst and the gate does not separate burst from organic.
-   Keep `Organization` a distinct core type; no Person deduplication.
+Both are **decisions, not tasks**. Each carries its full evidence in the koi task registry.
+
+1. **DECIDE koi 8294 — flip the resolver policy legacy → strict.** Recommended, with a companion
+   change. Per-type replays (2026-08-23) show the 3.2% aggregate was diluted by Concept; the
+   divergence is concentrated in date- and identifier-bearing types:
+
+   | type | attempts | diverged |
+   |---|---|---|
+   | Meeting | 259 | **86.9%** |
+   | SpecDoc | 29 | 65.5% |
+   | Location | 67 | 43.3% |
+   | Person | 126 | 8.0% |
+   | Organization | 607 | 1.8% |
+   | Concept | 568 | 0.4% |
+   | Claim / Project / Question / Event / Protocol / CaseStudy / WorkItem | — | 0% |
+
+   Judged objectively on Meeting (date **and** series, variant markers normalised):
+   **legacy is wrong on 89.2% of attempts, strict on 6.6%** — 13.5× fewer errors, and strict finds
+   *more* correct duplicate matches (29 vs 26). Legacy is greedy best-by-score, so a wrong-date
+   meeting in the same series outscores the right one and crowds it out.
+
+   Person and SpecDoc favour strict for the same reason (`clark`→`clare`, `joel`→`joe`;
+   `…open civics`→`…hyperstition`, `commitment economy VISION`→`DESIGN`). **Location and
+   Organization are the cost:** strict loses legitimate short/long merges
+   (`victoria`→`victoria bc`, `mcgill`→`mcgill university`).
+
+   The trade is **wrong merges → duplicates**. Duplicates are recoverable; wrong merges propagate
+   into edges and retrieval. Companion work: backfill Location/Organization aliases first (only
+   34 of 675 Locations carry any, so the exact-alias tier cannot currently catch what strict will
+   decline), and measure entity-creation rate before/after. A **per-type policy** — strict for
+   Meeting/SpecDoc/Person, legacy for Location/Organization — matches the evidence better than one
+   global switch, and the guards already take `entity_type`.
+
+2. **DECIDE koi 8292 — do NOT backfill the 1,902 Task notes.** Recommended as won't-fix.
+   `task_registry` already holds owner / project / source for **4,331 / 2,886 / 4,413** rows;
+   the graph's 70 Task entities hold **59 / 39 / 34** and have **zero** document links. Backfill
+   would take Task from 70 → ~1,972, all embedded and competing in entity ANN queries. If agreed,
+   `/register-entity` should skip Task **deliberately** (rule + test) — the accident that was
+   suppressing them is now fixed, so the next bulk vault sync will create them.
+   **Separate and small:** 22 of the 1,924 are not Tasks (17 `Shared/`, 2 `Organizations/`,
+   2 `HyphalTips/`, 1 other). Those are real graph entities; register them.
+   **Sequencing:** any backfill must follow the 8294 decision, or ~1,900 notes resolve under a
+   policy measured wrong 89.2% of the time on Meetings.
+
+3. **Migration 112** — eligible after 2026-08-29 10:05 PDT, but the date is not the blocker:
+   there is no specification anywhere (no SQL, no ADR, no task), only a parking-lot entry and
+   `scripts/check_migration_112_evidence.py`. 274 of 314 stamped rows (87%) are the Meeting
+   backfill burst and the gate does not separate burst from organic. Keep `Organization` a
+   distinct core type; no Person deduplication.
+
 4. **The launchd guard has a blind spot.** `tests/test_launchd_job_targets.py:50` globs
    `com.personal-koi.*.plist`; three installed jobs use `com.personal.koi-*` and are uncovered —
    including `com.personal.koi-repo-doc-sensors`, which runs `doc_scanner.py` **out of the shared
-   dev checkout**, the exact dependency the guard exists to forbid. Widening the glob alone is not
-   enough: the guard reads only `ProgramArguments`/`Program`, never `WorkingDirectory`.
+   dev checkout**. Widening the glob alone is not enough: the guard reads only
+   `ProgramArguments`/`Program`, never `WorkingDirectory`.
+
+## Closed this session
+
+- **koi 7878 — AC1 PASSED** at 13:48:57 PDT, exit 0, `window_elapsed: true`. Observed 0
+  nonconforming / 0 orphaned / 0 orphaned proposals over the full 24h window; re-derived directly
+  in psql rather than trusting the script. **Both positive controls fire** (225 entity rows, 256
+  proposal rows), so the zeros are measurements, not a broken predicate. Note the gate had to be
+  widened *before* it ran — as written it counted `entity_registry` only and would have certified
+  clean while 256 orphaned `intent_match_proposals` rows sat in the live database.
 
 ## Resolved — strike from the old list
 
