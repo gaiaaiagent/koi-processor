@@ -1143,6 +1143,7 @@ def create_router(
             type_hint = canonicalize_entity_type(type_hint)
 
         normalized = normalize_entity_text(name)
+        same_name_seen = False
 
         # Per-request cache hit — type already surfaced on first lookup of this
         # name in this request, so we return None for resolved_type here.
@@ -1198,6 +1199,10 @@ def create_router(
         """, normalized)
         if row:
             if type_hint == "Concept" and row["entity_type"] != "Concept":
+                # This is the intentional Concept-homonym bypass. If it reaches
+                # create, migration 111 must classify the new row as ambiguous
+                # rather than pretending no same-name entity existed.
+                same_name_seen = True
                 row = None
             else:
                 return await _accept(row)
@@ -1237,7 +1242,12 @@ def create_router(
                 from api.resolution_primitives import resolve_entity_multi_tier
                 mode = "semantic" if embed_fn else "fuzzy"
                 resolved_uri, confidence, _rel = await resolve_entity_multi_tier(
-                    conn, name, type_hint, mode=mode, embed_fn=embed_fn,
+                    conn,
+                    name,
+                    type_hint,
+                    mode=mode,
+                    embed_fn=embed_fn,
+                    resolution_caller="knowledge_router.add_knowledge",
                 )
                 if resolved_uri and confidence >= 0.85:
                     # Fetch resolved_type for return contract
@@ -1308,12 +1318,13 @@ def create_router(
         await conn.execute("""
             INSERT INTO entity_registry
                 (fuseki_uri, entity_text, normalized_text, entity_type,
-                 source, embedding_3072, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::vector, $7::jsonb)
+                 source, embedding_3072, metadata, resolution_tier)
+            VALUES ($1, $2, $3, $4, $5, $6::vector, $7::jsonb, $8)
             ON CONFLICT (fuseki_uri) DO NOTHING
         """, new_uri, name, normalized, entity_type,
             'knowledge-add', str(embedding) if embedding else None,
-            '{"type_source": "default"}' if typed_by_default else '{}')
+            '{"type_source": "default"}' if typed_by_default else '{}',
+            'tier3_created_ambiguous' if same_name_seen else 'tier3_created')
 
         seen[normalized] = new_uri
         logger.info(f"Created new entity: {name} -> {new_uri}")

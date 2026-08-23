@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 from api.entity_schema import get_schema_for_type
+from api.resolver_shadow import start_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +193,15 @@ def compute_token_overlap(text1: str, text2: str) -> Tuple[float, int]:
     return overlap_count / shorter_len, overlap_count
 
 
-def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool:
-    """Check if two texts pass the token overlap requirement."""
+def passes_token_overlap_legacy(text1: str, text2: str, entity_type: str) -> bool:
+    """The permissive token-overlap policy used by the shared resolver.
+
+    This name is intentionally explicit.  A stricter ingest policy historically
+    existed under the same ``passes_token_overlap_check`` name in
+    ``personal_ingest_api`` and shadowed this implementation.  Keeping the two
+    policies named independently lets us measure them without changing either
+    caller's production behavior.
+    """
     schema = get_schema_for_type(entity_type)
     if not schema.require_token_overlap:
         return True
@@ -248,7 +257,7 @@ def passes_person_name_guard(query_norm: str, cand_norm: str) -> bool:
       (last 0.43), "Sarah Wilshaw" vs "Sarah Wilson" (last 0.848) while
       allowing spelling variants of the same full name.
     - Single vs single -> True; the caller's single-word JW>=0.95 rule
-      (passes_token_overlap_check) is the gate for those.
+      (passes_token_overlap_strict in personal ingest) is the gate for those.
 
     Inputs are expected to be normalized (lowercased, hyphen/underscore ->
     space) but the function lowercases defensively.
@@ -302,12 +311,102 @@ def passes_distinctive_token_check(text1: str, text2: str) -> bool:
     return True
 
 
+_LEADING_DATE_RE = re.compile(r"^\s*(\d{4})[-\s](\d{2})[-\s](\d{2})(?![\d])")
+
+
+def extract_leading_meeting_date(text: Optional[str]) -> Optional[str]:
+    """Return a validated leading YYYY-MM-DD from a raw or normalized title.
+
+    The guard is leading-only by design.  Searching elsewhere in a title would
+    treat subject dates as meeting identity.  Missing or malformed dates fall
+    through to the surrounding resolution policy; only two parsed and unequal
+    dates are a rejection signal.
+    """
+    if not text:
+        return None
+    match = _LEADING_DATE_RE.match(text)
+    if not match:
+        return None
+    year, month, day = match.group(1), match.group(2), match.group(3)
+    if not (1 <= int(month) <= 12 and 1 <= int(day) <= 31):
+        return None
+    return f"{year}-{month}-{day}"
+
+
+def passes_token_overlap_strict(text1: str, text2: str, entity_type: str) -> bool:
+    """The strict identity policy historically local to personal ingest.
+
+    This is a behavior-preserving extraction, not a consolidation.  In
+    particular, it carries forward the Meeting leading-date guard that prevents
+    separate meetings in the same series from collapsing after normalization.
+    """
+    tokens1 = text1.lower().split()
+    tokens2 = text2.lower().split()
+
+    # Single-word guard applies to every schema, including schemas that bypass
+    # the multi-word overlap rule.
+    if len(tokens1) == 1 or len(tokens2) == 1:
+        jw = jaro_winkler_similarity(text1.lower(), text2.lower())
+        if jw < 0.95:
+            return False
+        s1, s2 = text1.lower(), text2.lower()
+        if len(s1) != len(s2):
+            shorter, longer = (s1, s2) if len(s1) < len(s2) else (s2, s1)
+            if longer.startswith(shorter) and len(longer) - len(shorter) >= 2:
+                return False
+        return True
+
+    if entity_type in ("Organization", "Project", "Concept"):
+        if not passes_distinctive_token_check(text1, text2):
+            return False
+
+    if entity_type == "Meeting":
+        date1 = extract_leading_meeting_date(text1)
+        date2 = extract_leading_meeting_date(text2)
+        if date1 and date2 and date1 != date2:
+            return False
+
+    schema = get_schema_for_type(entity_type)
+    if not schema.require_token_overlap:
+        if entity_type == "Person":
+            return passes_person_name_guard(text1, text2)
+        if len(tokens1) == 2 and len(tokens2) == 2:
+            last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
+            if last_jw < 0.75:
+                return False
+        return True
+
+    overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
+    return (
+        overlap_ratio >= MIN_TOKEN_OVERLAP_RATIO
+        and overlap_count >= MIN_TOKEN_OVERLAP_COUNT
+    )
+
+
 def passes_semantic_match_guard(
     entity_type: str,
     query_norm: str,
     match_text_norm: str,
     similarity: float,
     threshold: float,
+) -> bool:
+    return passes_semantic_match_guard_with_policy(
+        entity_type,
+        query_norm,
+        match_text_norm,
+        similarity,
+        threshold,
+        passes_token_overlap_legacy,
+    )
+
+
+def passes_semantic_match_guard_with_policy(
+    entity_type: str,
+    query_norm: str,
+    match_text_norm: str,
+    similarity: float,
+    threshold: float,
+    token_policy: Callable[[str, str, str], bool],
 ) -> bool:
     """Composite guard applied to a Tier 2b (semantic) candidate before accept.
 
@@ -316,7 +415,7 @@ def passes_semantic_match_guard(
     top:
 
     (a) Person -> passes_person_name_guard.
-    (b) Any multi-token pair -> passes_token_overlap_check (must share tokens),
+    (b) Any multi-token pair -> the supplied token policy (must share tokens),
         plus the distinctive-token guard for Organization/Project/Concept.
     (c) Short names (query <=2 tokens or <12 chars) -> require the embedding
         similarity to clear threshold by a 0.03 margin (short names embed
@@ -328,7 +427,7 @@ def passes_semantic_match_guard(
     q = query_norm.split()
     m = match_text_norm.split()
     if len(q) >= 2 and len(m) >= 2:
-        if not passes_token_overlap_check(query_norm, match_text_norm, entity_type):
+        if not token_policy(query_norm, match_text_norm, entity_type):
             return False
     if entity_type in ("Organization", "Project", "Concept"):
         if not passes_distinctive_token_check(query_norm, match_text_norm):
@@ -346,6 +445,7 @@ async def resolve_entity_multi_tier(
     entity_type: str,
     mode: str = "exact_alias",
     embed_fn: Optional[Callable[[str], Awaitable[Optional[List[float]]]]] = None,
+    resolution_caller: str = "resolution_primitives.resolve_entity_multi_tier",
 ) -> Tuple[Optional[str], float, str]:
     """Multi-tier resolution, guaranteed to return a LIVE uri.
 
@@ -359,7 +459,12 @@ async def resolve_entity_multi_tier(
     the match weaker, it makes the answer current.
     """
     uri, confidence, relationship = await _resolve_entity_multi_tier_raw(
-        conn, entity_name, entity_type, mode=mode, embed_fn=embed_fn
+        conn,
+        entity_name,
+        entity_type,
+        mode=mode,
+        embed_fn=embed_fn,
+        resolution_caller=resolution_caller,
     )
     if uri:
         live = await resolve_to_live_uri(conn, uri)
@@ -376,6 +481,7 @@ async def _resolve_entity_multi_tier_raw(
     entity_type: str,
     mode: str = "exact_alias",
     embed_fn: Optional[Callable[[str], Awaitable[Optional[List[float]]]]] = None,
+    resolution_caller: str = "resolution_primitives.resolve_entity_multi_tier",
 ) -> Tuple[Optional[str], float, str]:
     """Multi-tier entity resolution against entity_registry.
 
@@ -448,12 +554,47 @@ async def _resolve_entity_multi_tier_raw(
     )
     best_uri = None
     best_score = 0.0
+    shadow = start_attempt(
+        caller=resolution_caller,
+        engine="shared_multi_tier",
+        entity_type=entity_type,
+        query_norm=normalized,
+        active_policy="legacy",
+    )
 
     for c in candidates:
         cand_norm = c["normalized_text"]
         score = jaro_winkler_similarity(normalized, cand_norm)
+        if shadow.sampled and score >= threshold:
+            shadow_started = time.perf_counter_ns()
+            legacy_accepts = passes_token_overlap_legacy(
+                normalized, cand_norm, entity_type
+            )
+            strict_accepts = passes_token_overlap_strict(
+                normalized, cand_norm, entity_type
+            )
+            # These guards are common to the shared resolver regardless of
+            # which token-overlap policy is selected.
+            if entity_type == "Person":
+                common_accepts = passes_person_name_guard(normalized, cand_norm)
+                legacy_accepts = legacy_accepts and common_accepts
+                strict_accepts = strict_accepts and common_accepts
+            if entity_type in ("Organization", "Project", "Concept"):
+                common_accepts = passes_distinctive_token_check(
+                    normalized, cand_norm
+                )
+                legacy_accepts = legacy_accepts and common_accepts
+                strict_accepts = strict_accepts and common_accepts
+            shadow.observe_candidate(
+                uri=c["fuseki_uri"],
+                score=score,
+                tier="fuzzy",
+                legacy_accepts=legacy_accepts,
+                strict_accepts=strict_accepts,
+                elapsed_ns=time.perf_counter_ns() - shadow_started,
+            )
         if score >= threshold and score > best_score:
-            if not passes_token_overlap_check(normalized, cand_norm, entity_type):
+            if not passes_token_overlap_legacy(normalized, cand_norm, entity_type):
                 continue
             # Shared P1 guards (same as personal_ingest_api Tier 2a).
             if entity_type == "Person" and not passes_person_name_guard(normalized, cand_norm):
@@ -473,17 +614,41 @@ async def _resolve_entity_multi_tier_raw(
             best_uri = c["fuseki_uri"]
 
     if best_uri:
+        shadow.finish(
+            active_uri=best_uri,
+            active_outcome="fuzzy",
+            legacy_fallback="fallthrough_unobserved",
+            strict_fallback="fallthrough_unobserved",
+        )
         return best_uri, best_score, "related_to"
 
     if mode == "fuzzy":
+        shadow.finish(
+            active_uri=None,
+            active_outcome="unresolved",
+            legacy_fallback="unresolved",
+            strict_fallback="unresolved",
+        )
         return None, 0.0, "unresolved"
 
     # --- Tier 2b: Semantic (embedding similarity) ---
     if not embed_fn:
+        shadow.finish(
+            active_uri=None,
+            active_outcome="unresolved",
+            legacy_fallback="unresolved",
+            strict_fallback="unresolved",
+        )
         return None, 0.0, "unresolved"
 
     query_embedding = await embed_fn(normalized)
     if not query_embedding:
+        shadow.finish(
+            active_uri=None,
+            active_outcome="unresolved",
+            legacy_fallback="unresolved",
+            strict_fallback="unresolved",
+        )
         return None, 0.0, "unresolved"
 
     semantic_threshold = schema.semantic_threshold
@@ -509,15 +674,57 @@ async def _resolve_entity_multi_tier_raw(
         # Semantic candidate must clear the shared name-shape guards before we
         # accept it (matches personal_ingest_api Tier 2b).
         sem_norm = sem_row["normalized_text"] or ""
-        if sem_norm and not passes_semantic_match_guard(
-            entity_type, normalized, sem_norm,
-            float(sem_row["similarity"]), semantic_threshold,
-        ):
+        similarity = float(sem_row["similarity"])
+        legacy_accepts = not sem_norm or passes_semantic_match_guard_with_policy(
+            entity_type,
+            normalized,
+            sem_norm,
+            similarity,
+            semantic_threshold,
+            passes_token_overlap_legacy,
+        )
+        if shadow.sampled:
+            shadow_started = time.perf_counter_ns()
+            strict_accepts = not sem_norm or passes_semantic_match_guard_with_policy(
+                entity_type,
+                normalized,
+                sem_norm,
+                similarity,
+                semantic_threshold,
+                passes_token_overlap_strict,
+            )
+            shadow.observe_candidate(
+                uri=sem_row["fuseki_uri"],
+                score=similarity,
+                tier="semantic",
+                legacy_accepts=legacy_accepts,
+                strict_accepts=strict_accepts,
+                elapsed_ns=time.perf_counter_ns() - shadow_started,
+            )
+        if not legacy_accepts:
             logger.info(
                 "multi-tier Tier 2b REJECTED (name guard): %r vs %r (sim=%.3f)",
-                entity_name, sem_norm, float(sem_row["similarity"]),
+                entity_name, sem_norm, similarity,
+            )
+            shadow.finish(
+                active_uri=None,
+                active_outcome="unresolved",
+                legacy_fallback="unresolved",
+                strict_fallback="unresolved",
             )
             return None, 0.0, "unresolved"
-        return sem_row["fuseki_uri"], float(sem_row["similarity"]), "related_to"
+        shadow.finish(
+            active_uri=sem_row["fuseki_uri"],
+            active_outcome="semantic",
+            legacy_fallback="unresolved",
+            strict_fallback="unresolved",
+        )
+        return sem_row["fuseki_uri"], similarity, "related_to"
 
+    shadow.finish(
+        active_uri=None,
+        active_outcome="unresolved",
+        legacy_fallback="unresolved",
+        strict_fallback="unresolved",
+    )
     return None, 0.0, "unresolved"

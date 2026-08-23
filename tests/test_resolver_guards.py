@@ -5,7 +5,7 @@ No DB, no embeddings — these exercise the shared guard functions directly:
   - passes_person_name_guard        (api/resolution_primitives.py)
   - passes_distinctive_token_check  (api/resolution_primitives.py)
   - passes_semantic_match_guard     (api/resolution_primitives.py)
-  - passes_token_overlap_check      (api/personal_ingest_api.py — the rich
+  - passes_token_overlap_strict     (api/resolution_primitives.py — the rich
     Tier-2a gate that now composes the single-word, distinctive-token and
     person guards)
 
@@ -29,10 +29,10 @@ from api.resolution_primitives import (
     passes_person_name_guard,
     passes_distinctive_token_check,
     passes_semantic_match_guard,
+    passes_token_overlap_strict,
     normalize_entity_text as norm,
     jaro_winkler_similarity as jw,
 )
-from api.personal_ingest_api import passes_token_overlap_check
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def test_person_guard_boundary_wilshaw_wilson():
 
 def test_person_guard_single_vs_single_defers_true():
     """Single vs single returns True — the single-word JW>=0.95 rule (in
-    passes_token_overlap_check) is the gate for those, not this guard."""
+    passes_token_overlap_strict) is the gate for those, not this guard."""
     assert passes_person_name_guard("kevin", "kevan") is True
 
 
@@ -113,7 +113,7 @@ def test_distinctive_identity_passes():
 
 
 # ---------------------------------------------------------------------------
-# passes_token_overlap_check — the composed Tier-2a gate
+# passes_token_overlap_strict — the composed Tier-2a gate
 # (single-word guard + distinctive rule + person guard + count/ratio)
 # ---------------------------------------------------------------------------
 
@@ -144,14 +144,14 @@ TOK_PASS = [
 
 @pytest.mark.parametrize("a,b,etype,reason", TOK_REJECT)
 def test_token_overlap_check_rejects(a, b, etype, reason):
-    assert passes_token_overlap_check(norm(a), norm(b), etype) is False, (
+    assert passes_token_overlap_strict(norm(a), norm(b), etype) is False, (
         f"expected REJECT [{etype}] {a!r} vs {b!r} ({reason})"
     )
 
 
 @pytest.mark.parametrize("a,b,etype,reason", TOK_PASS)
 def test_token_overlap_check_passes(a, b, etype, reason):
-    assert passes_token_overlap_check(norm(a), norm(b), etype) is True, (
+    assert passes_token_overlap_strict(norm(a), norm(b), etype) is True, (
         f"expected PASS [{etype}] {a!r} vs {b!r} ({reason})"
     )
 

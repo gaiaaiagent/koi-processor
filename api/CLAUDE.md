@@ -23,7 +23,7 @@
 
 **Example:** `JW("benjamin life", "benjamin neal") = 0.9203 ≥ threshold 0.92` → false merge.
 
-**Fix (commit `8c067644`):** Added last-name gate in `passes_token_overlap_check()` (~line 476):
+**Fix (commit `8c067644`):** Added last-name gate in the policy now named `passes_token_overlap_strict()`:
 - For 2-token names where `require_token_overlap=False`, requires `JW(last_token_1, last_token_2) >= 0.75`
 - "life" vs "neal" → JW ≈ 0.4 < 0.75 → **rejected**
 - "life" vs "life" (Ben Life / Benjamin Life) → JW = 1.0 → **still passes**

@@ -33,9 +33,11 @@ import pytest
 from api.personal_ingest_api import (
     _extract_leading_date,
     normalize_entity_text,
-    passes_token_overlap_check,
 )
-from api.resolution_primitives import passes_distinctive_token_check
+from api.resolution_primitives import (
+    passes_distinctive_token_check,
+    passes_token_overlap_strict,
+)
 
 
 # Real pairs taken from entity_rid_mappings on 2026-08-22.
@@ -51,7 +53,7 @@ COLLAPSE_PAIRS = [
 
 @pytest.mark.parametrize("a,b,label", COLLAPSE_PAIRS)
 def test_different_dates_do_not_merge(a, b, label):
-    assert not passes_token_overlap_check(
+    assert not passes_token_overlap_strict(
         normalize_entity_text(a), normalize_entity_text(b), "Meeting"
     ), f"{label}: these are different meetings and must not merge"
 
@@ -60,7 +62,7 @@ def test_the_same_meeting_still_merges():
     """The accept-case. A guard that rejects everything also passes a
     rejection-only suite, which is why this test is not optional."""
     t = normalize_entity_text("2026-01-28 Pete Corke Meeting")
-    assert passes_token_overlap_check(t, t, "Meeting")
+    assert passes_token_overlap_strict(t, t, "Meeting")
 
 
 def test_same_date_different_titles_falls_through():
@@ -69,7 +71,7 @@ def test_same_date_different_titles_falls_through():
     auto-rejected by this guard."""
     a = normalize_entity_text("2026-01-28 Alpha Meeting")
     b = normalize_entity_text("2026-01-28 Beta Meeting")
-    assert passes_token_overlap_check(a, b, "Meeting")
+    assert passes_token_overlap_strict(a, b, "Meeting")
 
 
 @pytest.mark.parametrize("a,b,label", COLLAPSE_PAIRS)
@@ -77,7 +79,7 @@ def test_guard_is_scoped_to_meeting(a, b, label):
     """Non-Meeting types must be unaffected. Without this, a regression that
     applied the date guard everywhere would look like a pass above."""
     na, nb = normalize_entity_text(a), normalize_entity_text(b)
-    assert passes_token_overlap_check(na, nb, "Concept"), (
+    assert passes_token_overlap_strict(na, nb, "Concept"), (
         "the date guard leaked into Concept resolution"
     )
 
@@ -115,7 +117,7 @@ def test_absent_date_never_rejects():
     because the surrounding logic may legitimately reject for other reasons.
     """
     a, b = normalize_entity_text("Regen Network Sync"), normalize_entity_text("Regen Network Standup")
-    assert passes_token_overlap_check(a, b, "Meeting") == passes_token_overlap_check(a, b, "Concept")
+    assert passes_token_overlap_strict(a, b, "Meeting") == passes_token_overlap_strict(a, b, "Concept")
 
 
 def test_one_sided_date_behaves_identically_across_types():
@@ -124,6 +126,6 @@ def test_one_sided_date_behaves_identically_across_types():
     pre-existing rejection logic — the check that stopped me misreading an
     unrelated rejection as my own bug."""
     a, b = normalize_entity_text("2026-01-28 Sync"), normalize_entity_text("Sync")
-    results = {t: passes_token_overlap_check(a, b, t)
+    results = {t: passes_token_overlap_strict(a, b, t)
                for t in ("Meeting", "Concept", "Project", "Person")}
     assert len(set(results.values())) == 1, f"Meeting diverged from its peers: {results}"

@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import logging
+import time
 import uuid
 from pathlib import Path as _VaultPath
 from metaphone import doublemetaphone
@@ -155,15 +156,20 @@ from api.entity_schema import (
 )
 
 # Shared resolver name guards (single source of truth in resolution_primitives).
-# Wired into Tier 1.5 (Person), Tier 2a (via passes_token_overlap_check) and
+# Wired into Tier 1.5 (Person), Tier 2a (via passes_token_overlap_strict) and
 # Tier 2b (via passes_semantic_match_guard) below.
 from api.resolution_primitives import (
     GENERIC_NAME_TOKENS,
+    extract_leading_meeting_date,
     passes_person_name_guard,
     passes_distinctive_token_check,
     passes_semantic_match_guard,
+    passes_semantic_match_guard_with_policy,
+    passes_token_overlap_legacy,
+    passes_token_overlap_strict,
     resolve_to_live_uri,
 )
+from api.resolver_shadow import emitter_status, start_attempt, shutdown_emitter
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -591,36 +597,9 @@ async def generate_embedding(text: str) -> Optional[List[float]]:
 # Entity Resolution
 # =============================================================================
 
-_LEADING_DATE_RE = re.compile(r'^\s*(\d{4})[-\s](\d{2})[-\s](\d{2})(?![\d])')
-
-
-def _extract_leading_date(text: str) -> Optional[str]:
-    """Return a leading YYYY-MM-DD from a title, or None.
-
-    Matches BOTH the raw form ('2026-01-28 Pete Corke Meeting') and the
-    post-normalization form ('2026 01 28 pete corke meeting'), because
-    normalize_entity_text replaces '-' with ' ' before this ever runs and the
-    guard must work on either.
-
-    LEADING only, deliberately. 335 of 337 meeting notes carry the date at the
-    front of the title, so a leading match covers the corpus; scanning anywhere
-    in the string would match dates that appear in a subject ("2026 budget
-    review") and reject two meetings that are genuinely the same series. A title
-    with several dates yields the first -- a simplification, and any pair it
-    misfires on falls through to the existing matching logic rather than being
-    rejected, because the caller only acts when BOTH sides parse.
-    """
-    if not text:
-        return None
-    m = _LEADING_DATE_RE.match(text)
-    if not m:
-        return None
-    year, month, day = m.group(1), m.group(2), m.group(3)
-    # Reject impossible dates rather than treating them as a discriminator: a
-    # bad parse that yields a confident-looking value is worse than no value.
-    if not (1 <= int(month) <= 12 and 1 <= int(day) <= 31):
-        return None
-    return f"{year}-{month}-{day}"
+# Compatibility name retained for existing Meeting identity tests and callers.
+# The implementation now lives with the strict policy it protects.
+_extract_leading_date = extract_leading_meeting_date
 
 
 def normalize_entity_text(text: str) -> str:
@@ -760,104 +739,6 @@ def compute_token_overlap(text1: str, text2: str) -> Tuple[float, int]:
 
     overlap_ratio = overlap_count / shorter_len
     return overlap_ratio, overlap_count
-
-
-def passes_token_overlap_check(text1: str, text2: str, entity_type: str) -> bool:
-    """
-    Check if two texts pass the token overlap requirement.
-
-    For types with require_token_overlap=True in schema:
-    - At least MIN_TOKEN_OVERLAP_RATIO of shorter text's tokens match
-    - At least MIN_TOKEN_OVERLAP_COUNT tokens match (for multi-word entities)
-
-    Types with require_token_overlap=False bypass multi-word token overlap,
-    but single-word entities ALWAYS require JW >= 0.95 to prevent false merges
-    like "Microsoft" → "Miro" or "Marie" → "Marianne".
-    """
-    # Single-word guard applies to ALL types (before schema bypass)
-    # This catches short-name false merges regardless of entity type config
-    tokens1 = text1.lower().split()
-    tokens2 = text2.lower().split()
-    if len(tokens1) == 1 or len(tokens2) == 1:
-        jw = jaro_winkler_similarity(text1.lower(), text2.lower())
-        if jw < 0.95:
-            return False
-        # Strict-prefix-extension guard: when one input is a strict prefix of
-        # the other AND they differ by ≥2 characters, the longer one's suffix
-        # is a distinctive token (e.g. "MOVE37" → "MOVE37XR" — XR is a product
-        # variant, not the same entity; "Regen" → "RegenOS" — OS denotes a
-        # different software product). Without this guard, JW peaks at 0.95+
-        # for prefix-extension pairs and the merge fires.
-        s1, s2 = text1.lower(), text2.lower()
-        if len(s1) != len(s2):
-            shorter, longer = (s1, s2) if len(s1) < len(s2) else (s2, s1)
-            if longer.startswith(shorter) and len(longer) - len(shorter) >= 2:
-                return False
-        return True
-
-    # Distinctive-token guard for Organization/Project/Concept. Both inputs are
-    # multi-token here (single-token cases returned above). Rejects names whose
-    # distinctive (non-generic) tokens are DISJOINT ("University of Guelph" vs
-    # "University of Melbourne") or a strict token-level extension ("DWeb Camp
-    # Cascadia" vs "DWeb Camp"). Shared implementation in resolution_primitives.
-    if entity_type in ("Organization", "Project", "Concept"):
-        if not passes_distinctive_token_check(text1, text2):
-            return False
-
-    # Date guard for Meeting. Two meetings on different dates are different
-    # meetings, full stop.
-    #
-    # WHY MEETING IS NOT IN THE TUPLE ABOVE: it was tried and it does not work.
-    # passes_distinctive_token_check catches one name being a qualified
-    # EXTENSION of another; two titles differing only by date have distinct
-    # tokens on BOTH sides, so it never fires. Measured 2026-08-22 against the
-    # repo's own implementation: it ACCEPTS all three known collapse pairs,
-    # including '2026 01 30 parteck meeting' vs '2026 01 28 pete corke meeting'
-    # -- two unrelated meetings.
-    #
-    # The date is the discriminator, and normalize_entity_text has already
-    # destroyed it as such: .replace('-', ' ') at :589 turns 2026-01-28 into
-    # three ordinary tokens that then INFLATE the Jaro-Winkler prefix bonus and
-    # count toward token overlap. So the very field that separates two meetings
-    # is what makes them look alike. Measured damage before this guard existed:
-    # entity_rid_mappings held 70 Meeting rows collapsed onto 27 canonical URIs
-    # (2.59x), and 93 of 163 attended edges pointed at a meeting whose date
-    # disagreed with their source note.
-    #
-    # Falls through when either side has no parseable date -- never reject on
-    # absence, only on disagreement.
-    if entity_type == "Meeting":
-        d1, d2 = _extract_leading_date(text1), _extract_leading_date(text2)
-        if d1 and d2 and d1 != d2:
-            return False
-
-    # Get schema-driven config for multi-word token overlap
-    schema = get_schema_for_type(entity_type)
-    if not schema.require_token_overlap:
-        # Person: require BOTH first- and last-token JW>=0.85 (stricter than the
-        # legacy last-token-only 0.75 rule) so "Kevin Owocki" != "Kevin Triplett"
-        # and "Carol Newell" != "Carol Anne". Registered aliases are handled at
-        # Tier 1.1 before this runs. Shared guard in resolution_primitives.
-        if entity_type == "Person":
-            return passes_person_name_guard(text1, text2)
-        # Other bypass types (Concept, Question, Claim, Intent): keep the 2-token
-        # family-name guard so "Benjamin Life" != "Benjamin Neal".
-        if len(tokens1) == 2 and len(tokens2) == 2:
-            last_jw = jaro_winkler_similarity(tokens1[-1], tokens2[-1])
-            if last_jw < 0.75:
-                return False
-        return True  # Schema says bypass multi-word token overlap check
-
-    overlap_ratio, overlap_count = compute_token_overlap(text1, text2)
-
-    # For multi-word entities, require token overlap
-    if overlap_ratio < MIN_TOKEN_OVERLAP_RATIO:
-        return False
-
-    if overlap_count < MIN_TOKEN_OVERLAP_COUNT:
-        return False
-
-    return True
 
 
 # =============================================================================
@@ -1138,6 +1019,7 @@ async def resolve_entity(
     context: Optional[ResolutionContext] = None,
     skip_fuzzy: bool = False,
     skip_cross_type: bool = False,
+    resolution_caller: str = "personal_ingest_api.resolve_entity",
 ) -> Tuple[CanonicalEntity, bool]:
     """
     Resolve an entity against the knowledge base.
@@ -1158,6 +1040,8 @@ async def resolve_entity(
         skip_cross_type: When true, suppress ONLY the Tier 1.1b type-agnostic
             cross-type dedup fallback (see register-entity ``force_type``). All
             other tiers run normally.
+        resolution_caller: Stable entrypoint label for behavior-neutral shadow
+            measurement. It has no effect on the returned resolution.
 
     Returns: (CanonicalEntity, is_new)
     """
@@ -1366,17 +1250,50 @@ async def resolve_entity(
 
     best_match = None
     best_score = 0.0
+    shadow = start_attempt(
+        caller=resolution_caller,
+        engine="personal_ingest",
+        entity_type=entity.type or "",
+        query_norm=normalized,
+        active_policy="strict_fuzzy+legacy_semantic",
+    )
 
     for candidate in candidates:
         score = jaro_winkler_similarity(normalized, candidate['normalized_text'])
-        if score >= threshold and score > best_score:
-            cand_norm = candidate['normalized_text']
+        cand_norm = candidate['normalized_text']
 
+        # The shadow evaluator reuses this candidate and score. It never repeats
+        # the registry scan or embedding query.
+        length_rejected = False
+        if score >= threshold:
+            len_shorter = min(len(normalized), len(cand_norm))
+            len_longer = max(len(normalized), len(cand_norm))
+            length_rejected = bool(
+                len_shorter > 0
+                and len_longer / len_shorter > 1.8
+                and score < 0.95
+            )
+            if shadow.sampled and not length_rejected:
+                shadow_started = time.perf_counter_ns()
+                shadow.observe_candidate(
+                    uri=candidate['fuseki_uri'],
+                    score=score,
+                    tier="fuzzy",
+                    legacy_accepts=passes_token_overlap_legacy(
+                        normalized, cand_norm, entity.type
+                    ),
+                    strict_accepts=passes_token_overlap_strict(
+                        normalized, cand_norm, entity.type
+                    ),
+                    elapsed_ns=time.perf_counter_ns() - shadow_started,
+                )
+
+        if score >= threshold and score > best_score:
             # Length ratio guard: reject if candidate is much longer (prefix-match inflation)
             # e.g. "regen ai" (8) vs "regen ai bd sprint scope" (24) → ratio 3.0
             len_shorter = min(len(normalized), len(cand_norm))
             len_longer = max(len(normalized), len(cand_norm))
-            if len_shorter > 0 and len_longer / len_shorter > 1.8 and score < 0.95:
+            if length_rejected:
                 logger.info(f"Fuzzy match REJECTED (length ratio {len_longer/len_shorter:.1f}x): "
                            f"{entity.name} vs {candidate['entity_text']} | JW={score:.3f}")
                 continue
@@ -1384,13 +1301,19 @@ async def resolve_entity(
             # Additional check: token overlap for Organization/Project/Concept
             overlap_ratio, overlap_count = compute_token_overlap(normalized, cand_norm)
             logger.info(f"Fuzzy candidate: {entity.name} vs {candidate['entity_text']} | JW={score:.3f} | overlap={overlap_count} ({overlap_ratio:.2f})")
-            if not passes_token_overlap_check(normalized, cand_norm, entity.type):
+            if not passes_token_overlap_strict(normalized, cand_norm, entity.type):
                 logger.info(f"Fuzzy match REJECTED due to low token overlap: {entity.name} vs {candidate['entity_text']}")
                 continue
             best_score = score
             best_match = candidate
 
     if best_match:
+        shadow.finish(
+            active_uri=best_match['fuseki_uri'],
+            active_outcome="fuzzy",
+            legacy_fallback="fallthrough_unobserved",
+            strict_fallback="fallthrough_unobserved",
+        )
         return CanonicalEntity(
             name=best_match['entity_text'],
             uri=best_match['fuseki_uri'],
@@ -1444,10 +1367,34 @@ async def resolve_entity(
                 # multi-word names. Reject those and fall through to Tier 3.
                 match_norm = normalize_entity_text(semantic_match['entity_text'])
                 match_type = semantic_match['entity_type'] or entity.type
-                if not passes_semantic_match_guard(
-                    match_type, normalized, match_norm,
-                    float(semantic_match['similarity']), semantic_threshold,
-                ):
+                similarity = float(semantic_match['similarity'])
+                legacy_accepts = passes_semantic_match_guard_with_policy(
+                    match_type,
+                    normalized,
+                    match_norm,
+                    similarity,
+                    semantic_threshold,
+                    passes_token_overlap_legacy,
+                )
+                if shadow.sampled:
+                    shadow_started = time.perf_counter_ns()
+                    strict_accepts = passes_semantic_match_guard_with_policy(
+                        match_type,
+                        normalized,
+                        match_norm,
+                        similarity,
+                        semantic_threshold,
+                        passes_token_overlap_strict,
+                    )
+                    shadow.observe_candidate(
+                        uri=semantic_match['fuseki_uri'],
+                        score=similarity,
+                        tier="semantic",
+                        legacy_accepts=legacy_accepts,
+                        strict_accepts=strict_accepts,
+                        elapsed_ns=time.perf_counter_ns() - shadow_started,
+                    )
+                if not legacy_accepts:
                     logger.info(
                         f"Tier 2b REJECTED (name guard): '{entity.name}' -> "
                         f"'{semantic_match['entity_text']}' "
@@ -1456,6 +1403,12 @@ async def resolve_entity(
                 else:
                     logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
                                f"(similarity: {semantic_match['similarity']:.3f})")
+                    shadow.finish(
+                        active_uri=semantic_match['fuseki_uri'],
+                        active_outcome="semantic",
+                        legacy_fallback="create_unobserved",
+                        strict_fallback="create_unobserved",
+                    )
                     return CanonicalEntity(
                         name=semantic_match['entity_text'],
                         uri=semantic_match['fuseki_uri'],
@@ -1467,6 +1420,13 @@ async def resolve_entity(
 
     # Tier 3: Create new entity
     new_uri = generate_entity_uri(entity.name, entity.type)
+    create_outcome = f"create:{new_uri}"
+    shadow.finish(
+        active_uri=new_uri,
+        active_outcome="create",
+        legacy_fallback=create_outcome,
+        strict_fallback=create_outcome,
+    )
 
     return CanonicalEntity(
         name=entity.name,
@@ -2061,6 +2021,7 @@ async def shutdown():
     global db_pool
     if db_pool:
         await db_pool.close()
+    shutdown_emitter()
 
 
 async def ensure_schema(conn: asyncpg.Connection, embedding_dim: int = 1536):
@@ -2494,6 +2455,9 @@ async def health_check(request: Request):
                 "tier2_semantic": embedding_provider is not None and ENABLE_SEMANTIC_MATCHING,
                 "tier3_create": True
             },
+            # Behavior-neutral policy measurement. Includes the runtime kill
+            # switch state, sample rate, bounded-queue depth, and dropped count.
+            "resolver_shadow": emitter_status(),
             "null_embed_fact_count_db": null_embed_count_db,
             # actionable subset: excludes superseded rows (valid_to set). The _db
             # figure above is the honest total — see the docstring.
@@ -2911,7 +2875,12 @@ async def ingest_extraction(request: IngestRequest):
                         ) if (global_people or entity_people or global_orgs or entity_orgs or
                               (request.context and request.context.project)) else request.context
 
-                        canonical, is_new = await resolve_entity(conn, entity, context_for_entity)
+                        canonical, is_new = await resolve_entity(
+                            conn,
+                            entity,
+                            context_for_entity,
+                            resolution_caller="personal_ingest_api.ingest",
+                        )
                         logger.info(f"Resolved: {canonical.name} -> {canonical.uri} (new={is_new})")
                         canonical_entities.append(canonical)
                         entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
@@ -3348,7 +3317,12 @@ async def resolve_entity_get(
     entity = ExtractedEntity(name=label, type=type_hint or "")
     persisted = False
     async with db_pool.acquire() as conn:
-        canonical, is_new = await resolve_entity(conn, entity, context=None)
+        canonical, is_new = await resolve_entity(
+            conn,
+            entity,
+            context=None,
+            resolution_caller="personal_ingest_api.entity_resolve_get",
+        )
 
         if canonical is None:
             return {"candidates": [], "is_new": False, "persisted": False}
@@ -3453,7 +3427,12 @@ async def resolve_entity_post(request: ResolveRequest):
     persisted = False
     limit = request.limit if hasattr(request, "limit") and request.limit else 5
     async with db_pool.acquire() as conn:
-        canonical, is_new = await resolve_entity(conn, entity, request.context)
+        canonical, is_new = await resolve_entity(
+            conn,
+            entity,
+            request.context,
+            resolution_caller="personal_ingest_api.entity_resolve_post",
+        )
 
         if canonical is None:
             return {"candidates": [], "is_new": False, "persisted": False}
@@ -4091,6 +4070,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 entity,
                 skip_fuzzy=request.exact_only,
                 skip_cross_type=request.force_type,
+                resolution_caller="personal_ingest_api.register_vault_entity",
             )
 
             # Backfill vault_rid / vault_path for alias-only updates.

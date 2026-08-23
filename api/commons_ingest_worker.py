@@ -180,7 +180,11 @@ class CommonsIngestWorker:
                         type=ent_data.get("type", "Concept"),
                     )
 
-                    canonical, is_new = await resolve_entity(conn, entity)
+                    canonical, is_new = await resolve_entity(
+                        conn,
+                        entity,
+                        resolution_caller="commons_ingest_worker.ingest",
+                    )
 
                     if is_new:
                         # New entity — no match found, already created by resolve_entity

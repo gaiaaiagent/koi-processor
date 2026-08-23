@@ -64,7 +64,12 @@ async def cross_reference_resolver(ctx: OctoHandlerContext, kobj: KnowledgeObjec
 
         async with ctx.pool.acquire() as conn:
             local_uri, confidence, relationship = await resolve_entity_multi_tier(
-                conn, entity_name, entity_type, mode=mode, embed_fn=embed_fn,
+                conn,
+                entity_name,
+                entity_type,
+                mode=mode,
+                embed_fn=embed_fn,
+                resolution_caller="bundle_handlers.cross_reference_resolver",
             )
 
     if not local_uri:

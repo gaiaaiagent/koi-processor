@@ -913,7 +913,11 @@ def create_router(pool, caps):
                         type=ent.get("type", "Concept"),
                         confidence=ent.get("confidence") if ent.get("confidence") is not None else 0.9,
                     )
-                    canonical, is_new = await resolve_entity(conn, extracted)
+                    canonical, is_new = await resolve_entity(
+                        conn,
+                        extracted,
+                        resolution_caller="web_router.process",
+                    )
                     entities_resolved += 1
                     if is_new:
                         await store_new_entity(conn, extracted, canonical, preview.rid or body.url, source="web_process")
@@ -999,7 +1003,11 @@ def create_router(pool, caps):
                     type=ent.get("type", "Concept"),
                     confidence=ent.get("confidence") if ent.get("confidence") is not None else 0.9,
                 )
-                canonical, is_new = await resolve_entity(conn, extracted)
+                canonical, is_new = await resolve_entity(
+                    conn,
+                    extracted,
+                    resolution_caller="web_router.ingest",
+                )
                 entities_resolved += 1
                 if is_new:
                     doc_rid = submission["rid"] if submission else body.url
@@ -1640,6 +1648,7 @@ def create_router(pool, caps):
                                 extracted,
                                 context=None,
                                 skip_fuzzy=idx in renamed_indices,
+                                resolution_caller="web_router.batch_ingest",
                             )
                             canonical_uri = canonical.uri
                             was_new = bool(is_new)

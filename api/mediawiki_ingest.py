@@ -273,7 +273,11 @@ async def process_entity_bearing_page(
 
     # Resolve the page's primary entity
     page_entity = ExtractedEntity(name=title, type=bkc_type)
-    canonical, is_new = await resolve_entity(conn, page_entity)
+    canonical, is_new = await resolve_entity(
+        conn,
+        page_entity,
+        resolution_caller="mediawiki_ingest.page",
+    )
 
     if is_new:
         await store_new_entity(conn, page_entity, canonical, source_rid, source="mediawiki_import", origin="import")
@@ -325,7 +329,11 @@ async def process_entity_bearing_page(
     for se in page.get("structural_edges", []):
         target_type = se.get("target_type_hint", "Concept") or "Concept"
         target_entity = ExtractedEntity(name=se["target_title"], type=target_type)
-        target_canonical, target_is_new = await resolve_entity(conn, target_entity)
+        target_canonical, target_is_new = await resolve_entity(
+            conn,
+            target_entity,
+            resolution_caller="mediawiki_ingest.structural_edge",
+        )
 
         if target_is_new:
             await store_new_entity(
@@ -390,7 +398,11 @@ async def process_entity_bearing_page(
     # Resolve editorial edges (lower confidence, promote if target resolves to existing)
     for ee in page.get("editorial_edges", []):
         target_entity = ExtractedEntity(name=ee["target_title"], type="Concept")
-        target_canonical, target_is_new = await resolve_entity(conn, target_entity)
+        target_canonical, target_is_new = await resolve_entity(
+            conn,
+            target_entity,
+            resolution_caller="mediawiki_ingest.editorial_edge",
+        )
 
         if target_is_new:
             await store_new_entity(
