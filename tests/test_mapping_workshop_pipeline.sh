@@ -7,6 +7,8 @@
 # Checks: ~15 steps covering extraction, creation, routing, pool pledge, claim bridge
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/live_write_shell_guard.sh"
+live_write_begin
 BASE_URL="${BASE_URL:-http://127.0.0.1:8351}"
 PASS=0
 FAIL=0
@@ -46,9 +48,9 @@ TRANSCRIPT
 
 EXTRACT_RESP=$(curl -sf -X POST "${BASE_URL}/commitments/extract-from-transcript" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --arg text "$TRANSCRIPT_TEXT" '{
+  -d "$(jq -n --arg text "$TRANSCRIPT_TEXT" --arg run "$KOI_TEST_RUN_ID" '{
     document_text: $text,
-    source_document: "test-mapping-workshop-001",
+    source_document: ("test-mapping-workshop-" + $run + "-extract"),
     bioregion: "Salish Sea",
     confidence_threshold: 0.5
   }')" || echo '{"candidates":[]}')
@@ -76,15 +78,20 @@ check "Candidate has validity_start/validity_end fields" [ "$VALIDITY_CHECK" = "
 # Try to create from the first candidate with auto_create
 AUTO_CREATE_RESP=$(curl -sf -X POST "${BASE_URL}/commitments/extract-from-transcript" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --arg text "$TRANSCRIPT_TEXT" '{
+  -d "$(jq -n --arg text "$TRANSCRIPT_TEXT" --arg run "$KOI_TEST_RUN_ID" '{
     document_text: $text,
-    source_document: "test-mapping-workshop-auto",
+    source_document: ("test-mapping-workshop-" + $run + "-auto"),
     bioregion: "Salish Sea",
     confidence_threshold: 0.5,
     auto_create: true
   }')" || echo '{"auto_created":null}')
 
 AUTO_CREATED=$(echo "$AUTO_CREATE_RESP" | jq '.auto_created // []')
+while IFS= read -r commitment_rid; do
+  live_write_record commitment_rid "$commitment_rid"
+done < <(echo "$AUTO_CREATED" | jq -r '.[] | select(.status == "created") | .commitment_rid // empty')
+live_write_record source_document "test-mapping-workshop-$KOI_TEST_RUN_ID-extract"
+live_write_record source_document "test-mapping-workshop-$KOI_TEST_RUN_ID-auto"
 AUTO_COUNT=$(echo "$AUTO_CREATED" | jq 'length')
 echo ""
 echo "Auto-create results: ${AUTO_COUNT} attempts"
@@ -131,7 +138,7 @@ if [ "$CREATED_COUNT" -ge 1 ]; then
     FIRST_POOL_RID=$(echo "$POOLS_RESP" | jq -r '.[0].pool_rid')
     PLEDGE_RESP=$(curl -s -X POST "${BASE_URL}/pools/${FIRST_POOL_RID}/pledge" \
       -H "Content-Type: application/json" \
-      -d "$(jq -n --arg crid "$FIRST_CREATED_RID" '{commitment_rid: $crid, actor: "test-pipeline"}')")
+      -d "$(jq -n --arg crid "$FIRST_CREATED_RID" --arg run "$KOI_TEST_RUN_ID" '{commitment_rid: $crid, actor: ("test-pipeline-" + $run)}')")
     PLEDGE_OK=$(echo "$PLEDGE_RESP" | jq -r '.pool_rid // empty')
     PLEDGE_ERROR=$(echo "$PLEDGE_RESP" | jq -r '.detail // empty')
     # Accept success or "already pledged" / state conflict (idempotent re-run)
@@ -155,7 +162,7 @@ if [ "$CREATED_COUNT" -ge 1 ]; then
   if [ "$CURRENT_STATE" = "PROPOSED" ]; then
     VERIFY_RESP=$(curl -sf -X PATCH "${BASE_URL}/commitments/${FIRST_CREATED_RID}/state" \
       -H "Content-Type: application/json" \
-      -d '{"new_state": "VERIFIED", "actor": "test-pipeline", "reason": "test verification"}' || echo '{"error":true}')
+      -d "$(jq -n --arg run "$KOI_TEST_RUN_ID" '{new_state: "VERIFIED", actor: ("test-pipeline-" + $run), reason: ("test verification " + $run)}')" || echo '{"error":true}')
     VERIFY_STATE=$(echo "$VERIFY_RESP" | jq -r '.state // empty')
     check "State transition to VERIFIED" [ "$VERIFY_STATE" = "VERIFIED" ]
   else
@@ -166,8 +173,9 @@ if [ "$CREATED_COUNT" -ge 1 ]; then
   # --- 11. Create claim from verified commitment ---
   CLAIM_RESP=$(curl -sf -X POST "${BASE_URL}/commitments/${FIRST_CREATED_RID}/create-claim" \
     -H "Content-Type: application/json" \
-    -d '{"actor": "test-pipeline"}' || echo '{"error":true}')
+    -d "$(jq -n --arg run "$KOI_TEST_RUN_ID" '{actor: ("test-pipeline-" + $run)}')" || echo '{"error":true}')
   CLAIM_RID=$(echo "$CLAIM_RESP" | jq -r '.claim_rid // empty')
+  live_write_record claim_rid "$CLAIM_RID"
   check "Create claim from commitment" [ -n "$CLAIM_RID" ]
 
   # --- 12. Claim has source_commitment_rid in metadata ---

@@ -16,6 +16,10 @@
 
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/live_write_shell_guard.sh"
+live_write_begin
+RUN_ANCHOR="${RUN_ANCHOR:-0}"
+
 BASE_URL="${BASE_URL:-http://localhost:8351}"
 PASS=0
 FAIL=0
@@ -129,9 +133,9 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 1: Create Evidence entity ---"
 
-EVIDENCE_NAME="Steel Thread Test Evidence $(date +%s)"
-EVIDENCE_VAULT_RID="orn:obsidian.entity:Evidence/steel-thread-test-$(date +%s)"
-EVIDENCE_VAULT_PATH="Evidence/steel-thread-test-$(date +%s).md"
+EVIDENCE_NAME="Steel Thread Test Evidence $KOI_TEST_RUN_ID"
+EVIDENCE_VAULT_RID="orn:obsidian.entity:Evidence/steel-thread-test-$KOI_TEST_RUN_ID"
+EVIDENCE_VAULT_PATH="Evidence/steel-thread-test-$KOI_TEST_RUN_ID.md"
 
 REGISTER_RESP=$(curl -sf -X POST "$BASE_URL/register-entity" \
     -H "Content-Type: application/json" \
@@ -140,7 +144,7 @@ REGISTER_RESP=$(curl -sf -X POST "$BASE_URL/register-entity" \
         \"vault_path\": \"$EVIDENCE_VAULT_PATH\",
         \"entity_type\": \"Evidence\",
         \"name\": \"$EVIDENCE_NAME\",
-        \"content_hash\": \"steel-thread-$(date +%s)\",
+        \"content_hash\": \"steel-thread-$KOI_TEST_RUN_ID\",
         \"visibility_scope\": \"public\",
         \"frontmatter\": {
             \"@type\": \"Evidence\",
@@ -150,6 +154,7 @@ REGISTER_RESP=$(curl -sf -X POST "$BASE_URL/register-entity" \
     }" 2>/dev/null || echo '{"success":false}')
 
 EVIDENCE_URI=$(echo "$REGISTER_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("canonical_uri",""))' 2>/dev/null || echo "")
+live_write_record entity_uri "$EVIDENCE_URI"
 IS_NEW=$(echo "$REGISTER_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(str(d.get("is_new",False)).lower())' 2>/dev/null || echo "false")
 
 check "Evidence entity registered" "$([ -n "$EVIDENCE_URI" ] && echo true || echo false)"
@@ -168,7 +173,7 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 2: Create claim ---"
 
-CLAIM_STATEMENT="Steel Thread Phase A test: The Salish Sea Knowledge Garden demonstrates bioregional knowledge commoning practices including federation, consent-aware data governance, and community-driven entity curation across four connected nodes."
+CLAIM_STATEMENT="Steel Thread Phase A test $KOI_TEST_RUN_ID: The Salish Sea Knowledge Garden demonstrates bioregional knowledge commoning practices including federation, consent-aware data governance, and community-driven entity curation across four connected nodes."
 
 ABOUT_URI_FIELD=""
 if [ -n "$ABOUT_URI" ]; then
@@ -185,12 +190,14 @@ CLAIM_RESP=$(curl -sf -X POST "$BASE_URL/claims/" \
         \"metadata\": {
             \"methodology\": \"steel_thread_phase_a\",
             \"test_run\": true,
+            \"test_run_id\": \"$KOI_TEST_RUN_ID\",
             \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
         },
         \"created_by\": \"steel-thread-test\"
     }" 2>/dev/null || echo '{}')
 
 CLAIM_RID=$(echo "$CLAIM_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("claim_rid",""))' 2>/dev/null || echo "")
+live_write_record claim_rid "$CLAIM_RID"
 CLAIM_VERIFICATION=$(echo "$CLAIM_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("verification",""))' 2>/dev/null || echo "")
 
 check "Claim created" "$([ -n "$CLAIM_RID" ] && echo true || echo false)"
@@ -325,7 +332,7 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 6: Anchor to Regen testnet ---"
 
-if [ "$READY" = "true" ]; then
+if [ "$READY" = "true" ] && [ "$RUN_ANCHOR" = "1" ]; then
     # Anchor call may take up to 30s (polling for tx confirmation)
     ANCHOR_RESP=$(curl -sf --max-time 60 -X POST "$BASE_URL/claims/$CLAIM_RID/anchor" 2>/dev/null || echo '{}')
     ANCHOR_STATUS=$?
@@ -354,7 +361,7 @@ if [ "$READY" = "true" ]; then
         echo "  Response: $ANCHOR_RESP"
     fi
 else
-    skip "Anchor broadcast" "regen CLI not available or prepare-anchor failed"
+    skip "Anchor broadcast" "RUN_ANCHOR is not 1, regen CLI unavailable, or prepare-anchor failed"
     skip "Anchor confirmed" "skipped due to above"
 fi
 echo ""

@@ -18,6 +18,10 @@
 
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/live_write_shell_guard.sh"
+live_write_begin
+RUN_ANCHOR="${RUN_ANCHOR:-0}"
+
 BASE_URL="${BASE_URL:-http://localhost:8351}"
 PASS=0
 FAIL=0
@@ -211,7 +215,7 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 2: Create Evidence from artifacts ---"
 
-TS=$(date +%s)
+TS="$KOI_TEST_RUN_ID"
 EVIDENCE_NAME="Interview Evidence — Bioregional Knowledge Practices $TS"
 EVIDENCE_DESC="Evidence synthesized from published interview artifacts demonstrating bioregional knowledge commoning practices including pattern recognition and protocol development."
 
@@ -225,6 +229,7 @@ EVIDENCE_RESP=$(curl -sf -X POST "$BASE_URL/claims/evidence-from-artifacts" \
     }" 2>/dev/null || echo '{}')
 
 EVIDENCE_URI=$(echo "$EVIDENCE_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("evidence_uri",""))' 2>/dev/null || echo "")
+live_write_record entity_uri "$EVIDENCE_URI"
 IS_NEW=$(echo "$EVIDENCE_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(str(d.get("is_new",False)).lower())' 2>/dev/null || echo "false")
 VISIBILITY=$(echo "$EVIDENCE_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("visibility_scope",""))' 2>/dev/null || echo "")
 VAULT_RID=$(echo "$EVIDENCE_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("vault_rid",""))' 2>/dev/null || echo "")
@@ -257,7 +262,7 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 3: Create claim ---"
 
-CLAIM_STATEMENT="Steel Thread Phase B: Interview participants in the Salish Sea bioregion have documented knowledge commoning practices including pattern recognition for community coordination and protocol development for facilitated knowledge sharing, demonstrating active bioregional knowledge stewardship."
+CLAIM_STATEMENT="Steel Thread Phase B $KOI_TEST_RUN_ID: Interview participants in the Salish Sea bioregion have documented knowledge commoning practices including pattern recognition for community coordination and protocol development for facilitated knowledge sharing, demonstrating active bioregional knowledge stewardship."
 
 ABOUT_URI_FIELD=""
 if [ -n "$ABOUT_URI" ]; then
@@ -275,12 +280,14 @@ CLAIM_RESP=$(curl -sf -X POST "$BASE_URL/claims/" \
             \"methodology\": \"steel_thread_phase_b\",
             \"source_type\": \"interview_artifacts\",
             \"test_run\": true,
+            \"test_run_id\": \"$KOI_TEST_RUN_ID\",
             \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
         },
         \"created_by\": \"steel-thread-phase-b\"
     }" 2>/dev/null || echo '{}')
 
 CLAIM_RID=$(echo "$CLAIM_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("claim_rid",""))' 2>/dev/null || echo "")
+live_write_record claim_rid "$CLAIM_RID"
 CLAIM_VERIFICATION=$(echo "$CLAIM_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("verification",""))' 2>/dev/null || echo "")
 
 check "Claim created" "$([ -n "$CLAIM_RID" ] && echo true || echo false)"
@@ -393,7 +400,7 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 7: Anchor to Regen testnet ---"
 
-if [ "$READY" = "true" ]; then
+if [ "$READY" = "true" ] && [ "$RUN_ANCHOR" = "1" ]; then
     ANCHOR_RESP=$(curl -sf --max-time 60 -X POST "$BASE_URL/claims/$CLAIM_RID/anchor" 2>/dev/null || echo '{}')
 
     TX_HASH=$(echo "$ANCHOR_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("tx_hash",""))' 2>/dev/null || echo "")
@@ -419,7 +426,7 @@ if [ "$READY" = "true" ]; then
         echo "  Response: $ANCHOR_RESP"
     fi
 else
-    skip "Anchor broadcast" "regen CLI not available or prepare-anchor failed"
+    skip "Anchor broadcast" "RUN_ANCHOR is not 1, regen CLI unavailable, or prepare-anchor failed"
     skip "Anchor confirmed" "skipped due to above"
 fi
 echo ""

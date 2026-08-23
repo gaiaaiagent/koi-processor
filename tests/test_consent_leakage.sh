@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/live_write_shell_guard.sh"
+live_write_begin
+
 BASE_URL="${BASE_URL:-http://localhost:8351}"
 PASS=0
 FAIL=0
@@ -47,7 +50,7 @@ echo ""
 # ------------------------------------------------------------------ #
 echo "--- Step 1: Create node_private Evidence entity ---"
 
-TS=$(date +%s)
+TS="$KOI_TEST_RUN_ID"
 PRIVATE_NAME="CONSENT-LEAKAGE-TEST-$TS"
 PRIVATE_VAULT_RID="orn:obsidian.entity:Evidence/consent-leakage-test-$TS"
 PRIVATE_VAULT_PATH="Evidence/consent-leakage-test-$TS.md"
@@ -69,6 +72,7 @@ REGISTER_RESP=$(curl -sf -X POST "$BASE_URL/register-entity" \
     }" 2>/dev/null || echo '{"success":false}')
 
 PRIVATE_URI=$(echo "$REGISTER_RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("canonical_uri",""))' 2>/dev/null || echo "")
+live_write_record entity_uri "$PRIVATE_URI"
 check "node_private Evidence registered" "$([ -n "$PRIVATE_URI" ] && echo true || echo false)"
 echo "  URI: $PRIVATE_URI"
 

@@ -15,6 +15,9 @@
 
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/live_write_shell_guard.sh"
+live_write_begin
+
 BASE_URL="${BASE_URL:-http://localhost:8351}"
 PASS=0
 FAIL=0
@@ -165,7 +168,7 @@ if [ -z "$CLAIMANT_URI" ] || [ -z "$REVIEWER_URI" ]; then
 fi
 
 # Unique suffix for this test run
-RUN_ID=$(date +%s | tail -c 7)
+RUN_ID="$KOI_TEST_RUN_ID"
 
 # --------------------------------------------------------
 # Step 2: Test AUTO band (< $500) — should auto-advance
@@ -210,6 +213,8 @@ AUTO_VERIFICATION=$(echo "$AUTO_RESPONSE" | python3 -c "import sys,json; print(j
 AUTO_ADVANCED=$(echo "$AUTO_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_advanced',False))" 2>/dev/null || echo "")
 AUTO_CLAIM_RID=$(echo "$AUTO_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('claim_rid',''))" 2>/dev/null || echo "")
 AUTO_EVIDENCE_URI=$(echo "$AUTO_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('evidence_uri',''))" 2>/dev/null || echo "")
+live_write_record claim_rid "$AUTO_CLAIM_RID"
+live_write_record entity_uri "$AUTO_EVIDENCE_URI"
 AUTO_REASON=$(echo "$AUTO_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_advance_reason','') or '')" 2>/dev/null || echo "")
 
 check "Auto band: threshold_band=auto" "$([ "$AUTO_BAND" = "auto" ] && echo true || echo false)"
@@ -277,6 +282,9 @@ SEMI_BAND=$(echo "$SEMI_RESPONSE" | python3 -c "import sys,json; print(json.load
 SEMI_VERIFICATION=$(echo "$SEMI_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verification',''))" 2>/dev/null || echo "")
 SEMI_ADVANCED=$(echo "$SEMI_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_advanced',False))" 2>/dev/null || echo "")
 SEMI_CLAIM_RID=$(echo "$SEMI_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('claim_rid',''))" 2>/dev/null || echo "")
+SEMI_EVIDENCE_URI=$(echo "$SEMI_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('evidence_uri',''))" 2>/dev/null || echo "")
+live_write_record claim_rid "$SEMI_CLAIM_RID"
+live_write_record entity_uri "$SEMI_EVIDENCE_URI"
 
 check "Semi band: threshold_band=semi" "$([ "$SEMI_BAND" = "semi" ] && echo true || echo false)"
 check "Semi band: auto-advanced" "$([ "$SEMI_ADVANCED" = "True" ] && echo true || echo false)"
@@ -324,6 +332,9 @@ MANUAL_BAND=$(echo "$MANUAL_RESPONSE" | python3 -c "import sys,json; print(json.
 MANUAL_VERIFICATION=$(echo "$MANUAL_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verification',''))" 2>/dev/null || echo "")
 MANUAL_ADVANCED=$(echo "$MANUAL_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_advanced',False))" 2>/dev/null || echo "")
 MANUAL_CLAIM_RID=$(echo "$MANUAL_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('claim_rid',''))" 2>/dev/null || echo "")
+MANUAL_EVIDENCE_URI=$(echo "$MANUAL_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('evidence_uri',''))" 2>/dev/null || echo "")
+live_write_record claim_rid "$MANUAL_CLAIM_RID"
+live_write_record entity_uri "$MANUAL_EVIDENCE_URI"
 
 check "Manual band: threshold_band=manual" "$([ "$MANUAL_BAND" = "manual" ] && echo true || echo false)"
 check "Manual band: NOT auto-advanced" "$([ "$MANUAL_ADVANCED" = "False" ] && echo true || echo false)"
@@ -370,6 +381,10 @@ OVERRIDE_RESPONSE=$(curl -sf -X POST "$BASE_URL/claims/claim-from-settlement" \
 OVERRIDE_BAND=$(echo "$OVERRIDE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('threshold_band',''))" 2>/dev/null || echo "")
 OVERRIDE_VERIFICATION=$(echo "$OVERRIDE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verification',''))" 2>/dev/null || echo "")
 OVERRIDE_ADVANCED=$(echo "$OVERRIDE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_advanced',False))" 2>/dev/null || echo "")
+OVERRIDE_CLAIM_RID=$(echo "$OVERRIDE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('claim_rid',''))" 2>/dev/null || echo "")
+OVERRIDE_EVIDENCE_URI=$(echo "$OVERRIDE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('evidence_uri',''))" 2>/dev/null || echo "")
+live_write_record claim_rid "$OVERRIDE_CLAIM_RID"
+live_write_record entity_uri "$OVERRIDE_EVIDENCE_URI"
 
 check "Override: threshold_band=manual (despite \$${OVERRIDE_AMOUNT})" "$([ "$OVERRIDE_BAND" = "manual" ] && echo true || echo false)"
 check "Override: NOT auto-advanced" "$([ "$OVERRIDE_ADVANCED" = "False" ] && echo true || echo false)"
@@ -410,6 +425,10 @@ NO_REVIEWER_RESPONSE=$(curl -sf -X POST "$BASE_URL/claims/claim-from-settlement"
 NO_REVIEWER_BAND=$(echo "$NO_REVIEWER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('threshold_band',''))" 2>/dev/null || echo "")
 NO_REVIEWER_VERIFICATION=$(echo "$NO_REVIEWER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verification',''))" 2>/dev/null || echo "")
 NO_REVIEWER_REASON=$(echo "$NO_REVIEWER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_advance_reason',''))" 2>/dev/null || echo "")
+NO_REVIEWER_CLAIM_RID=$(echo "$NO_REVIEWER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('claim_rid',''))" 2>/dev/null || echo "")
+NO_REVIEWER_EVIDENCE_URI=$(echo "$NO_REVIEWER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('evidence_uri',''))" 2>/dev/null || echo "")
+live_write_record claim_rid "$NO_REVIEWER_CLAIM_RID"
+live_write_record entity_uri "$NO_REVIEWER_EVIDENCE_URI"
 
 check "No reviewer: threshold_band=auto" "$([ "$NO_REVIEWER_BAND" = "auto" ] && echo true || echo false)"
 check "No reviewer: verification=self_reported" "$([ "$NO_REVIEWER_VERIFICATION" = "self_reported" ] && echo true || echo false)"

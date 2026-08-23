@@ -16,14 +16,54 @@ Environment variables:
 """
 
 import os
+import io
 import time
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 import pytest
 
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8351")
 PEER_URL = os.environ.get("PEER_URL", "http://127.0.0.1:8355")
+
+FEDERATION_STATE_TABLES = (
+    "koi_net_edges",
+    "koi_net_events",
+    "koi_net_cross_refs",
+    "koi_outbound_shares",
+    "koi_shared_documents",
+)
+
+
+def _snapshot_federation_state(dsn):
+    import psycopg2
+
+    database = urlparse(dsn).path.lstrip("/")
+    if "test" not in database and "scratch" not in database:
+        pytest.fail(
+            f"Interop mutation tests require a disposable test/scratch DB, got {database!r}"
+        )
+    snapshots = {}
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        for table in FEDERATION_STATE_TABLES:
+            cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+            if cur.fetchone()[0] is None:
+                continue
+            buf = io.StringIO()
+            cur.copy_expert(f'COPY "{table}" TO STDOUT', buf)
+            snapshots[table] = buf.getvalue()
+    return snapshots
+
+
+def _restore_federation_state(dsn, snapshots):
+    import psycopg2
+
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        for table, payload in snapshots.items():
+            cur.execute(f'DELETE FROM "{table}"')
+            if payload:
+                cur.copy_expert(f'COPY "{table}" FROM STDIN', io.StringIO(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +82,41 @@ def peer_client():
     """Client pointed at the federated peer node."""
     with httpx.Client(base_url=PEER_URL, timeout=30.0) as c:
         yield c
+
+
+@pytest.fixture(scope="module", autouse=True)
+def governed_live_write_run(tmp_path_factory):
+    """Run only by explicit opt-in against a disposable two-node DB pair.
+
+    The federation tables are restored byte-for-byte after the module. Entity,
+    claim and relationship fixtures are removed by their UUID namespace.
+    """
+    if os.getenv("KOI_ALLOW_LIVE_TEST_WRITES") != "1":
+        pytest.skip("set KOI_ALLOW_LIVE_TEST_WRITES=1 for governed interop writes")
+    primary_dsn = os.getenv("KOI_LIVE_POSTGRES_URL")
+    peer_dsn = os.getenv("KOI_PEER_POSTGRES_URL")
+    if not primary_dsn or not peer_dsn:
+        pytest.fail("KOI_LIVE_POSTGRES_URL and KOI_PEER_POSTGRES_URL are required")
+
+    from tests.live_write_cleanup import cleanup
+
+    run_id = uuid.uuid4().hex
+    manifest = tmp_path_factory.mktemp("interop-cleanup") / "manifest.jsonl"
+    primary_snapshot = _snapshot_federation_state(primary_dsn)
+    peer_snapshot = _snapshot_federation_state(peer_dsn)
+    yield run_id
+    failures = []
+    for dsn, snapshot, label in (
+        (primary_dsn, primary_snapshot, "primary"),
+        (peer_dsn, peer_snapshot, "peer"),
+    ):
+        try:
+            cleanup(dsn, manifest, run_id)
+            _restore_federation_state(dsn, snapshot)
+        except Exception as exc:
+            failures.append(f"{label}: {type(exc).__name__}: {exc}")
+    if failures:
+        pytest.fail("interop cleanup failed: " + "; ".join(failures))
 
 
 @pytest.fixture(scope="module")
@@ -69,9 +144,9 @@ def peer_health(peer_client):
 
 
 @pytest.fixture
-def unique_entity_name():
+def unique_entity_name(governed_live_write_run):
     """Generate a unique entity name for test isolation."""
-    return f"interop-test-{uuid.uuid4().hex[:8]}"
+    return f"interop-test-{governed_live_write_run}-{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +206,7 @@ class TestSignedPollCycle:
 class TestSignedBroadcast:
     """IM-2: Broadcast delivered to subscribers."""
 
-    def test_signed_broadcast(self, client, node_health):
+    def test_signed_broadcast(self, client, node_health, governed_live_write_run):
         """Broadcast an event and verify acceptance.
 
         Steps:
@@ -143,8 +218,8 @@ class TestSignedBroadcast:
                 {
                     "event_type": "entity_created",
                     "payload": {
-                        "uri": f"orn:test:broadcast-{uuid.uuid4().hex[:8]}",
-                        "label": "Broadcast Test Entity",
+                        "uri": f"orn:test:broadcast-{governed_live_write_run}",
+                        "label": f"Broadcast Test Entity {governed_live_write_run}",
                         "entity_type": "Concept",
                     },
                     "source_node": node_health.get(
@@ -240,7 +315,7 @@ class TestHandshakeEdgeCreation:
 class TestShareInboxExchange:
     """IM-5: Shared entity appears in receiver's /shared-with-me."""
 
-    def test_share_inbox_exchange(self, client, peer_client, node_health, peer_health):
+    def test_share_inbox_exchange(self, client, peer_client, node_health, peer_health, governed_live_write_run):
         """Share an entity and verify it appears in the peer's inbox.
 
         Steps:
@@ -248,14 +323,14 @@ class TestShareInboxExchange:
         2. GET /koi-net/shared-with-me on peer
         3. Verify the entity appears in the shared list
         """
-        test_uri = f"orn:test:share-{uuid.uuid4().hex[:8]}"
+        test_uri = f"orn:test:share-{governed_live_write_run}"
         peer_rid = peer_health.get("node_rid", peer_health.get("node_id", ""))
 
         share_payload = {
             "entity_uri": test_uri,
             "target_node": peer_rid,
             "entity_type": "Concept",
-            "label": "Shared Test Entity",
+            "label": f"Shared Test Entity {governed_live_write_run}",
         }
         r = client.post("/koi-net/share", json=share_payload)
         assert r.status_code < 500, (
@@ -294,6 +369,10 @@ class TestVaultSyncRoundTrip:
         2. Poll /koi-net/vault-sync/status until complete
         3. Verify no drift reported
         """
+        if os.getenv("KOI_INTEROP_ALLOW_VAULT_SYNC") != "1":
+            pytest.skip(
+                "vault sync is a broad write; enable only on a disposable vault+DB pair"
+            )
         r = client.post("/koi-net/vault-sync/trigger", json={})
         if r.status_code == 404:
             pytest.skip("Vault sync not available on this profile")
@@ -333,7 +412,7 @@ class TestVaultSyncRoundTrip:
 class TestHandlerPipeline:
     """IM-7: Event -> handler chain -> entity created (BKC only)."""
 
-    def test_handler_pipeline(self, client):
+    def test_handler_pipeline(self, client, governed_live_write_run):
         """Verify that ingesting an entity triggers the handler pipeline.
 
         Steps:
@@ -341,7 +420,7 @@ class TestHandlerPipeline:
         2. GET /ingest/status to verify processing
         3. GET /entities to confirm entity was created
         """
-        test_name = f"Handler Pipeline Test {uuid.uuid4().hex[:8]}"
+        test_name = f"Handler Pipeline Test {governed_live_write_run}"
         ingest_payload = {
             "name": test_name,
             "entity_type": "Concept",
@@ -374,7 +453,7 @@ class TestHandlerPipeline:
 class TestWebIngestPipeline:
     """IM-8: URL -> preview -> evaluate -> process -> ingest (BKC only)."""
 
-    def test_web_ingest_pipeline(self, client):
+    def test_web_ingest_pipeline(self, client, governed_live_write_run):
         """End-to-end web content ingestion pipeline.
 
         Steps:
@@ -383,7 +462,7 @@ class TestWebIngestPipeline:
         3. POST /web/process with the evaluation result
         4. POST /web/ingest with the processed content
         """
-        test_url = "https://example.com"
+        test_url = f"https://example.com/?koi_test_run={governed_live_write_run}"
 
         # Step 1: Preview
         preview_r = client.post("/web/preview", json={"url": test_url})
@@ -461,7 +540,7 @@ class TestC1ConflictingClaims:
     history with full provenance.
     """
 
-    def test_c1_conflicting_claims(self, client, peer_client, node_health, peer_health):
+    def test_c1_conflicting_claims(self, client, peer_client, node_health, peer_health, governed_live_write_run):
         """Two nodes assert different entity types; both must be preserved.
 
         Steps:
@@ -469,7 +548,7 @@ class TestC1ConflictingClaims:
         2. Peer node resolves same-name entity as type "Project"
         3. Query assertion history — both assertions must exist
         """
-        shared_name = f"C1-Conflict-{uuid.uuid4().hex[:8]}"
+        shared_name = f"C1-Conflict-{governed_live_write_run}"
 
         # Primary asserts Organization
         r1 = client.post("/entity/resolve", json={
@@ -526,7 +605,7 @@ class TestC2ProvenanceReplay:
     the document that triggered it.
     """
 
-    def test_c2_provenance_replay(self, client):
+    def test_c2_provenance_replay(self, client, governed_live_write_run):
         """Create an entity and verify its assertion history has provenance.
 
         Steps:
@@ -534,7 +613,7 @@ class TestC2ProvenanceReplay:
         2. Query /graph/history/{uri}
         3. Verify each assertion has asserted_by_node_rid and tx_recorded_at
         """
-        test_name = f"C2-Provenance-{uuid.uuid4().hex[:8]}"
+        test_name = f"C2-Provenance-{governed_live_write_run}"
         r = client.post("/entity/resolve", json={
             "name": test_name,
             "entity_type": "Concept",
@@ -585,7 +664,7 @@ class TestC3SovereignEdits:
     the reconciliation must be deterministic and auditable.
     """
 
-    def test_c3_sovereign_edits(self, client, peer_client, node_health, peer_health):
+    def test_c3_sovereign_edits(self, client, peer_client, node_health, peer_health, governed_live_write_run):
         """Local and remote edits to the same entity reconcile deterministically.
 
         Steps:
@@ -594,7 +673,7 @@ class TestC3SovereignEdits:
         3. Peer adds a different relationship
         4. Verify both relationships visible on primary (after federation)
         """
-        shared_name = f"C3-Sovereign-{uuid.uuid4().hex[:8]}"
+        shared_name = f"C3-Sovereign-{governed_live_write_run}"
 
         # Both nodes know the entity
         r1 = client.post("/entity/resolve", json={

@@ -77,7 +77,10 @@ LIVE_URL = re.compile(
 # (tests/test_task_registry.py runs net zero), which a static scan cannot do.
 # This gate answers "did anyone even try?", which is the question that was going
 # unasked while 627 rows accumulated.
-CLEANUP = re.compile(r'KOI_LIVE_POSTGRES_URL|purge_test|DELETE\s+FROM')
+CLEANUP = re.compile(
+    r'KOI_LIVE_POSTGRES_URL|purge_test|DELETE\s+FROM'
+    r'|live_write_begin|governed_live_write_run'
+)
 # Drives the app in-process, so tests/conftest.py's redirect moves its writes
 # AND its teardown together — not a live writer.
 IN_PROCESS = re.compile(r'ASGITransport|TestClient|app\s*=\s*app')
@@ -145,27 +148,6 @@ KNOWN_UNGOVERNED: dict[str, str] = {
         "Same shape: one POST site at :50-58, to /entity/resolve, non-persisting "
         "for the same reason as tests/test_contract.py."
     ),
-    # --- Latent: writes with no teardown, but currently cannot reach the DB --
-    # Measured 2026-08-22 rather than inferred. Both were previously described
-    # here as "REAL LEAK, UNFIXED", which overstated them: a static scan sees the
-    # write calls but not whether they execute. Kept in the allowlist because the
-    # teardown is genuinely absent — the moment the blocker below is removed,
-    # these leak.
-    "tests/test_interop_matrix.py": (
-        "LATENT. 18 write calls incl. POST /ingest, /koi-net/share, "
-        "/koi-net/events/broadcast, and no teardown of any kind. But 7 of its 11 "
-        "tests skip without a peer on :8355 (plus admin-token and BKC-profile "
-        "skips), and a full run on 2026-08-22 left 0 rows: entity_text LIKE "
-        "'Handler Pipeline Test%' = 0, fuseki_uri LIKE 'orn:test:%' = 1 (dated "
-        "2026-01-21, unrelated). Bring up a peer and it leaks. Fix with the "
-        "template in 148fcc6 / bcc6386."
-    ),
-    # --- Dormant shell scripts: unreachable by pytest, hence by any fixture --
-    "tests/test_consent_leakage.sh": "curl writes to the live API, no cleanup; last touched 2026-03-11.",
-    "tests/test_steel_thread_phase_a.sh": "curl writes to the live API, no cleanup; last touched 2026-03-11.",
-    "tests/test_steel_thread_phase_b.sh": "curl writes to the live API, no cleanup; last touched 2026-03-11.",
-    "tests/test_tbff_threshold_policy.sh": "curl writes to the live API, no cleanup; last touched 2026-03-11.",
-    "tests/test_mapping_workshop_pipeline.sh": "curl writes to the live API, no cleanup; last touched 2026-03-14.",
 }
 
 
