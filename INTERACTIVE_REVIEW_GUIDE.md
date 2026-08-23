@@ -23,7 +23,7 @@ The batch consolidation merged 189 entities using semantic similarity (0.88 thre
 ### Step 1: SSH to Server
 
 ```bash
-ssh darren@202.61.196.119
+ssh $KOI_PROD_HOST
 cd /opt/projects/koi-processor
 source venv/bin/activate
 source .env

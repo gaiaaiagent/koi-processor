@@ -39,7 +39,7 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > | Branch | Surface | How it deploys |
 > |---|---|---|
 > | **`regen-prod`** | Local personal-koi (backend + sensors, above) + **NUC federation** | NUC: Dobby's `deploy.sh` rsyncs. Local backend: `restart.sh`. Local sensors: `git pull` in runtime clone. |
-> | **`stable`** | **RegenAI public production** (`darren@202.61.196.119`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep clean. |
+> | **`stable`** | **RegenAI public production** (`$KOI_PROD_HOST`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep clean. |
 > | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. |
 >
 > **`regen-prod` takes direct pushes — this is intended (2026-08-14).** The branch carried a
@@ -468,7 +468,7 @@ Top entity types: API_MESSAGE (5,565), CONCEPT (3,463), TECHNOLOGY (960), PROCES
 
 ## Production Environment
 
-**Server**: darren@202.61.196.119
+**Server**: $KOI_PROD_HOST
 **Branch**: `stable` (verified live 2026-07-16; HEAD `eaf1f77`) — NOT `regen-prod`. Has untracked local drift (backup files); the deploy baseline is the live host, not a clean `stable`.
 **Code Path**: /opt/projects/koi-processor
 **Database**: PostgreSQL (eliza) on port 5433 (Docker: gaia-postgres-1)

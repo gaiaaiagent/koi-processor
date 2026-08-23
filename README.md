@@ -13,7 +13,10 @@ semantic + graph search to AI agents. PostgreSQL + pgvector is the authoritative
 > | Backend | `api/personal_ingest_api.py` @ **:8351** | event-bridge stack + `personal_ingest_api` |
 > | DB | `personal_koi` (localhost:5432) | `eliza` (host, :5433) |
 > | Embeddings | OpenAI `text-embedding-3-large` (**3072-dim**) | BGE `bge-large-en-v1.5` (1024-dim) live via `src/core/bge_server.py` |
-> | Host | local (macOS launchd) + NUC | `darren@202.61.196.119` |
+> | Host | local (macOS launchd) + NUC | `$KOI_PROD_HOST` |
+>
+> `$KOI_PROD_HOST` is deliberately not written down in this public repo. Operators: it is in
+> your local ops notes / SSH config. Set it in your shell, or use an `ssh` alias.
 >
 > When an older doc mentions `bge_server.py` / `koi_event_bridge_v2.py`, `eliza`, or ports
 > 8090/8100, it's describing **RegenAI prod**. (Verified against live prod 2026-07-16.)

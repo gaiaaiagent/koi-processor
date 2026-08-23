@@ -6,7 +6,7 @@ Open your terminal and paste these commands:
 
 ```bash
 # SSH to server
-ssh darren@202.61.196.119
+ssh $KOI_PROD_HOST
 
 # Navigate and setup
 cd /opt/projects/koi-processor
