@@ -549,13 +549,13 @@ def create_router(pool) -> APIRouter:
                     ledger_id, metadata_iri, admin_address, aliases, jurisdiction,
                     class_id, source, first_seen_rid, metadata, embedding,
                     vault_rid, phonetic_code, node_private, wallet_address, koi_rid,
-                    description, embedding_3072
+                    description, embedding_3072, resolution_tier
                 )
                 SELECT $1, entity_text, $2, normalized_text,
                        ledger_id, metadata_iri, admin_address, aliases, jurisdiction,
                        class_id, source, first_seen_rid, metadata, embedding,
                        vault_rid, $3, node_private, $4, $5,
-                       description, embedding_3072
+                       description, embedding_3072, 'manual'
                 FROM entity_registry WHERE fuseki_uri = $6
             """, new_uri, new_type, phonetic_code, moved_wallet, moved_koi_rid, old_uri)
             rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)

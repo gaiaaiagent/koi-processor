@@ -705,10 +705,13 @@ def create_router(pool, caps=None):
                     # 4. Register claim as entity (URI derived from RID for version isolation)
                     entity_uri = generate_entity_uri(claim_rid, 'Claim')
                     await conn.execute("""
-                        INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text)
-                        VALUES ($1, $2, 'Claim', $3)
+                        INSERT INTO entity_registry
+                            (fuseki_uri, entity_text, entity_type, normalized_text,
+                             source, first_seen_rid, resolution_tier)
+                        VALUES ($1, $2, 'Claim', $3, 'claims-engine', $4, 'manual')
                         ON CONFLICT (fuseki_uri) DO NOTHING
-                    """, entity_uri, body.statement[:200], normalize_entity_text(body.statement[:200]))
+                    """, entity_uri, body.statement[:200],
+                        normalize_entity_text(body.statement[:200]), claim_rid)
 
                     # 5. Write makes_claim relationship edge
                     await conn.execute("""

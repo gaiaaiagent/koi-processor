@@ -78,6 +78,7 @@ async def _create_retype_schema(pool, schema: str) -> None:
                 koi_rid         TEXT,
                 description     TEXT,
                 embedding_3072  TEXT,
+                resolution_tier TEXT,
                 merged_into     TEXT,
                 merged_at       TIMESTAMPTZ,
                 merged_by       TEXT,
