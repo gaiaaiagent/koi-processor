@@ -4,6 +4,25 @@
 **Session:** Claude Code · ffb7988e-3224-4372-8b24-e54e2d083a09 · Ontology safety rails → Meeting promotion → historical repair
 **Status:** All executable priorities are done and pushed (`38c11fe`). Meeting graph is 302 entities / 1,261 edges with **zero** cross-date groups and **zero** date-mismatched edges. Only two clock-gated items remain, plus one design decision on the resolver shadow gate.
 
+> ## ⚠ START KOI SESSIONS IN THIS CHECKOUT
+>
+> `~/projects/koi-processor-service` — despite the name, this is **not a separate repo**. All four
+> local checkouts are clones of `gaiaaiagent/koi-processor`; the directory names encode *roles*, not
+> repositories. There is no `gaiaaiagent/koi-processor-service`.
+>
+> | checkout | role | branch |
+> |---|---|---|
+> | `koi-processor-service` | **serves :8351** (uvicorn cwd) — start here | `regen-prod` |
+> | `koi-processor-runtime` | the sensor launchd jobs | `regen-prod`, never switch |
+> | `RegenAI/koi-processor` | shared dev checkout | whatever a session left it on |
+>
+> **Do not start ontology sessions in `RegenAI/koi-processor`.** As of 2026-08-23 it is **284 commits
+> behind** `regen-prod` on a feature branch with uncommitted work, and it has no `PROJECT_HANDOFF.md`
+> — so the SessionStart hook walks upward and injects `~/projects/RegenAI/PROJECT_HANDOFF.md`
+> instead, which is dated 2026-08-19 and describes Claims Engine call prep and a Notion blocker.
+> A session there starts confidently oriented to the wrong work. It will pick these files up on its
+> own once that branch merges from `regen-prod`.
+
 ## Completed this session
 
 Three concurrent sessions worked this repo today (this one, `abb2c016`/d9, and `koi-wt-nate-federation`); 26 commits are on `origin/regen-prod`.
