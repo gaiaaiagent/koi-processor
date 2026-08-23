@@ -1,8 +1,8 @@
 # Project handoff
 
-**Updated:** 2026-08-23 00:10 PDT
-**Session:** Claude Code · ffb7988e-3224-4372-8b24-e54e2d083a09 · Ontology safety rails → Meeting promotion → historical repair
-**Status:** All executable priorities are done and pushed (`38c11fe`). Meeting graph is 302 entities / 1,261 edges with **zero** cross-date groups and **zero** date-mismatched edges. Only two clock-gated items remain, plus one design decision on the resolver shadow gate.
+**Updated:** 2026-08-23 12:30 PDT
+**Session:** Claude Code · c1defaa8-ad3c-4de2-9e54-47361c370b33 · Wikilink silent-rollback defect → intent leak → resolver replay
+**Status:** Six commits pushed (`763ede4..2169721`). Two defects that were NOT on yesterday's list are fixed and deployed (API restarted 12:05:33, PID 82263). The resolver shadow gate has returned a real verdict — `explicit_policy_split`, 36 outcome divergences — instead of the ~170-day wait. One clock-gated item and one operator decision remain.
 
 > ## ⚠ START KOI SESSIONS IN THIS CHECKOUT
 >
@@ -25,43 +25,146 @@
 
 ## Completed this session
 
-Three concurrent sessions worked this repo today (this one, `abb2c016`/d9, and `koi-wt-nate-federation`); 26 commits are on `origin/regen-prod`.
+Six commits, all pushed. The API was restarted at 12:05:33 so the fixes are live — before that
+it had been running code from 23:57 the previous night.
 
-- **Meeting identity fix** (`d1be8ac`) — two meetings on different dates no longer resolve to the same entity. `normalize_entity_text` flattens `-` to a space, so `2026-01-28` became three ordinary tokens that *inflated* Jaro-Winkler similarity: the field that distinguishes meetings was what made them look alike. Measured damage: `entity_rid_mappings` 70 rows → 27 URIs (2.59×), and 93 of 151 determinable `attended` edges pointed at the wrong meeting. **The obvious fix — adding `Meeting` to `passes_distinctive_token_check` — was tested first and ACCEPTS all three collapse pairs**; a test pins that so it is not re-proposed. 20 tests, both directions.
-- **93 false `attended` assertions deleted** after snapshot (`entity_relationships_backup_meeting_identity_20260822`, full rows). Decomposed before acting: 158 edges = 93 mismatched + 58 agreeing + **7 undeterminable**, the last deliberately left alone.
-- **Meeting backfill** (`3cbee4d`, session d9) — +234 Meeting entities, +1,011 edges from a frozen 1,365-slot corpus. Independently verified here: **0 date-mismatched of 1,076 determinable**, mapping excess unchanged at 43 (zero new collapse, ratio 2.59× → 1.16×), 0 NULL embeddings.
-- **Live-write gate expressed as a property** (`8eb0e32`, `0d21ec8`, `988da21`) — `tests/test_live_write_governance.py` derives its population from the filesystem and fails on any new ungoverned live writer. `pytest.ini` gained `testpaths`; `scripts/run-red-baseline-gate.sh` makes the gate a runnable command and gave `KOI_REQUIRE_BACKEND` its first caller.
-- **Two fixture leaks closed** — `test_task_registry` (627 rows) and the intent suite; three backlogs purged with snapshots (612 tasks, 1,310 intents, 62 claims). The claims purge used a **claimant-identity** signature, not text: a naive `ILIKE '%test%'` would have deleted 93 genuine claims including six of Darren's own.
-- **Historical Meeting repair + resolver split** (`38c11fe`, a later session) — 262 → **302** Meetings, 1,081 → **1,261** edges, 379 pending; mappings 304 rows / **301** URIs / 3 intentional same-date excess. The duplicated resolver guard now has explicit `legacy`/`strict` names with caller behavior preserved, and bounded shadow measurement runs at 10% sampling behind a 1,024-entry non-blocking queue. All six latent live-writers governed; allowlist down to the two non-persisting exceptions. Independently re-derived here: every figure exact, 0 cross-date groups, 0 date-mismatched edges.
-- **Migration 111 propagated** to `personal_koi_test` and to the NUC federation peer — the NUC had neither column on a live 14,435-row registry, so a push before migrating would have broken its federation write path.
+### The wikilink silent-rollback defect (not on yesterday's list)
+
+`/register-entity` was returning HTTP 200 `success=true` while **rolling back the registration
+itself**. Three defects composed:
+
+1. `api/vault_parser.py` `parse_wikilink` did `path.rsplit('/', 1)`, so a nested vault path
+   produced the folder key `"meetings/bkc cop"`. Every key in `folder_type_map` is a single
+   segment, so nested paths matched nothing and came back untyped. Nested is the vault's actual
+   convention (`Meetings/<series>/<date> <title>`).
+2. The untyped tier ordered by `occurrence_count` — a RegenAI-era column that exists in
+   **zero** tables of `personal_koi`. It raised `UndefinedColumnError` on every execution.
+3. The handler caught that exception and kept going. **`except Exception` does not un-abort a
+   PostgreSQL transaction**, and the whole handler runs in one `conn.transaction()`, so every
+   later statement failed and the closing COMMIT became a silent ROLLBACK.
+
+Fixed in `56f61d1`, `98d3d26`, `f169f29`, `d38ce26`: real column with a deterministic tiebreak,
+segments walked outermost-first, `SAVEPOINT vault_rel_sync` containment, and a
+`relationship_sync_error` field so partial failure is reportable.
+
+**Dating, from git, not inference:** the bad `ORDER BY` shipped 2026-02-01 (`01343c4`), but
+`sourceNote` became a mapped predicate field on 2026-02-26 (`8681900`) — one day *after* the
+Feb-25 bulk sync. That is why 97 Task notes registered and then effectively none did for six
+months.
+
+**Population, measured with a control (koi task 8292):**
+
+| | count |
+|---|---|
+| Would have rolled back, and are NOT registered | **1,924** (1,902 `Tasks/`) |
+| Would fail today but ARE registered | 60 — all 2026-02-25, before `sourceNote` was mapped |
+| Clean targets, unregistered — never pushed, NOT this defect | 3,456 |
+
+The 60 are the falsification test the model had to pass. The 3,456 is the control against
+overclaiming. **No repair done** — that is a separate decision.
+
+### The intent_match_proposals leak (also not on the list)
+
+The 2026-08-22 purge closed the three tables it swept. `POST /intents/match` writes a fourth,
+`tests/test_intent_registry.py` exercises it over HTTP against the live backend, and nothing
+deleted it — so the leak continued one table over: 260 rows, 256 pointing at intents that no
+longer existed. Rows were still arriving; **some of today's were produced by this session's own
+test runs**, which is the mechanism in miniature (the conftest DSN redirect cannot contain a
+suite that talks HTTP to the live API).
+
+`c5d3759`: teardown extended (keyed on intent RID, `OR` not `AND`), conftest tripwire widened,
+and `scripts/check_intent_leak_observation.py` now counts orphaned proposals **with a positive
+control**. Without that last part, the AC1 gate would have reported `orphaned: 0` at 13:47 today
+and closed task 7878 while 256 orphans sat in the database.
+
+256 purged, backed up in full to `intent_match_proposals_backup_orphans_20260823`. Partition was
+clean: 256 both-missing, **0 half-orphans**, 4 intact.
+
+### The resolver shadow gate now has an answer
+
+`2169721` adds `scripts/replay_resolver_shadow.py`. Live sampling needed ~170 days and could
+never reach the 10 of 13 callers with no organic traffic; after a full day exactly **one**
+observation existed. The replay produced **1,110 attempts in 10m26s, all 13 callers, 0 dropped**.
+
+**Verdict: exit 3, `explicit_policy_split` — 358 candidate divergences, 36 outcome divergences
+(3.2%).** Legacy and strict do NOT agree, so the wrapper is load-bearing and consolidation is
+unsafe. Evidence retained at `evidence/resolver-shadow/replay-20260823.{log,report.json}`.
+
+Admissibility is enforced, not assumed: records carry `"replay": true`, and the analyzer counts
+them for divergence/attempts/callers but **excludes them from overhead and elapsed-days** — in a
+replay the shadow comparison is the entire workload, so its overhead ratio would trip exit 4 for
+a reason unrelated to the policy. Tests carry the live-record control for each exclusion.
 
 ## Next steps
 
-1. **koi 7878 — AC1's 24-hour window.** Evaluate no earlier than **2026-08-23 13:47 PDT**. Currently 0 nonconforming and 0 orphaned Intents. Pass = no post-cutover rows, or every new row has non-null `resolution_tier`, `source='intent-registry'`, and an `intent_key`. Positive control: the 225-row backup cohort.
-2. **DECIDE: make replay the primary evidence for the resolver shadow gate.** Phase 6 requires 1,000 sampled attempts reaching a permissive guard boundary, at 10% sampling. Organic entity creation runs **~60/day** (the 620/713/1,018 days were backfills, not organic), so that is **~6 observations/day → roughly 170 days**; zero have been emitted so far. The plan already contemplates "a deterministic replay fixture" — promoting replay to primary evidence produces the same counterfactual outcome data in a day, at no production cost, and covers zero-traffic callers that live sampling will never reach. Otherwise the gate never fires and the legacy/strict wrapper state becomes permanent **by default rather than by choice** — which is an acceptable outcome, but should be chosen.
-3. **Migration 112** — eligible after **2026-08-29 10:05 PDT**, after 7 days of organic `resolution_tier` data. Report the Meeting backfill burst separately from organic traffic. Constraint from B0's refutation: **keep `Organization` a distinct core type**; no Person deduplication.
-4. Minor: confirm the backup for the four stamped knowledge-add rows — the end state is verifiable (310 rows, zero NULL tiers) but no matching backup table was locatable.
+1. **koi 7878 — AC1.** Evaluate at/after **2026-08-23 13:47 PDT**:
+   `venv/bin/python scripts/check_intent_leak_observation.py`. As of 12:30 it reads
+   `nonconforming: 0, orphaned: 0, orphaned_proposals: 0` and correctly refuses to close
+   (`window_elapsed: false`). Positive controls: 225 entity rows, 256 proposal rows.
+2. **DECIDE: flip the resolver policy from legacy to strict (koi task 8294).** Every one of the
+   36 divergences inspected favours strict. **18 of them are the cross-date Meeting collapse this
+   repo repaired in the DATA yesterday** — `active_policy` is still `legacy`, so the guard that
+   caused it would recreate it on the next resolution. Yesterday fixed the symptom, not the
+   cause. But strict refuses matches legacy accepts, so expect fewer auto-merges and **more new
+   entities** — measure before and after; it interacts with migration 112.
+3. **Migration 112** — eligible after **2026-08-29 10:05 PDT**, but the date is not the real
+   blocker: there is no specification anywhere (no SQL, no ADR, no task), only a two-line
+   parking-lot entry and `scripts/check_migration_112_evidence.py`. Also 274 of 314 stamped rows
+   (87%) are the Meeting backfill burst and the gate does not separate burst from organic.
+   Keep `Organization` a distinct core type; no Person deduplication.
+4. **The launchd guard has a blind spot.** `tests/test_launchd_job_targets.py:50` globs
+   `com.personal-koi.*.plist`; three installed jobs use `com.personal.koi-*` and are uncovered —
+   including `com.personal.koi-repo-doc-sensors`, which runs `doc_scanner.py` **out of the shared
+   dev checkout**, the exact dependency the guard exists to forbid. Widening the glob alone is not
+   enough: the guard reads only `ProgramArguments`/`Program`, never `WorkingDirectory`.
 
-## Open questions
+## Resolved — strike from the old list
 
-- Which caller stopped registering Meeting entities after the 2026-02-25 backfill — a one-off script, or a regressed pipeline path? Unresolved; the backfill worked around it rather than answering it.
-- `meeting-bioregional-learning-bbd3da7e298c` is `Concept` in `entity_registry` but `Meeting` in `entity_rid_mappings`, with live `attended` edges. Which table is authoritative for Meeting identity?
-- The "~10.2% of prompts are meeting-shaped" demand claim is **neither substantiated nor refuted** — 7.57% corpus-wide, 13.1% last month, single-rater classifier, and meeting is the smallest of three shapes measured. Do not build a case on it.
-- Person duplicate mess: 1,034 of 4,770 live Person rows are bare single tokens. **Do not de-dup naively** — `Dave Bronner` carries the alias `dave`, so cleaning fragment rows would route all 22 "Dave" attendees to him at confidence 1.0 while the vault says 20 are David Fortson.
+- **Schema-dump drift (task 7878) was false when written.** `~/koi-backups/personal_koi-schema.sql`
+  was refreshed 2026-08-22 13:59 PDT and has both columns; the task was created the same minute.
+  Live-vs-test column diff is zero both ways.
+- **The "missing" backup for the four stamped rows exists** —
+  `entity_registry_backup_resolution_tier_gap_20260822`. The earlier session probed the wrong
+  date suffix (`…_20260823`). Nothing was at risk: migration 111 added the column with no
+  backfill, so the prior value was NULL by design.
+- **Both old open questions answered.** No caller ever *stopped* registering Meetings — none ever
+  did routinely; there are two bulk bursts, and the gap is a default folder list in
+  `personal-koi-mcp`, not this repo. And `entity_registry.entity_type` is authoritative for
+  behaviour while `entity_rid_mappings.entity_type` is authoritative for vault-facing reads —
+  the `meeting-bioregional-learning` row is two surfaces answering two questions, not a conflict.
 
-## Verification and working tree
+## Corrections made this session
 
-- **Branch/status:** `regen-prod`, 0 uncommitted, **0 ahead of origin**, `git diff --check` clean.
-- **Verification:** red-baseline gate **10/10 PASS** (`scripts/run-red-baseline-gate.sh`); live-write governance 4/4; Meeting identity 20/20; drift-retry 10/10; 78 focused tests pass. API healthy (PID 22784). Graph as of 2026-08-23 00:10: **302** Meetings / **1,261** `attended` / **379** pending / 31701 registry rows.
-- **Canon validator:** not applicable — no `scripts/validate_spec_dag.py` in this repo.
-- **Snapshots retained** (all deletes reversible): `entity_relationships_backup_meeting_identity_20260822`, `task_registry_backup_fixtures_20260822`, `intent_registry_backup_fixtures_20260822`, `intent_state_log_backup_fixtures_20260822`, `claims_backup_fixtures_20260822`, `claim_attestations_backup_fixtures_20260822`, `entity_registry_backup_intent_fixtures_20260822`.
-- **Re-measure before acting.** Concurrent sessions write this database; `document_entity_links` grew 6,820 → 6,870 during one measurement window.
-- **The 3 residual excess Meeting mappings are INTENTIONAL, not debt.** After the repair, `entity_rid_mappings` is 304 rows / 301 URIs. The excess of 3 is three `(canonical_uri, date)` groups holding more than one artifact for the *same* meeting on the *same* date — transcripts and note variants — which correctly share one Meeting entity. Anyone seeing "excess: 3" should not try to drive it to zero. Verified 0 cross-date groups and 0 date-mismatched edges as of 2026-08-23 00:07.
-- **Two dateless Meeting mappings are preserved deliberately:** `Meetings/Bioregioning/Bioregional Learning.md` and `Meetings/Cascadia Canada/Cascadia Canada Sync Sept 24.md`. Both are singletons. Do not infer a year from partial text like "Sept 24".
+- A commit message here (`98d3d26`) claimed "registering the entity genuinely succeeded". It did
+  not — the transaction was poisoned. `d38ce26` states and fixes that.
+- The orphaned proposals were reported mid-session as "served verbatim by `GET /intents/proposals`".
+  Wrong: that endpoint inner-joins twice, so orphans never surfaced. It was table residue plus a
+  blind gate, not a poisoned read surface.
+- A comment in `vault_parser.py` (and its copy in `test_tombstone_isolation.py`) said the untyped
+  tier "actively PREFERS the tombstone, which typically has the higher occurrence_count". It
+  described behaviour that tier never had, since the query could not run. Both corrected.
 
-## Recent sessions
+## Watch
 
-| Date | Provider | Session | Summary |
-|---|---|---|---|
-| 2026-08-22 | Claude Code | ffb7988e | Ontology safety rails → Meeting identity fix + promotion; 26 commits across 3 sessions |
-| 2026-08-23 | Claude Code | (fresh) | Historical Meeting repair, resolver legacy/strict split, live-writer governance (`38c11fe`) |
+- **The 3 residual excess Meeting mappings are INTENTIONAL** — same meeting, same date, multiple
+  artifacts. Do not drive them to zero.
+- **Never de-dup Person rows naively** — the `dave` alias would misroute 20 of 22 "Dave" attendees
+  away from David Fortson.
+- **Never purge fixtures on `ILIKE '%test%'`** — that nearly deleted 93 genuine claims once.
+- **Do not add an `occurrence_count` column** to `personal_koi` to "fix" anything.
+- The **intent suite writes to the live database over HTTP**; the conftest DSN redirect cannot
+  contain it. That is by design and is why its teardown must be complete.
+- Concurrent sessions write this DB. Re-measure before acting.
+
+## Verification
+
+- Branch `regen-prod`, 0 uncommitted, **0 ahead of origin** (pushed `2169721`).
+- Red-baseline gate **10/10 PASS**; live-write governance 4/4; meeting suites 57/57; tombstone
+  isolation 16/16; new wikilink suite 19/19; shadow + replay 15/15.
+- Full suite: **44 failed / 1455 passed**, against a measured pre-session baseline of
+  **45 failed / 1438 passed** at `763ede4` — no new failures, +17 passes. The residual failures
+  are pre-existing test-double and test-DB issues (`_FetchvalConn` lacks `.fetch`,
+  `test_project_router` asyncpg errors) plus `tests/test_koi_flow_integration.py`, which fails to
+  import (`No module named 'koi_protocol'`).
+- API healthy, PID 82263, started 2026-08-23 12:05:33, cwd `koi-processor-service`.
+- Every delete has a timestamped backup table.
