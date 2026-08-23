@@ -8,11 +8,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/darrenzal/projects/RegenAI/koi-processor/scripts/run_substack_sensor.sh</string>
+        <string>/Users/darrenzal/projects/koi-processor-runtime/scripts/run_substack_sensor.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/darrenzal/projects/RegenAI/koi-processor</string>
+    <string>/Users/darrenzal/projects/koi-processor-runtime</string>
 
     <!-- Daily at 07:15 local; ingests only archive posts not already in koi_memories -->
     <key>StartCalendarInterval</key>
@@ -37,9 +37,9 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/darrenzal/projects/RegenAI/koi-processor/logs/substack-sensor.log</string>
+    <string>/Users/darrenzal/projects/koi-processor-runtime/logs/substack-sensor.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/darrenzal/projects/RegenAI/koi-processor/logs/substack-sensor.error.log</string>
+    <string>/Users/darrenzal/projects/koi-processor-runtime/logs/substack-sensor.error.log</string>
 
     <key>Nice</key>
     <integer>10</integer>

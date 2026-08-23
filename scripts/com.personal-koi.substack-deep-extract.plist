@@ -8,11 +8,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/darrenzal/projects/koi-processor-service/scripts/deep_extract_substack_corpus.sh</string>
+        <string>/Users/darrenzal/projects/koi-processor-runtime/scripts/deep_extract_substack_corpus.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/darrenzal/projects/koi-processor-service</string>
+    <string>/Users/darrenzal/projects/koi-processor-runtime</string>
 
     <!-- Daily at 07:45 local — 30 min after the substack sensor's 07:15 ingest, so new
          posts are chunked/embedded before this deep-extracts them. -->
@@ -30,8 +30,8 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/darrenzal/projects/koi-processor-service/logs/substack-deep-extract.out.log</string>
+    <string>/Users/darrenzal/projects/koi-processor-runtime/logs/substack-deep-extract.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/darrenzal/projects/koi-processor-service/logs/substack-deep-extract.err.log</string>
+    <string>/Users/darrenzal/projects/koi-processor-runtime/logs/substack-deep-extract.err.log</string>
 </dict>
 </plist>

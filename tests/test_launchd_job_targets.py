@@ -44,10 +44,22 @@ DEV_CHECKOUT_MARKERS = ("projects/regenai/koi-processor", "projects/RegenAI/koi-
 STABLE_CHECKOUT_MARKERS = ("projects/koi-processor-runtime", "projects/koi-processor-service")
 
 
+# TWO namespaces, not one. The jobs were named under both `com.personal-koi.*` and
+# `com.personal.koi-*`, and globbing only the first silently excluded three installed jobs
+# — including `com.personal.koi-repo-doc-sensors`, which was loading code from the shared
+# dev checkout while this suite reported green. A guard that enumerates a subset does not
+# fail; it passes, which is worse.
+PLIST_GLOBS = ("com.personal-koi.*.plist", "com.personal.koi*.plist")
+
+
 def installed_plists() -> list[Path]:
     if not LAUNCH_AGENTS.is_dir():
         return []
-    return sorted(LAUNCH_AGENTS.glob("com.personal-koi.*.plist"))
+    found: set[Path] = set()
+    for pattern in PLIST_GLOBS:
+        found |= set(LAUNCH_AGENTS.glob(pattern))
+    # `.bak-*`, `.retired-*` and `.corrupt-*` copies are not loaded by launchd.
+    return sorted(p for p in found if p.suffix == ".plist")
 
 
 def program_paths(plist_path: Path) -> list[str]:
@@ -64,6 +76,40 @@ def program_paths(plist_path: Path) -> list[str]:
     if isinstance(data.get("Program"), str):
         args.append(data["Program"])
     return [a for a in args if isinstance(a, str) and a.startswith("/")]
+
+
+def working_directory(plist_path: Path) -> list[str]:
+    """`WorkingDirectory` is a code-location dependency too, and was not being read.
+
+    `com.personal.koi-processor` names the dev checkout here. It is survivable only because
+    its launcher happens to `cd` elsewhere — an accident of that script, not a property of
+    the job. Asserting on ProgramArguments alone cannot see it.
+    """
+    try:
+        data = plistlib.loads(plist_path.read_bytes())
+    except Exception as exc:
+        pytest.fail(f"{plist_path.name}: unparseable plist ({exc})")
+    wd = data.get("WorkingDirectory")
+    return [wd] if isinstance(wd, str) and wd.startswith("/") else []
+
+
+def launched_script_bodies(plist_path: Path) -> list[tuple[str, str]]:
+    """(script path, its text) for each launched shell script that exists.
+
+    The dependency that actually bit is one level down from the plist:
+    `repo-doc-sensors-start.sh` hardcodes KOI_PROCESSOR="$HOME/projects/RegenAI/koi-processor"
+    and the plist names only the script. Widening the glob alone would still have missed it,
+    because the offending path is not in the plist at all.
+    """
+    bodies = []
+    for path in program_paths(plist_path):
+        p = Path(path)
+        if p.suffix in (".sh", ".bash", "") and p.is_file():
+            try:
+                bodies.append((path, p.read_text(errors="ignore")))
+            except OSError:
+                continue
+    return bodies
 
 
 @pytest.mark.skipif(not installed_plists(), reason="no personal-KOI LaunchAgents installed")
@@ -92,13 +138,22 @@ def test_no_job_loads_code_from_the_shared_dev_checkout(plist: Path) -> None:
     shared and expected to move; a deployable checkout is pinned and never switched.
     Depending on the first is the defect even while the file happens to be present.
     """
-    offenders = [
-        p for p in program_paths(plist)
-        if any(marker in p for marker in DEV_CHECKOUT_MARKERS)
-    ]
+    offenders: list[str] = []
+    for path in program_paths(plist) + working_directory(plist):
+        if any(marker in path for marker in DEV_CHECKOUT_MARKERS):
+            offenders.append(f"plist names {path}")
+    # One level down: a launcher that hardcodes the dev checkout is the same dependency,
+    # and is invisible to any check that reads only the plist.
+    for script, body in launched_script_bodies(plist):
+        for line_no, line in enumerate(body.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if any(marker in line for marker in DEV_CHECKOUT_MARKERS):
+                offenders.append(f"{script}:{line_no} {line.strip()}")
     assert not offenders, (
-        f"{plist.name} loads {offenders} from the shared DEV checkout, which sessions "
-        f"branch-switch freely. Point it at one of {STABLE_CHECKOUT_MARKERS} instead "
+        f"{plist.name} depends on the shared DEV checkout, which sessions branch-switch "
+        f"freely:\n  " + "\n  ".join(offenders) +
+        f"\nPoint it at one of {STABLE_CHECKOUT_MARKERS} instead "
         f"(see CLAUDE.md DEPLOY TOPOLOGY)."
     )
 
@@ -114,6 +169,81 @@ def test_the_rule_is_checked_against_something() -> None:
     if not LAUNCH_AGENTS.is_dir():
         pytest.skip("not a machine with LaunchAgents")
     assert installed_plists(), (
-        f"no com.personal-koi.*.plist found under {LAUNCH_AGENTS}. Either every job was "
+        f"no plist matching {PLIST_GLOBS} found under {LAUNCH_AGENTS}. Either every job was "
         f"uninstalled, or this check is looking in the wrong place and silently passing."
+    )
+
+
+def test_both_job_namespaces_are_enumerated() -> None:
+    """The jobs live under two prefixes and the glob covered only one.
+
+    That is not hypothetical drift: three jobs sat outside the enumeration, one of them
+    loading code from the shared dev checkout, while every test above reported green. If a
+    namespace ever empties out, this fails loudly rather than shrinking the measured
+    surface in silence.
+    """
+    if not LAUNCH_AGENTS.is_dir():
+        pytest.skip("not a machine with LaunchAgents")
+    names = [p.name for p in installed_plists()]
+    hyphen = [n for n in names if n.startswith("com.personal-koi.")]
+    dotted = [n for n in names if n.startswith("com.personal.koi")]
+    assert hyphen, "no com.personal-koi.* jobs enumerated"
+    assert dotted, (
+        "no com.personal.koi-* jobs enumerated. Three existed on 2026-08-23 "
+        "(koi-processor, koi-knowledge-health, koi-repo-doc-sensors); if they are truly "
+        "gone, delete this assertion deliberately rather than letting the glob shrink."
+    )
+
+
+# --------------------------------------------------------------------------------------
+# A committed copy that has drifted from the installed one is worse than no copy: it reads
+# as documentation of what runs, while what runs is something else. That divergence IS the
+# original defect, so having introduced repo copies, assert they still agree.
+# --------------------------------------------------------------------------------------
+
+REPO_PLISTS = Path(__file__).resolve().parents[1] / "scripts"
+
+# Fields that change what launchd actually does. Log paths and comments may differ
+# harmlessly; these may not.
+LOAD_BEARING = ("ProgramArguments", "Program", "WorkingDirectory", "KeepAlive",
+                "StartInterval", "ThrottleInterval", "EnvironmentVariables")
+
+
+def committed_plists() -> list[Path]:
+    return sorted(REPO_PLISTS.glob("com.personal*.plist"))
+
+
+@pytest.mark.skipif(not committed_plists(), reason="no plists committed under scripts/")
+@pytest.mark.parametrize("committed", committed_plists(), ids=lambda p: p.stem)
+def test_committed_plist_matches_the_installed_one(committed: Path) -> None:
+    installed = LAUNCH_AGENTS / committed.name
+    if not installed.exists():
+        pytest.skip(f"{committed.name} is not installed on this machine")
+
+    want = plistlib.loads(committed.read_bytes())
+    got = plistlib.loads(installed.read_bytes())
+    drifted = {
+        key: {"committed": want.get(key), "installed": got.get(key)}
+        for key in LOAD_BEARING
+        if want.get(key) != got.get(key)
+    }
+    assert not drifted, (
+        f"{committed.name} in scripts/ disagrees with the installed copy on "
+        f"{sorted(drifted)}. The committed file then documents a job that is not the job "
+        f"launchd runs — which is the exact divergence this suite exists to catch.\n"
+        f"{drifted}"
+    )
+
+
+def test_the_repo_copy_of_the_sensor_launcher_matches_the_installed_one() -> None:
+    """The launcher, not just the plist. The dev-checkout dependency lived in this file."""
+    committed = REPO_PLISTS / "repo-doc-sensors-start.sh"
+    installed = Path.home() / ".config" / "personal-koi" / "repo-doc-sensors-start.sh"
+    if not installed.exists():
+        pytest.skip("sensor launcher not installed on this machine")
+    assert committed.exists(), "the launcher is no longer committed; the repo copy vanished"
+    assert committed.read_text() == installed.read_text(), (
+        f"{committed} differs from the installed {installed}. The hardcoded KOI_PROCESSOR "
+        f"path that pointed the doc sensors at the shared dev checkout lived in this file, "
+        f"so a stale committed copy hides exactly the class of defect it was added to pin."
     )

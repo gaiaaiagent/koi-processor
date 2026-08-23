@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+		<key>REPO_DOC_SENSOR_RECONCILE_INTERVAL</key>
+		<string>21600</string>
+		<key>REPO_DOC_SENSOR_SCAN_INTERVAL</key>
+		<string>300</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>com.personal.koi-repo-doc-sensors</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/darrenzal/.config/personal-koi/repo-doc-sensors-start.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/darrenzal/.config/personal-koi/repo-doc-sensors/stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/darrenzal/.config/personal-koi/repo-doc-sensors/stdout.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime</string>
+</dict>
+</plist>
