@@ -172,8 +172,8 @@ RESOLUTION_SITES = [
     ("api/personal_ingest_api.py", "async def _resolve_entity_uri",
      "POST /chat structured graph query — runs on every request"),
     ("api/vault_parser.py", "async def batch_resolve_entities",
-     "wikilink -> document_entity_links; its untyped tier PREFERS the tombstone, which "
-     "usually has the higher occurrence_count"),
+     "wikilink -> document_entity_links; its typed and alias tiers can both land on a "
+     "tombstone (merges keep normalized_text and aliases deliberately)"),
     ("api/routers/claims_router.py", "WHERE normalized_text = $1 OR entity_text ILIKE $2",
      "claimant on an auto-created claim — can be attested, verified and anchored on chain"),
     ("api/routers/commitment_router.py", "candidate.pledger_organization or candidate.pledger_name",
@@ -217,16 +217,23 @@ def test_write_paths_never_persist_a_tombstoned_uri() -> None:
     )
 
 
-@pytest.mark.skipif(not os.environ.get("POSTGRES_URL"), reason="POSTGRES_URL not set")
+@pytest.mark.skipif(not os.environ.get("KOI_LIVE_POSTGRES_URL"),
+                    reason="KOI_LIVE_POSTGRES_URL not set")
 def test_the_live_registry_still_has_the_shape_these_tests_assume() -> None:
     """Guard the guard.
 
     If merges ever start hard-deleting instead of tombstoning, every assertion above
     becomes vacuously true and this file would keep reporting green while testing nothing.
     Assert the hazard still exists, so the tests stay meaningful or fail loudly.
+
+    Reads KOI_LIVE_POSTGRES_URL, not POSTGRES_URL. conftest rewrites POSTGRES_URL to
+    personal_koi_test so no suite can write the live graph; this test asks about the LIVE
+    registry's shape, so pointing it at POSTGRES_URL made it report "no tombstones in
+    entity_registry" (the test DB has one row) while live held 205. A read-only question
+    about production must name the production DSN explicitly.
     """
     import psycopg2
-    with psycopg2.connect(os.environ["POSTGRES_URL"]) as conn, conn.cursor() as cur:
+    with psycopg2.connect(os.environ["KOI_LIVE_POSTGRES_URL"]) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM entity_registry WHERE merged_into IS NOT NULL")
         tombstones = cur.fetchone()[0]
         cur.execute("""SELECT count(*) FROM entity_registry

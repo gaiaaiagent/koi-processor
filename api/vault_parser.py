@@ -314,7 +314,7 @@ async def batch_resolve_entities(
             SELECT DISTINCT ON (normalized_text) normalized_text, fuseki_uri
             FROM entity_registry
             WHERE normalized_text = ANY($1)
-            ORDER BY normalized_text, occurrence_count DESC NULLS LAST
+            ORDER BY normalized_text, (merged_into IS NOT NULL), id
         """, untyped_names)
         for row in rows:
             result[(row['normalized_text'], None)] = row['fuseki_uri']
@@ -345,9 +345,15 @@ async def batch_resolve_entities(
     # normalized_text, and merges keep it; the alias tier matches on aliases, which merges
     # also keep, deliberately, so old names stay resolvable.
     #
-    # The untyped tier is the worst of them — `ORDER BY occurrence_count DESC` actively
-    # PREFERS the tombstone, which typically has the higher count because it accumulated
-    # mentions before being merged and the survivor started fresh.
+    # The untyped tier now orders live rows ahead of tombstones explicitly
+    # (`(merged_into IS NOT NULL), id`), so it no longer has to be followed to be correct.
+    # It is followed anyway, because the typed and alias tiers still can land on one.
+    #
+    # An earlier version of this comment said that tier "actively PREFERS the tombstone,
+    # which typically has the higher occurrence_count". That described behaviour it never
+    # had: `occurrence_count` does not exist in personal_koi, so the tier raised
+    # UndefinedColumnError on every execution and the caller swallowed it. The ranking was
+    # reasoned about carefully; that the query could not run was not noticed.
     #
     # Follow rather than exclude: this feeds document_entity_links, so excluding would drop
     # the backlink entirely, whereas following attaches it to the entity the note meant.
