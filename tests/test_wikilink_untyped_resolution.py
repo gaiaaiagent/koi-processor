@@ -232,3 +232,82 @@ def test_the_response_actually_carries_the_error() -> None:
     assert "relationship_sync_error=relationship_sync_error" in ctor, (
         "the error is recorded but not returned"
     )
+
+
+# --------------------------------------------------------------------------------------
+# The failure must not poison the enclosing transaction.
+#
+# `except Exception` does not undo a failed statement's effect on a PostgreSQL
+# transaction. /register-entity runs its whole body inside one `conn.transaction()`, so
+# when the untyped tier raised, catching it let the handler continue while every later
+# statement failed with InFailedSQLTransactionError and the closing COMMIT became a
+# silent ROLLBACK. The endpoint returned HTTP 200 success=True having discarded the
+# entity_registry and entity_rid_mappings writes it had just made.
+# --------------------------------------------------------------------------------------
+
+def test_catching_an_error_without_a_savepoint_poisons_the_transaction() -> None:
+    """Positive control. If this ever stops failing, the test below proves nothing."""
+    async def run() -> str:
+        conn = await asyncpg.connect(os.environ["POSTGRES_URL"])
+        try:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                try:
+                    await conn.fetch("SELECT 1 FROM entity_registry ORDER BY no_such_column")
+                except Exception:
+                    pass
+                try:
+                    await conn.fetchval("SELECT count(*) FROM entity_registry")
+                    return "usable"
+                except Exception as e:
+                    return type(e).__name__
+            finally:
+                await tr.rollback()
+        finally:
+            await conn.close()
+
+    assert asyncio.run(run()) == "InFailedSQLTransactionError", (
+        "a caught error no longer aborts the transaction — re-derive the savepoint "
+        "reasoning in personal_ingest_api before trusting the test below"
+    )
+
+
+def test_a_savepoint_makes_the_transaction_usable_again() -> None:
+    """The containment the handler relies on."""
+    async def run() -> str:
+        conn = await asyncpg.connect(os.environ["POSTGRES_URL"])
+        try:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                await conn.execute("SAVEPOINT vault_rel_sync")
+                try:
+                    await conn.fetch("SELECT 1 FROM entity_registry ORDER BY no_such_column")
+                except Exception:
+                    await conn.execute("ROLLBACK TO SAVEPOINT vault_rel_sync")
+                await conn.fetchval("SELECT count(*) FROM entity_registry")
+                return "usable"
+            finally:
+                await tr.rollback()
+        finally:
+            await conn.close()
+
+    assert asyncio.run(run()) == "usable"
+
+
+def test_the_relationship_sync_call_is_wrapped_in_a_savepoint() -> None:
+    src = INGEST_API.read_text()
+    idx = src.find("await sync_vault_relationships(")
+    assert idx != -1, "call site vanished — re-anchor this test"
+    block = src[max(0, idx - 1800): idx + 2200]
+
+    assert "SAVEPOINT vault_rel_sync" in block, (
+        "sync_vault_relationships is not wrapped in a savepoint. Its exception is caught, "
+        "but the enclosing transaction stays aborted and the handler's COMMIT silently "
+        "becomes a ROLLBACK — discarding the registration while returning success=True"
+    )
+    handler = block[block.find("except Exception", idx - max(0, idx - 1800)):]
+    assert "ROLLBACK TO SAVEPOINT vault_rel_sync" in handler, (
+        "the savepoint is set but never rolled back to, so the transaction stays aborted"
+    )

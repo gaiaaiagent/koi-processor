@@ -451,10 +451,14 @@ class RegisterEntityResponse(BaseModel):
     cross_type_warning: Optional[str] = None
     koi_rid: Optional[str] = None
     # Non-null means the entity registered but its frontmatter relationships did NOT.
-    # This field exists because that failure used to be invisible: the handler caught
-    # every exception from sync_vault_relationships, logged one line with no note name,
-    # and returned success=True. success stays True — registration genuinely succeeded —
-    # so callers must read this field to know the graph is incomplete for this note.
+    #
+    # This failure used to be invisible AND much larger than its name suggests: the
+    # handler caught every exception from sync_vault_relationships and logged one
+    # unattributable line, but catching it did not un-abort the transaction. The whole
+    # handler shares one transaction, so the closing COMMIT became a silent ROLLBACK and
+    # the endpoint returned success=True having discarded the registration itself. A
+    # savepoint now contains that failure, which is what makes success=True honest here:
+    # the entity really is registered and only the relationships are missing.
     relationship_sync_error: Optional[str] = None
 
 
@@ -4247,7 +4251,20 @@ async def register_vault_entity(request: RegisterEntityRequest):
             if frontmatter_data:
                 # Relationship sync needs a vault_path; alias merge (below) does not.
                 if eff_vault_path:
+                    # SAVEPOINT, because `except Exception` does NOT undo a failed
+                    # statement's effect on the transaction. This whole handler runs in one
+                    # `async with conn.transaction()`. When sync_vault_relationships raised,
+                    # PostgreSQL put the transaction in the aborted state; catching the
+                    # exception let the handler keep going, but every later statement then
+                    # failed with InFailedSQLTransactionError and the closing COMMIT was
+                    # silently converted to a ROLLBACK. So the endpoint returned HTTP 200
+                    # success=True having discarded the entity_registry and
+                    # entity_rid_mappings writes it had just made — not merely the
+                    # relationships. Rolling back to a savepoint is what makes the enclosing
+                    # transaction usable again; the same pattern is already used per-edge in
+                    # vault_parser.sync_vault_relationships ("SAVEPOINT rel_insert").
                     try:
+                        await conn.execute("SAVEPOINT vault_rel_sync")
                         rel_stats = await sync_vault_relationships(
                             conn,
                             eff_vault_path,
@@ -4260,7 +4277,17 @@ async def register_vault_entity(request: RegisterEntityRequest):
                         if rel_stats and TERMINUSDB_ENABLED:
                             await _enqueue_relationship_outbox(
                                 conn, canonical.uri, eff_vault_path)
+                        await conn.execute("RELEASE SAVEPOINT vault_rel_sync")
                     except Exception as e:
+                        # Valid in the aborted state — this is what clears it.
+                        try:
+                            await conn.execute("ROLLBACK TO SAVEPOINT vault_rel_sync")
+                        except Exception as rollback_error:  # savepoint never established
+                            logger.error(
+                                "Could not roll back to vault_rel_sync for %s; the "
+                                "registration transaction is unusable and will roll back: %s",
+                                eff_vault_path, rollback_error,
+                            )
                         # Do NOT re-raise: registering the entity succeeded and is worth
                         # keeping. But this is a whole-note failure, not a per-edge one —
                         # sync_vault_relationships resolves every target in one batch, so
