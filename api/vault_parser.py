@@ -213,7 +213,22 @@ def parse_wikilink(value: str) -> Tuple[str, Optional[str]]:
             'meetings': 'Meeting',
             'meeting': 'Meeting',
         }
+        # `rsplit('/', 1)` puts the ENTIRE prefix in `folder`, so a nested vault path
+        # yields a key like "meetings/bkc cop". Every key in the map above is a single
+        # segment, so nested notes never matched and fell through to type_hint None —
+        # into the untyped resolution tier, which until 2026-08-23 raised on every call.
+        # Nested is the vault's actual convention (Meetings/<series>/<date> <title>),
+        # so this silently untyped essentially every meeting and task wikilink.
+        #
+        # Walk the segments outermost-first: the top-level folder is what names the type,
+        # and an inner folder is a series or grouping. The whole-prefix lookup is kept
+        # first so a multi-segment key could still be added to the map later.
         type_hint = folder_type_map.get(folder_lower)
+        if type_hint is None:
+            for segment in folder_lower.split('/'):
+                type_hint = folder_type_map.get(segment.strip())
+                if type_hint:
+                    break
     else:
         name = path
 
