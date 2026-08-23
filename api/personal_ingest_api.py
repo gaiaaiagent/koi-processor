@@ -422,6 +422,11 @@ class RegisterEntityRequest(BaseModel):
     # already carries the name. Use to intentionally create a legitimately
     # distinct same-named entity (the advisory cross_type_warning still fires).
     force_type: bool = False
+    # Opt-in exact-name-only resolution for controlled bulk registration.
+    # Default false preserves the full alias/context/fuzzy/semantic resolver for
+    # every existing caller. The Meeting attendee backfill sets this true so
+    # distinct sessions held on the same date cannot fuzzy-collapse.
+    exact_only: bool = False
 
     @field_validator("entity_type")
     @classmethod
@@ -4082,7 +4087,11 @@ async def register_vault_entity(request: RegisterEntityRequest):
             # Tier 1.1b cross-type dedup fallback (advisory cross_type_warning
             # below still fires).
             canonical, is_new = await resolve_entity(
-                conn, entity, skip_cross_type=request.force_type)
+                conn,
+                entity,
+                skip_fuzzy=request.exact_only,
+                skip_cross_type=request.force_type,
+            )
 
             # Backfill vault_rid / vault_path for alias-only updates.
             # When the caller omits them (e.g. alias auto-learning), reuse the

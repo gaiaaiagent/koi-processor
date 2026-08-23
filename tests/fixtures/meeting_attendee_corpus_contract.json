@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "stats": {
+    "file_count": 337,
+    "frontmatter_count": 333,
+    "no_frontmatter_count": 4,
+    "attendees_field_count": 322,
+    "without_attendees_field_count": 11,
+    "all_entry_count": 1365,
+    "null_entry_count": 22,
+    "unusable_entry_count": 22,
+    "nonempty_entry_count": 1343,
+    "attended_meeting_count": 296
+  },
+  "ordered_nonempty_row_digest": "10a31cf72803a5c731bc2c999d2f84607e99452c768359b0b6c1198347cf2c38",
+  "snapshot_digest": "6f449c63baaaf07a8feaaa3c9b772a375f889cbf497b8163a56378a71ef3efbe"
+}
