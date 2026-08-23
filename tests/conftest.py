@@ -114,6 +114,24 @@ _TEST_SIGNATURE_SQL = """
         SELECT count(*) FROM task_registry
         WHERE created_at > $1::timestamp
           AND task_key LIKE 'reg-test%'
+    ) + (
+        -- intent_match_proposals, added 2026-08-23. POST /intents/match writes here and
+        -- tests/test_intent_registry.py exercises it over HTTP against the live backend,
+        -- so it leaked exactly as predicted four lines above: 260 rows, 256 of them
+        -- pointing at intents that no longer existed, and rows still arriving the day
+        -- after the purge that swept the three tables someone happened to be looking at.
+        --
+        -- Signature is orphanhood, not a name: a proposal carries no test marker, only
+        -- the RIDs of the two intents it pairs. That is also why this arm is not
+        -- restricted by $1 -- an orphan's own timestamp says nothing about when the
+        -- intent it points at was deleted, and an orphan is wrong whenever it arrived.
+        SELECT count(*) FROM intent_match_proposals p
+        WHERE NOT EXISTS (
+                SELECT 1 FROM intent_registry o WHERE o.intent_rid = p.offer_intent_rid
+              )
+           OR NOT EXISTS (
+                SELECT 1 FROM intent_registry w WHERE w.intent_rid = p.want_intent_rid
+              )
     )
 """
 

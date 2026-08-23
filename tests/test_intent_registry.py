@@ -207,6 +207,28 @@ def purge_test_entities():
             )
             purged_intents = cur.rowcount
 
+            # The match proposals these intents generated. POST /intents/match writes
+            # here, tests below exercise it, and nothing deleted it -- so this table
+            # accumulated the same leak one table over: 260 rows on 2026-08-23 of which
+            # 244 pointed at intents that no longer existed, 200 of them at RIDs now
+            # only present in intent_registry_backup_fixtures_20260822. Rows kept
+            # arriving after the 2026-08-22 purge because the purge fixed the three
+            # tables someone was looking at.
+            #
+            # Keyed on intent RID, never on a name pattern: a proposal carries no test
+            # marker of its own, and an ILIKE '%test%' sweep over this database is how a
+            # previous cleanup nearly deleted 93 genuine claims.
+            #
+            # OR, not AND: a proposal pairs two intents and a test run frequently creates
+            # only one side, so requiring both to be ours would leave exactly the
+            # half-orphaned rows this is meant to prevent.
+            cur.execute(
+                "DELETE FROM intent_match_proposals "
+                "WHERE offer_intent_rid = ANY(%s) OR want_intent_rid = ANY(%s)",
+                (expected, expected),
+            )
+            purged_proposals = cur.rowcount
+
             # Confirm the purge rather than trusting it: rowcount can be right while the
             # connection points somewhere harmless. Ask the same database what survived.
             cur.execute(
@@ -219,6 +241,12 @@ def purge_test_entities():
                 "SELECT count(*) FROM intent_registry WHERE intent_key = ANY(%s)", (keys,)
             )
             remaining_intents = cur.fetchone()[0]
+            cur.execute(
+                "SELECT count(*) FROM intent_match_proposals "
+                "WHERE offer_intent_rid = ANY(%s) OR want_intent_rid = ANY(%s)",
+                (expected, expected),
+            )
+            remaining_proposals = cur.fetchone()[0]
     except Exception as exc:  # noqa: BLE001 — reported, never swallowed
         pytest.fail(
             f"\n*** INTENT FIXTURE LEAK — PURGE FAILED ***\n"
@@ -246,14 +274,16 @@ def purge_test_entities():
             pytrace=False,
         )
 
-    if remaining or remaining_intents:
+    if remaining or remaining_intents or remaining_proposals:
         pytest.fail(
             f"\n*** INTENT FIXTURE LEAK — ROW(S) SURVIVED PURGE ***\n"
             f"Against {dsn.rsplit('/', 1)[-1]}: deleted {purged} of {len(expected)} "
             f"expected entity_registry rows ({remaining} still match) and "
             f"{purged_intents} of {len(keys)} intent_registry rows "
-            f"({remaining_intents} still match).\n"
-            f"Entity rows are embedded and compete in every entity ANN until removed.",
+            f"({remaining_intents} still match) and {purged_proposals} "
+            f"intent_match_proposals rows ({remaining_proposals} still match).\n"
+            f"Entity rows are embedded and compete in every entity ANN until removed; "
+            f"surviving proposals become orphans pointing at intents that are gone.",
             pytrace=False,
         )
 

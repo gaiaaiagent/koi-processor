@@ -17,6 +17,7 @@ DEFAULT_CUTOVER = "2026-08-22T13:47:00-07:00"
 TASK_ID = 7878
 TASK_KEY = "koi-intent-orphan-leak-ac1-24h-check"
 POSITIVE_CONTROL_TABLE = "entity_registry_backup_intent_fixtures_20260822"
+PROPOSAL_CONTROL_TABLE = "intent_match_proposals_backup_orphans_20260823"
 
 
 class ObservationError(RuntimeError):
@@ -39,10 +40,11 @@ def classify_observation(
     deadline: datetime,
     nonconforming: int,
     orphaned: int,
+    orphaned_proposals: int,
 ) -> tuple[str, int]:
     if database_now < deadline:
         return "incomplete", 2
-    if nonconforming == 0 and orphaned == 0:
+    if nonconforming == 0 and orphaned == 0 and orphaned_proposals == 0:
         return "pass", 0
     return "fail", 3
 
@@ -81,6 +83,57 @@ def evaluate(
         )
         observed = dict(cur.fetchone())
 
+        # intent_match_proposals, because the leak this gate certifies did not stop at
+        # the three tables the 2026-08-22 purge swept. POST /intents/match writes here,
+        # the intent suite exercises it over HTTP against the live backend, and nothing
+        # deleted it: 260 rows on 2026-08-23, 256 of them pointing at intents that no
+        # longer exist. A gate that counts entity_registry only would have reported
+        # orphaned:0 and closed task 7878 while those rows sat in the live database --
+        # certifying clean on a surface it could not see.
+        #
+        # Not restricted to the cutover window: these rows carry the RID of a deleted
+        # intent, so there is no way to date them against the fix, and an orphan is
+        # wrong whenever it was written.
+        cur.execute(
+            """
+            SELECT count(*) AS orphaned_proposals
+            FROM intent_match_proposals p
+            WHERE NOT EXISTS (
+                    SELECT 1 FROM intent_registry o WHERE o.intent_rid = p.offer_intent_rid
+                  )
+               OR NOT EXISTS (
+                    SELECT 1 FROM intent_registry w WHERE w.intent_rid = p.want_intent_rid
+                  )
+            """
+        )
+        observed["orphaned_proposals"] = int(cur.fetchone()["orphaned_proposals"])
+
+        # Positive control for the query above. orphaned_proposals == 0 is the outcome we
+        # want AND the outcome a broken predicate produces, so run the same predicate over
+        # the retained snapshot of the 256 rows purged on 2026-08-23. If that does not
+        # come back 256, the check is not measuring what it claims and the zero is noise.
+        cur.execute("SELECT to_regclass(%s) AS t", (f"public.{PROPOSAL_CONTROL_TABLE}",))
+        proposal_control: dict[str, Any] = {
+            "table": PROPOSAL_CONTROL_TABLE,
+            "available": cur.fetchone()["t"] is not None,
+        }
+        if proposal_control["available"]:
+            cur.execute(
+                f"""
+                SELECT count(*) AS n
+                FROM {PROPOSAL_CONTROL_TABLE} p
+                WHERE NOT EXISTS (
+                        SELECT 1 FROM intent_registry o
+                        WHERE o.intent_rid = p.offer_intent_rid
+                      )
+                   OR NOT EXISTS (
+                        SELECT 1 FROM intent_registry w
+                        WHERE w.intent_rid = p.want_intent_rid
+                      )
+                """
+            )
+            proposal_control["detected_in_snapshot"] = int(cur.fetchone()["n"])
+
         cur.execute("SELECT to_regclass(%s) AS backup", (f"public.{POSITIVE_CONTROL_TABLE}",))
         backup_exists = cur.fetchone()["backup"] is not None
         positive_control = None
@@ -117,6 +170,7 @@ def evaluate(
         deadline=deadline,
         nonconforming=int(observed["nonconforming"]),
         orphaned=int(observed["orphaned"]),
+        orphaned_proposals=int(observed["orphaned_proposals"]),
     )
     report = {
         "verdict": verdict,
@@ -127,6 +181,7 @@ def evaluate(
         "minimum_hours": minimum_hours,
         "window_elapsed": elapsed,
         "observed": {key: int(value) for key, value in observed.items()},
+        "proposal_control": proposal_control,
         "positive_control": {
             "table": POSITIVE_CONTROL_TABLE,
             "available": backup_exists,
