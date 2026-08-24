@@ -1,214 +1,55 @@
 # Project handoff
 
-**Updated:** 2026-08-23 13:52 PDT
-**Session:** Claude Code · c1defaa8-ad3c-4de2-9e54-47361c370b33 · Wikilink silent-rollback defect → intent leak → resolver replay
-**Status:** Seven commits pushed. Two defects that were NOT on yesterday's list are fixed and deployed (API restarted 12:05:33, PID 82263). **koi 7878 PASSED and is closed.** The resolver shadow gate returned a real verdict instead of a ~170-day wait, and both remaining items are now decisions with evidence behind them rather than open questions.
+**Updated:** 2026-08-24 13:20 PDT
+**Session:** Claude Code · c1defaa8-ad3c-4de2-9e54-47361c370b33 · Silent-rollback defect → resolver strict flip → entity-type canonicalization
+**Status:** 15 commits pushed (`763ede4..331b105`), working tree clean, API live and healthy. Every open item from the prior handoff is closed; two new decisions were made and executed. Nothing is blocked.
 
-> ## ⚠ START KOI SESSIONS IN THIS CHECKOUT
->
-> `~/projects/koi-processor-service` — despite the name, this is **not a separate repo**. All four
-> local checkouts are clones of `gaiaaiagent/koi-processor`; the directory names encode *roles*, not
-> repositories. There is no `gaiaaiagent/koi-processor-service`.
->
-> | checkout | role | branch |
-> |---|---|---|
-> | `koi-processor-service` | **serves :8351** (uvicorn cwd) — start here | `regen-prod` |
-> | `koi-processor-runtime` | the sensor launchd jobs | `regen-prod`, never switch |
-> | `RegenAI/koi-processor` | shared dev checkout | whatever a session left it on |
->
-> **Do not start ontology sessions in `RegenAI/koi-processor`.** As of 2026-08-23 it is **284 commits
-> behind** `regen-prod` on a feature branch with uncommitted work, and it has no `PROJECT_HANDOFF.md`
-> — so the SessionStart hook walks upward and injects `~/projects/RegenAI/PROJECT_HANDOFF.md`
-> instead, which is dated 2026-08-19 and describes Claims Engine call prep and a Notion blocker.
-> A session there starts confidently oriented to the wrong work. It will pick these files up on its
-> own once that branch merges from `regen-prod`.
+> ## Completed this session
 
-## Completed this session
-
-Six commits, all pushed. The API was restarted at 12:05:33 so the fixes are live — before that
-it had been running code from 23:57 the previous night.
-
-### The wikilink silent-rollback defect (not on yesterday's list)
-
-`/register-entity` was returning HTTP 200 `success=true` while **rolling back the registration
-itself**. Three defects composed:
-
-1. `api/vault_parser.py` `parse_wikilink` did `path.rsplit('/', 1)`, so a nested vault path
-   produced the folder key `"meetings/bkc cop"`. Every key in `folder_type_map` is a single
-   segment, so nested paths matched nothing and came back untyped. Nested is the vault's actual
-   convention (`Meetings/<series>/<date> <title>`).
-2. The untyped tier ordered by `occurrence_count` — a RegenAI-era column that exists in
-   **zero** tables of `personal_koi`. It raised `UndefinedColumnError` on every execution.
-3. The handler caught that exception and kept going. **`except Exception` does not un-abort a
-   PostgreSQL transaction**, and the whole handler runs in one `conn.transaction()`, so every
-   later statement failed and the closing COMMIT became a silent ROLLBACK.
-
-Fixed in `56f61d1`, `98d3d26`, `f169f29`, `d38ce26`: real column with a deterministic tiebreak,
-segments walked outermost-first, `SAVEPOINT vault_rel_sync` containment, and a
-`relationship_sync_error` field so partial failure is reportable.
-
-**Dating, from git, not inference:** the bad `ORDER BY` shipped 2026-02-01 (`01343c4`), but
-`sourceNote` became a mapped predicate field on 2026-02-26 (`8681900`) — one day *after* the
-Feb-25 bulk sync. That is why 97 Task notes registered and then effectively none did for six
-months.
-
-**Population, measured with a control (koi task 8292):**
-
-| | count |
-|---|---|
-| Would have rolled back, and are NOT registered | **1,924** (1,902 `Tasks/`) |
-| Would fail today but ARE registered | 60 — all 2026-02-25, before `sourceNote` was mapped |
-| Clean targets, unregistered — never pushed, NOT this defect | 3,456 |
-
-The 60 are the falsification test the model had to pass. The 3,456 is the control against
-overclaiming. **No repair done** — that is a separate decision.
-
-### The intent_match_proposals leak (also not on the list)
-
-The 2026-08-22 purge closed the three tables it swept. `POST /intents/match` writes a fourth,
-`tests/test_intent_registry.py` exercises it over HTTP against the live backend, and nothing
-deleted it — so the leak continued one table over: 260 rows, 256 pointing at intents that no
-longer existed. Rows were still arriving; **some of today's were produced by this session's own
-test runs**, which is the mechanism in miniature (the conftest DSN redirect cannot contain a
-suite that talks HTTP to the live API).
-
-`c5d3759`: teardown extended (keyed on intent RID, `OR` not `AND`), conftest tripwire widened,
-and `scripts/check_intent_leak_observation.py` now counts orphaned proposals **with a positive
-control**. Without that last part, the AC1 gate would have reported `orphaned: 0` at 13:47 today
-and closed task 7878 while 256 orphans sat in the database.
-
-256 purged, backed up in full to `intent_match_proposals_backup_orphans_20260823`. Partition was
-clean: 256 both-missing, **0 half-orphans**, 4 intact.
-
-### The resolver shadow gate now has an answer
-
-`2169721` adds `scripts/replay_resolver_shadow.py`. Live sampling needed ~170 days and could
-never reach the 10 of 13 callers with no organic traffic; after a full day exactly **one**
-observation existed. The replay produced **1,110 attempts in 10m26s, all 13 callers, 0 dropped**.
-
-**Verdict: exit 3, `explicit_policy_split` — 358 candidate divergences, 36 outcome divergences
-(3.2%).** Legacy and strict do NOT agree, so the wrapper is load-bearing and consolidation is
-unsafe. Evidence retained at `evidence/resolver-shadow/replay-20260823.{log,report.json}`.
-
-Admissibility is enforced, not assumed: records carry `"replay": true`, and the analyzer counts
-them for divergence/attempts/callers but **excludes them from overhead and elapsed-days** — in a
-replay the shadow comparison is the entire workload, so its overhead ratio would trip exit 4 for
-a reason unrelated to the policy. Tests carry the live-record control for each exclusion.
+- **Found and fixed a silent-rollback defect in `/register-entity`** (`56f61d1`, `98d3d26`, `f169f29`, `d38ce26`). It returned HTTP 200 `success=true` while **discarding the registration**: a caught `UndefinedColumnError` (the untyped wikilink tier ordered by `occurrence_count`, a column `personal_koi` has never had) left the shared transaction aborted, so COMMIT became a silent ROLLBACK. `except` is not a savepoint. Three composing defects — nested vault paths lost their type hint via `rsplit('/', 1)`, the bad column, and the swallow — all fixed, with `SAVEPOINT vault_rel_sync` containment. ~1,924 notes affected since 2026-02-26; git dates it precisely (`sourceNote` became a mapped field 2026-02-26, one day after the bulk sync that succeeded).
+- **Flipped the resolver to strict on both tiers**, each measured separately first. Built `scripts/replay_resolver_shadow.py`, which answered a gate that needed ~170 days of live sampling in ~10 minutes: 1,110 attempts across all 13 callers. Fuzzy (`c350640`): legacy was wrong on **89.2%** of 259 Meeting attempts vs strict's **6.6%**. Semantic (`ce400f1`), measured separately: 17 divergences, **all Meeting, all legacy accepting a different-dated meeting**, 0% every other type.
+- **Made that flip safe by fixing data, not policy.** Alias backfill was proposed and **does not work** — both sides of each pair existed as separate entities and Tier 1 precedes the alias tier. Did **12 merges + 2 retypes** instead; afterwards every residual Location divergence is legacy accepting something *wrong*. Also removed 23 junk Location rows (IPs/hostnames) + 98 doc links.
+- **Closed the `intent_match_proposals` leak** (`c5d3759`) — the 2026-08-22 purge swept three tables; a fourth kept filling. 256 orphans purged with backup, teardown + tripwire + AC1 gate all widened. **The gate was widened before it ran**, or it would have certified `orphaned: 0` while 256 orphans sat in the database.
+- **koi 7878 AC1 PASSED** at 13:48:57 on 08-23, exit 0, both positive controls firing (225 entity rows, 256 proposal rows). Re-derived in psql rather than trusting the script.
+- **Canonicalized the entity-type vocabulary: 421 → 3 non-canonical rows** (`d3bd22a`, `331b105`). Admitted `Document` + `Event` (390 rows, 598 edges, 498 doc links — schema.org types written deliberately, and a `Document` entity already ranked *first* in unified-search), then retyped 28 more. All reversible.
+- **Fixed the launchd guard's blind spot** (`5e70697`). It globbed one label namespace and missed three jobs — one running `doc_scanner.py` from the shared dev checkout, 284 commits behind, exactly what the guard exists to forbid. Guard now reads both namespaces, `WorkingDirectory`, and launched script bodies.
 
 ## Next steps
 
-Both are **decisions, not tasks**. Each carries its full evidence in the koi task registry.
+1. **koi 8386 — re-measure entity creation after the strict flip** (due 2026-08-31). Only ~20h of post-flip data existed at wrap-up and the windows are not comparable (pre-flip is 285 of 317 rows from one vault burst). Methodology is on the task: same-source only, exclude bursts, normalize per hour, and treat `resolution_tier='tier3_created_ambiguous'` as the key signal (5 → 0 so far, n far too small).
+2. **Decide the 3 remaining non-canonical rows.** `Resource` "BKC COP Emails" needs a **vault edit first** — its note declares `"@type": Resource`, so retyping the DB row alone is undone by the next sync. The 2 `Session` rows are inert; deleting them is a data decision, not a retype.
+3. **Optional: a Task-skip rule on `/register-entity`.** koi 8292 is closed won't-fix, but nothing yet prevents a bulk vault sync from creating ~1,900 Task entities. Must key on resolved `entity_type`, not the `Tasks/` path prefix — 10 of 15 non-`Tasks/` hits live under `Shared/*/Tasks/`.
 
-1. **DECIDE koi 8294 — flip the resolver policy legacy → strict.** Recommended, with a companion
-   change. Per-type replays (2026-08-23) show the 3.2% aggregate was diluted by Concept; the
-   divergence is concentrated in date- and identifier-bearing types:
+## Open questions
 
-   | type | attempts | diverged |
-   |---|---|---|
-   | Meeting | 259 | **86.9%** |
-   | SpecDoc | 29 | 65.5% |
-   | Location | 67 | 43.3% |
-   | Person | 126 | 8.0% |
-   | Organization | 607 | 1.8% |
-   | Concept | 568 | 0.4% |
-   | Claim / Project / Question / Event / Protocol / CaseStudy / WorkItem | — | 0% |
+- **`docs/planning/` is gitignored** (`.gitignore:85`, "working documents"). Two files there are tracked from before the rule, which makes it look safe — a doc written there is silently never committed. That is how the migration-112 spec was lost until caught at wrap-up. Worth deciding whether to keep the rule, and whether other repos have the same trap.
+- **Enforcement of the type vocabulary was deliberately NOT added.** `allowed_entity_types` is read by nothing. Since the canonicalizing validator landed 2026-07-13, exactly **one** non-canonical row has been created, so a hard FK would reject at the database what the application already fixes. If enforcement is wanted, the right shape is a create-path guard that *logs*, not a constraint that drops the write.
+- **The `Idea` type** is both the single post-validator drift case and one of the collisions. Retyped to `Concept` this session; if `Idea` is a real distinction it should be admitted instead.
+- Polysemous names (`regen`, `indigenomics`, `ethereum`, `open`, `nature`, `amazon`) are **not** duplicates. The Organization "long tail" is 225 prefix pairs, but 126 have a short name with multiple long forms (`open` → 14 distinct orgs). That is a Tier 1.5 contextual-resolution problem, not a merge backlog.
 
-   Judged objectively on Meeting (date **and** series, variant markers normalised):
-   **legacy is wrong on 89.2% of attempts, strict on 6.6%** — 13.5× fewer errors, and strict finds
-   *more* correct duplicate matches (29 vs 26). Legacy is greedy best-by-score, so a wrong-date
-   meeting in the same series outscores the right one and crowds it out.
+## Verification and working tree
 
-   Person and SpecDoc favour strict for the same reason (`clark`→`clare`, `joel`→`joe`;
-   `…open civics`→`…hyperstition`, `commitment economy VISION`→`DESIGN`). **Location and
-   Organization are the cost:** strict loses legitimate short/long merges
-   (`victoria`→`victoria bc`, `mcgill`→`mcgill university`).
-
-   The trade is **wrong merges → duplicates**. Duplicates are recoverable; wrong merges propagate
-   into edges and retrieval. Companion work: backfill Location/Organization aliases first (only
-   34 of 675 Locations carry any, so the exact-alias tier cannot currently catch what strict will
-   decline), and measure entity-creation rate before/after. A **per-type policy** — strict for
-   Meeting/SpecDoc/Person, legacy for Location/Organization — matches the evidence better than one
-   global switch, and the guards already take `entity_type`.
-
-2. **DECIDE koi 8292 — do NOT backfill the 1,902 Task notes.** Recommended as won't-fix.
-   `task_registry` already holds owner / project / source for **4,331 / 2,886 / 4,413** rows;
-   the graph's 70 Task entities hold **59 / 39 / 34** and have **zero** document links. Backfill
-   would take Task from 70 → ~1,972, all embedded and competing in entity ANN queries. If agreed,
-   `/register-entity` should skip Task **deliberately** (rule + test) — the accident that was
-   suppressing them is now fixed, so the next bulk vault sync will create them.
-   **Separate and small:** 22 of the 1,924 are not Tasks (17 `Shared/`, 2 `Organizations/`,
-   2 `HyphalTips/`, 1 other). Those are real graph entities; register them.
-   **Sequencing:** any backfill must follow the 8294 decision, or ~1,900 notes resolve under a
-   policy measured wrong 89.2% of the time on Meetings.
-
-3. **Migration 112** — eligible after 2026-08-29 10:05 PDT, but the date is not the blocker:
-   there is no specification anywhere (no SQL, no ADR, no task), only a parking-lot entry and
-   `scripts/check_migration_112_evidence.py`. 274 of 314 stamped rows (87%) are the Meeting
-   backfill burst and the gate does not separate burst from organic. Keep `Organization` a
-   distinct core type; no Person deduplication.
-
-4. **The launchd guard has a blind spot.** `tests/test_launchd_job_targets.py:50` globs
-   `com.personal-koi.*.plist`; three installed jobs use `com.personal.koi-*` and are uncovered —
-   including `com.personal.koi-repo-doc-sensors`, which runs `doc_scanner.py` **out of the shared
-   dev checkout**. Widening the glob alone is not enough: the guard reads only
-   `ProgramArguments`/`Program`, never `WorkingDirectory`.
-
-## Closed this session
-
-- **koi 7878 — AC1 PASSED** at 13:48:57 PDT, exit 0, `window_elapsed: true`. Observed 0
-  nonconforming / 0 orphaned / 0 orphaned proposals over the full 24h window; re-derived directly
-  in psql rather than trusting the script. **Both positive controls fire** (225 entity rows, 256
-  proposal rows), so the zeros are measurements, not a broken predicate. Note the gate had to be
-  widened *before* it ran — as written it counted `entity_registry` only and would have certified
-  clean while 256 orphaned `intent_match_proposals` rows sat in the live database.
-
-## Resolved — strike from the old list
-
-- **Schema-dump drift (task 7878) was false when written.** `~/koi-backups/personal_koi-schema.sql`
-  was refreshed 2026-08-22 13:59 PDT and has both columns; the task was created the same minute.
-  Live-vs-test column diff is zero both ways.
-- **The "missing" backup for the four stamped rows exists** —
-  `entity_registry_backup_resolution_tier_gap_20260822`. The earlier session probed the wrong
-  date suffix (`…_20260823`). Nothing was at risk: migration 111 added the column with no
-  backfill, so the prior value was NULL by design.
-- **Both old open questions answered.** No caller ever *stopped* registering Meetings — none ever
-  did routinely; there are two bulk bursts, and the gap is a default folder list in
-  `personal-koi-mcp`, not this repo. And `entity_registry.entity_type` is authoritative for
-  behaviour while `entity_rid_mappings.entity_type` is authoritative for vault-facing reads —
-  the `meeting-bioregional-learning` row is two surfaces answering two questions, not a conflict.
-
-## Corrections made this session
-
-- A commit message here (`98d3d26`) claimed "registering the entity genuinely succeeded". It did
-  not — the transaction was poisoned. `d38ce26` states and fixes that.
-- The orphaned proposals were reported mid-session as "served verbatim by `GET /intents/proposals`".
-  Wrong: that endpoint inner-joins twice, so orphans never surfaced. It was table residue plus a
-  blind gate, not a poisoned read surface.
-- A comment in `vault_parser.py` (and its copy in `test_tombstone_isolation.py`) said the untyped
-  tier "actively PREFERS the tombstone, which typically has the higher occurrence_count". It
-  described behaviour that tier never had, since the query could not run. Both corrected.
+- **Branch/status:** `regen-prod`, 0 uncommitted, **0 ahead of origin**, `git diff --check` clean.
+- **Verification:** red-baseline gate **10/10 PASS**; live-write governance 4/4; **155 focused tests pass**. Full suite at last run **44 failed / 1486 passed** against a *measured* `763ede4` baseline of 45/1438 — zero new failures, one fixed. Both policy flips are pinned by tests **proven non-vacuous** (reverting turns them red).
+- **Canon validator:** not applicable — no `scripts/validate_spec_dag.py` in this repo.
+- **API:** healthy, 30 entity types, 0 null embeddings. Graph: 31,485 live entities, 302 Meetings / 1,261 `attended`, 3 non-canonical rows, 4 intent proposals.
+- **Every delete and retype this session is reversible** — 22 timestamped backup tables retained; retypes tombstone rather than delete.
+- **Re-measure before acting.** Concurrent sessions write this database.
 
 ## Watch
 
-- **The 3 residual excess Meeting mappings are INTENTIONAL** — same meeting, same date, multiple
-  artifacts. Do not drive them to zero.
-- **Never de-dup Person rows naively** — the `dave` alias would misroute 20 of 22 "Dave" attendees
-  away from David Fortson.
-- **Never purge fixtures on `ILIKE '%test%'`** — that nearly deleted 93 genuine claims once.
-- **Do not add an `occurrence_count` column** to `personal_koi` to "fix" anything.
-- The **intent suite writes to the live database over HTTP**; the conftest DSN redirect cannot
-  contain it. That is by design and is why its teardown must be complete.
-- Concurrent sessions write this DB. Re-measure before acting.
+- The 3 residual excess Meeting mappings are **INTENTIONAL** (same meeting, same date, multiple artifacts). Do not drive them to zero.
+- Never de-dup Person rows naively — `dave` would misroute 20 of 22 "Dave" attendees away from David Fortson.
+- Never purge fixtures on `ILIKE '%test%'` — that nearly deleted 93 genuine claims once.
+- Do **not** add an `occurrence_count` column; it is RegenAI-era.
+- `/entities/retype` **mints a new row** when no live row occupies the target URI — check first, or you recreate the duplicate you just merged.
+- `tests/test_intent_registry.py` writes to the **live** database over HTTP by design; the conftest DSN redirect cannot contain it, so its teardown must stay complete.
+- The 74 `koi_sustained_write` SpecDoc rows are **real content** (`bkc.foundations.*`), not load-test junk — verified no twins exist.
 
-## Verification
+## Recent sessions
 
-- Branch `regen-prod`, 0 uncommitted, **0 ahead of origin** (pushed `2169721`).
-- Red-baseline gate **10/10 PASS**; live-write governance 4/4; meeting suites 57/57; tombstone
-  isolation 16/16; new wikilink suite 19/19; shadow + replay 15/15.
-- Full suite: **44 failed / 1455 passed**, against a measured pre-session baseline of
-  **45 failed / 1438 passed** at `763ede4` — no new failures, +17 passes. The residual failures
-  are pre-existing test-double and test-DB issues (`_FetchvalConn` lacks `.fetch`,
-  `test_project_router` asyncpg errors) plus `tests/test_koi_flow_integration.py`, which fails to
-  import (`No module named 'koi_protocol'`).
-- API healthy, PID 82263, started 2026-08-23 12:05:33, cwd `koi-processor-service`.
-- Every delete has a timestamped backup table.
+| Date | Provider | Session | Summary |
+|---|---|---|---|
+| 2026-08-22 | Claude Code | ffb7988e | Ontology safety rails → Meeting identity fix + promotion; 26 commits across 3 sessions |
+| 2026-08-23 | Claude Code | (fresh) | Historical Meeting repair, resolver legacy/strict split, live-writer governance (`38c11fe`) |
+| 2026-08-23/24 | Claude Code | c1defaa8 | `/register-entity` silent rollback; resolver → strict (both tiers, measured); intent-proposal leak; entity types 421→3; launchd guard. 15 commits (`763ede4..331b105`) |
