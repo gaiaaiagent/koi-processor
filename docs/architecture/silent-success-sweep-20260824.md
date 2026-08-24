@@ -144,10 +144,26 @@ scripts/deep_extract_substack_corpus.sh reads its worklist via process substitut
 - The soak-checker false-zero count was first measured at **5 of 202** against a partial copy in
   /tmp. The durable log (1,348 records) lives in the DEV checkout under docs/soak-results/ and
   gives **310 false zeros in 2,696 node-readings (11.5%)**, from 2026-03-04 onward. Quote 310.
-- The register-entity replace-all relationship sync is a **latent hazard, not active damage**:
-  370 notes appear to have lost edges, but the gap is pending_relationships (379 rows across 240
-  notes) holding targets that correctly did not resolve, such as a tool name as a meeting
-  attendee. Known callers pass full note frontmatter.
+- ⚠ **CORRECTED — the register-entity replace-all IS active damage, and the first reading here
+  was wrong twice.** I initially concluded "latent hazard, not active damage" because the MCP
+  client passes full note frontmatter. That check was incomplete: **the repo's own scripts are the
+  partial caller.** `scripts/backfill_meeting_attendance.py:504` and
+  `scripts/repair_historical_meeting_mappings.py:591` both post `frontmatter={"attendees": [...]}`
+  — a single key — and both ran during the 2026-08-22 Meeting backfill.
+
+  Measured over the 281 mappings written in that window: **276 declare `project` and `location`
+  in frontmatter, and all 276 have zero non-attended edges in the graph.** The endpoint returned
+  success and stamped every one `sync_status='linked'` with the full-file content hash.
+
+  The damage is **durable, not transient**: the MCP skips a note when
+  `backendEntry.content_hash === entity.contentHash` (`personal-koi-mcp/src/index.ts:5089`), and
+  **278 of 281 hashes are current**, so a re-sync passes over them and the missing edges are never
+  written. (Second error: I first measured 0/281 matching, having compared full sha256 digests —
+  `computeContentHash` truncates to 16 chars at `vault-rid.ts:227-233`.)
+
+  The destructive half was NOT exercised in that batch: the subfolder paths were new, so the
+  opening DELETE matched nothing. What is proven by data is the write-nothing half.
+
 - substack-deep-extract appeared 39 days dead by log mtime; all 636 post-2026-07-16 documents
   have entities and the job reports runs=9, exit 0. Log mtime is not a liveness signal for a job
   that is silent on success.
