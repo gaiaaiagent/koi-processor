@@ -362,6 +362,38 @@ DEFAULT_SCHEMAS = {
         semantic_threshold=0.92,
         require_token_overlap=True,
     ),
+    # ── Ingest-pipeline types, admitted 2026-08-24 ──────────────────────
+    # Not part of the original 28. They are schema.org types written deliberately by two
+    # intake pipelines and they are load-bearing: 240 Document rows carry 598 relationship
+    # edges, 150 Event rows carry 498 document links. Admitted rather than retyped because
+    # no mapping into the existing vocabulary is defensible — an Event extracted from a
+    # session transcript is not a Meeting with attendees — and because being outside the
+    # vocabulary cost almost nothing: they fell back to UNKNOWN_TYPE_SCHEMA, which is
+    # STRICTER than most real types, and a Document entity already ranks first in
+    # unified-search. See docs/planning/MIGRATION_112_SPEC.md and koi task 8368.
+    #
+    # Thresholds match the UNKNOWN fallback they were already resolving under (0.90/0.95)
+    # rather than being loosened on admission: nothing measured says these should merge
+    # more eagerly than they have been, and 0.95 semantic is deliberately conservative for
+    # types whose names are document titles and event labels.
+    'Document': EntityTypeConfig(
+        type_key='Document',
+        label='Document',
+        folder='Documents',
+        phonetic_matching=False,
+        similarity_threshold=0.90,
+        semantic_threshold=0.95,
+        require_token_overlap=True,
+    ),
+    'Event': EntityTypeConfig(
+        type_key='Event',
+        label='Event',
+        folder='Events',
+        phonetic_matching=False,
+        similarity_threshold=0.90,
+        semantic_threshold=0.95,
+        require_token_overlap=True,
+    ),
 }
 
 # Safe default schema for unknown types (never returns None)
