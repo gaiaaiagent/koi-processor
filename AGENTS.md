@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-08-24 13:20 PDT
+**Updated:** 2026-08-24 14:40 PDT
 
-**Current status:** 15 commits pushed (`763ede4..331b105`), tree clean, API healthy, all prior open items closed. `/register-entity` no longer returns success while silently rolling back the registration — a caught error left the shared transaction aborted, so COMMIT became ROLLBACK. Resolver now **strict** on both tiers, each measured first. Entity types 421 → 3.
+**Current status:** 18 commits pushed (`763ede4..2a50f07`), tree clean, API healthy, all prior items closed. `/register-entity` no longer reports success over an aborted transaction; the resolver is **strict** on both tiers, each measured before flipping; entity types 421 → 1. A sweep of that class then confirmed **14 more instances**.
 
-**Next:** 1) koi 8386 — re-measure entity creation post-flip (due 08-31); ~20h of data so far, windows not comparable. 2) Decide the 3 remaining non-canonical rows; `Resource` "BKC COP Emails" needs a **vault edit first** or the retype reverts. 3) Optional Task-skip rule, keyed on `entity_type` not the `Tasks/` prefix.
+**Next:** 1) **DECIDE + REPAIR** (koi 8387): 276 Meeting notes have zero `project`/`location` edges — the 08-22 backfill sent one frontmatter key into a **replace-all** sync, and 278/281 hashes are current so a re-sync *skips* them. 2) Fix the sweep findings worst-first: the **consent-leakage gate fails OPEN**; `GET /tasks/` drops all four date filters on malformed input. 3) koi 8386 — re-measure entity creation (due 08-31, clock-gated).
 
-**Watch:** `docs/planning/` is gitignored — docs written there are silently never committed. Type enforcement deliberately NOT added (one drift row since the 07-13 validator). `regen`/`open`/`nature` are polysemous, not duplicates. `/entities/retype` mints a new row when the target URI is free.
+**Watch:** `docs/planning/` and `docs/soak-results/` are gitignored — docs written there are silently never committed. Type enforcement deliberately NOT added. `regen`/`open`/`nature` are polysemous, not duplicates. `/entities/retype` mints a new row when the target URI is free.
 
-**Verification:** regen-prod, 0 uncommitted/ahead, `diff --check` clean. Gate 10/10; governance 4/4; 155 focused tests. Full suite 44 failed / 1486 passed vs a MEASURED baseline of 45/1438 — zero new. 22 backups; all changes reversible.
+**Verification:** measured at `2a50f07`, the final commit: 44 failed / 1492 passed vs a MEASURED `763ede4` baseline of 45/1438 — zero new. Gate 10/10; governance 4/4; 155 focused tests. 23 backups; all reversible.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
