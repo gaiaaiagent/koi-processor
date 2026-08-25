@@ -26,6 +26,8 @@ Options:
     --reconcile-interval
                        Seconds between reconcile scans (deletion/drift cleanup)
     --no-watcher       Disable watchdog watcher and rely on timed scans only
+    --tenant ID        Owning tenant recorded on every document ingested (migration 108).
+                       Capture only; sticky (never re-attributes an existing document).
 """
 
 import argparse
@@ -105,13 +107,18 @@ async def get_existing_docs(conn: asyncpg.Connection, repo_name: str) -> Dict[st
     rows = await conn.fetch("""
         SELECT rid,
                metadata->>'rel_path' AS rel_path,
-               metadata->>'content_hash' AS content_hash
+               metadata->>'content_hash' AS content_hash,
+               tenant_id
         FROM koi_memories
         WHERE source_sensor = 'doc-scanner'
           AND metadata->>'repo' = $1
     """, repo_name)
     return {
-        r["rel_path"]: {"content_hash": r["content_hash"], "rid": r["rid"]}
+        r["rel_path"]: {
+            "content_hash": r["content_hash"],
+            "rid": r["rid"],
+            "tenant_id": r["tenant_id"],
+        }
         for r in rows
         if r["rel_path"]
     }
@@ -144,6 +151,7 @@ async def upsert_doc(
     frontmatter: Dict[str, Any],
     body_text: str,
     chash: str,
+    tenant: Optional[str] = None,
 ) -> str:
     """Upsert into koi_memories. Returns the memory UUID."""
     doc_content = {
@@ -169,17 +177,30 @@ async def upsert_doc(
     existing = await conn.fetchrow("SELECT id FROM koi_memories WHERE rid = $1", rid)
     event_type = "NEW" if existing is None else "UPDATE"
 
+    # Tenancy: capture the owning tenant at write time (migration 108). This writer is
+    # the folder-watching path a per-client ingest directory would travel, so it is the
+    # one route where losing attribution is unrecoverable. CAPTURE ONLY — no read path
+    # filters on tenant_id yet; this does not make the data safe to expose.
+    # Sticky via COALESCE: re-scanning a doc must never re-attribute an existing one.
+    # Operator flag is the ONLY source. Deliberately not read from frontmatter: a
+    # scanned file must not be able to declare which tenant owns it.
+    tenant_id = tenant.strip() or None if isinstance(tenant, str) else None
+    if tenant_id is not None and len(tenant_id) > 100:
+        logger.warning("tenant too long (%d chars), not recording", len(tenant_id))
+        tenant_id = None
+
     memory_id = await conn.fetchval("""
-        INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata)
-        VALUES ($1, $2, $3, 'doc-scanner', $4::jsonb, $5::jsonb)
+        INSERT INTO koi_memories (id, rid, event_type, source_sensor, content, metadata, tenant_id)
+        VALUES ($1, $2, $3, 'doc-scanner', $4::jsonb, $5::jsonb, $6)
         ON CONFLICT (rid) DO UPDATE SET
             event_type = EXCLUDED.event_type,
             content = EXCLUDED.content,
             metadata = EXCLUDED.metadata,
+            tenant_id = COALESCE(koi_memories.tenant_id, EXCLUDED.tenant_id),
             updated_at = NOW()
         RETURNING id
     """, uuid.uuid4(), rid, event_type,
-        json.dumps(doc_content), json.dumps(doc_metadata))
+        json.dumps(doc_content), json.dumps(doc_metadata), tenant_id)
 
     return str(memory_id)
 
@@ -238,6 +259,7 @@ async def scan_repo(
     force: bool,
     doc_id_only: bool,
     delete_missing: bool = True,
+    tenant: Optional[str] = None,
 ) -> Dict[str, int]:
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
     embedder = RemoteEmbeddingProvider(
@@ -284,10 +306,18 @@ async def scan_repo(
         chash = content_hash(raw)
         rid = f"doc-scanner:{repo_name}:{rel_path}"
 
-        if not force and existing_hashes.get(rel_path) == chash:
+        # Unchanged content normally short-circuits. But if a tenant was supplied and
+        # this document has not been attributed yet, we must still write — otherwise
+        # `--tenant` silently does nothing for every already-indexed doc, which is
+        # exactly the lost-attribution failure migration 108 exists to prevent.
+        _existing = existing.get(rel_path) or {}
+        _needs_tenant = bool(tenant) and not _existing.get("tenant_id")
+        if not force and _existing.get("content_hash") == chash and not _needs_tenant:
             logger.debug("Unchanged %s", rel_path)
             stats["skipped"] += 1
             continue
+        if _needs_tenant and _existing.get("content_hash") == chash:
+            logger.info("repo_doc_sensor.backfill_tenant rel_path=%s tenant=%s", rel_path, tenant)
 
         governed_marker = " [governed]" if is_governed(fm) else ""
         logger.info("Indexing %s%s", rel_path, governed_marker)
@@ -315,7 +345,7 @@ async def scan_repo(
                 embeddings.append(None)
 
         async with pool.acquire() as conn:
-            await upsert_doc(conn, rid, repo_name, rel_path, fm, body, chash)
+            await upsert_doc(conn, rid, repo_name, rel_path, fm, body, chash, tenant)
             await upsert_chunks(conn, rid, chunks, embeddings, fm, repo_name, rel_path)
 
         stats["indexed"] += 1
@@ -430,11 +460,13 @@ class RepoDocSensor:
         scan_interval: int,
         reconcile_interval: int,
         watcher_enabled: bool,
+        tenant: Optional[str] = None,
     ):
         self.repo_path = repo_path
         self.repo_name = repo_name
         self.dry_run = dry_run
         self.doc_id_only = doc_id_only
+        self.tenant = tenant
         self.scan_interval = scan_interval
         self.reconcile_interval = reconcile_interval
         self.watcher_enabled = watcher_enabled
@@ -513,6 +545,7 @@ class RepoDocSensor:
                 force=False,
                 doc_id_only=self.doc_id_only,
                 delete_missing=due_reconcile,
+                tenant=self.tenant,
             )
         finally:
             completed_at = datetime.now(timezone.utc)
@@ -556,6 +589,10 @@ def main():
     parser.add_argument("repo_path", help="Path to repo root")
     parser.add_argument("--repo-name", help="Override repo name (default: dir name)")
     parser.add_argument("--dry-run", action="store_true", help="Parse without writing")
+    parser.add_argument("--tenant", default=None,
+                        help="Owning tenant id, recorded on every document ingested in this run "
+                             "(migration 108). Capture only — no read path filters on it yet. "
+                             "Sticky: will not re-attribute documents that already have a tenant.")
     parser.add_argument("--force", action="store_true", help="Re-index unchanged files")
     parser.add_argument("--doc-id-only", action="store_true",
                         help="Only index files with doc_id frontmatter")
@@ -587,13 +624,15 @@ def main():
             scan_interval=args.scan_interval,
             reconcile_interval=args.reconcile_interval,
             watcher_enabled=not args.no_watcher,
+            tenant=args.tenant,
         )
         try:
             asyncio.run(sensor.serve_forever())
         except KeyboardInterrupt:
             logger.info("repo_doc_sensor.stopped repo=%s", repo_name)
     else:
-        asyncio.run(scan_repo(repo_path, repo_name, args.dry_run, args.force, args.doc_id_only))
+        asyncio.run(scan_repo(repo_path, repo_name, args.dry_run, args.force, args.doc_id_only,
+                              tenant=args.tenant))
 
 
 if __name__ == "__main__":

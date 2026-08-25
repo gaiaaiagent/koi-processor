@@ -466,14 +466,23 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
         is_private = bool(bundle_meta.get('is_private', False))
         access_source = bundle_meta.get('access_source')
 
+        # Tenancy: promote bundle-metadata tenant_id to a dedicated column (migration 108).
+        # CAPTURE ONLY — nothing filters on this column yet; see the migration's closing note.
+        # Sticky via COALESCE on conflict: a re-ingest of the same rid must never silently
+        # re-attribute a document that already belongs to someone. Empty string is
+        # normalised to NULL so a sensor emitting '' cannot claim ownership by accident.
+        tenant_id = (bundle_meta.get('tenant_id') or None)
+        if isinstance(tenant_id, str):
+            tenant_id = tenant_id.strip() or None
+
         # Insert new version with publication tracking
         await conn.execute("""
             INSERT INTO koi_memories (
                 id, rid, cid, version, previous_version_id,
                 event_type, source_sensor, content, metadata,
                 published_at, published_confidence, content_hash,
-                is_private, access_source
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                is_private, access_source, tenant_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (rid) DO UPDATE SET
                 content = EXCLUDED.content,
                 metadata = EXCLUDED.metadata,
@@ -481,6 +490,7 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
                 content_hash = EXCLUDED.content_hash,
                 is_private = (koi_memories.is_private OR EXCLUDED.is_private),
                 access_source = COALESCE(koi_memories.access_source, EXCLUDED.access_source),
+                tenant_id = COALESCE(koi_memories.tenant_id, EXCLUDED.tenant_id),
                 superseded_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
         """,
@@ -500,7 +510,8 @@ async def create_new_version(conn: asyncpg.Connection, event: KOIEvent,
             published_confidence,
             content_hash,
             is_private,
-            access_source
+            access_source,
+            tenant_id
         )
 
         # Fetch the actual memory_id from database (in case ON CONFLICT kept the old UUID)

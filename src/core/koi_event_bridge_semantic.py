@@ -795,14 +795,26 @@ async def store_processed_document(
     is_private = bool((metadata or {}).get('is_private', False))
     access_source = (metadata or {}).get('access_source')
 
+    # Tenancy: capture the owning tenant at write time (migration 108). THIS is the
+    # document-level writer (is_chunk FALSE) — koi_event_bridge_v2.create_new_version
+    # only ever writes chunk rows, so document attribution has to happen here.
+    # CAPTURE ONLY: nothing filters on tenant_id. Sticky via COALESCE so a re-ingest
+    # cannot re-attribute a document that already has an owner. Non-str values are
+    # coerced away rather than raising, so a malformed payload cannot kill the bridge.
+    _raw_tenant = (metadata or {}).get('tenant_id')
+    tenant_id = _raw_tenant.strip() or None if isinstance(_raw_tenant, str) else None
+    if tenant_id is not None and len(tenant_id) > 100:
+        logger.warning("koi_memories.tenant_id too long (%d chars), dropping", len(tenant_id))
+        tenant_id = None
+
     # Store document in koi_memories (not chunks)
     await conn.execute("""
         INSERT INTO koi_memories (
             id, rid, cid, version, event_type, source_sensor,
             content, metadata, published_at, published_confidence,
             content_hash, source_content_rid, is_chunk,
-            is_private, access_source
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE, $13, $14)
+            is_private, access_source, tenant_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE, $13, $14, $15)
         ON CONFLICT (rid) DO UPDATE SET
             content = $7,
             metadata = $8,
@@ -812,6 +824,7 @@ async def store_processed_document(
             source_content_rid = $12,
             is_private = (koi_memories.is_private OR EXCLUDED.is_private),
             access_source = COALESCE(koi_memories.access_source, EXCLUDED.access_source),
+            tenant_id = COALESCE(koi_memories.tenant_id, EXCLUDED.tenant_id),
             updated_at = NOW()
     """,
         str(uuid.uuid4()),
@@ -833,7 +846,8 @@ async def store_processed_document(
         content_hash,
         source_content_rid,
         is_private,
-        access_source
+        access_source,
+        tenant_id
     )
 
     logger.info(f"Stored processed document in koi_memories: {document_rid}")
