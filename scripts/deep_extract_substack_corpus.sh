@@ -46,17 +46,32 @@ if [[ ! -x "$PY" ]]; then echo "[$(ts)] ERROR: venv python not found at $PY" >> 
 # Un-extracted substack-corpus posts = ingested rows with no completed deep-extraction.
 # NOTE: `mapfile` is a bash-4 builtin; macOS system /bin/bash (used by launchd) is
 # 3.2 and lacks it — read into the array with a portable while-loop instead.
+#
+# The query's output goes to a temp file rather than a `< <(psql ...)` process
+# substitution: bash cannot see a process substitution's exit status through the
+# while-loop's `$?`, so a failed psql (bad DSN, network blip, syntax error after an
+# edit) produced an empty RIDS array indistinguishable from the genuine "0 rows
+# pending" case below — "nothing to extract" and "the query never ran" logged
+# identically. Capturing psql's own exit code makes that distinction explicit.
 RIDS=()
-while IFS= read -r _rid; do
-  [[ -n "$_rid" ]] && RIDS+=("$_rid")
-done < <(psql "$PSQL_URL" -tAc "
+PSQL_OUT="$(mktemp)"
+trap 'rm -f "$PSQL_OUT"' EXIT
+psql "$PSQL_URL" -tAc "
   SELECT m.rid FROM koi_memories m
   WHERE m.source_sensor = '$SOURCE_SENSOR'
     AND m.rid LIKE 'substack-corpus:%'
     AND NOT EXISTS (
       SELECT 1 FROM document_ingestion_log l
       WHERE l.document_rid = m.rid AND l.deep_extracted_at IS NOT NULL)
-  ORDER BY m.rid;")
+  ORDER BY m.rid;" > "$PSQL_OUT" 2>&1
+psql_status=$?
+if [[ "$psql_status" -ne 0 ]]; then
+  echo "[$(ts)] ERROR: psql query failed (exit $psql_status): $(cat "$PSQL_OUT")" >> "$LOG"
+  exit 1
+fi
+while IFS= read -r _rid; do
+  [[ -n "$_rid" ]] && RIDS+=("$_rid")
+done < "$PSQL_OUT"
 
 N=${#RIDS[@]}
 if [[ "$N" -eq 0 ]]; then
