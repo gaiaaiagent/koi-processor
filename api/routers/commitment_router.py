@@ -61,6 +61,16 @@ class CommitmentResponse(BaseModel):
     metadata: Dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    relationship_warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when this request's graph-edge write (entity_relationships) "
+            "failed. The commitment row above still committed successfully — "
+            "only the edge is missing. entity_relationships.object_uri has a "
+            "FK to entity_registry.fuseki_uri, and a commitment/pool RID is "
+            "never registered there, so this fires on every attempt today."
+        ),
+    )
 
 
 class StateTransitionRequest(BaseModel):
@@ -99,6 +109,10 @@ class PoolResponse(BaseModel):
     metadata: Dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    relationship_warning: Optional[str] = Field(
+        None,
+        description="Set when this request's graph-edge write failed. See CommitmentResponse.relationship_warning.",
+    )
 
 
 class PledgeToPoolRequest(BaseModel):
@@ -281,6 +295,7 @@ def create_router(pool, caps=None):
             """, rid, body.created_by)
 
             # Write pledges_commitment relationship
+            relationship_warning = None
             try:
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
@@ -288,7 +303,8 @@ def create_router(pool, caps=None):
                     ON CONFLICT DO NOTHING
                 """, body.pledger_uri, rid)
             except Exception as e:
-                logger.warning(f"Failed to create pledges_commitment relationship: {e}")
+                relationship_warning = f"Failed to create pledges_commitment relationship: {e}"
+                logger.warning(relationship_warning)
 
         logger.info(f"commitment.create rid={rid} pledger={body.pledger_uri}")
         await emit_domain_event("commitment", "NEW", rid, {
@@ -304,7 +320,7 @@ def create_router(pool, caps=None):
                                  "actor": body.created_by, "reason": "created",
                                  "created_at": datetime.now(timezone.utc).isoformat()},
         })
-        return _row_to_commitment(row)
+        return _row_to_commitment(row, relationship_warning=relationship_warning)
 
     @router.get("/", response_model=List[CommitmentResponse])
     async def list_commitments(
@@ -478,20 +494,23 @@ def create_router(pool, caps=None):
                             ON CONFLICT DO NOTHING
                         """, rid, f"commitment-extractor:{body.source_document}")
 
+                        relationship_warning = None
                         try:
                             await conn.execute("""
                                 INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
                                 VALUES ($1, 'pledges_commitment', $2, 'commitment_extractor')
                                 ON CONFLICT DO NOTHING
                             """, pledger_uri, rid)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            relationship_warning = f"Failed to create pledges_commitment relationship: {e}"
+                            logger.warning(relationship_warning)
 
                         auto_created.append({
                             "title": candidate.title,
                             "commitment_rid": rid,
                             "pledger_uri": pledger_uri,
                             "status": "created",
+                            "relationship_warning": relationship_warning,
                         })
                     except Exception as e:
                         auto_created.append({
@@ -599,6 +618,7 @@ def create_router(pool, caps=None):
             """, rid, row["state"], body.actor)
 
             # Insert proves_commitment relationship into entity_relationships
+            relationship_warning = None
             try:
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
@@ -606,7 +626,8 @@ def create_router(pool, caps=None):
                     ON CONFLICT DO NOTHING
                 """, body.evidence_uri, rid)
             except Exception as e:
-                logger.warning(f"Failed to create proves_commitment relationship: {e}")
+                relationship_warning = f"Failed to create proves_commitment relationship: {e}"
+                logger.warning(relationship_warning)
 
         logger.info(f"commitment.link_evidence rid={rid} evidence={body.evidence_uri}")
         await emit_domain_event("commitment", "UPDATE", rid, {
@@ -616,7 +637,7 @@ def create_router(pool, caps=None):
                                  "actor": body.actor, "reason": "evidence linked",
                                  "created_at": datetime.now(timezone.utc).isoformat()},
         })
-        return _row_to_commitment(updated)
+        return _row_to_commitment(updated, relationship_warning=relationship_warning)
 
     @router.post("/{rid}/create-claim")
     async def create_claim_from_commitment(rid: str, body: CreateClaimRequest = CreateClaimRequest()):
@@ -683,14 +704,16 @@ def create_router(pool, caps=None):
                 raise HTTPException(status_code=500, detail=f"Failed to create claim: {e}")
 
             # Link claim to commitment subject via 'about' relationship
+            relationship_warning = None
             try:
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
                     VALUES ($1, 'about', $2, 'commitment_claim_bridge')
                     ON CONFLICT DO NOTHING
                 """, claim_rid, rid)
-            except Exception:
-                pass
+            except Exception as e:
+                relationship_warning = f"Failed to create 'about' relationship: {e}"
+                logger.warning(relationship_warning)
 
         logger.info(f"commitment.create_claim commitment_rid={rid} claim_rid={claim_rid}")
         return {
@@ -700,6 +723,7 @@ def create_router(pool, caps=None):
             "claim_type": "governance",
             "verification": "self_reported",
             "metadata": claim_meta,
+            "relationship_warning": relationship_warning,
         }
 
     # ------------------------------------------------------------------ #
@@ -801,6 +825,7 @@ def create_pool_router(pool, caps=None):
             """, rid, body.created_by)
 
             # Write governs_pool relationship
+            relationship_warning = None
             if body.steward_uri:
                 try:
                     await conn.execute("""
@@ -809,7 +834,8 @@ def create_pool_router(pool, caps=None):
                         ON CONFLICT DO NOTHING
                     """, body.steward_uri, rid)
                 except Exception as e:
-                    logger.warning(f"Failed to create governs_pool relationship: {e}")
+                    relationship_warning = f"Failed to create governs_pool relationship: {e}"
+                    logger.warning(relationship_warning)
 
         logger.info(f"pool.create rid={rid} name={body.name}")
         await emit_domain_event("commitment_pool", "NEW", rid, {
@@ -821,7 +847,7 @@ def create_pool_router(pool, caps=None):
             "state": "forming", "metadata": body.metadata or {},
             "created_by": body.created_by,
         })
-        return _row_to_pool(row)
+        return _row_to_pool(row, relationship_warning=relationship_warning)
 
     @router.get("/{rid}", response_model=PoolResponse)
     async def get_pool(rid: str):
@@ -869,6 +895,7 @@ def create_pool_router(pool, caps=None):
             """, rid, body.actor, _json_dumps({"commitment_rid": body.commitment_rid}))
 
             # Write aggregates_commitments relationship
+            relationship_warning = None
             try:
                 await conn.execute("""
                     INSERT INTO entity_relationships (subject_uri, predicate, object_uri, source)
@@ -876,7 +903,8 @@ def create_pool_router(pool, caps=None):
                     ON CONFLICT DO NOTHING
                 """, rid, body.commitment_rid)
             except Exception as e:
-                logger.warning(f"Failed to create aggregates_commitments relationship: {e}")
+                relationship_warning = f"Failed to create aggregates_commitments relationship: {e}"
+                logger.warning(relationship_warning)
 
             # Check if threshold is now met and auto-activate
             total = await conn.fetchval(
@@ -909,6 +937,7 @@ def create_pool_router(pool, caps=None):
             "pool_activated": activated,
             "total_pledges": int(total),
             "verified_pledges": int(verified),
+            "relationship_warning": relationship_warning,
         }
 
     @router.get("/{rid}/status")
@@ -961,7 +990,7 @@ def _check_threshold(pool_row, total: int, verified: int) -> bool:
     return (verified / total * 100) >= float(pool_row["activation_threshold_pct"])
 
 
-def _row_to_commitment(row) -> CommitmentResponse:
+def _row_to_commitment(row, relationship_warning: Optional[str] = None) -> CommitmentResponse:
     import json as _json
     meta = row["metadata"]
     if isinstance(meta, str):
@@ -982,10 +1011,11 @@ def _row_to_commitment(row) -> CommitmentResponse:
         metadata=meta or {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        relationship_warning=relationship_warning,
     )
 
 
-def _row_to_pool(row) -> PoolResponse:
+def _row_to_pool(row, relationship_warning: Optional[str] = None) -> PoolResponse:
     import json as _json
     meta = row["metadata"]
     if isinstance(meta, str):
@@ -1003,6 +1033,7 @@ def _row_to_pool(row) -> PoolResponse:
         metadata=meta or {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        relationship_warning=relationship_warning,
     )
 
 
