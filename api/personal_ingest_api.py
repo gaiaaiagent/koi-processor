@@ -4318,6 +4318,12 @@ async def register_vault_entity(request: RegisterEntityRequest):
 
                     if normalized_aliases:
                         try:
+                            # SAVEPOINT: same reasoning as vault_rel_sync above — an
+                            # unhandled exception here would leave the transaction
+                            # aborted and silently turn the closing COMMIT into a
+                            # ROLLBACK, discarding the entity registration itself, not
+                            # just the alias update.
+                            await conn.execute("SAVEPOINT alias_update")
                             # Merge with existing aliases using DISTINCT to prevent duplicates
                             await conn.execute("""
                                 UPDATE entity_registry
@@ -4330,8 +4336,10 @@ async def register_vault_entity(request: RegisterEntityRequest):
                                 )
                                 WHERE fuseki_uri = $2
                             """, normalized_aliases, canonical.uri)
+                            await conn.execute("RELEASE SAVEPOINT alias_update")
                             logger.info(f"Updated aliases for {canonical.uri}: {normalized_aliases}")
                         except Exception as e:
+                            await conn.execute("ROLLBACK TO SAVEPOINT alias_update")
                             # Same shape as the relationship-sync handler above, smaller
                             # blast radius: this loses the aliases for one entity, not
                             # every relationship in the note, so it stays out of the
@@ -4347,15 +4355,23 @@ async def register_vault_entity(request: RegisterEntityRequest):
             pending_promoted = 0
             if is_new:
                 try:
+                    # SAVEPOINT: resolve_pending_relationships now savepoints its own
+                    # promotion internally, but this wraps the call too as
+                    # defense-in-depth against any exception outside that inner
+                    # try/except (matching the vault_rel_sync / alias_update pattern
+                    # above rather than assuming the inner function is exception-proof).
+                    await conn.execute("SAVEPOINT pending_promotion_call")
                     pending_promoted = await resolve_pending_relationships(
                         conn,
                         canonical.uri,
                         request.name,
                         request.entity_type
                     )
+                    await conn.execute("RELEASE SAVEPOINT pending_promotion_call")
                     if pending_promoted > 0:
                         logger.info(f"Promoted {pending_promoted} pending relationship(s)")
                 except Exception as e:
+                    await conn.execute("ROLLBACK TO SAVEPOINT pending_promotion_call")
                     # Leaves the pending rows in place, so this is recoverable on a later
                     # registration rather than lost — hence log-only. Attributable anyway.
                     logger.warning(

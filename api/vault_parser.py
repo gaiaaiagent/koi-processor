@@ -465,14 +465,18 @@ async def insert_relationship_with_symmetric(
         field_key: Original YAML field name
         raw_value: Original raw value from YAML
     """
-    # Insert primary relationship
-    await conn.execute("""
-        INSERT INTO entity_relationships
-        (subject_uri, predicate, object_uri, source, source_rid, source_field, raw_value)
-        VALUES ($1, $2, $3, 'vault', $4, $5, $6)
-        ON CONFLICT (subject_uri, predicate, object_uri) DO UPDATE
-        SET updated_at = NOW(), source_rid = $4, source_field = $5, raw_value = $6
-    """, subject_uri, predicate, object_uri, vault_path, field_key, raw_value)
+    # Insert primary relationship. Guarded the same way as the symmetric insert
+    # below: entity_relationships has CHECK (subject_uri <> object_uri), and a
+    # near-duplicate fuzzy/trigram match can otherwise attempt to relate an
+    # entity to itself, raising CheckViolationError from here.
+    if subject_uri != object_uri:
+        await conn.execute("""
+            INSERT INTO entity_relationships
+            (subject_uri, predicate, object_uri, source, source_rid, source_field, raw_value)
+            VALUES ($1, $2, $3, 'vault', $4, $5, $6)
+            ON CONFLICT (subject_uri, predicate, object_uri) DO UPDATE
+            SET updated_at = NOW(), source_rid = $4, source_field = $5, raw_value = $6
+        """, subject_uri, predicate, object_uri, vault_path, field_key, raw_value)
 
     # Insert symmetric relationship if applicable
     if predicate in SYMMETRIC_PREDICATES and subject_uri != object_uri:
@@ -710,6 +714,16 @@ async def resolve_pending_relationships(
         object_uri = row['object_uri']
 
     try:
+        # Isolate this promotion behind a SAVEPOINT, matching the pattern
+        # already used twice above in sync_vault_relationships (rel_insert /
+        # pending_insert). Without it, an exception here (e.g. the
+        # CHECK (subject_uri <> object_uri) constraint on entity_relationships)
+        # leaves the enclosing transaction aborted, and the caller's COMMIT
+        # silently becomes a ROLLBACK — discarding the entire /register-entity
+        # write (entity row + RID mapping + relationships), not just this
+        # promotion.
+        await conn.execute("SAVEPOINT pending_promote")
+
         # Insert resolved relationship (with symmetric handling)
         await insert_relationship_with_symmetric(
             conn, subject_uri, row['predicate'], object_uri,
@@ -719,11 +733,13 @@ async def resolve_pending_relationships(
         # Delete from pending
         await conn.execute("DELETE FROM pending_relationships WHERE id = $1", row['id'])
 
+        await conn.execute("RELEASE SAVEPOINT pending_promote")
         logger.info(f"Promoted pending relationship for {entity_name} "
                    f"(sim: {row['sim']:.2f}, predicate: {row['predicate']})")
         return 1
 
     except Exception as e:
+        await conn.execute("ROLLBACK TO SAVEPOINT pending_promote")
         logger.warning(f"Failed to promote pending relationship: {e}")
         return 0
 
