@@ -138,9 +138,10 @@ async def test_annotate_vault_folder_by_type(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 class _ResolveConn:
-    def __init__(self, uri, name, etype, vault_path):
+    def __init__(self, uri, name, etype, vault_path, node_private=False):
         self._uri, self._name, self._etype = uri, name, etype
         self._vault_path = vault_path
+        self._node_private = node_private
 
     async def fetchrow(self, query, *args):
         # Tier 1 exact match on normalized_text (+ entity_type).
@@ -160,7 +161,7 @@ class _ResolveConn:
         if "vault_path" in query and "entity_rid_mappings" in query:
             return self._vault_path
         if "SELECT node_private" in query:
-            return False
+            return self._node_private
         return None
 
     async def fetch(self, query, *args):
@@ -238,6 +239,40 @@ def test_resolve_get_annotation_null_mapping_does_not_gate(monkeypatch, tmp_path
     assert cand["vault_path"] is None
     assert cand["vault_note_exists"] is False
     assert cand["vault_folder"] == "Organizations"
+
+
+def test_resolve_get_hides_node_private_entity(monkeypatch, tmp_path):
+    """A node_private=True match must be hidden entirely from /entity/resolve.
+
+    Regression coverage for the consent-leakage gate's blind spot: every
+    other test in this file (and the only other caller of this endpoint)
+    hardcodes node_private=False, so the private branch at
+    personal_ingest_api.py:3349-3355 had zero unit-level coverage before
+    this test — the live smoke test (tests/test_consent_leakage.sh) was the
+    only thing exercising it, and it was silently failing open.
+    """
+    from fastapi.testclient import TestClient
+    from api import personal_ingest_api as pia
+
+    monkeypatch.setattr(pia, "_VAULT_ROOT", tmp_path)
+    conn = _ResolveConn(
+        uri="orn:personal-koi.entity:evidence-secret-xyz",
+        name="Secret Evidence",
+        etype="Evidence",
+        vault_path="Evidence/Secret Evidence.md",
+        node_private=True,
+    )
+    monkeypatch.setattr(pia, "db_pool", _FakePool(conn))
+
+    client = TestClient(pia.app)
+    resp = client.get("/entity/resolve", params={"label": "Secret Evidence", "type_hint": "Evidence"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["candidates"] == []
+    assert body["is_new"] is False
+    assert body["persisted"] is False
+    assert "orn:personal-koi.entity:evidence-secret-xyz" not in resp.text
+    assert "Secret Evidence" not in resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -16,9 +16,11 @@ live_write_begin
 BASE_URL="${BASE_URL:-http://localhost:8351}"
 PASS=0
 FAIL=0
+SKIP=0
 
 green()  { printf "\033[32m%s\033[0m\n" "$1"; }
 red()    { printf "\033[31m%s\033[0m\n" "$1"; }
+yellow() { printf "\033[33m%s\033[0m\n" "$1"; }
 
 check() {
     local desc="$1" ok="$2"
@@ -82,7 +84,9 @@ if [ -z "$PRIVATE_URI" ]; then
 fi
 echo ""
 
-# Helper: check if a JSON response contains the private entity name or URI
+# Helper: check if a JSON response contains the private entity name or URI.
+# A python crash reads as "ERROR" (a broken check), never as a silent "false"
+# (no-leak) — the two must not be indistinguishable to the caller.
 contains_private() {
     local resp="$1"
     echo "$resp" | python3 -c "
@@ -92,7 +96,44 @@ name = '$PRIVATE_NAME'
 uri = '$PRIVATE_URI'
 found = name in data or uri in data
 print('true' if found else 'false')
-" 2>/dev/null || echo "false"
+" 2>/dev/null || echo "ERROR"
+}
+
+# Fetch a URL (any curl args) and assert BOTH that it returns 2xx AND that the
+# body doesn't leak the private entity. A transport failure or non-2xx status
+# is a hard [FAIL] here, never a silent substitution into an empty '{}'/'[]'
+# that would read as "no leak found". This is the structural fix for the
+# consent-leakage gate previously failing OPEN on any of these 10 checks.
+check_no_leak() {
+    local desc="$1"; shift
+    local tmp code body leaked
+    tmp=$(mktemp)
+    code=$(curl -s -o "$tmp" -w '%{http_code}' "$@" 2>/dev/null || echo "000")
+    body=$(cat "$tmp" 2>/dev/null || echo "")
+    rm -f "$tmp"
+    # 501 is a genuine, intentional "capability not enabled in this deployment"
+    # response (e.g. LLM enrichment off locally) — it means the check couldn't
+    # exercise anything, so it's neither a real [PASS] nor a [FAIL]. Counting
+    # it as PASS would recreate the exact masking bug this rewrite removes;
+    # counting it as FAIL would make the suite permanently red on any
+    # deployment profile that disables the capability.
+    if [ "$code" = "501" ]; then
+        yellow "  [SKIP] $desc (HTTP 501 — capability not enabled in this deployment)"
+        SKIP=$((SKIP + 1))
+        return
+    fi
+    if [[ "$code" != 2* ]]; then
+        check "$desc" "false"
+        red "    (request failed: HTTP $code)"
+        return
+    fi
+    leaked=$(contains_private "$body")
+    if [ "$leaked" = "ERROR" ]; then
+        check "$desc" "false"
+        red "    (contains_private check crashed on the response body)"
+        return
+    fi
+    check "$desc" "$([ "$leaked" = "false" ] && echo true || echo false)"
 }
 
 # ------------------------------------------------------------------ #
@@ -101,38 +142,34 @@ print('true' if found else 'false')
 echo "--- Step 2: Verify invisibility on public endpoints ---"
 
 # 2a. /entity-search
-SEARCH_RESP=$(curl -sf "$BASE_URL/entity-search?query=CONSENT-LEAKAGE-TEST&limit=50" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$SEARCH_RESP")
-check "/entity-search: private entity NOT found" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+check_no_leak "/entity-search: private entity NOT found" \
+    "$BASE_URL/entity-search?query=CONSENT-LEAKAGE-TEST&limit=50"
 
 # 2b. /entity/{uri} — should return 404 or empty for private entity
 ENTITY_RESP=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/entity/$PRIVATE_URI" 2>/dev/null || echo "000")
 check "/entity/{uri}: returns 404 for private entity" "$([ "$ENTITY_RESP" = "404" ] && echo true || echo false)"
 
 # 2c. /entities (list)
-ENTITIES_RESP=$(curl -sf "$BASE_URL/entities?entity_type=Evidence&limit=500" 2>/dev/null || echo '[]')
-LEAKED=$(contains_private "$ENTITIES_RESP")
-check "/entities: private entity NOT in list" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+check_no_leak "/entities: private entity NOT in list" \
+    "$BASE_URL/entities?entity_type=Evidence&limit=500"
 
 # 2d. /entity/{uri}/mentioned-in
-MENTION_RESP=$(curl -s "$BASE_URL/entity/$PRIVATE_URI/mentioned-in" 2>/dev/null || echo '{}')
 MENTION_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/entity/$PRIVATE_URI/mentioned-in" 2>/dev/null || echo "000")
 check "/entity/{uri}/mentioned-in: rejects or 404" "$([ "$MENTION_CODE" = "404" ] || [ "$MENTION_CODE" = "403" ] && echo true || echo false)"
 
-# 2e. /entities/mentioned-in (batch)
-BATCH_RESP=$(curl -sf -X POST "$BASE_URL/entities/mentioned-in" \
+# 2e. /entities/mentioned-in (batch) — request field is `uris`, not
+# `entity_uris` (BatchMentionedInRequest); the old name 422'd and was masked
+# by the same silent-substitution bug fixed above.
+check_no_leak "/entities/mentioned-in: private entity filtered out" \
+    -X POST "$BASE_URL/entities/mentioned-in" \
     -H "Content-Type: application/json" \
-    -d "{\"entity_uris\": [\"$PRIVATE_URI\"]}" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$BATCH_RESP")
-check "/entities/mentioned-in: private entity filtered out" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+    -d "{\"uris\": [\"$PRIVATE_URI\"]}"
 
 # 2f. /stats
-STATS_RESP=$(curl -sf "$BASE_URL/stats" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$STATS_RESP")
-check "/stats: private entity NOT in response" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+check_no_leak "/stats: private entity NOT in response" \
+    "$BASE_URL/stats"
 
 # 2g. /entity/{uri}/evidence
-EV_RESP=$(curl -s "$BASE_URL/entity/$PRIVATE_URI/evidence" 2>/dev/null || echo '{}')
 EV_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/entity/$PRIVATE_URI/evidence" 2>/dev/null || echo "000")
 check "/entity/{uri}/evidence: rejects or 404" "$([ "$EV_CODE" = "404" ] || [ "$EV_CODE" = "403" ] && echo true || echo false)"
 
@@ -141,44 +178,42 @@ REL_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/relationships/$PRIV
 check "/relationships/{uri}: rejects or 404" "$([ "$REL_CODE" = "404" ] || [ "$REL_CODE" = "403" ] && echo true || echo false)"
 
 # 2i. /vault-entities
-VAULT_RESP=$(curl -sf "$BASE_URL/vault-entities?entity_type=Evidence" 2>/dev/null || echo '[]')
-LEAKED=$(contains_private "$VAULT_RESP")
-check "/vault-entities: private entity NOT in list" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+check_no_leak "/vault-entities: private entity NOT in list" \
+    "$BASE_URL/vault-entities?entity_type=Evidence"
 
 # 2j. /vault-entity/{vault_rid}
 VAULT_SINGLE_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/vault-entity/$PRIVATE_VAULT_RID" 2>/dev/null || echo "000")
 check "/vault-entity/{rid}: returns 404 for private" "$([ "$VAULT_SINGLE_CODE" = "404" ] && echo true || echo false)"
 
-# 2k. /chat — search for the private entity name
-CHAT_RESP=$(curl -sf -X POST "$BASE_URL/chat" \
+# 2k. /chat — search for the private entity name. ChatRequest's field is
+# `query`; there is no `session_id` field at all. The old body 422'd and was
+# masked by the same silent-substitution bug fixed above.
+check_no_leak "/chat: private entity NOT in retrieval context" \
+    -X POST "$BASE_URL/chat" \
     -H "Content-Type: application/json" \
-    -d "{\"message\": \"Tell me about $PRIVATE_NAME\", \"session_id\": \"consent-test-$TS\"}" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$CHAT_RESP")
-check "/chat: private entity NOT in retrieval context" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+    -d "{\"query\": \"Tell me about $PRIVATE_NAME\"}"
 
-# 2l. /entity/resolve (GET)
-RESOLVE_RESP=$(curl -sf "$BASE_URL/entity/resolve?name=CONSENT-LEAKAGE-TEST&type=Evidence" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$RESOLVE_RESP")
-check "/entity/resolve (GET): private entity NOT resolved" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+# 2l. /entity/resolve (GET) — params are label/type_hint, not name/type; use
+# the actual suffixed test name (matches what was registered), not the bare
+# prefix. Both were bugs that made this check pass on a 422, not a real PASS.
+check_no_leak "/entity/resolve (GET): private entity NOT resolved" \
+    "$BASE_URL/entity/resolve?label=$PRIVATE_NAME&type_hint=Evidence"
 
 # 2m. /graph-version — entity count should NOT include private entity
-GV_RESP=$(curl -sf "$BASE_URL/graph-version" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$GV_RESP")
-check "/graph-version: private entity NOT in response" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+check_no_leak "/graph-version: private entity NOT in response" \
+    "$BASE_URL/graph-version"
 
 # 2n. /web/evaluate — entity context for LLM should exclude private
-WE_RESP=$(curl -s -X POST "$BASE_URL/web/evaluate" \
+check_no_leak "/web/evaluate: private entity NOT in LLM context" \
+    -X POST "$BASE_URL/web/evaluate" \
     -H "Content-Type: application/json" \
-    -d "{\"url\": \"https://example.com\", \"title\": \"Test\", \"content\": \"$PRIVATE_NAME\"}" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$WE_RESP")
-check "/web/evaluate: private entity NOT in LLM context" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+    -d "{\"url\": \"https://example.com\", \"title\": \"Test\", \"content\": \"$PRIVATE_NAME\"}"
 
 # 2o. /web/process — entity context for LLM should exclude private
-WP_RESP=$(curl -s -X POST "$BASE_URL/web/process" \
+check_no_leak "/web/process: private entity NOT in LLM context" \
+    -X POST "$BASE_URL/web/process" \
     -H "Content-Type: application/json" \
-    -d "{\"url\": \"https://example.com\", \"title\": \"Test\", \"content\": \"$PRIVATE_NAME\", \"submission_id\": \"consent-test-$TS\"}" 2>/dev/null || echo '{}')
-LEAKED=$(contains_private "$WP_RESP")
-check "/web/process: private entity NOT in LLM context" "$([ "$LEAKED" = "false" ] && echo true || echo false)"
+    -d "{\"url\": \"https://example.com\", \"title\": \"Test\", \"content\": \"$PRIVATE_NAME\", \"submission_id\": \"consent-test-$TS\"}"
 
 echo ""
 
@@ -195,8 +230,8 @@ echo ""
 # Summary
 # ------------------------------------------------------------------ #
 echo "================================================"
-TOTAL=$((PASS + FAIL))
-echo "Results: $PASS passed, $FAIL failed ($TOTAL total)"
+TOTAL=$((PASS + FAIL + SKIP))
+echo "Results: $PASS passed, $FAIL failed, $SKIP skipped ($TOTAL total)"
 echo "Private entity URI: $PRIVATE_URI"
 echo "================================================"
 
