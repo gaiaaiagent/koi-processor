@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-08-24 14:40 PDT
+**Updated:** 2026-08-25 00:45 PDT
 
-**Current status:** 18 commits pushed (`763ede4..2a50f07`), tree clean, API healthy, all prior items closed. `/register-entity` no longer reports success over an aborted transaction; the resolver is **strict** on both tiers, each measured before flipping; entity types 421 → 1. A sweep of that class then confirmed **14 more instances**.
+**Current status:** 12 commits, tree clean, not pushed (12 ahead). Prior handoff fully closed: all 9 sweep-finding fixes shipped, 276-Meeting-note repair executed (270 re-measured fresh, 8-row orphan issue caught+fixed), last non-canonical entity retyped — migration 112 complete, 421→0.
 
-**Next:** 1) **DECIDE + REPAIR** (koi 8387): 276 Meeting notes have zero `project`/`location` edges — the 08-22 backfill sent one frontmatter key into a **replace-all** sync, and 278/281 hashes are current so a re-sync *skips* them. 2) Fix the sweep findings worst-first: the **consent-leakage gate fails OPEN**; `GET /tasks/` drops all four date filters on malformed input. 3) koi 8386 — re-measure entity creation (due 08-31, clock-gated).
+**Next:** 1) koi 8386 re-measure (due 08-31, clock-gated). 2) Push 12 commits — needs operator go-ahead. 3) Optional: defect-class-sweep on curl-fallback-masks-failure idiom; decide on a koi-sensors-runtime clone.
 
-**Watch:** `docs/planning/` and `docs/soak-results/` are gitignored — docs written there are silently never committed. Type enforcement deliberately NOT added. `regen`/`open`/`nature` are polysemous, not duplicates. `/entities/retype` mints a new row when the target URI is free.
+**Watch:** `/entities/retype` mints a new row on a type change — `dry_run:true` first. Never use `vault_register_entity` for a type change (no merge-back; caused 8 orphans this session). Rank 11/14 sweep findings deliberately deferred.
 
-**Verification:** measured at `2a50f07`, the final commit: 44 failed / 1492 passed vs a MEASURED `763ede4` baseline of 45/1438 — zero new. Gate 10/10; governance 4/4; 155 focused tests. 23 backups; all reversible.
+**Verification:** at `1cea455`: 43 failed / 1527 passed vs measured `763ede4` baseline 45/1438 — zero new failures. 0 non-canonical entity-type rows (was 1). 32 backups; all reversible.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
