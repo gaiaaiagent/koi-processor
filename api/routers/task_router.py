@@ -280,6 +280,25 @@ def create_router(pool, caps) -> APIRouter:
         except ValueError:
             return None
 
+    def _parse_date_strict(name: str, s: Optional[str]) -> Optional[date]:
+        """Like _parse_date, but a present-and-unparseable value 422s instead
+        of silently dropping the filter. _parse_date conflates "absent" and
+        "unparseable" into the same None — fine for the write path (a missing
+        field is meant to leave the column untouched), wrong for the GET-list
+        read path, where a caller filtering by ?due_before=<malformed value>
+        (e.g. a full ISO datetime — only YYYY-MM-DD parses) silently got back
+        every task with HTTP 200 instead of the filtered set it asked for.
+        """
+        if not s:
+            return None
+        try:
+            return date.fromisoformat(s)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name} must be an ISO date (YYYY-MM-DD), got {s!r}",
+            )
+
     # -----------------------------------------------------------------------
     # POST /ingest — upsert by taskKey
     # -----------------------------------------------------------------------
@@ -485,21 +504,26 @@ def create_router(pool, caps) -> APIRouter:
                     )"""
                 )
 
-            # Date filters
+            # Date filters. Strict: a present-but-malformed value 422s rather
+            # than silently widening the query to unfiltered (see
+            # _parse_date_strict). Only the read path is strict — POST
+            # /ingest and PATCH keep the lenient _parse_date, since a missing
+            # or malformed date there is meant to leave the column untouched
+            # for MCP callers, not reject the whole write.
             if due_before:
-                d = _parse_date(due_before)
+                d = _parse_date_strict("due_before", due_before)
                 if d:
                     add("due_date < ?", d)
             if due_after:
-                d = _parse_date(due_after)
+                d = _parse_date_strict("due_after", due_after)
                 if d:
                     add("due_date >= ?", d)
             if updated_before:
-                d = _parse_date(updated_before)
+                d = _parse_date_strict("updated_before", updated_before)
                 if d:
                     add("updated_at < ?", d)
             if updated_after:
-                d = _parse_date(updated_after)
+                d = _parse_date_strict("updated_after", updated_after)
                 if d:
                     add("updated_at >= ?", d)
 

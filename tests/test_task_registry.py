@@ -478,3 +478,42 @@ class TestListPaginationHeader:
         finally:
             for k in keys:
                 cleanup(client, k)
+
+
+class TestDateFilterValidation:
+    """A malformed due_before/due_after/updated_before/updated_after must 422,
+    not silently widen the query to unfiltered. _parse_date returned None for
+    both "absent" and "unparseable", and the four call sites only added the
+    WHERE clause `if d:` — so e.g. ?due_before=2026-08-24T00:00:00Z (a full
+    ISO datetime; only YYYY-MM-DD parses) or ?due_before=garbage dropped the
+    filter entirely and still returned HTTP 200 with every task. Live-verified
+    before the fix: due_before=2026-08-24 -> 415 rows, both malformed values
+    above -> 4,265 rows (identical to no filter at all)."""
+
+    @pytest.mark.parametrize("param", [
+        "due_before", "due_after", "updated_before", "updated_after",
+    ])
+    @pytest.mark.parametrize("bad_value", [
+        "2026-08-24T00:00:00Z",  # full ISO datetime, not a bare date
+        "garbage",
+        "2026-13-40",  # not a real calendar date
+    ])
+    def test_malformed_date_filter_rejected(self, client, param, bad_value):
+        r = client.get("/tasks/", params={param: bad_value, "limit": 1})
+        assert r.status_code == 422, (
+            f"{param}={bad_value!r} should 422, got {r.status_code}: {r.text}"
+        )
+
+    @pytest.mark.parametrize("param", [
+        "due_before", "due_after", "updated_before", "updated_after",
+    ])
+    def test_valid_iso_date_filter_accepted(self, client, param):
+        r = client.get("/tasks/", params={param: "2026-08-24", "limit": 1})
+        assert r.status_code == 200, f"{param}=2026-08-24 rejected: {r.status_code}: {r.text}"
+        assert isinstance(r.json(), list)
+
+    def test_absent_date_filters_still_default_to_unfiltered(self, client):
+        """Confirms the strict parser didn't change absent-filter behavior —
+        only present-and-malformed values should 422."""
+        r = client.get("/tasks/", params={"limit": 1})
+        assert r.status_code == 200, r.text
