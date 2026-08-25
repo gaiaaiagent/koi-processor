@@ -61,6 +61,36 @@ def test_cleanup_removes_exact_recorded_entity_and_edges(tmp_path):
         assert cur.fetchone()[0] == 0
 
 
+def test_recovery_scan_still_finds_unmanifested_recent_row():
+    """The federation-table recovery scan must still catch a row whose
+    identifier was never recorded to the manifest (the "HTTP response lost
+    after commit" case it exists for) — proving the 2026-08-24 recency-bound
+    fast path (FEDERATION_RECENCY_COLUMNS) didn't narrow that guarantee for
+    the case it actually protects: a row created during THIS run."""
+    run_id = uuid.uuid4().hex
+    marker_url = f"https://example.com/cleanup-recovery-test-{run_id}"
+    with psycopg2.connect(TEST_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO web_submissions (url, rid, domain, status)
+            VALUES (%s, %s, 'example.com', 'pending')
+            """,
+            (marker_url, f"orn:test:web-submission-{run_id}"),
+        )
+    manifest_path = Path("/tmp") / f"cleanup-recovery-manifest-{run_id}.jsonl"
+    manifest_path.touch()  # no append_record call — identifier was "lost"
+    try:
+        report = cleanup(TEST_DSN, manifest_path, run_id)
+        assert report["deleted"].get("web_submissions", 0) == 1
+        with psycopg2.connect(TEST_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM web_submissions WHERE url = %s", (marker_url,)
+            )
+            assert cur.fetchone()[0] == 0
+    finally:
+        manifest_path.unlink(missing_ok=True)
+
+
 def test_shell_guard_refuses_writes_without_explicit_opt_in():
     guard = Path(__file__).with_name("live_write_shell_guard.sh")
     result = subprocess.run(

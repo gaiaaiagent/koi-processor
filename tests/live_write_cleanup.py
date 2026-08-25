@@ -17,6 +17,35 @@ import sys
 from urllib.parse import urlparse
 
 
+# Federation tables have no returned identifier, so cleanup recovers them by
+# a substring match on the run's UUID marker across the whole row (see
+# cleanup() below). row_to_json(t)::text LIKE %s on a bare table forces a
+# full-table scan with a per-row JSON serialization — on koi_net_events
+# (~199K rows) this took 9+ minutes and counting on 2026-08-24, blocking a
+# live-write test's cleanup entirely. Every one of these tables has a column
+# recording when the row was created, and the 3 largest already have a btree
+# index on it (idx_koi_events_queued, idx_koi_receipts_created_at,
+# idx_vault_sync_applied_age). A test run's own rows are always fresh — the
+# marker can only appear in a row created during THIS run's execution window
+# (seconds to low minutes) — so bounding the scan to a generous recency
+# window lets the planner use that index for the expensive part and keeps
+# the marker as the exact correctness check, not a substitute for it.
+FEDERATION_RECENCY_COLUMNS = {
+    "commitment_pool_events": "created_at",
+    "federation_applied_events": "applied_at",
+    "koi_provenance_links": "created_at",
+    "koi_transformation_receipts": "created_at",
+    "web_crawl_jobs": "created_at",
+    "web_submissions": "created_at",
+    "koi_net_cross_refs": "created_at",
+    "koi_net_events": "queued_at",
+    "koi_outbound_shares": "shared_at",
+    "koi_shared_documents": "received_at",
+    "vault_sync_applied_events": "applied_at",
+}
+FEDERATION_RECENCY_WINDOW = "24 hours"
+
+
 VALID_KINDS = {
     "claim_rid",
     "commitment_rid",
@@ -90,6 +119,13 @@ def cleanup(dsn: str, manifest: Path, run_id: str) -> dict:
 
         # Recover identifiers from the UUID marker when an HTTP response was
         # lost after the server committed but before the test could record it.
+        # Same recency-bound rationale as FEDERATION_RECENCY_COLUMNS below:
+        # entity_registry carries two pgvector embedding columns
+        # (embedding vector(1024), embedding_3072 vector(3072)), so
+        # row_to_json(t)::text on every one of its ~32K rows serializes both
+        # vectors just to search unrelated text columns — this table was the
+        # slower of the two 2026-08-24 incidents (~6 min for 32K rows vs. ~9
+        # min for koi_net_events' 199K), entirely from that per-row cost.
         for table, column, kind in (
             ("claims", "claim_rid", "claim_rid"),
             ("commitments", "commitment_rid", "commitment_rid"),
@@ -100,8 +136,9 @@ def cleanup(dsn: str, manifest: Path, run_id: str) -> dict:
                 continue
             cur.execute(
                 f'SELECT "{column}" FROM "{table}" t '
-                "WHERE row_to_json(t)::text LIKE %s",
-                (marker,),
+                f'WHERE "created_at" > now() - interval %s '
+                "AND row_to_json(t)::text LIKE %s",
+                (FEDERATION_RECENCY_WINDOW, marker),
             )
             records[kind].update(row[0] for row in cur.fetchall() if row[0])
 
@@ -185,10 +222,19 @@ def cleanup(dsn: str, manifest: Path, run_id: str) -> dict:
             "vault_sync_applied_events",
         ):
             if _table_exists(cur, table):
-                cur.execute(
-                    f'DELETE FROM "{table}" t WHERE row_to_json(t)::text LIKE %s',
-                    (marker,),
-                )
+                recency_col = FEDERATION_RECENCY_COLUMNS.get(table)
+                if recency_col:
+                    cur.execute(
+                        f'DELETE FROM "{table}" t '
+                        f'WHERE "{recency_col}" > now() - interval %s '
+                        f"AND row_to_json(t)::text LIKE %s",
+                        (FEDERATION_RECENCY_WINDOW, marker),
+                    )
+                else:
+                    cur.execute(
+                        f'DELETE FROM "{table}" t WHERE row_to_json(t)::text LIKE %s',
+                        (marker,),
+                    )
                 deleted[table] = deleted.get(table, 0) + cur.rowcount
 
         # Fail closed if any explicitly recorded base object survived.
