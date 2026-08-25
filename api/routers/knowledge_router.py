@@ -1315,7 +1315,7 @@ def create_router(
 
         # Writes to embedding_3072 (post-migration 089); legacy embedding
         # column (1024) retained for rollback only — do not write to it.
-        await conn.execute("""
+        insert_tag = await conn.execute("""
             INSERT INTO entity_registry
                 (fuseki_uri, entity_text, normalized_text, entity_type,
                  source, embedding_3072, metadata, resolution_tier)
@@ -1325,6 +1325,33 @@ def create_router(
             'knowledge-add', str(embedding) if embedding else None,
             '{"type_source": "default"}' if typed_by_default else '{}',
             'tier3_created_ambiguous' if same_name_seen else 'tier3_created')
+
+        # asyncpg's status tag is "INSERT 0 1" on a real insert, "INSERT 0 0"
+        # when ON CONFLICT DO NOTHING no-op'd. Never trusted before this fix —
+        # a 0-row result was still reported is_new=True, live-log-proven twice
+        # on the identical URI (same deterministic name+type hash reached this
+        # INSERT a second time, most likely via a same-name concurrent race).
+        # That silently rebinds the fact to whatever row actually holds this
+        # URI without checking its real type, and skips the caller's
+        # type_mismatches check (:897-898 above), which only compares against
+        # the type THIS call requested — never the type the existing row
+        # actually has when a conflict is hidden.
+        try:
+            rows_affected = int(insert_tag.split()[-1])
+        except (ValueError, IndexError):
+            rows_affected = 1  # unexpected tag shape — don't misreport a real insert as a conflict
+
+        if rows_affected == 0:
+            existing = await conn.fetchrow(
+                "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1", new_uri
+            )
+            actual_type = existing["entity_type"] if existing else entity_type
+            seen[normalized] = new_uri
+            logger.warning(
+                f"Tier-3 create for {name!r} conflicted on {new_uri} (already exists as "
+                f"{actual_type!r}); reporting is_new=False instead of a silent re-create"
+            )
+            return new_uri, False, actual_type
 
         seen[normalized] = new_uri
         logger.info(f"Created new entity: {name} -> {new_uri}")

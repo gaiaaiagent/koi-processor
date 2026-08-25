@@ -14,6 +14,13 @@ sys.path.insert(0, str(REPO_ROOT))
 
 DB_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
 
+# /knowledge/episodes is gated by make_service_token_auth(pool) (default
+# env_var="KOI_CLAIMS_SERVICE_TOKEN" -- knowledge_router.py:710), added after
+# this file's existing "succeeds" test was written, which is why it 401s
+# without this. Same pattern as test_claims_attestations.py's auth fixture.
+TEST_SERVICE_TOKEN = "test-service-token-deadbeef"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_SERVICE_TOKEN}"}
+
 
 class _SingleConnPool:
     def __init__(self, conn):
@@ -331,7 +338,8 @@ async def test_search_facts_returns_empty_when_surface_unavailable():
 
 
 @pytest.mark.anyio
-async def test_create_episode_succeeds_when_surface_available():
+async def test_create_episode_succeeds_when_surface_available(monkeypatch):
+    monkeypatch.setenv("KOI_CLAIMS_SERVICE_TOKEN", TEST_SERVICE_TOKEN)
     conn = await asyncpg.connect(DB_URL)
     tx = conn.transaction()
     await tx.start()
@@ -341,7 +349,9 @@ async def test_create_episode_succeeds_when_surface_available():
         source_document = f"unit-test://facts-gate/{uuid4()}"
 
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=AUTH_HEADERS
+        ) as client:
             response = await client.post(
                 "/knowledge/episodes",
                 json={
@@ -375,6 +385,110 @@ async def test_create_episode_succeeds_when_surface_available():
 
         assert episode_id is not None
         assert fact_count == 1
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pytest.mark.anyio
+async def test_tier3_conflict_reports_is_new_false_and_real_type(monkeypatch):
+    """A4/A5 (silent-success sweep rank 5): Tier 3's `INSERT ... ON CONFLICT
+    (fuseki_uri) DO NOTHING` never checked the command tag, so a 0-row insert
+    (fuseki_uri already occupied) was still reported is_new=True with the
+    caller's REQUESTED type echoed back -- never the existing row's actual
+    type. That silently (a) miscounts entities_created, and (b) suppresses
+    the type_mismatches diagnostic, since it only fires when the requested
+    type differs from what _resolve_or_create returns, and pre-fix that
+    return value was always forced to equal the request on a Tier-3 path.
+
+    Live-log-proven (2026-08-24, personal-koi stderr.log): "Created new
+    entity: Knowledge Organization Infrastructure -> orn:...concept-
+    knowledge-organization-infrastructure-45521ed50fd5" logged twice for the
+    identical URI -- the second call did not actually insert a row.
+
+    Reproduced here deterministically (not relying on request-level timing):
+    generate_entity_uri(name, entity_type) is a pure function of name+type,
+    independent of what's stored in normalized_text. A pre-existing row at
+    that exact URI, but with a normalized_text Tier 1's text search won't
+    match, stands in for "the row exists but this request's lookups missed
+    it" -- the same end state a genuine concurrent-request race produces,
+    without relying on real concurrency timing to hit it.
+    """
+    from api.personal_ingest_api import generate_entity_uri, normalize_entity_text
+
+    monkeypatch.setenv("KOI_CLAIMS_SERVICE_TOKEN", TEST_SERVICE_TOKEN)
+    conn = await asyncpg.connect(DB_URL)
+    tx = conn.transaction()
+    await tx.start()
+
+    try:
+        app = _build_app(conn, facts_surface_available=True)
+        source_document = f"unit-test://tier3-conflict/{uuid4()}"
+        name = f"Tier3 Conflict Subject {uuid4().hex[:8]}"
+
+        # Pre-existing row occupies the exact URI Tier 3 will compute for
+        # (name, "Concept"), but under a normalized_text Tier 1 won't match.
+        existing_uri = generate_entity_uri(name, "Concept")
+        stale_normalized = normalize_entity_text(name) + "-stale-mismatch"
+        await conn.execute("""
+            INSERT INTO entity_registry
+                (fuseki_uri, entity_text, normalized_text, entity_type, source)
+            VALUES ($1, $2, $3, 'Organization', 'test-setup')
+        """, existing_uri, name, stale_normalized)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=AUTH_HEADERS
+        ) as client:
+            response = await client.post(
+                "/knowledge/episodes",
+                json={
+                    "name": "Tier3 conflict episode",
+                    "source_document": source_document,
+                    "facts": [
+                        {
+                            "subject": name,
+                            "subject_type": "Concept",
+                            "predicate": "RELATES_TO",
+                            "object_literal": "conflict probe",
+                            "fact_text": f"{name} relates to conflict probe.",
+                        }
+                    ],
+                    "create_entities": True,
+                },
+            )
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+
+        # The fact must bind to the EXISTING row's URI (deterministic hash
+        # match), not silently mint a phantom duplicate.
+        assert body["facts_created"] == 1
+        assert body["entities_created"] == 0, (
+            "must not count this as a fresh creation -- the insert conflicted "
+            "with an existing row"
+        )
+        mismatches = body["type_mismatches"]
+        assert len(mismatches) == 1, f"expected exactly one type mismatch, got {mismatches}"
+        m = mismatches[0]
+        assert m["name"] == name
+        assert m["role"] == "subject"
+        assert m["requested_type"] == "Concept"
+        assert m["resolved_type"] == "Organization"  # the EXISTING row's real type
+        assert m["resolved_uri"] == existing_uri
+
+        fact_row = await conn.fetchrow(
+            "SELECT subject_uri FROM knowledge_facts WHERE episode_id = "
+            "(SELECT id FROM knowledge_episodes WHERE source_document = $1)",
+            source_document,
+        )
+        assert fact_row["subject_uri"] == existing_uri
+
+        # No second row was minted at a different URI for the same name.
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM entity_registry WHERE entity_text = $1", name
+        )
+        assert count == 1
     finally:
         await tx.rollback()
         await conn.close()
