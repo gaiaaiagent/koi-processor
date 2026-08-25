@@ -30,28 +30,31 @@ from __future__ import annotations
 
 import plistlib
 import subprocess
-import warnings
 from pathlib import Path
 
 import pytest
 
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 
-# The shared dev checkout. Case-insensitive on this filesystem, so both spellings reach the
+# The shared dev checkouts. Case-insensitive on this filesystem, so both spellings reach the
 # same directory and both must be caught — the dead plist used the lowercase one while
 # CLAUDE.md documents the capitalised one, which is part of why it read as fine.
-DEV_CHECKOUT_MARKERS = ("projects/regenai/koi-processor", "projects/RegenAI/koi-processor")
+#
+# koi-sensors (email-sensor, email-watcher, proton-email-sensor) joined this list on
+# 2026-08-25, once `koi-sensors-runtime` was established as its pinned-branch sibling
+# (mirroring koi-processor-runtime). Before that it had the identical risk shape but no
+# repoint target, so it was only reported via a warn-only test rather than hard-failed here
+# — see git history for that test if the rationale is needed again.
+DEV_CHECKOUT_MARKERS = (
+    "projects/regenai/koi-processor", "projects/RegenAI/koi-processor",
+    "projects/regenai/koi-sensors", "projects/RegenAI/koi-sensors",
+)
 
 # Deployable checkouts: pinned to a branch, never switched. See CLAUDE.md DEPLOY TOPOLOGY.
-STABLE_CHECKOUT_MARKERS = ("projects/koi-processor-runtime", "projects/koi-processor-service")
-
-# koi-sensors (email-sensor, email-watcher, proton-email-sensor) has the identical
-# session-branch-switches-it-freely risk as koi-processor's dev checkout — but unlike
-# koi-processor, there is no koi-sensors-runtime clone, so there is currently no repoint
-# target. Reported (see test_ungoverned_checkout_dependencies_are_visible), not hard-failed,
-# until a stable pair is established for it. Do not add this to DEV_CHECKOUT_MARKERS: that
-# would land a hard-failing check with no remedy available.
-UNGOVERNED_CHECKOUT_MARKERS = ("projects/regenai/koi-sensors", "projects/RegenAI/koi-sensors")
+STABLE_CHECKOUT_MARKERS = (
+    "projects/koi-processor-runtime", "projects/koi-processor-service",
+    "projects/koi-sensors-runtime",
+)
 
 
 # TWO namespaces, not one. The jobs were named under both `com.personal-koi.*` and
@@ -166,34 +169,6 @@ def test_no_job_loads_code_from_the_shared_dev_checkout(plist: Path) -> None:
         f"\nPoint it at one of {STABLE_CHECKOUT_MARKERS} instead "
         f"(see CLAUDE.md DEPLOY TOPOLOGY)."
     )
-
-
-@pytest.mark.skipif(not installed_plists(), reason="no personal-KOI LaunchAgents installed")
-def test_ungoverned_checkout_dependencies_are_visible() -> None:
-    """koi-sensors jobs (email-sensor, email-watcher, proton-email-sensor) depend on
-    ~/projects/RegenAI/koi-sensors, a checkout sessions branch-switch freely — the identical
-    risk shape as koi-processor's dev checkout. They matched none of DEV_CHECKOUT_MARKERS
-    (that list only names koi-processor), so test_no_job_loads_code_from_the_shared_dev_
-    checkout passed for all three without ever evaluating whether koi-sensors itself is a
-    movable dev checkout. It is — nothing about the risk is specific to koi-processor's name.
-
-    This reports via a pytest warning (visible in the run's "warnings summary", not hidden
-    behind -s) rather than asserting failure: unlike koi-processor, there is no
-    koi-sensors-runtime clone, so there is no repoint target today. Landing a hard fail here
-    would be a check with no remedy. Decide separately whether to establish one.
-    """
-    findings: list[str] = []
-    for plist in installed_plists():
-        for path in program_paths(plist) + working_directory(plist):
-            if any(marker in path for marker in UNGOVERNED_CHECKOUT_MARKERS):
-                findings.append(f"{plist.name}: {path}")
-    if findings:
-        warnings.warn(
-            "jobs depending on koi-sensors with no stable/runtime pair yet (not a failure — "
-            "see UNGOVERNED_CHECKOUT_MARKERS docstring):\n  " + "\n  ".join(findings),
-            UserWarning,
-            stacklevel=1,
-        )
 
 
 def installed_cron_lines() -> list[str]:

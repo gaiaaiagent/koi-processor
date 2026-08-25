@@ -59,6 +59,8 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > | `~/projects/koi-processor-service` | **SERVES :8351** (uvicorn cwd; `start.sh` `WORKTREE=`) | ⛔ never switch branches here — the live API becomes whatever you leave it on. `start.sh` now REFUSES to serve a non-deployable branch. |
 > | `~/projects/koi-processor-runtime` | **launchd sensor jobs** (incl. `embedding-repair`) | ⛔ never switch branches here — a job's script can vanish and it exits 78 silently. |
 > | `~/projects/RegenAI/koi-processor` | shared DEV checkout | sessions switch this freely; assume it moves under you. |
+> | `~/projects/koi-sensors-runtime` | **launchd email-sensor jobs** (`email-sensor`, `email-watcher`, `proton-email-sensor`) — a DIFFERENT GitHub repo (`gaiaaiagent/koi-sensors`), established 2026-08-25 mirroring this pair | ⛔ never switch branches here — pinned to `main` (koi-sensors has no `regen-prod`-equivalent; `main` is its only real mainline). Refresh: `git -C ~/projects/koi-sensors-runtime pull`. |
+> | `~/projects/RegenAI/koi-sensors` | shared DEV checkout for koi-sensors | sessions switch this freely; assume it moves under you. Do not point any launchd/cron job here — enforced by `tests/test_launchd_job_targets.py`. |
 > | `~/projects/koi-wt-*` | per-topic **worktrees** | ✅ do multi-step work here. `git worktree add ~/projects/koi-wt-<topic> <branch>` |
 >
 > Three incidents from getting this wrong: a branch switch orphaned the `chunk-embedder`
