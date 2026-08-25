@@ -53,6 +53,9 @@ RETRIEVAL_SITES = [
      "GET /entities list endpoint"),
     ("api/retrieval_executors.py", "LIVE_FILTER",
      "POST /chat entity ANN (fixed in 00a3049)"),
+    ("api/web_fetcher.py", "WHERE LENGTH(entity_text) >= 3",
+     "scan_for_known_entities — web-submission entity matching, feeds "
+     "web_submissions.matching_entities (a 7th site the original sweep missed)"),
 ]
 
 

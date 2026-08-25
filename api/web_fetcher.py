@@ -612,11 +612,18 @@ async def scan_for_known_entities(
     text_lower = text.lower()
 
     async with db_pool.acquire() as conn:
-        # Get all entities with at least 3 chars to avoid noise
+        # Get all entities with at least 3 chars to avoid noise. Tombstoned
+        # (merged-away) rows are excluded on read here, matching the
+        # convention used everywhere else this scans/searches rather than
+        # resolves-and-follows (e.g. resolve_entity_get's sibling-lookup
+        # query) -- a merge keeps the row + aliases + embedding, so an
+        # unfiltered scan would keep matching dead entities and returning
+        # tombstoned URIs to callers of this function.
         rows = await conn.fetch("""
             SELECT entity_text, fuseki_uri, entity_type
             FROM entity_registry
             WHERE LENGTH(entity_text) >= 3
+              AND merged_into IS NULL
             ORDER BY LENGTH(entity_text) DESC
         """)
 
