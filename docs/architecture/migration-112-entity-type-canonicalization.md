@@ -1,11 +1,14 @@
 # Migration 112 — entity-type canonicalization
 
-**Status:** the Document/Event decision is **RESOLVED (2026-08-24)** — option (a), both
-admitted as canonical. Population fell **421 → 31 rows**. What remains of migration 112 is
-the 14-type tail and is not gated on the soak.
+**Status:** **COMPLETE (2026-08-25).** Population fell 421 → 31 (Document/Event admitted,
+2026-08-24) → 3 (the tail retyped, commit `331b105`, same day) → 0 (the last row, "BKC COP
+Emails", retyped 2026-08-25 — see below). Live-verified: `SELECT entity_type, count(*) FROM
+entity_registry WHERE entity_type NOT IN (<30 canonical types>) AND merged_into IS NULL
+GROUP BY 1` returns zero rows.
 
-Not eligible to run before **2026-08-29 10:05 PDT** (`scripts/check_migration_112_evidence.py`,
-currently `incomplete_soak`) if a retype pass is still wanted for the tail.
+The 2 `Session` rows named in "The 3 rows deliberately left" below were also resolved before
+this pass (confirmed gone via live query); no commit in this repo's history documents how —
+attributed to a prior session, not fabricated here.
 
 ## Why this document exists
 
@@ -56,9 +59,27 @@ infrastructure`) folded into their existing 0-link `Concept` twins, carrying 7 a
   `Projects/BKC COP Emails.md` declares `"@type": Resource`, so **retyping the database row
   alone would be undone by the next vault sync**. This needs a vault edit first, or nothing.
   Filed under `Projects/`, so `Project` is the likely target once the note is changed.
+
+  **RESOLVED 2026-08-25 — retyped to `Document`, not `Project`** (operator decision: the
+  note's actual content — an email correspondence log/archive — matches the 15 other
+  article/gist/paper-shaped rows retyped to `Document` in the tail pass above, better than
+  its `Projects/` folder placement alone suggested). Order followed the house rule: vault
+  frontmatter `@type: Resource` → `Document` first (via `vault_write_note`), then
+  `POST /entities/retype` (`dry_run:true` confirmed no existing `Document`-typed twin at
+  that name — would have minted a new row and correctly rewired `entity_rid_mappings`, not
+  merged into a twin; `dry_run:false` applied, `merge_log_id: 258`). New live URI
+  `orn:personal-koi.entity:document-bkc-cop-emails-b7ecc417ce30`; old
+  `resource-bkc-cop-emails-c06037298f4a` tombstoned (not deleted) via `merged_into`. Vault
+  note's `koi:` block refreshed via a follow-up `vault_register_entity` call, which
+  confirmed "Linked to existing entity" (no duplicate minted). Verified: 0 non-canonical
+  rows remain.
 - **2 × `Session`** — `claude-code session <uuid>`, from the `koi_sustained_write` pass on
   2026-04-29. No vault mapping, no links, no edges, no facts. Inert artifacts with no
   sensible target type; deletion is the honest option but is a data decision, not a retype.
+
+  Also resolved by the time this update was written (2026-08-25) — confirmed 0 rows matching
+  `entity_text LIKE 'claude-code session%'` remain live. No commit in this repo documents the
+  mechanism; not claimed here beyond "gone, verified."
 
 Note the other 74 rows from `koi_sustained_write` are **real `SpecDoc` content**
 (`bkc.foundations.*`), not load-test junk — verified no twins exist, so they are the only
