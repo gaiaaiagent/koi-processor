@@ -200,6 +200,7 @@ def main() -> int:
         return 1
 
     grand = 0
+    ingest_failures = 0
     try:
         for feed_slug, pub in pubs.items():
             if args.only and feed_slug != args.only:
@@ -237,11 +238,17 @@ def main() -> int:
             rc = subprocess.run(cmd, cwd=str(REPO_ROOT)).returncode
             if rc != 0:
                 print(f"    WARNING: ingest exited {rc} for {feed_slug}", file=sys.stderr)
+                ingest_failures += 1
     finally:
         try:
             M.logout()
         except Exception:
             pass
+    if ingest_failures:
+        print(f"DONE WITH FAILURES: {grand} post(s) processed across publications, "
+              f"{ingest_failures} ingest subprocess failure(s) — see WARNING lines above",
+              file=sys.stderr)
+        return 1
     print(f"DONE: {grand} post(s) processed across publications")
     return 0
 
