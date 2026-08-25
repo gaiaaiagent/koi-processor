@@ -71,7 +71,7 @@ LOCAL_RECONCILE=$(local_curl -X POST -H "Content-Type: application/json" -d '{"m
 LOCAL_PENDING=$(echo "$LOCAL_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pending_events','?'))" 2>/dev/null || echo "?")
 LOCAL_SCANS=$(echo "$LOCAL_STATUS" | python3 -c "import sys,json; m=json.load(sys.stdin).get('metrics',{}); print(m.get('scans_completed','?'))" 2>/dev/null || echo "?")
 LOCAL_WATCHER=$(echo "$LOCAL_STATUS" | python3 -c "import sys,json; m=json.load(sys.stdin).get('metrics',{}); print(m.get('watcher_enabled','?'))" 2>/dev/null || echo "?")
-LOCAL_REJECTED=$(echo "$LOCAL_STATUS" | python3 -c "import sys,json; r=json.load(sys.stdin).get('rejected_events',{}); print(sum(r.values()))" 2>/dev/null || echo "?")
+LOCAL_REJECTED=$(echo "$LOCAL_STATUS" | python3 -c "import sys,json; r=json.load(sys.stdin).get('rejected_events'); print(sum(r.values()) if isinstance(r, dict) else '?')" 2>/dev/null || echo "?")
 LOCAL_DRIFT=$(echo "$LOCAL_RECONCILE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_drift','?'))" 2>/dev/null || echo "?")
 
 printf "  pending_events: %s\n" "$LOCAL_PENDING"
@@ -89,7 +89,7 @@ PEER_RECONCILE=$(peer_curl "/koi-net/vault-sync/reconcile" '{"mode":"detect"}' 2
 PEER_PENDING=$(echo "$PEER_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pending_events','?'))" 2>/dev/null || echo "?")
 PEER_SCANS=$(echo "$PEER_STATUS" | python3 -c "import sys,json; m=json.load(sys.stdin).get('metrics',{}); print(m.get('scans_completed','?'))" 2>/dev/null || echo "?")
 PEER_WATCHER=$(echo "$PEER_STATUS" | python3 -c "import sys,json; m=json.load(sys.stdin).get('metrics',{}); print(m.get('watcher_enabled','?'))" 2>/dev/null || echo "?")
-PEER_REJECTED=$(echo "$PEER_STATUS" | python3 -c "import sys,json; r=json.load(sys.stdin).get('rejected_events',{}); print(sum(r.values()))" 2>/dev/null || echo "?")
+PEER_REJECTED=$(echo "$PEER_STATUS" | python3 -c "import sys,json; r=json.load(sys.stdin).get('rejected_events'); print(sum(r.values()) if isinstance(r, dict) else '?')" 2>/dev/null || echo "?")
 PEER_DRIFT=$(echo "$PEER_RECONCILE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_drift','?'))" 2>/dev/null || echo "?")
 
 printf "  pending_events: %s\n" "$PEER_PENDING"
