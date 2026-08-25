@@ -29,6 +29,8 @@ defect was a divergence between the two.
 from __future__ import annotations
 
 import plistlib
+import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,14 @@ DEV_CHECKOUT_MARKERS = ("projects/regenai/koi-processor", "projects/RegenAI/koi-
 
 # Deployable checkouts: pinned to a branch, never switched. See CLAUDE.md DEPLOY TOPOLOGY.
 STABLE_CHECKOUT_MARKERS = ("projects/koi-processor-runtime", "projects/koi-processor-service")
+
+# koi-sensors (email-sensor, email-watcher, proton-email-sensor) has the identical
+# session-branch-switches-it-freely risk as koi-processor's dev checkout — but unlike
+# koi-processor, there is no koi-sensors-runtime clone, so there is currently no repoint
+# target. Reported (see test_ungoverned_checkout_dependencies_are_visible), not hard-failed,
+# until a stable pair is established for it. Do not add this to DEV_CHECKOUT_MARKERS: that
+# would land a hard-failing check with no remedy available.
+UNGOVERNED_CHECKOUT_MARKERS = ("projects/regenai/koi-sensors", "projects/RegenAI/koi-sensors")
 
 
 # TWO namespaces, not one. The jobs were named under both `com.personal-koi.*` and
@@ -155,6 +165,76 @@ def test_no_job_loads_code_from_the_shared_dev_checkout(plist: Path) -> None:
         f"freely:\n  " + "\n  ".join(offenders) +
         f"\nPoint it at one of {STABLE_CHECKOUT_MARKERS} instead "
         f"(see CLAUDE.md DEPLOY TOPOLOGY)."
+    )
+
+
+@pytest.mark.skipif(not installed_plists(), reason="no personal-KOI LaunchAgents installed")
+def test_ungoverned_checkout_dependencies_are_visible() -> None:
+    """koi-sensors jobs (email-sensor, email-watcher, proton-email-sensor) depend on
+    ~/projects/RegenAI/koi-sensors, a checkout sessions branch-switch freely — the identical
+    risk shape as koi-processor's dev checkout. They matched none of DEV_CHECKOUT_MARKERS
+    (that list only names koi-processor), so test_no_job_loads_code_from_the_shared_dev_
+    checkout passed for all three without ever evaluating whether koi-sensors itself is a
+    movable dev checkout. It is — nothing about the risk is specific to koi-processor's name.
+
+    This reports via a pytest warning (visible in the run's "warnings summary", not hidden
+    behind -s) rather than asserting failure: unlike koi-processor, there is no
+    koi-sensors-runtime clone, so there is no repoint target today. Landing a hard fail here
+    would be a check with no remedy. Decide separately whether to establish one.
+    """
+    findings: list[str] = []
+    for plist in installed_plists():
+        for path in program_paths(plist) + working_directory(plist):
+            if any(marker in path for marker in UNGOVERNED_CHECKOUT_MARKERS):
+                findings.append(f"{plist.name}: {path}")
+    if findings:
+        warnings.warn(
+            "jobs depending on koi-sensors with no stable/runtime pair yet (not a failure — "
+            "see UNGOVERNED_CHECKOUT_MARKERS docstring):\n  " + "\n  ".join(findings),
+            UserWarning,
+            stacklevel=1,
+        )
+
+
+def installed_cron_lines() -> list[str]:
+    """Lines from `crontab -l`, or [] if there is no crontab / cron is unavailable.
+
+    A launchd-only guard is blind to a job installed via cron — koi-soak (soak-check.sh)
+    runs every 2 hours from whatever directory was current when soak-cron-install.sh was
+    last run, which was ~/projects/RegenAI/koi-processor (the dev checkout) at install time,
+    and stays wherever that was regardless of later branch switches there.
+    """
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []  # no crontab installed for this user
+    return result.stdout.splitlines()
+
+
+def test_no_cron_job_loads_code_from_the_shared_dev_checkout() -> None:
+    """Same rule as test_no_job_loads_code_from_the_shared_dev_checkout, applied to cron.
+
+    Unlike koi-sensors above, koi-processor DOES have an established stable pair
+    (koi-processor-service / koi-processor-runtime), so a violation here has a real
+    repoint target and is hard-failed, not just reported.
+    """
+    lines = installed_cron_lines()
+    if not lines:
+        pytest.skip("no crontab installed for this user")
+    offenders = [
+        line for line in lines
+        if any(marker in line for marker in DEV_CHECKOUT_MARKERS)
+    ]
+    assert not offenders, (
+        "cron job(s) depend on the shared DEV checkout, which sessions branch-switch "
+        "freely:\n  " + "\n  ".join(offenders) +
+        f"\nPoint it at one of {STABLE_CHECKOUT_MARKERS} instead "
+        f"(see CLAUDE.md DEPLOY TOPOLOGY). Fix scripts/federation/soak-cron-install.sh's "
+        f"own PROJECT_DIR derivation too, or a reinstall will reintroduce this."
     )
 
 
