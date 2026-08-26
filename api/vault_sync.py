@@ -1213,6 +1213,10 @@ class VaultSyncManager:
                 if actions_taken >= max_actions:
                     remaining += 1
                     continue
+                # A4: the enumeration above and this write are not atomic, and
+                # the enumeration can miss a file that is present.
+                if not self._absence_confirmed(rel_path, source="reconcile"):
+                    continue
                 prev_hash = db_map.get(rel_path)
                 async with self._write_lock:
                     async with self.pool.acquire() as conn:
@@ -1493,6 +1497,11 @@ class VaultSyncManager:
                             logger.info("vault_sync.scan_capped reason=event_cap_deletes total=%d", events_this_cycle)
                             break
                         rel_path = row["relative_path"]
+                        # A4: confirm absence against the filesystem before the
+                        # destructive write, independently of why this path was
+                        # selected as a deletion candidate.
+                        if not self._absence_confirmed(rel_path, source="scan"):
+                            continue
                         new_seq = row["local_edit_seq"] + 1
                         # Remove from stat cache
                         self._stat_cache.pop(rel_path, None)
@@ -1688,6 +1697,45 @@ class VaultSyncManager:
             pass
 
         await self._record_applied(source_node, event_id, rid)
+
+    def _absence_confirmed(self, rel_path: str, source: str) -> bool:
+        """Re-stat the path at the moment of the tombstone write.
+
+        A4. Every other guard in this file reasons about coverage: was the scan
+        truncated (A1), did the budget run out (A2), could we read it (A5). This
+        one does not reason. It asks the filesystem, at the point of the
+        destructive write, whether the file is there.
+
+        That independence is the point. On 2026-08-25 the storm tombstoned 1,339
+        paths of which 1,139 were still on disk — this check alone would have
+        blocked all 1,139 no matter what the coverage logic concluded.
+
+        Applies ONLY where WE decide a file is absent. An inbound FORGET is a
+        decision a peer already made and the file existing locally is the normal
+        case; guarding that on exists() would break every legitimate remote
+        deletion, which is the mirror image of the storm.
+
+        Returns True when the file really is gone and the tombstone may proceed.
+        """
+        try:
+            present = (self.vault_path / rel_path).exists()
+        except OSError as e:
+            # Cannot even stat it, so absence is not established. A5's rule.
+            logger.warning(
+                "vault_sync.absence_unverifiable path=%s source=%s error=%s — refusing to tombstone",
+                rel_path, source, e,
+            )
+            return False
+        if present:
+            self._metrics.tombstones_blocked_present = getattr(
+                self._metrics, "tombstones_blocked_present", 0) + 1
+            logger.warning(
+                "vault_sync.tombstone_blocked path=%s source=%s reason=file_present_on_disk — "
+                "a deletion candidate that is still on disk is a bug upstream of here, not a delete",
+                rel_path, source,
+            )
+            return False
+        return True
 
     async def _apply_forget(
         self, target_path: Path, relative_path: str,

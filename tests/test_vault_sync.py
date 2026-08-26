@@ -1647,3 +1647,179 @@ def test_owned_namespace_does_not_squat_the_protocol():
     assert not VAULT_FILE_NS_OWNED.startswith(reserved_root + "."), (
         f"{VAULT_FILE_NS_OWNED} still squats the reserved {reserved_root}.* namespace"
     )
+
+
+# ---------------------------------------------------------------------------
+# A4: confirmed absence — never tombstone a file that is on disk right now
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_scan_will_not_tombstone_a_file_that_exists(pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch):
+    """The last-mile guard: re-stat the path immediately before tombstoning it.
+
+    A1 stops a TRUNCATED scan from deleting, and A5 stops an unreadable file
+    from being called absent. Both reason about coverage. This one does not
+    reason at all — it asks the filesystem, at the moment of the write, whether
+    the file is there.
+
+    That matters because it is independent of every coverage judgement above it.
+    On 2026-08-25 the storm tombstoned 1,339 paths of which 1,139 were still on
+    disk; this check alone would have blocked all 1,139 regardless of whether
+    the truncation logic was right.
+
+    Simulated here the way it actually happens: the file is tracked in
+    vault_sync_state and present on disk, but the glob does not yield it on this
+    pass (an exclusion change, a case-fold quirk, a transient FS hiccup), so it
+    lands in the deletion-candidate set of a scan that was NOT truncated.
+    """
+    import api.vault_sync as vs
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    survivor = shared / "a4-present.md"
+    survivor.write_text("# still here")
+
+    await mgr._scan_async()
+    async with pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state WHERE relative_path=$1", "Shared/a4-present.md"
+        ) == 1, "setup: file must be tracked"
+
+    # Make the glob blind to it while leaving it on disk.
+    mock_event_queue.add.reset_mock()
+    mgr._stat_cache.clear()
+    real_rglob = Path.rglob
+
+    def _blind_rglob(self, pattern):
+        for hit in real_rglob(self, pattern):
+            if hit.name == "a4-present.md":
+                continue
+            yield hit
+
+    monkeypatch.setattr(Path, "rglob", _blind_rglob)
+    await mgr._scan_async()
+    monkeypatch.undo()
+
+    assert survivor.exists(), "precondition: the file is still on disk"
+
+    forgets = [c for c in mock_event_queue.add.call_args_list
+               if c.kwargs.get("event_type") == "FORGET"]
+    assert not any("a4-present.md" in str(c) for c in forgets), (
+        f"a file present on disk must never be FORGET'd, got {forgets}"
+    )
+    async with pool.acquire() as conn:
+        tombstoned = await conn.fetchval(
+            "SELECT is_deleted FROM vault_sync_state WHERE relative_path=$1", "Shared/a4-present.md"
+        )
+    assert tombstoned is False, "a file present on disk must not be tombstoned"
+
+
+@pytest.mark.anyio
+async def test_scan_still_tombstones_a_genuinely_deleted_file(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Positive control: A4 must not become a blanket refusal to delete.
+
+    Without this, `return` at the top of the deletion loop would pass the test
+    above — the "safe and wrong" outcome A2's commit message warned about.
+    """
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    doomed = shared / "a4-really-gone.md"
+    doomed.write_text("# will be deleted")
+
+    await mgr._scan_async()
+
+    mock_event_queue.add.reset_mock()
+    doomed.unlink()
+    mgr._stat_cache.clear()
+    await mgr._scan_async()
+
+    forgets = [c for c in mock_event_queue.add.call_args_list
+               if c.kwargs.get("event_type") == "FORGET"]
+    assert any("a4-really-gone.md" in str(c) for c in forgets), (
+        f"a genuinely deleted file must still emit a FORGET, got {forgets}"
+    )
+
+
+@pytest.mark.anyio
+async def test_reconcile_repair_will_not_tombstone_a_file_that_exists(pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch):
+    """Same guard on the reconcile repair path (TOCTOU).
+
+    reconcile enumerates, then repairs. A file recreated between those two
+    steps is in missing_on_disk but present on disk by the time the tombstone
+    is written.
+    """
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    flapper = shared / "a4-recreated.md"
+    flapper.write_text("# v1")
+
+    await mgr._scan_async()
+
+    # Blind reconcile's ENUMERATION to the file while it stays on disk, so it
+    # lands in missing_on_disk. Deleting it instead would not exercise the
+    # guard: reconcile(mode="repair") re-enumerates in the same call, so the
+    # file would simply be seen again.
+    mock_event_queue.add.reset_mock()
+    real_rglob = Path.rglob
+
+    def _blind_rglob(self, pattern):
+        for hit in real_rglob(self, pattern):
+            if hit.name == "a4-recreated.md":
+                continue
+            yield hit
+
+    monkeypatch.setattr(Path, "rglob", _blind_rglob)
+    result = await mgr.reconcile(mode="repair", confirm=True)
+    monkeypatch.undo()
+
+    assert flapper.exists(), "precondition: the file never left the disk"
+    assert "Shared/a4-recreated.md" in result.get("missing_on_disk", []), (
+        "premise: enumeration must have reported it missing, or this proves nothing"
+    )
+    forgets = [c for c in mock_event_queue.add.call_args_list
+               if c.kwargs.get("event_type") == "FORGET"]
+    assert not any("a4-recreated.md" in str(c) for c in forgets), (
+        f"a file recreated before the tombstone write must not be FORGET'd, got {forgets}"
+    )
+
+
+@pytest.mark.anyio
+async def test_applying_a_peer_forget_still_deletes_an_existing_file(pool, setup_peer, tmp_vault, mock_event_queue):
+    """A4 must NOT be applied to inbound FORGETs.
+
+    Sites 3 and 4 apply a DECISION A PEER ALREADY MADE. The file existing
+    locally is the normal case there — that is the whole point of replicating a
+    delete. Guarding those on exists() would silently break every legitimate
+    remote deletion, which is the mirror-image failure of the storm.
+    """
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    target = shared / "a4-remote-delete.md"
+    target.write_text("# peer will delete this")
+
+    await mgr._scan_async()
+    assert target.exists()
+
+    async with pool.acquire() as conn:
+        local_row = await conn.fetchrow(
+            "SELECT * FROM vault_sync_state WHERE relative_path=$1",
+            "Shared/a4-remote-delete.md",
+        )
+    assert local_row is not None, "setup: must be tracked"
+
+    await mgr._apply_forget(
+        target_path=target,
+        relative_path="Shared/a4-remote-delete.md",
+        local_row=local_row,
+        base_hash=local_row["content_hash"],
+        origin_node=PEER_NODE,
+        origin_seq=local_row["origin_seq"] + 1,
+        source_node=PEER_NODE,
+        event_id=str(uuid.uuid4()),
+        rid="orn:koi-net.vault-file:Shared/a4-remote-delete.md",
+    )
+
+    assert not target.exists(), (
+        "an inbound FORGET must still delete the local file; A4 belongs only on "
+        "the paths where WE decide a file is absent"
+    )
