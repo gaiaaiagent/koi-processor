@@ -351,6 +351,61 @@ async def test_cold_cache_does_not_truncate_and_real_delete_still_forgets(
 
 
 @pytest.mark.anyio
+async def test_excluded_path_is_not_tombstoned(pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch):
+    """An excluded path with a state row must not be read as deleted.
+
+    The glob skips excluded paths BEFORE adding them to seen_paths, but the
+    deletion query selected every tracked row regardless — so any excluded path
+    that had a state row was in the DB set and absent from seen_paths by
+    construction, and got tombstoned with a FORGET broadcast to every peer.
+
+    Live consequence: KOI_VAULT_EXCLUDE_PATHS matches '*(conflict *).md' and
+    _create_conflict_copy registered the copy it had just written, so every
+    conflict copy self-destructed seconds after creation. 992 of the NUC's 994
+    false tombstones were conflict paths.
+    """
+    import api.vault_sync as vs
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    keeper = shared / "excl-keeper.md"
+    keeper.write_text("# not excluded")
+    excluded = shared / "excl-target (conflict 2026-01-01 00-00-00).md"
+    excluded.write_text("# a conflict copy")
+
+    # Register both while nothing is excluded.
+    monkeypatch.setattr(vs, "_VAULT_EXCLUDE_PATTERNS", [])
+    await mgr._scan_async()
+
+    async with pool.acquire() as conn:
+        registered = await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state WHERE relative_path LIKE 'Shared/excl-%'"
+        )
+    assert registered == 2, f"setup: expected 2 registered rows, got {registered}"
+
+    # Now exclude the conflict copy, as the live config does.
+    mock_event_queue.add.reset_mock()
+    mgr._stat_cache.clear()
+    monkeypatch.setattr(vs, "_VAULT_EXCLUDE_PATTERNS", ["*(conflict *).md"])
+    await mgr._scan_async()
+
+    forgets = [
+        c for c in mock_event_queue.add.call_args_list
+        if c.kwargs.get("event_type") == "FORGET"
+    ]
+    async with pool.acquire() as conn:
+        tombstoned = await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state "
+            "WHERE relative_path LIKE 'Shared/excl-%' AND is_deleted=TRUE"
+        )
+        await conn.execute("DELETE FROM vault_sync_state WHERE relative_path LIKE 'Shared/excl-%'")
+
+    assert tombstoned == 0, f"{tombstoned} excluded path(s) tombstoned while present on disk"
+    assert forgets == [], f"excluded path produced {len(forgets)} FORGET event(s)"
+    assert excluded.exists(), "the excluded file itself must be left alone"
+
+
+@pytest.mark.anyio
 async def test_scan_skips_unsupported_extensions(pool, setup_peer, tmp_vault, mock_event_queue):
     """Files with extensions not in VAULT_SYNC_PATTERNS (e.g. .pdf, .png) are ignored.
 

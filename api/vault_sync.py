@@ -907,7 +907,13 @@ class VaultSyncManager:
                     db_rows.extend(rows)
 
         # Compare against filesystem (no lock) — scan each folder
-        db_map = {r["relative_path"]: r["content_hash"] for r in db_rows}
+        # A3: exclude the same paths the disk side skips, or an excluded file
+        # lands in missing_on_disk and the repair path queues a FORGET for it.
+        db_map = {
+            r["relative_path"]: r["content_hash"]
+            for r in db_rows
+            if not _path_excluded(r["relative_path"])
+        }
         disk_files: Dict[str, str] = {}
         for shared_folder in folder_set:
             base_dir = self.vault_path / shared_folder
@@ -1323,6 +1329,14 @@ class VaultSyncManager:
                     "WHERE is_deleted=FALSE AND relative_path LIKE $1",
                     shared_folder + "/%",
                 )
+                # A3: the glob skips excluded paths BEFORE adding them to
+                # seen_paths, but this query does not exclude them — so any
+                # tracked path matching an exclude pattern is in the DB set and
+                # absent from seen_paths by construction, and gets tombstoned.
+                # That is why every conflict copy self-destructed seconds after
+                # creation (KOI_VAULT_EXCLUDE_PATHS matches '*(conflict *).md')
+                # and why 992 of the NUC's false tombstones were conflict paths.
+                rows = [r for r in rows if not _path_excluded(r["relative_path"])]
                 for row in rows:
                     if row["relative_path"] not in seen_paths:
                         if events_this_cycle >= MAX_EVENTS_PER_SCAN:
@@ -1640,6 +1654,19 @@ class VaultSyncManager:
             conflict_rel = conflict_name
 
         await self._atomic_write(conflict_path, markdown)
+
+        # A3: do not register a path the scanner is configured to ignore. The
+        # live config excludes '*(conflict *).md', so registering the copy here
+        # created a row the glob would never see again — tracked but
+        # unscannable. The file itself is still written; only the state row is
+        # skipped.
+        if _path_excluded(conflict_rel):
+            await self._record_applied(source_node, event_id, rid)
+            logger.warning(
+                "vault_sync.conflict_created path=%s state=unregistered "
+                "reason=path_excluded", conflict_rel,
+            )
+            return
 
         # Insert sync state for the conflict copy
         async with self.pool.acquire() as conn:
