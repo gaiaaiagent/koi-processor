@@ -50,6 +50,15 @@ A second independent verification session confirmed the koi-sensors-runtime work
   2. The committed plist's own comment contained a literal `--`, invalid inside an XML comment per spec. `plutil -lint` accepted it; this repo's own `test_launchd_job_targets.py` (strict `plistlib`/expat) failed 3 tests the moment the job went live — caught immediately by running the guard suite right after installing.
 - **Shared-checkout care:** another concurrent session ("dobby") was committing federation/vault-sync/SQL-security fixes directly in this exact checkout throughout this window. Staged only this session's own files on every commit (never `git add -A`); found and discarded one exact-duplicate uncommitted change in `koi-processor-runtime` only after confirming byte-for-byte it matched an already-incoming commit — never touched their in-flight, non-duplicate work.
 
+## Continued a fourth time (2026-08-26 10:15-10:20 PDT) — pinned against the storm class, not just this instance
+
+Operator/reviewer flagged a real gap: nothing pinned the new job's anti-storm properties the way `test_the_plist_cannot_storm` pins embedding-repair's — and the job had only fired manually during testing, never unattended.
+
+- **Also caught while addressing this: the plist itself had the wrong invariant.** `ThrottleInterval` was 300 while `StartInterval` was 1800 — if `KeepAlive` were ever added later, launchd's minimum runtime would drop to 300s (restart every 5 min), not the intended 1800s. Fixed to `ThrottleInterval == StartInterval == 1800`, matching embedding-repair's pattern exactly.
+- **Added `test_the_plist_cannot_storm`** to `tests/test_vault_conflict_sweep.py`, mirroring `test_embedding_repair.py`'s test of the same name: asserts no `KeepAlive`, `ThrottleInterval >= StartInterval`, and (adapted for this job's launcher-script architecture — `ProgramArguments[0]` is `~/.config/personal-koi/vault-conflict-sweep-run.sh`, not a runtime-clone path directly, so the check is on `WorkingDirectory` instead) that it runs from `koi-processor-runtime`, never the dev checkout. **Mutation-tested against all three claimed failure modes before committing** — each fails correctly, restored original passes.
+- **Reloaded the job** (`launchctl bootout` + `bootstrap`) to pick up the fixed plist — confirmed via `test_committed_plist_matches_the_installed_one`, which caught the drift on the first attempt (committed 1800, installed still 300) before the reload.
+- **⚠ Timing note for whoever is watching the canary:** the `bootout`/`bootstrap` reload at ~10:18 PDT reset the job's `StartInterval` countdown. It will next fire unattended around **~10:48 PDT**, not the ~10:28 the earlier canary was tracking — that estimate predates this reload. Confirm the next unattended firing against the NEW time, not the old one.
+
 ## Continued this session, second resume (2026-08-26 00:40-01:10 PDT)
 
 An independent verification session checked the work above and found the conflict-storm cleanup had been declared done prematurely.
