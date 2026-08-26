@@ -30,13 +30,17 @@ Each divergence below is classified:
 | `koi-net-graph-extension` | 0.1.3 | 2026-06-18 | 1 | no |
 
 **Provenance.** BlockScience is the *former* org name; the current upstream is
-**`DynamicalSystemsGroup`**. All 20 public repos in the KOI/RID lineage are cloned
-to `~/projects/DynamicalSystemsGroup/` (verified 2026-08-26: canonical origins,
-clean worktrees). Use those for any implementation claim — the vendored snapshots
-under `RegenAI/koi-research/sources/blockscience/` are dated and say so themselves.
+**`DynamicalSystemsGroup`**. The core clones — `koi-net`, `rid-lib` and
+`koi-net-node-template`, plus 17 more in the lineage — live at
+`~/projects/DynamicalSystemsGroup/` with canonical DSG origins (verified
+2026-08-26). Use those for any implementation claim. Additional **archival** copies
+sit under `RegenAI/koi-research/sources/blockscience/`; `blockscience` there is now
+merely a legacy *folder* name, not a statement about who publishes the code, and
+those snapshots already flag themselves as dated.
+
 The official spec at `dynamicalsystemsgroup.github.io/koi-net-spec` has **no public
-source repo** (`koi-net-spec` returns 404), so it cannot be pinned locally; quote it
-by URL and date, not from memory.
+source repo** (`koi-net-spec` → 404), so it cannot be cloned or diffed. It is
+pinned by content hash instead — see "Edge direction and `rid_types`" below.
 
 `koi-net` 2.1.2 is ~5,694 LOC across `protocol/` (event, edge, node, envelope,
 secure, knowledge_object), `components/` (sync_manager, event_buffer, cache,
@@ -502,6 +506,61 @@ and the edge scoping vocabulary (divergences 9 and 12). **`rid_types` on an edge
 the protocol's authorization boundary; `vault_sync_peers` is our emitter's
 configuration.** They are different mechanisms and neither substitutes for the other
 — which is exactly why Gate 1 in the re-enable runbook needs *both* controls.
+
+## Edge direction and `rid_types` — pinned, including where the spec contradicts itself
+
+**Pinned source.** The rendered draft has no public source repo, so it is pinned by
+content hash instead:
+
+```
+https://dynamicalsystemsgroup.github.io/koi-net-spec/v1.0-draft-release.html
+sha256  b0959d7881cebe47fc3c82d4db858428a11294cd23356c2ee3d28a2e1072497f
+retrieved 2026-08-26 (96,189 bytes; hash re-computed locally, matches)
+```
+
+### What `rid_types` is
+
+`rid_types` on an edge is the **protocol's event-subscription / delivery scope** —
+the declared set of RID types that flow along that edge. It is a *routing* concept.
+
+**Requiring an `APPROVED` edge before serving a poll is our own local
+authorization control**, layered on top. Upstream `EdgeStatus` has exactly two
+members, `PROPOSED` and `APPROVED` (`protocol/edge.py`, `7a4d631`); our
+`REJECTED`/`REVOKED` are local additions (divergence 12). So: subscription scope is
+protocol, enforcement posture is ours.
+
+### Direction: `source` = publisher, `target` = subscriber
+
+Verified in the current implementation rather than inferred:
+
+| evidence | at |
+|---|---|
+| subscribers derived from **out**-edges | `components/knowledge_handlers/basic_network_output_filter.py:52` (`get_neighbors(direction="out", …)`) |
+| `poll_neighbors()` applies **no** direction filter — both directions are polled | `components/resolver.py:103` |
+| our poller polls the `source_node` of edges whose `target_node` is us | `api/koi_poller.py:207-211` |
+
+So an edge `A -> B` means **A publishes, B subscribes**, and a node consults edges
+in *both* directions: out-edges to decide whom to serve, in-edges to decide whom to
+poll.
+
+### The spec contradicts itself, and which reading we adopt
+
+**§3.2 and §5.2 of the pinned draft disagree: §5.2 reverses `source`/`target`
+relative to §3.2.** This is a real ambiguity in the published document, not a
+misreading of it.
+
+**Adopted deliberately: §3.2 plus the current `koi-net` implementation at
+`7a4d631`** — publisher→subscriber. Reasons, in order:
+
+1. The implementation is unambiguous and is what any peer we actually federate with
+   will be running.
+2. Our own poller already matches it (`koi_poller.py:207-211`), so adopting §5.2
+   would mean changing working code to match the *less* consistent half of a draft.
+3. A draft that disagrees with itself cannot be the tiebreaker against running code.
+
+**Recorded as an ambiguity to re-check when the spec leaves draft**, because if
+§5.2 turns out to be the intended reading, every edge in this deployment is
+backwards and the fix is a migration, not a patch.
 
 ## PENDING GATE — conformance is asserted against models, not against a running node
 

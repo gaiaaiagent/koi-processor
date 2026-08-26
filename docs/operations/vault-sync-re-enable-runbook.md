@@ -54,12 +54,28 @@ ran. Both nodes read clear. **Run this before and after every step below.**
 
 ## GATE 1 — `friend-e2e` (BLOCKING)
 
-**Do not re-enable until this is decided.** The earlier characterisation of this
-peer as "a dead March dry-run" was wrong, corrected 2026-08-26:
+**RESOLVED 2026-08-26 by the operator. `friend-e2e` is Darren's own machine** —
+the Netcup personal server at `37.120.162.60`, DKG V6 node 6, host of the
+Indigenomics Living Library. Its WireGuard key matches the `friend-e2e` registry
+entry and its old `friend-e2e` KOI installation is still on disk, but nothing
+listens on 8351. It is **not** Shawn and not an unknown third party.
+
+Treat `friend-e2e` as **the stale March federation-bootstrap identity of a host
+Darren owns**. Preserve the host and its WireGuard peer; the only thing being
+withdrawn is the vault-file delivery scope.
+
+That resolves the "we don't know what this is" objection, but it does **not**
+remove the need for the control: a stale identity on a live host with an approved
+vault-file edge is still a path by which `Shared/` could be drained by a service
+nobody is currently running deliberately.
+
+The earlier characterisation of this peer as "a dead March dry-run" was wrong on a
+second count too, corrected 2026-08-26:
 
 | fact | value |
 |---|---|
 | WireGuard handshake | **~2 minutes ago** — the host is live |
+| identity | **Darren's Netcup server `37.120.162.60`** — DKG V6 node 6 / Indigenomics Living Library |
 | ping `10.100.0.24` | up, 228 ms |
 | port 80 | **401** — an authenticated service is running |
 | KOI ports 8351 / 8355 / 8100 | no response — its KOI node is down, not its machine |
@@ -286,9 +302,31 @@ the time of writing; recount before applying, because two of them age.
 
 ## Change 1 — narrow the `friend-e2e` edge (Gate 1, remaining half)
 
-**Affected rows: 2** (one per node). The inbound edge
-`friend-e2e -> darren-personal` is *their* authorization to us and is enforced by
-their node, not ours; leave it alone.
+**Affected rows: 2** (one per node) — the **outbound** edge only.
+
+**Corrected 2026-08-26.** An earlier draft called the reverse edge "their
+authorization to us, enforced by their node." **That is wrong.** Under §3.2 of the
+draft spec and the current implementation, `source` is the **publisher** and
+`target` is the **subscriber**, so `friend-e2e -> darren-personal` means *Darren
+subscribes to that host* — and our own poller consults it:
+
+```sql
+-- api/koi_poller.py:207-211 — we poll the SOURCE of edges that TARGET us
+SELECT e.source_node, e.rid_types, ... FROM koi_net_edges e
+  JOIN koi_net_nodes n ON n.node_rid = e.source_node
+ WHERE e.target_node = $1          -- $1 = this node
+```
+
+Upstream agrees at `7a4d631`: `basic_network_output_filter.py:52` derives
+subscribers from `direction="out"`, and `NetworkResolver.poll_neighbors()` applies
+**no** direction filter, so both directions are polled.
+
+So the reverse edge is a live subscription, not a remote formality. It is left
+alone in this change **by instruction**, and it is safe to leave because
+`vault_sync_peers` for `friend-e2e` is `enabled=f` and every peer lookup filters
+`enabled=TRUE` — inbound vault events from that host are rejected at the vault-sync
+layer regardless of edge scope. That is defence in depth, not redundancy: the edge
+governs KOI delivery, the peering governs vault application.
 
 ```sql
 -- MacBook AND NUC, same statement on each.
