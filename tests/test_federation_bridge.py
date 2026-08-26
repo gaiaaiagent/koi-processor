@@ -155,6 +155,40 @@ class TestEventQueueRidTypesFilter:
         )
 
     @pytest.mark.anyio
+    async def test_empty_rid_types_delivers_nothing(self, pool, conn):
+        """An edge declaring no types must receive nothing — not everything.
+
+        The gate was `if rid_types:`, a truthiness test, so an edge with
+        rid_types=[] disabled filtering entirely and received the full stream.
+        Fail-open on an access control is the wrong default; upstream does a
+        membership test against a declared set. One such edge exists live on the
+        NUC today (PROPOSED, so undelivered), which is how this was found.
+        """
+        from api.event_queue import EventQueue
+
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
+        requesting_node = f"orn:koi-net.node:requester-{_uid()}"
+
+        entity_rid = f"orn:personal-koi.entity:person-test-{_uid()}"
+        await eq.add(
+            event_type="NEW",
+            rid=entity_rid,
+            contents={"_koi_domain": "entity", "payload": {"fuseki_uri": entity_rid}},
+        )
+
+        delivered = await eq.poll(requesting_node, limit=5000, rid_types=[])
+        assert entity_rid not in [e["rid"] for e in delivered], (
+            "an edge declaring no rid_types must receive nothing"
+        )
+
+        # None still means "no filter declared" — unchanged behaviour.
+        other = f"orn:koi-net.node:requester-{_uid()}"
+        unfiltered = await eq.poll(other, limit=5000, rid_types=None)
+        assert entity_rid in [e["rid"] for e in unfiltered], (
+            "rid_types=None must remain unfiltered"
+        )
+
+    @pytest.mark.anyio
     async def test_non_domain_event_filtered_by_rid_types(self, pool, conn):
         """A non-domain event with extractable type should be filtered by rid_types."""
         from api.event_queue import EventQueue

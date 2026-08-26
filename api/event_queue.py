@@ -146,7 +146,7 @@ class EventQueue:
                 # approved POLL edge, regardless of what that edge declared.
                 # The domain name is now matched as a pseudo rid-type, so an
                 # edge must opt in by listing it (e.g. "task", "entity").
-                if rid_types:
+                if rid_types is not None:
                     contents_raw = row["contents"]
                     is_domain_event = False
                     domain = None
@@ -253,7 +253,7 @@ class EventQueue:
                 # belongs to the CALLER: WEBHOOK delivery must mark excluded ids
                 # too. Zero WEBHOOK edges exist on either node (verified 0/0) —
                 # do not approve one until that caller-side marking exists.
-                if rid_types:
+                if rid_types is not None:
                     contents_raw = row["contents"]
                     is_domain_event = False
                     domain = None

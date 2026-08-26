@@ -980,8 +980,22 @@ async def events_poll(request: Request):
         )
         if edge:
             has_approved_edge = True
-            if edge["rid_types"]:
-                rid_types = edge["rid_types"]
+            # Pass rid_types through verbatim, INCLUDING an empty list. Collapsing
+            # empty -> None made the filter fail OPEN: an edge declaring nothing
+            # received everything. poll() distinguishes None (no filter declared)
+            # from [] (declares nothing, so receives nothing).
+            rid_types = edge["rid_types"]
+            # Divergence 6: last_seen was written only by handshake/key-bootstrap,
+            # so every value went stale in March while peers polled continuously —
+            # and a peer was wrongly reported offline for three months on that
+            # basis. A poll is proof of life; record it.
+            try:
+                await conn.execute(
+                    "UPDATE koi_net_nodes SET last_seen = NOW() WHERE node_rid = $1",
+                    requesting_node,
+                )
+            except Exception:
+                pass  # liveness bookkeeping must never fail a poll
 
     policy = _security_policy()
     if not has_approved_edge and policy["require_approved_edge_for_poll"]:
