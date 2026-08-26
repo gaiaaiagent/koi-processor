@@ -104,6 +104,14 @@ def psql_json(db: str, sql: str, timeout: int = 20) -> dict[str, Any]:
         return {"ok": False, "error": "psql output was not JSON", "stdout": raw}
 
 
+# Vault-file RIDs exist in two namespaces during the divergence-1 migration:
+# the legacy squatted `koi-net.vault-file` and the owned `personal-koi.vault-file`.
+# A doctor that only matches the legacy one reports a healthy zero after the
+# cutover, which is the worst possible failure mode for a diagnostic tool.
+_VAULT_RID_PREFIXES = ("orn:koi-net.vault-file:", "orn:personal-koi.vault-file:")
+_VAULT_RID_CLAUSE = "(" + " OR ".join(f"rid LIKE '{p}%'" for p in _VAULT_RID_PREFIXES) + ")"
+
+
 def sql_literal(value: str) -> str:
     """Return a safely quoted SQL string literal for psql snippets."""
     return "'" + value.replace("'", "''") + "'"
@@ -381,7 +389,7 @@ FROM (
     MIN(queued_at) AS oldest_queued_at,
     MAX(queued_at) AS newest_queued_at
   FROM koi_net_events
-  WHERE rid LIKE 'orn:koi-net.vault-file:%'
+  WHERE {_VAULT_RID_CLAUSE}
     AND expires_at > NOW()
   GROUP BY target_node, event_type
 ) s;
@@ -402,14 +410,16 @@ SELECT jsonb_build_object(
   )::int
 )
 FROM koi_net_events
-WHERE rid LIKE 'orn:koi-net.vault-file:%'
+WHERE {_VAULT_RID_CLAUSE}
   AND expires_at > NOW();
 """)
 
     if peer_rid and path_prefix:
-        rid_like = "orn:koi-net.vault-file:" + path_prefix.rstrip("/") + "/%"
+        suffix = path_prefix.rstrip("/") + "/%"
+        rid_like_sql = "(" + " OR ".join(
+            f"rid LIKE {sql_literal(pfx + suffix)}" for pfx in _VAULT_RID_PREFIXES
+        ) + ")"
         peer_sql = sql_literal(peer_rid)
-        rid_like_sql = sql_literal(rid_like)
         diagnostics["path_events_for_peer"] = psql_json(db, f"""
 SELECT jsonb_build_object(
   'peer_rid', {peer_sql}::text,

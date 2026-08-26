@@ -327,6 +327,75 @@ class VaultWatcher:
         self._debounce_handle = None
 
 
+# ---------------------------------------------------------------------------
+# Vault-file RID namespace (divergence 1)
+# ---------------------------------------------------------------------------
+#
+# `rid_lib.types` reserves the `koi-net.*` namespace for exactly two protocol
+# objects — `koi-net.node` and `koi-net.edge`. `orn:koi-net.vault-file:` is
+# application data wearing protocol clothes, and it squats a namespace we do not
+# own.
+#
+# We are NOT migrating to upstream's `obsidian.note`, and the reason is measured
+# rather than aesthetic: `koi-net-obsidian-manager-node`'s `ObsidianNote`
+# requires a reference of exactly two '/'-separated components
+# (`<vault_id>/<note_id>`), and **766 of our 2,595 tracked paths are deeper than
+# that** — `Shared/Projects/IndigenomicsAI.md` raises ValueError. Upstream's
+# grammar cannot express a nested vault, so adopting it would break 29.5% of the
+# vault. That is a deliberate fork with a reason, which is the bar.
+#
+# Instead we move to a namespace we actually own, matching the
+# `personal-koi.*` convention already used for entity/doclink/knowledge-episode.
+#
+# MIGRATION IS STAGED (expand → migrate → contract). Today we ACCEPT both and
+# still EMIT the legacy one, so no peer breaks. Flip KOI_VAULT_FILE_NAMESPACE
+# only once every peer accepts both — Shawn's node included.
+#
+# The cutover is safe for edge scoping because both namespaces resolve to the
+# same rid type, `Vault-file` (pinned by
+# tests/test_rid_type_extraction.py::test_legacy_and_migrated_namespaces_agree).
+VAULT_FILE_NS_LEGACY = "koi-net.vault-file"
+VAULT_FILE_NS_OWNED = "personal-koi.vault-file"
+
+#: Namespace used for OUTBOUND RIDs. Legacy until every peer accepts both.
+VAULT_FILE_NS_EMIT = os.getenv("KOI_VAULT_FILE_NAMESPACE", VAULT_FILE_NS_LEGACY)
+
+#: Namespaces accepted on INBOUND events. Always both.
+VAULT_FILE_RID_PREFIXES = (
+    f"orn:{VAULT_FILE_NS_LEGACY}:",
+    f"orn:{VAULT_FILE_NS_OWNED}:",
+)
+
+
+def vault_file_rid(relative_path: str) -> str:
+    """Build the outbound RID for a vault file."""
+    return f"orn:{VAULT_FILE_NS_EMIT}:{relative_path}"
+
+
+def parse_vault_file_rid(rid: Any) -> Optional[str]:
+    """Return the relative path from a vault-file RID in EITHER namespace.
+
+    Returns None if the RID is not a vault-file RID at all, so callers can tell
+    "not mine" from "mine but empty".
+    """
+    if not isinstance(rid, str):
+        return None
+    for prefix in VAULT_FILE_RID_PREFIXES:
+        if rid.startswith(prefix):
+            return rid[len(prefix):]
+    return None
+
+
+def vault_file_rid_sql_clause(column: str = "rid") -> str:
+    """SQL matching a vault-file RID in either namespace.
+
+    A single LIKE on the legacy prefix silently stops matching the moment
+    emission flips, which would make every vault row invisible to cleanup,
+    doctor and metrics queries at once.
+    """
+    return "(" + " OR ".join(f"{column} LIKE '{p}%'" for p in VAULT_FILE_RID_PREFIXES) + ")"
+
+
 def _build_vault_manifest(
     *, relative_path: str, content_hash: str, base_hash: Optional[str],
     origin_node: str, origin_seq: int, file_size: int, event_type: str, now,
@@ -347,7 +416,7 @@ def _build_vault_manifest(
     """
     return {
         # --- upstream KOI-net Manifest contract ---
-        "rid": f"orn:koi-net.vault-file:{relative_path}",
+        "rid": vault_file_rid(relative_path),
         "timestamp": now,
         "sha256_hash": content_hash,
         # --- our extensions (additive; ignored by upstream parsers) ---
@@ -602,8 +671,7 @@ class VaultSyncManager:
         relative_path = (
             manifest.get("relative_path")
             or contents.get("relative_path")
-            or (rid.split("orn:koi-net.vault-file:", 1)[1]
-                if isinstance(rid, str) and rid.startswith("orn:koi-net.vault-file:") else None)
+            or parse_vault_file_rid(rid)
         )
         if not relative_path:
             self._reject("missing_fields", rid, source_node, event_id, "relative_path missing")
@@ -790,8 +858,8 @@ class VaultSyncManager:
             total = await conn.fetchval("SELECT COUNT(*) FROM vault_sync_state WHERE is_deleted=FALSE")
             tombstones = await conn.fetchval("SELECT COUNT(*) FROM vault_sync_state WHERE is_deleted=TRUE")
             pending = await conn.fetchval(
-                """SELECT COUNT(*) FROM koi_net_events
-                   WHERE rid LIKE 'orn:koi-net.vault-file:%'
+                f"""SELECT COUNT(*) FROM koi_net_events
+                   WHERE {vault_file_rid_sql_clause()}
                    AND expires_at > NOW()
                    AND array_length(delivered_to, 1) IS NULL""",
             )
@@ -1848,7 +1916,7 @@ class VaultSyncManager:
                 event_type="UPDATE",
                 # Keep reconcile events under the vault-file RID type so edge rid_types
                 # filters allow delivery without requiring an extra capability type.
-                rid=f"orn:koi-net.vault-file:reconcile/{self.node_rid}",
+                rid=vault_file_rid(f"reconcile/{self.node_rid}"),
                 manifest={"type": "reconcile", "timestamp": now, "entry_count": len(manifest_entries)},
                 contents={"_vault_sync": True, "_reconcile": True, "entries": manifest_entries},
                 ttl_hours=24,
@@ -1978,7 +2046,7 @@ class VaultSyncManager:
     ):
         """Queue a vault-sync event for delivery."""
         now = datetime.now(timezone.utc).isoformat()
-        rid = f"orn:koi-net.vault-file:{relative_path}"
+        rid = vault_file_rid(relative_path)
 
         contents = {
             "relative_path": relative_path,
@@ -2105,7 +2173,7 @@ class VaultSyncManager:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
                     f"""DELETE FROM koi_net_events
-                        WHERE rid LIKE 'orn:koi-net.vault-file:%'
+                        WHERE {vault_file_rid_sql_clause()}
                         AND array_length(delivered_to, 1) IS NOT NULL
                         AND queued_at < NOW() - INTERVAL '{EVENT_QUEUE_RETENTION_DAYS} days'"""
                 )

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
+from rid_lib.core import RID as _RidLibRID
 
 from api.koi_protocol import EventType, WireEvent, WireManifest, timestamp_to_z_format
 
@@ -365,24 +366,43 @@ class EventQueue:
 
 
 def extract_rid_type(rid: str) -> Optional[str]:
-    """Extract entity type from RID string.
+    """Extract the type segment of an ORN, using rid-lib's own parser.
 
-    Expected formats:
-    - orn:koi-net.practice:slug+hash -> Practice
-    - orn:entity:practice/slug+hash -> Practice
+    An ORN is `orn:<namespace>:<reference>`, and the type is the last
+    dot-separated segment of the namespace:
+
+        orn:koi-net.vault-file:Shared/x.md      -> Vault-file
+        orn:personal-koi.entity:abc             -> Entity
+        orn:obsidian.note:Shared/x.md           -> Note
+
+    This replaced two hardcoded substring branches (`"koi-net." in rid`,
+    `"entity:" in rid`). Substring-matching a structured identifier was wrong in
+    three ways that only became dangerous once the poll filter began failing
+    closed (divergence 10):
+
+      * `orn:personal-koi.entity:abc` contains "entity:", so the old code
+        returned 'Abc' — the slug, capitalized, presented as a type.
+      * `orn:personal-koi.doclink:*` matched neither branch and returned None,
+        which now means "excluded from every edge".
+      * `orn:personal-koi.vault-file:*` likewise, which blocked the divergence-1
+        migration off the squatted koi-net.* namespace: vault files would have
+        become undeliverable the moment the namespace changed.
+
+    Both the legacy `koi-net.vault-file` and the migration target
+    `personal-koi.vault-file` resolve to `Vault-file`, so the cutover is a no-op
+    for edge scoping.
+
+    The `orn:entity:{type}/{slug}` form the second branch handled has zero rows
+    on either node, so nothing depended on it.
+
+    Returns None for anything unparseable — including non-str input, which the
+    old code raised on. A raise here aborts the poll for every peer.
     """
-    if "koi-net." in rid:
-        # orn:koi-net.{type}:{slug}+{hash}
-        try:
-            type_part = rid.split("koi-net.")[1].split(":")[0]
-            return type_part.capitalize()
-        except (IndexError, AttributeError):
-            return None
-    if "entity:" in rid:
-        # orn:entity:{type}/{slug}+{hash}
-        try:
-            type_part = rid.split("entity:")[1].split("/")[0]
-            return type_part.capitalize()
-        except (IndexError, AttributeError):
-            return None
-    return None
+    try:
+        parsed = _RidLibRID.from_string(rid)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    namespace = getattr(parsed, "namespace", None)
+    if not namespace or "." not in namespace:
+        return None
+    return namespace.rsplit(".", 1)[1].capitalize()

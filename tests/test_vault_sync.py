@@ -1575,3 +1575,75 @@ async def test_source_allowlist(pool, setup_peer, tmp_vault, mock_event_queue):
     assert mgr._metrics.rejected_unauthorized_source >= 1
     # File should NOT exist
     assert not (tmp_vault / "Shared" / "unauthorized.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Divergence 1: vault-file RID namespace migration (staged)
+# ---------------------------------------------------------------------------
+
+def test_vault_file_rid_accepts_both_namespaces():
+    """Inbound must parse BOTH the legacy and the owned namespace.
+
+    This is the expand half of expand/migrate/contract. Until every peer accepts
+    both, emission stays on the legacy namespace; a peer that only understands
+    one must never see the other.
+    """
+    from api.vault_sync import (
+        parse_vault_file_rid, VAULT_FILE_NS_LEGACY, VAULT_FILE_NS_OWNED,
+    )
+
+    for ns in (VAULT_FILE_NS_LEGACY, VAULT_FILE_NS_OWNED):
+        assert parse_vault_file_rid(f"orn:{ns}:Shared/x.md") == "Shared/x.md"
+        # Nested paths are the whole reason we are not adopting obsidian.note.
+        assert parse_vault_file_rid(f"orn:{ns}:Shared/a/b/c.md") == "Shared/a/b/c.md"
+
+    # "not a vault-file RID" must be distinguishable from "empty path".
+    assert parse_vault_file_rid("orn:personal-koi.entity:abc") is None
+    assert parse_vault_file_rid("orn:koi-net.node:n+h") is None
+    assert parse_vault_file_rid(None) is None
+    assert parse_vault_file_rid(12345) is None
+
+
+def test_vault_file_emission_namespace_is_legacy_by_default():
+    """Emission must NOT move until the operator flips it.
+
+    A silent cutover would hand every peer RIDs it has never seen. Shawn's node
+    has been unreachable since June and cannot have been upgraded.
+    """
+    from api.vault_sync import vault_file_rid, VAULT_FILE_NS_LEGACY
+
+    rid = vault_file_rid("Shared/x.md")
+    assert rid == f"orn:{VAULT_FILE_NS_LEGACY}:Shared/x.md", (
+        "default emission must stay on the legacy namespace"
+    )
+
+
+def test_vault_file_sql_clause_matches_both_namespaces():
+    """The cleanup/metrics queries must not go blind when emission flips.
+
+    A single LIKE on the legacy prefix keeps parsing fine and simply stops
+    matching — so retention would stop reaping and the pending-event gauge would
+    read zero, both silently.
+    """
+    from api.vault_sync import (
+        vault_file_rid_sql_clause, VAULT_FILE_NS_LEGACY, VAULT_FILE_NS_OWNED,
+    )
+
+    clause = vault_file_rid_sql_clause()
+    assert f"orn:{VAULT_FILE_NS_LEGACY}:%" in clause
+    assert f"orn:{VAULT_FILE_NS_OWNED}:%" in clause
+    assert clause.startswith("(") and clause.endswith(")"), (
+        "must be parenthesised or it breaks the surrounding AND"
+    )
+
+
+def test_owned_namespace_does_not_squat_the_protocol():
+    """The point of the exercise: stop using a namespace rid_lib reserves."""
+    from rid_lib.types import KoiNetNode, KoiNetEdge
+    from api.vault_sync import VAULT_FILE_NS_OWNED
+
+    reserved_root = KoiNetNode.namespace.split(".")[0]  # "koi-net"
+    assert KoiNetEdge.namespace.split(".")[0] == reserved_root
+    assert not VAULT_FILE_NS_OWNED.startswith(reserved_root + "."), (
+        f"{VAULT_FILE_NS_OWNED} still squats the reserved {reserved_root}.* namespace"
+    )

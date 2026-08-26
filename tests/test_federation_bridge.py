@@ -214,7 +214,21 @@ class TestEventQueueRidTypesFilter:
         from api.event_queue import EventQueue, extract_rid_type
 
         # Guard the premise rather than assuming it.
-        assert extract_rid_type("orn:obsidian.note:Shared/x.md") is None
+        #
+        # UPDATED 2026-08-26: this originally asserted
+        #     extract_rid_type("orn:obsidian.note:Shared/x.md") is None
+        # which was true while extract_rid_type substring-matched on "koi-net."
+        # and "entity:". It now parses ORNs with rid_lib and returns 'Note'.
+        # This assertion failing is the guard doing its job — the premise moved,
+        # the conclusion did not: 'Note' is still absent from a {SpecDoc} edge,
+        # so the event is still excluded. Both routes to exclusion are pinned
+        # below so a future parser change cannot quietly reopen the hole.
+        assert extract_rid_type("orn:obsidian.note:Shared/x.md") == "Note", (
+            "premise: the namespace resolves to a type that no edge here declares"
+        )
+        assert extract_rid_type("orn:not-an-orn") is None, (
+            "premise: a genuinely unparseable RID still yields no type"
+        )
 
         eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
         requesting_node = f"orn:koi-net.node:requester-{_uid()}"
@@ -222,9 +236,17 @@ class TestEventQueueRidTypesFilter:
         note_rid = f"orn:obsidian.note:Shared/leak-{_uid()}.md"
         await eq.add(event_type="NEW", rid=note_rid, contents={"text": "secret"})
 
+        # A genuinely unparseable RID, which is the other route to rid_type=None.
+        junk_rid = f"not-an-orn-{_uid()}"
+        await eq.add(event_type="NEW", rid=junk_rid, contents={"text": "secret"})
+
         delivered = await eq.poll(requesting_node, limit=5000, rid_types=["SpecDoc"])
-        assert note_rid not in [e["rid"] for e in delivered], (
-            "an unrecognized RID namespace must not bypass the edge scope"
+        rids = [e["rid"] for e in delivered]
+        assert note_rid not in rids, (
+            "a namespace the edge does not declare must not bypass the edge scope"
+        )
+        assert junk_rid not in rids, (
+            "an unparseable RID must not bypass the edge scope either"
         )
 
     @pytest.mark.anyio

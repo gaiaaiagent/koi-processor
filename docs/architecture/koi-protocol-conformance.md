@@ -102,18 +102,67 @@ KoiNetEdge.namespace = koi-net.edge
 ```
 
 We mint `orn:koi-net.vault-file:Shared/…`, which is application data wearing
-protocol clothes. Upstream defines `obsidian.vault` / `obsidian.note` for exactly
-this content — and **our own vault frontmatter already uses `orn:obsidian.note:`
-RIDs**, so two conventions coexist inside one system.
+protocol clothes.
 
-This is not cosmetic. The Telegram engineering log records the symptom directly:
-*"old `obsidian.note`-format events at head of queue silently unapplied"* and
-*"RID format skew"*.
+> **CORRECTED 2026-08-26.** This entry previously said "Upstream defines
+> `obsidian.vault` / `obsidian.note` for exactly this content" and proposed
+> migrating there. The first half is true; the conclusion is **wrong**, and it
+> would have broken 29.5% of the vault.
 
-**Fix direction:** migrate vault files to the `obsidian.note` namespace, or, if we
-keep a local namespace, use one we own (`personal-koi.vault-file`) rather than
-squatting `koi-net.*`. Requires a migration and peer coordination — not a
-drive-by change.
+`obsidian.note` is defined by `koi-net-obsidian-manager-node`, not by `rid_lib`
+core (checked: `rid_lib.types` has no Obsidian type in 3.3.0). Its reference
+grammar is:
+
+```python
+class ObsidianNote(ORN):
+    namespace = "obsidian.note"
+    @classmethod
+    def from_reference(cls, reference):
+        components = reference.split("/")
+        if len(components) == 2: return cls(*components)
+        raise ValueError("...must contain two '/'-separated components: <vault_id>/<note_id>")
+```
+
+**Exactly two components.** Our paths are nested:
+
+| path depth | tracked paths |
+|---|---|
+| 2 components (`Shared/x.md`) | 1,829 — would migrate |
+| 3 | 664 |
+| 4 | 88 |
+| 5 / 7 / 8 | 14 |
+| **cannot be expressed as `ObsidianNote`** | **766 of 2,595 (29.5%)** |
+
+Verified directly: `ObsidianNote.from_reference("Shared/Projects/IndigenomicsAI.md")`
+raises. Upstream's grammar cannot express a nested vault.
+
+**So this is a deliberate fork with a measured reason** — the bar this document
+exists to enforce. We move to a namespace we *own*, `personal-koi.vault-file`,
+matching the `personal-koi.*` convention already used for
+entity/doclink/knowledge-episode. That fixes the actual defect (squatting a
+reserved namespace) without adopting a grammar that cannot hold our data.
+
+**Migration is staged** (expand → migrate → contract), because a RID change is a
+wire change:
+
+1. **EXPAND — done 2026-08-26.** Both namespaces are accepted inbound
+   (`parse_vault_file_rid`), all SQL matches both (`vault_file_rid_sql_clause`),
+   and emission still uses the legacy namespace. No peer can break.
+2. **MIGRATE — not done.** Set `KOI_VAULT_FILE_NAMESPACE=personal-koi.vault-file`
+   once every peer accepts both. **Shawn's node has been unreachable since June
+   and cannot have been upgraded**, so this must not be flipped unilaterally.
+3. **CONTRACT — not done.** Drop legacy acceptance only after the queue holds no
+   legacy RIDs.
+
+The cutover is a no-op for edge scoping: both namespaces resolve to rid type
+`Vault-file`, so no edge needs re-negotiating. Pinned by
+`test_legacy_and_migrated_namespaces_agree`.
+
+**Prerequisite that was nearly missed:** `extract_rid_type` returned `None` for
+`personal-koi.*`, and since divergence 10 made the filter fail closed, flipping
+the namespace would have made vault files **undeliverable to every edge**. It now
+parses ORNs with `rid_lib.core.RID.from_string` instead of substring-matching —
+see divergence 13.
 
 ### 2. FORGET ships the full record — **INTENTIONAL FORK (newly deliberate), pending D1**
 
@@ -376,13 +425,46 @@ all-bad news:
 | `Event` / `EventsPayload` / manifest | **parses**, after divergence 11 was fixed |
 | `rid-lib` canonical hashing | identical 3.2.12 → 3.3.0, pinned by test |
 
+### 13. `extract_rid_type` guessed by substring instead of parsing — **DEFECT (fixed 2026-08-26)**
+
+The poll filter's type extractor was two hardcoded substring tests:
+
+```python
+if "koi-net." in rid: ...split on "koi-net."
+if "entity:"  in rid: ...split on "entity:"
+```
+
+Substring-matching a structured identifier, with three live consequences once
+divergence 10 made the filter fail closed:
+
+| RID | old result | correct |
+|---|---|---|
+| `orn:personal-koi.entity:abc` | **`'Abc'`** — the *slug*, as a type | `Entity` |
+| `orn:personal-koi.doclink:abc` | `None` → excluded from every edge | `Doclink` |
+| `orn:personal-koi.vault-file:x` | `None` → **blocked divergence 1 outright** | `Vault-file` |
+| non-`str` input | **raised**, aborting the poll for every peer | `None` |
+
+The `orn:entity:{type}/{slug}` form the second branch existed for has **zero**
+rows on either node (positive control: `orn:personal-koi.entity:` = 81,552), so
+it was dead code.
+
+Now uses `rid_lib.core.RID.from_string` — upstream's own parser — and takes the
+last dot-segment of the namespace. This is the small version of the whole
+argument: we were hand-rolling a parser for a format someone else specifies.
+
+One inherited behaviour change, pinned by test: `rid_lib` validates references
+for types it registers, so `orn:koi-net.node:probe` (no `+hash`) now returns
+`None` and is excluded, where the substring version returned `'Node'`. Failing
+closed on a malformed protocol RID is correct; real node RIDs carry the hash and
+are unaffected.
+
 ---
 
 ## Conformance summary
 
 | # | Divergence | Class |
 |---|---|---|
-| 1 | `koi-net.vault-file` in reserved namespace | DEFECT |
+| 1 | `koi-net.vault-file` in reserved namespace | DEFECT (expand done; cutover pending peers) |
 | 2 | FORGET ships full payload | INTENTIONAL FORK (pending D1 soak) |
 | 3 | Broadcast table + read-time filtering | INTENTIONAL FORK |
 | 4 | Empty `rid_types` fail-open | DEFECT |
@@ -394,6 +476,7 @@ all-bad news:
 | 10 | Unrecognized RID namespace bypasses edge scope | DEFECT (fixed 2026-08-26) |
 | 11 | Vault-file manifest unparseable by stock KOI-net | DEFECT (fixed 2026-08-26) |
 | 12 | Edge shape + status vocabulary vs `EdgeProfile` | DEFECT (latent — 0 edge events on the wire) |
+| 13 | `extract_rid_type` guessed by substring | DEFECT (fixed 2026-08-26) |
 
 **Not a divergence, and worth stating plainly:** none of the above caused the
 2026-08-25 FORGET storm. That defect is entirely inside `api/vault_sync.py`, before
