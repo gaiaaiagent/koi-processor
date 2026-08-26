@@ -19,7 +19,7 @@ re-verified live by prereg-skeptic)
 
 | What | Value |
 |---|---|
-| Mac serving koi tree | `koi-processor-service` @ `regen-prod` = `74da823d3cd9bd44a4882a2ed2444db3ac0beb39`, clean, = origin |
+| Mac serving koi tree | `koi-processor-service` @ `regen-prod` = `a9487f00dbc7d62f32e028302fc368c748448c6d`, clean, = origin (re-pinned at run start per the abort rule: HEAD had moved from `74da823` by one docs-only commit, "pin the spec by hash…", verified docs-only by diff --stat; first run attempt VOIDED on this pin) |
 | NUC serving koi tree | `/home/dobby/projects/RegenAI/koi-processor` @ `316f2e22be4b4951c3f90691e53d5553d7126578`, dirty ×10 |
 | NUC content identity | diff `071364987b47e8f1b0483c8c0e89a5653b6b52436a8643407e4081b9067ad872` · manifest `8badaf389293adc2c8ae4279e11776e03454e2eb89a9c68d000dc95686fda3bc` |
 | Dobby baseline | `main` @ `879aefd`, clean (baseline only — see Run header, §1a) |
