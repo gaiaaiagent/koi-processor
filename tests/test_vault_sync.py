@@ -351,6 +351,110 @@ async def test_cold_cache_does_not_truncate_and_real_delete_still_forgets(
 
 
 @pytest.mark.anyio
+async def test_unreadable_file_is_not_tombstoned(pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch):
+    """A file that exists but cannot be READ must not be reported as deleted.
+
+    _reconcile() enumerates the folder with rglob and hashes each file. If
+    read_bytes() raises OSError it does `continue`, so the path never enters
+    disk_files — and the very next loop reads "in db_map, not in disk_files"
+    as `missing_on_disk`, which the repair path tombstones and FORGETs to
+    every peer.
+
+    rglob already yielded the path, so the file demonstrably EXISTS. The only
+    thing that happened is that this process could not read it: a permissions
+    change, a transient I/O error, a cloud-sync placeholder not yet
+    materialised, a file locked by another writer. Every one of those is
+    temporary, and every one of them currently produces a permanent
+    cross-peer delete.
+
+    This is the same defect class as the truncated-scan storm (A1) but on the
+    reconcile path, which has NO cap and therefore no scan_truncated guard:
+    "I could not look at it" is being recorded as "it is not there".
+    """
+    import api.vault_sync as vs
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    readable = shared / "unread-keeper.md"
+    readable.write_text("# readable")
+    unreadable = shared / "unread-target.md"
+    unreadable.write_text("# exists but will fail to read")
+
+    await mgr._scan_async()
+    async with pool.acquire() as conn:
+        registered = await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state WHERE relative_path LIKE 'Shared/unread-%'"
+        )
+    assert registered == 2, f"setup: expected 2 registered rows, got {registered}"
+
+    # Make exactly one file unreadable, leaving it present on disk.
+    real_read_bytes = Path.read_bytes
+
+    def _selective_read(self, *a, **kw):
+        if self.name == "unread-target.md":
+            raise OSError(13, "Permission denied")
+        return real_read_bytes(self, *a, **kw)
+
+    mock_event_queue.add.reset_mock()
+    monkeypatch.setattr(Path, "read_bytes", _selective_read)
+    result = await mgr.reconcile(mode="repair", confirm=True)
+    monkeypatch.undo()
+
+    assert unreadable.exists(), "precondition: the file must still be on disk"
+
+    assert "Shared/unread-target.md" not in result.get("missing_on_disk", []), (
+        "a file that exists but could not be read must not be reported missing_on_disk; "
+        f"got {result.get('missing_on_disk')}"
+    )
+
+    forgets = [
+        c for c in mock_event_queue.add.call_args_list
+        if c.kwargs.get("event_type") == "FORGET"
+    ]
+    assert not forgets, f"no FORGET may be queued for an unreadable-but-present file, got {forgets}"
+
+    async with pool.acquire() as conn:
+        tombstoned = await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state "
+            "WHERE relative_path LIKE 'Shared/unread-%' AND is_deleted=TRUE"
+        )
+    assert tombstoned == 0, f"expected 0 tombstones, got {tombstoned}"
+
+
+@pytest.mark.anyio
+async def test_genuinely_absent_file_is_still_tombstoned(pool, setup_peer, tmp_vault, mock_event_queue):
+    """Positive control for the above.
+
+    Without this, making _reconcile refuse to tombstone anything at all would
+    pass the unreadable-file test while silently disabling deletion entirely —
+    which is exactly the "safe and wrong" outcome A2 was written to catch.
+    """
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    doomed = shared / "gone-target.md"
+    doomed.write_text("# will be really deleted")
+
+    await mgr._scan_async()
+
+    mock_event_queue.add.reset_mock()
+    doomed.unlink()
+    assert not doomed.exists()
+
+    result = await mgr.reconcile(mode="repair", confirm=True)
+
+    assert "Shared/gone-target.md" in result.get("missing_on_disk", []), (
+        "a genuinely deleted file must still be reported missing_on_disk"
+    )
+    forgets = [
+        c for c in mock_event_queue.add.call_args_list
+        if c.kwargs.get("event_type") == "FORGET"
+    ]
+    assert any("gone-target.md" in str(c) for c in forgets), (
+        f"a real deletion must still emit a FORGET, got {forgets}"
+    )
+
+
+@pytest.mark.anyio
 async def test_excluded_path_is_not_tombstoned(pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch):
     """An excluded path with a state row must not be read as deleted.
 

@@ -915,25 +915,46 @@ class VaultSyncManager:
             if not _path_excluded(r["relative_path"])
         }
         disk_files: Dict[str, str] = {}
+        # A5: a path we could not examine is UNKNOWN, not ABSENT. rglob already
+        # yielded it, so the file exists; the only thing that happened is that
+        # this process could not read it (permissions, transient I/O, an
+        # unmaterialised cloud-sync placeholder, a concurrent writer). Without
+        # this set those paths fall straight through to missing_on_disk and the
+        # repair loop tombstones them and FORGETs them to every peer — a
+        # permanent cross-peer delete caused by a temporary read failure.
+        # Deliberate skips (symlink, excluded, hidden dir) are NOT unknown:
+        # they are decisions, and they are handled by the db_map exclusion above.
+        unknown_paths: set = set()
         for shared_folder in folder_set:
             base_dir = self.vault_path / shared_folder
             for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
-                if md_file.is_symlink() or not md_file.is_file():
+                if md_file.is_symlink():
                     continue
                 try:
                     _inner = md_file.relative_to(base_dir)
                     rel_path = f"{shared_folder}/{_inner}"
                 except ValueError:
+                    # Cannot even name it, so cannot judge its absence.
                     continue
                 if any(part.startswith(".") for part in _inner.parts[:-1]):
                     continue
                 if _path_excluded(rel_path):
                     continue
+                if not md_file.is_file():
+                    # Enumerated but not a regular file right now — a race with
+                    # a writer, or a type change. Unknown, not absent.
+                    unknown_paths.add(rel_path)
+                    continue
                 try:
                     content = md_file.read_bytes()
                     disk_files[rel_path] = hashlib.sha256(content).hexdigest()
-                except OSError:
-                    continue
+                except OSError as e:
+                    unknown_paths.add(rel_path)
+                    logger.warning(
+                        "vault_sync.reconcile_unreadable path=%s error=%s — "
+                        "recorded UNKNOWN, will not be treated as deleted",
+                        rel_path, e,
+                    )
 
         missing_on_disk = []
         hash_mismatch = []
@@ -944,6 +965,9 @@ class VaultSyncManager:
 
         for rel_path, db_hash in db_map.items():
             if check_paths and rel_path not in check_paths:
+                continue
+            if rel_path in unknown_paths:
+                # A5: absence was never established for this path.
                 continue
             if rel_path not in disk_files:
                 missing_on_disk.append(rel_path)
@@ -958,12 +982,23 @@ class VaultSyncManager:
 
         total_drift = len(missing_on_disk) + len(hash_mismatch) + len(missing_in_db)
 
+        if unknown_paths:
+            logger.warning(
+                "vault_sync.reconcile_unknown_paths count=%d — these were enumerated but "
+                "could not be examined, and are excluded from missing_on_disk",
+                len(unknown_paths),
+            )
+
         result: Dict[str, Any] = {
             "mode": mode,
             "missing_on_disk": missing_on_disk,
             "missing_in_db": missing_in_db,
             "hash_mismatch": hash_mismatch,
             "total_drift": total_drift,
+            # A5: report coverage, so a caller can tell a clean reconcile from
+            # one that simply could not see part of the vault.
+            "unknown_on_disk": sorted(unknown_paths),
+            "unknown_count": len(unknown_paths),
         }
 
         if mode == "repair":
