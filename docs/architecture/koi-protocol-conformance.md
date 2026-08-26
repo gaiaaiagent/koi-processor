@@ -339,6 +339,43 @@ match `koi_net.protocol.api.paths` exactly (`/events/broadcast`, `/events/poll`,
 `/rids/fetch`, `/manifests/fetch`, `/bundles/fetch`, under a `/koi-net` prefix).
 The transport surface conformed all along; only the payload did not.
 
+### 12. Edge shape and status vocabulary differ from `EdgeProfile` — **DEFECT (latent)**
+
+Found by validating live API output against upstream models on 2026-08-26.
+
+**Field names.** `GET /koi-net/edges` returns
+`{edge_rid, edge_type, source_node, status, target_node}`. Upstream
+`koi_net.protocol.edge.EdgeProfile` requires
+`{source, target, edge_type, status, rid_types}`. All 10 live edges fail
+`EdgeProfile.model_validate` on the first required field, `source`.
+
+**Status vocabulary.** Upstream `EdgeStatus` has exactly two members,
+`PROPOSED` and `APPROVED`. We use four — `APPROVED`, `PROPOSED`, `REJECTED`,
+`REVOKED` — and all four appear in the live table. `REJECTED` and `REVOKED`
+have no upstream representation at all.
+
+**Why this is latent rather than breaking:** measured, `koi-net.edge` events on
+the wire = **0**. We never exchange edges as bundles; `/koi-net/edges` is our own
+administrative endpoint, which upstream does not define, and edge negotiation
+here happens through `/handshake` (divergence 7). So nothing currently
+serializes an edge to a peer.
+
+It stops being latent the moment edges are exchanged as bundles — which is the
+upstream mechanism, and the natural thing to adopt if the mesh grows past
+hand-managed peers. **Fix direction:** rename on the wire (keep the DB columns),
+and decide whether `REJECTED`/`REVOKED` become an extension field or collapse to
+"absent edge". Do not silently emit a four-value status into a two-value enum.
+
+**Verified conformant on the same pass**, so the register does not read as
+all-bad news:
+
+| surface | result |
+|---|---|
+| the five endpoint paths | match `koi_net.protocol.api.paths` exactly |
+| `NodeProfile` on the wire | **parses** (`base_url`, `node_type`, `provides`, `public_key`) |
+| `Event` / `EventsPayload` / manifest | **parses**, after divergence 11 was fixed |
+| `rid-lib` canonical hashing | identical 3.2.12 → 3.3.0, pinned by test |
+
 ---
 
 ## Conformance summary
@@ -356,6 +393,7 @@ The transport surface conformed all along; only the payload did not.
 | 9 | `rid_types` conflates domain and entity type | DEFECT (design) |
 | 10 | Unrecognized RID namespace bypasses edge scope | DEFECT (fixed 2026-08-26) |
 | 11 | Vault-file manifest unparseable by stock KOI-net | DEFECT (fixed 2026-08-26) |
+| 12 | Edge shape + status vocabulary vs `EdgeProfile` | DEFECT (latent — 0 edge events on the wire) |
 
 **Not a divergence, and worth stating plainly:** none of the above caused the
 2026-08-25 FORGET storm. That defect is entirely inside `api/vault_sync.py`, before
