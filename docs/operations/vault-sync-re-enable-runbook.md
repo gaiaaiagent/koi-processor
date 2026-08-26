@@ -402,6 +402,38 @@ mirrored on the NUC during the soak.
    post-restart scan — that is the exact condition that produced the storm.
 6. Detector after one scan cycle, then after an hour. Any trip → disable, restart,
    investigate. Do not debug with it on.
+
+### A FORGET during the soak is NOT automatically a trip
+
+Observed on the first NUC soak, 2026-08-26 — recorded because the instinct to hit
+the kill switch was wrong, and the next person will have it too.
+
+At 14:56 the NUC emitted a FORGET for
+`Meetings/Civic Intelligence Engine/2026-08-05 - CIE Reconvene.md`. That looks
+exactly like the storm restarting. It was not:
+
+| check | result |
+|---|---|
+| file on disk, either node | **absent** (checked directly, path contains spaces — quote it) |
+| NUC vault git | deleted in snapshot `690915f` at **14:07**, *before* sync was enabled at 14:44 |
+| what else was in that snapshot | `.last-sync-from-macbook` plus a batch of renames — it was the **MacBook→NUC rsync** |
+| how many FORGETs | exactly **1**, unicast to `darren-personal`, not broadcast |
+| `tombstone_blocked` | 0 — A4 correctly did *not* block, because the file really is gone |
+| detector | **clear** on both nodes |
+| Mac applied events | **0** (its own `VAULT_SYNC_ENABLED` is false) |
+
+So a real deletion produced exactly one correct FORGET. **That is the system
+working.** A vault sync that can never emit a FORGET is the "safe and wrong"
+outcome A2's commit message warns about, and it is the *harder* failure to notice.
+
+**The discriminator is not "did a FORGET appear" — it is "does the path still
+exist".** That is precisely what the detector computes, which is why the halt
+conditions are the detector's exit code and `tombstone_blocked`, and nothing else.
+The first soak monitor halted on any FORGET at all and was recalibrated.
+
+Quote paths when checking them by hand. The first existence check on this file ran
+`tr -d ' '` over the path and tested a filename that never existed, which would
+have reported "absent" no matter what was on disk.
 7. Only then the MacBook, same watch.
 
 Only Mac↔NUC will sync: `friend-e2e` and `shawn` are both `enabled=f`.
