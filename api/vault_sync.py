@@ -1129,6 +1129,24 @@ class VaultSyncManager:
         scan_truncated = False
         create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
 
+        # A2: the mtime+size pre-check below is backed by an in-memory cache that
+        # starts empty on every process start, so after a restart EVERY file is a
+        # cache miss and counts toward MAX_FILES_PER_SCAN regardless of whether its
+        # content actually changed — which guarantees truncation. Compare against
+        # the hashes already in the DB so only genuinely-changed files consume the
+        # cap. One query per folder scan, taken without the write lock.
+        db_hashes: Dict[str, str] = {}
+        try:
+            async with self.pool.acquire() as conn:
+                for r in await conn.fetch(
+                    "SELECT relative_path, content_hash FROM vault_sync_state "
+                    "WHERE is_deleted=FALSE AND relative_path LIKE $1",
+                    shared_folder + "/%",
+                ):
+                    db_hashes[r["relative_path"]] = r["content_hash"]
+        except Exception as e:  # never let this optimisation break a scan
+            logger.warning("vault_sync.scan_hash_preload_failed folder=%s error=%s", shared_folder, e)
+
         for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
             if md_file.is_symlink():
                 continue
@@ -1190,6 +1208,13 @@ class VaultSyncManager:
 
             # Update stat cache
             self._stat_cache[rel_path] = (mtime_ns, size, content_hash)
+
+            # A2: content is byte-identical to what the DB already has, so this
+            # file is not "changed" — warm the cache and move on WITHOUT charging
+            # it against the scan budget. Without this, a cold cache spends the
+            # entire cap on unchanged files and the scan truncates every time.
+            if db_hashes.get(rel_path) == content_hash:
+                continue
 
             # Backpressure checks (WP3)
             if files_changed >= MAX_FILES_PER_SCAN:

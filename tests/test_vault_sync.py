@@ -297,6 +297,60 @@ async def test_truncated_scan_emits_no_forget(pool, setup_peer, tmp_vault, mock_
 
 
 @pytest.mark.anyio
+async def test_cold_cache_does_not_truncate_and_real_delete_still_forgets(
+    pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch
+):
+    """After a restart, unchanged files must not consume the scan budget.
+
+    This is the positive control for the A1 truncation guard. A1 alone makes a
+    truncated scan safe by refusing to delete — but a cold _stat_cache makes
+    EVERY file look changed, so every post-restart scan truncates and genuine
+    deletions are never propagated. A2 compares the freshly computed hash
+    against the DB, so unchanged files cost nothing, the scan completes, and a
+    real deletion is still reported.
+
+    Without A2 this test fails by emitting zero FORGETs: correct-but-useless.
+    """
+    import api.vault_sync as vs
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    for i in range(6):
+        (shared / f"cold-{i:02d}.md").write_text(f"# note {i}")
+    doomed = shared / "cold-doomed.md"
+    doomed.write_text("# genuinely deleted later")
+
+    monkeypatch.setattr(vs, "MAX_FILES_PER_SCAN", 100)
+    await mgr._scan_async()
+
+    # Simulate a service restart: in-memory cache gone, tiny budget.
+    mock_event_queue.add.reset_mock()
+    mgr._stat_cache.clear()
+    monkeypatch.setattr(vs, "MAX_FILES_PER_SCAN", 2)
+    doomed.unlink()
+
+    await mgr._scan_async()
+
+    forgets = [
+        c for c in mock_event_queue.add.call_args_list
+        if c.kwargs.get("event_type") == "FORGET"
+    ]
+    rids = {c.kwargs["rid"] for c in forgets}
+    async with pool.acquire() as conn:
+        survivors = await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state "
+            "WHERE relative_path LIKE 'Shared/cold-%' "
+            "AND relative_path <> 'Shared/cold-doomed.md' AND is_deleted=TRUE"
+        )
+        await conn.execute("DELETE FROM vault_sync_state WHERE relative_path LIKE 'Shared/cold-%'")
+
+    assert survivors == 0, f"{survivors} present file(s) tombstoned on a cold-cache scan"
+    assert rids == {"orn:koi-net.vault-file:Shared/cold-doomed.md"}, (
+        f"expected exactly the genuinely deleted file to be forgotten, got {rids}"
+    )
+
+
+@pytest.mark.anyio
 async def test_scan_skips_unsupported_extensions(pool, setup_peer, tmp_vault, mock_event_queue):
     """Files with extensions not in VAULT_SYNC_PATTERNS (e.g. .pdf, .png) are ignored.
 
