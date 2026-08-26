@@ -7,6 +7,9 @@ Tooling Issues entries in Meta/Entity Resolution Issues.md for the incident.
 This locks the logic in so a future edit can't silently regress it.
 """
 
+import plistlib
+from pathlib import Path
+
 import pytest
 
 from scripts.vault_conflict_sweep import (
@@ -16,6 +19,8 @@ from scripts.vault_conflict_sweep import (
     split_frontmatter,
     triage,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 NOTE_WITH_FRONTMATTER = """---
@@ -102,6 +107,54 @@ def test_triage_no_live_when_matching_file_is_missing(vault):
     _write(conflict, "", "No matching live note.\n")
     verdict, detail = triage(str(conflict))
     assert verdict == "no_live"
+
+
+def test_the_plist_cannot_storm():
+    """Mirrors test_embedding_repair.py::test_the_plist_cannot_storm.
+
+    That test exists because embedding-repair's plist had KeepAlive +
+    StartInterval with no ThrottleInterval, and a 2026-08-12 external-provider
+    failure turned an intended 109 runs into 3,040 in 9h06m. This job has the
+    same shape (a periodic launchd job that could, in principle, gain
+    KeepAlive later) -- pinning the same invariants here is what makes that
+    regression testable at all: a plist that only ever existed in
+    ~/Library/LaunchAgents, not committed to the repo, cannot be asserted on.
+
+    Mutation: add KeepAlive back -> fails. Drop ThrottleInterval below
+    StartInterval -> fails. Repoint at the dev checkout -> fails.
+    """
+    p = plistlib.loads(
+        (REPO_ROOT / "scripts" / "com.personal-koi.vault-conflict-sweep.plist").read_bytes()
+    )
+
+    assert "KeepAlive" not in p, (
+        "KeepAlive + StartInterval with no adequate ThrottleInterval is the exact "
+        "shape that produced 3,040 crashed runs in 9h06m for embedding-repair on "
+        "2026-08-12"
+    )
+    assert p["ThrottleInterval"] >= p["StartInterval"], (
+        "ThrottleInterval must be >= StartInterval so launchd's 10s minimum "
+        "runtime cannot govern if KeepAlive is ever re-added"
+    )
+
+    # Unlike embedding-repair, this job's ProgramArguments[0] is a launcher
+    # script living under ~/.config/personal-koi/ (uncommitted, local-only --
+    # same pattern as knowledge-health-run.sh), not a path inside the runtime
+    # clone itself. The plist-level guarantee this test CAN see is
+    # WorkingDirectory; the launcher script's own hardcoded
+    # KOI_PROCESSOR="$HOME/projects/koi-processor-runtime" is the second,
+    # unpinnable-from-here layer of the same guarantee.
+    working_dir = p["WorkingDirectory"]
+    assert "koi-processor-runtime" in working_dir, (
+        f"job must run from the runtime clone, not {working_dir} -- a branch "
+        f"switch in a dev checkout is exactly the risk this job was built to avoid"
+    )
+    assert "RegenAI" not in working_dir and "koi-processor-service" not in working_dir
+
+    # Logs live under ~/.config, not a checkout, but must still never point at
+    # a checkout path that could vanish under a branch switch.
+    for k in ("StandardOutPath", "StandardErrorPath"):
+        assert "RegenAI" not in p[k] and "koi-processor-service" not in p[k]
 
 
 def test_find_conflict_files_excludes_cadap_and_finds_real_ones(vault):

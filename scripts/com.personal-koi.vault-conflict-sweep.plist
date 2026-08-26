@@ -37,8 +37,15 @@
     <key>StandardErrorPath</key>
     <string>/Users/darrenzal/.config/personal-koi/vault-conflict-sweep/stderr.log</string>
 
+    <!-- No KeepAlive, deliberately: same reasoning as embedding-repair
+         (see EMBEDDING SELF-HEAL in CLAUDE.md). StartInterval alone gives a
+         strict 1800s cadence regardless of exit code. ThrottleInterval is set
+         equal to StartInterval as belt-and-braces: if KeepAlive is ever
+         re-added, launchd's minimum runtime becomes 1800, not the default 10,
+         which is what turned a 2026-08-12 external-provider failure into
+         3,040 runs in 9h06m for a different job on this same host. -->
     <key>ThrottleInterval</key>
-    <integer>300</integer>
+    <integer>1800</integer>
 
     <key>Nice</key>
     <integer>10</integer>
