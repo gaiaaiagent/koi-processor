@@ -17,11 +17,35 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_PATH = Path(__file__).resolve().parents[1] / "scripts"
-sys.path.insert(0, str(REPO_ROOT / "koi-sensors"))
+import os
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_PATH = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_PATH))
 
+# koi_protocol lives in the koi-sensors repo, not this one. This test assumed
+# a sibling "koi-sensors" directory next to the repo root -- that layout
+# never existed on this machine (koi-sensors is either the shared dev
+# checkout at ~/projects/RegenAI/koi-sensors, or its stable pinned sibling
+# koi-sensors-runtime -- see CHECKOUT TOPOLOGY in CLAUDE.md), so the import
+# below has failed collection for this file's entire lifetime and every
+# full-suite run in this repo had to --ignore it to complete. Point at the
+# stable clone, same reasoning as every launchd job pointed there this
+# session: it is pinned and never branch-switched, so this test's target
+# doesn't move under whoever runs the suite next.
+KOI_SENSORS_PATH = Path(
+    os.getenv("KOI_SENSORS_PATH", str(Path.home() / "projects" / "koi-sensors-runtime"))
+)
+sys.path.insert(0, str(KOI_SENSORS_PATH))
+
+pytest.importorskip(
+    "koi_protocol.coordinator.koi_coordinator",
+    reason=(
+        f"koi_protocol not importable from {KOI_SENSORS_PATH} -- set KOI_SENSORS_PATH "
+        f"to a koi-sensors checkout that has it, or this suite runs without KOI-flow "
+        f"integration coverage"
+    ),
+)
 from koi_protocol.coordinator.koi_coordinator import KOICoordinator
 from koi_protocol.core.bundle_system import Bundle, Manifest
 from koi_protocol.core.rid_system import GenericRID
