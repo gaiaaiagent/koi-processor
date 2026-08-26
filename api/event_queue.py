@@ -135,21 +135,49 @@ class EventQueue:
             ids_to_mark = []
 
             for row in rows:
-                # If rid_types filter specified, check entity type from RID
-                # Domain events (_koi_domain marker) bypass the filter — they
-                # carry their own routing and should always be delivered.
+                # If rid_types filter specified, gate BOTH rid-typed events and
+                # domain events against the edge's declared types.
+                #
+                # Domain events used to bypass this filter entirely, on the
+                # stated assumption that they "carry their own routing". They do
+                # not: every domain event is queued with target_node NULL, i.e.
+                # broadcast. The bypass therefore delivered the full
+                # entity/task/intent/knowledge stream to every peer holding an
+                # approved POLL edge, regardless of what that edge declared.
+                # The domain name is now matched as a pseudo rid-type, so an
+                # edge must opt in by listing it (e.g. "task", "entity").
                 if rid_types:
                     contents_raw = row["contents"]
                     is_domain_event = False
+                    domain = None
                     if contents_raw:
                         c = json.loads(contents_raw) if isinstance(contents_raw, str) else contents_raw
-                        is_domain_event = isinstance(c, dict) and "_koi_domain" in c
-                    if not is_domain_event:
+                        if isinstance(c, dict) and "_koi_domain" in c:
+                            is_domain_event = True
+                            domain = c.get("_koi_domain")
+                    lowered = [rt.lower() for rt in rid_types]
+                    excluded = False
+                    if is_domain_event:
+                        # Fail closed: a malformed domain event carrying no
+                        # domain name cannot be matched against the edge, so it
+                        # is not delivered.
+                        excluded = not domain or str(domain).lower() not in lowered
+                    else:
                         # RID format: orn:koi-net.{type}:{slug}+{hash}
-                        rid = row["rid"]
-                        rid_type = extract_rid_type(rid)
-                        if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
-                            continue
+                        rid_type = extract_rid_type(row["rid"])
+                        excluded = bool(rid_type) and rid_type.lower() not in lowered
+
+                    if excluded:
+                        # Mark excluded events delivered rather than skipping
+                        # them. A filter decision is PERMANENT for this peer,
+                        # not a deferral — if we leave them unmarked they stay
+                        # at the head of the peer's queue (ORDER BY queued_at
+                        # ASC LIMIT n) and every subsequent poll re-reads and
+                        # re-drops the same rows, returning an empty list
+                        # forever. That starves the peer of everything behind
+                        # them until the 24h TTL lapses.
+                        ids_to_mark.append(row["id"])
+                        continue
 
                 event = {
                     "event_id": row["event_id"],
