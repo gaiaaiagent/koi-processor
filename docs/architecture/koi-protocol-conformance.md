@@ -24,10 +24,19 @@ Each divergence below is classified:
 | Package | Latest | Released | Releases | We use |
 |---|---|---|---|---|
 | `koi-net` (`DynamicalSystemsGroup/koi-net`) | 2.1.2 | 2026-08-06 | 80 | **no** |
-| `rid-lib` (`DynamicalSystemsGroup/rid-lib`) | 3.3.0 | 2026-06-18 | 24 | yes, pinned **3.2.12** |
+| `rid-lib` (`DynamicalSystemsGroup/rid-lib`) | 3.3.0 | 2026-06-18 | 24 | yes, pinned **3.3.0** (bumped 2026-08-26) |
 | `koi-net-obsidian-manager-node` | 0.1.0 | 2026-04-01 | 1 | no |
 | `koi-net-coordinator-node` | 0.1.0 | 2026-03-25 | 1 | no |
 | `koi-net-graph-extension` | 0.1.3 | 2026-06-18 | 1 | no |
+
+**Provenance.** BlockScience is the *former* org name; the current upstream is
+**`DynamicalSystemsGroup`**. All 20 public repos in the KOI/RID lineage are cloned
+to `~/projects/DynamicalSystemsGroup/` (verified 2026-08-26: canonical origins,
+clean worktrees). Use those for any implementation claim — the vendored snapshots
+under `RegenAI/koi-research/sources/blockscience/` are dated and say so themselves.
+The official spec at `dynamicalsystemsgroup.github.io/koi-net-spec` has **no public
+source repo** (`koi-net-spec` returns 404), so it cannot be pinned locally; quote it
+by URL and date, not from memory.
 
 `koi-net` 2.1.2 is ~5,694 LOC across `protocol/` (event, edge, node, envelope,
 secure, knowledge_object), `components/` (sync_manager, event_buffer, cache,
@@ -457,6 +466,58 @@ for types it registers, so `orn:koi-net.node:probe` (no `+hash`) now returns
 `None` and is excluded, where the substring version returned `'Node'`. Failing
 closed on a malformed protocol RID is correct; real node RIDs carry the hash and
 are unaffected.
+
+## What the protocol actually governs — and what it therefore does NOT
+
+This settles a question that kept recurring as "is our ownership policy a fork?"
+
+> "KOI-nets are heterogenous compositions of KOI nodes, each of which is capable of
+> **autonomously** inputting, processing, and outputting knowledge. The behavior of
+> each node and configuration of each network can vary greatly… **The protocol only
+> governs communication between nodes, not how they operate internally.**"
+>
+> — `DynamicalSystemsGroup/koi-net-demo-v1`, `README.md:11`, HEAD `e1483ec`
+
+**Provenance caveat, stated because it changes how much weight this carries:** that
+sentence is from a *demo* README, not the specification. The official spec lives at
+`dynamicalsystemsgroup.github.io/koi-net-spec` and its source repo is **not public**
+(`koi-net-spec` → 404), so it cannot be pinned or diffed locally. The same phrasing
+appears nowhere else in the 20 cloned repos. Treat it as a strong statement of
+intent from the maintainers, and re-check against the rendered spec before relying
+on it for anything load-bearing.
+
+On that basis, the following are **local effector policy, not protocol forks**, and
+should stop being counted as divergences:
+
+| our behaviour | why it is not a fork |
+|---|---|
+| `KOI_VAULT_READONLY_PATHS` — reject an inbound UPDATE/FORGET for a path we own | what a node does on receiving an event is internal |
+| `KOI_VAULT_MIRROR_PATHS` — accept an owner's events without conflict copies | same |
+| A4 — refuse to *emit* a FORGET for a file that is on disk | this is our own emission correctness, not a wire change |
+| conflict copies instead of overwriting | internal storage behaviour |
+
+The genuine wire-level obligations remain the ones in the register: the five endpoint
+paths, the `Event`/`Manifest` shape (divergence 11), the RID namespace (divergence 1),
+and the edge scoping vocabulary (divergences 9 and 12). **`rid_types` on an edge is
+the protocol's authorization boundary; `vault_sync_peers` is our emitter's
+configuration.** They are different mechanisms and neither substitutes for the other
+— which is exactly why Gate 1 in the re-enable runbook needs *both* controls.
+
+## PENDING GATE — conformance is asserted against models, not against a running node
+
+Everything claimed in divergences 11 and 12 was verified by importing upstream's
+pydantic models in a scratch venv and validating real payloads pulled from
+`koi_net_events`. That is real evidence and it caught a genuine break.
+
+**It is not an interoperability test.** No stock `koi-net` node has ever completed a
+handshake, poll, or broadcast against this deployment. `tests/test_interop_matrix.py`
+exercises two of *our* nodes, and the shape tests assert field presence. Neither
+proves a third-party node can join.
+
+**Do not claim full conformance until** a disposable reference node built from
+`~/projects/DynamicalSystemsGroup/koi-net-node-template` (pinned to koi-net 2.1.2)
+completes handshake → edge negotiation → poll → broadcast against this node, and the
+result is recorded here with the commit it ran at.
 
 ---
 

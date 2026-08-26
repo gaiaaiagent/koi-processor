@@ -64,7 +64,7 @@ peer as "a dead March dry-run" was wrong, corrected 2026-08-26:
 | port 80 | **401** — an authenticated service is running |
 | KOI ports 8351 / 8355 / 8100 | no response — its KOI node is down, not its machine |
 | edge `darren-personal -> friend-e2e` | **APPROVED, includes `Vault-file`**, on both nodes |
-| `vault_sync_peers` | has a **`Shared`** row on both nodes |
+| `vault_sync_peers` | has a `Shared` row on both nodes, **already `enabled=f`** |
 | vault files ever delivered to it | **0** |
 | unexpired `Shared/` events targeted at it | **1,226**, expiring by 2026-09-01 |
 | last event of any kind delivered | 2026-08-14 |
@@ -73,19 +73,75 @@ So the exposure has never been realised, is self-expiring, **and becomes live th
 moment its KOI node restarts while vault sync is on.** A live host with an
 approved vault-file edge is not a theoretical risk.
 
-Pick one, then re-run the detector:
+### State correction, 2026-08-26 — half of this gate is already closed
 
-- **(a) Narrow the edge.** Remove `Vault-file` from `rid_types` on the
-  `darren-personal -> friend-e2e` edge, both nodes. Reversible, no WireGuard
-  change, keeps whatever the peer was legitimately for.
-- **(b) Drop the vault peering.** Delete the `friend-e2e` / `Shared` row from
-  `vault_sync_peers` on both nodes. Stops events being targeted at it at the
-  emitter.
-- **(c) Remove the peer entirely**, per the original plan — also edits the relay's
-  `/etc/wireguard/wg-koi.conf` over `ssh poly@37.27.48.12`. Most thorough, least
-  reversible, and it disconnects a host that is currently up.
-- **(d) Deliberately keep it.** Only if you know what that machine is and intend
-  it to hold a copy of `Shared/`. Write down which, so this stops resurfacing.
+Re-read from both databases rather than from this document:
+
+```
+MAC  friend-e2e  Shared  enabled=f        NUC  friend-e2e  Shared  enabled=f
+MAC  shawn       Shared  enabled=f        NUC  shawn       Shared  enabled=f
+MAC  nuc-personal <7 folders> enabled=t   NUC  darren-personal <7 folders> enabled=t
+```
+
+**Every peer lookup in `api/vault_sync.py` filters `enabled=TRUE`** — the emitter
+(`_get_all_peers`), the per-source lookup (`_get_peer_by_source`) and the
+folder-scoped variant all do. So a disabled peering already blocks *both*
+directions: no new events are targeted at that peer, and inbound vault events from
+it are rejected.
+
+Two consequences, and they materially shrink this gate:
+
+1. **The "disable the peering" step is already in effect** for `friend-e2e`. The
+   1,226 queued events are historical residue from before it was disabled. They
+   **cannot grow**, including after vault sync is re-enabled.
+2. **Shawn's vault peering is also already disabled**, which is consistent with
+   what he was told on 2026-08-26 ("I'm not going to run vault-sync/configure for
+   Legion2 until the drift is diagnosed").
+
+So when vault sync is re-enabled, **only Mac↔NUC will sync.** No third party
+receives anything new. What remains of this gate is narrower than written above:
+
+* the **edge** still lists `Vault-file`, so the 1,226 already-targeted events would
+  be *served* if that node polled before they expire (last expiry **2026-09-02**);
+* and nobody can yet say what `10.100.0.24` is.
+
+### The four options were a false either/or — corrected 2026-08-26
+
+The original framing offered (a) narrow the edge *or* (b) drop the vault peering.
+That is wrong, because **they are different mechanisms guarding different halves**,
+and neither substitutes for the other:
+
+| control | what it stops | what it does NOT stop |
+|---|---|---|
+| **(a)** remove `Vault-file` from the edge `rid_types` | *delivery* — the poll gate refuses to serve vault events | the emitter keeps generating and targeting them, and inbound vault events from that peer are still applied |
+| **(b)** disable the `friend-e2e`/`Shared` peering row | *emission* — no new events are targeted at it, and its inbound vault writes stop | the 1,226 already-queued events, which are already targeted |
+
+`rid_types` is the protocol's authorization boundary; `vault_sync_peers` is our
+emitter's configuration. Doing only (b) leaves a queue behind an edge that would
+still serve it. Doing only (a) keeps manufacturing data that can never be
+delivered. **The already-targeted events are a third decision, not covered by
+either.**
+
+**RECOMMENDED — all three, in this order:**
+
+1. **Narrow the edge.** Remove `Vault-file` from `rid_types` on
+   `darren-personal -> friend-e2e`, **both nodes**. Reversible, no WireGuard change.
+2. **Disable, do not delete, the peering.** Set `enabled=false` on the
+   `friend-e2e`/`Shared` row in `vault_sync_peers`, both nodes. Deleting it loses
+   the record that this peering ever existed, which is how the peer became
+   unexplained in the first place.
+3. **Let the queue expire behind the narrowed edge.** Do **not** purge. Recount
+   first (the figure below ages), confirm zero remain after the last expiry, and
+   only then consider deletion as a separate, explicitly approved step.
+
+**Preserve the node identity and the WireGuard peer.** The host is up. Removing it
+from the relay disconnects a live machine whose purpose is not yet established, and
+that is not a decision to take as a side effect of a vault-sync fix.
+
+**Still open regardless of which controls are applied:** *what is `10.100.0.24`?* It
+answers 401 on port 80. Until someone can say what that machine is and who runs it,
+"keep it deliberately" is not available as an option, because nobody can state what
+would be kept.
 
 ## GATE 2 — `Locations/` and `Bridges/` are unguarded (BLOCKING)
 
@@ -112,8 +168,28 @@ Mac : KOI_VAULT_READONLY_PATHS=Meetings/,People/,Organizations/,Projects/,Locati
 NUC : KOI_VAULT_MIRROR_PATHS=Meetings/,People/,Organizations/,Projects/,Locations/,Bridges/
 ```
 
-Confirm that `Locations/` and `Bridges/` really are Mac-owned entity folders
-before applying.
+**RECOMMENDED: apply.** The justification is ownership topology, not activity
+level — both folders are peered with `nuc-personal` and nothing else, exactly like
+the four already governed:
+
+```sql
+SELECT shared_folder, count(*) FROM vault_sync_peers GROUP BY 1;
+-- Bridges / Locations: nuc-personal only
+```
+
+**A characterisation offered during review, and why it was not used:** that
+`Bridges/` is "a legacy/archive folder, superseded by `StagedBridgeNotes/`". Checked
+2026-08-26 and **both halves are wrong**:
+
+* `StagedBridgeNotes/` **does not exist** on the MacBook or the NUC. It is an
+  aspirational Dobby-side staging convention in `dobby/config/identity.md` that has
+  never been exercised.
+* `Bridges/` is not dormant — `Sheaf-Coordination-x-Spore.md` was modified
+  **2026-08-14**, twelve days ago. The other five are April.
+
+The conclusion survives; the reason does not. Ownership policy should not depend on
+how recently a folder was written, or it will need re-litigating every time activity
+changes.
 
 ## GATE 3 — `Shared/` is protected on neither node (ACCEPT, do not "fix")
 
@@ -200,3 +276,94 @@ DELETE FROM koi_net_events WHERE event_type='FORGET' AND expires_at > now()
 
 * `docs/architecture/koi-protocol-conformance.md` — the 13-divergence register
 * `dobby/scripts/vault_sync_detectors.py` — the tripwires
+
+---
+
+# DRY RUN — 2026-08-26
+
+Nothing below has been executed. Every count was read live from both databases at
+the time of writing; recount before applying, because two of them age.
+
+## Change 1 — narrow the `friend-e2e` edge (Gate 1, remaining half)
+
+**Affected rows: 2** (one per node). The inbound edge
+`friend-e2e -> darren-personal` is *their* authorization to us and is enforced by
+their node, not ours; leave it alone.
+
+```sql
+-- MacBook AND NUC, same statement on each.
+UPDATE koi_net_edges
+   SET rid_types = array_remove(rid_types, 'Vault-file')
+ WHERE source_node = 'orn:koi-net.node:darren-personal+80e26aab6b59178cd605c93b1aa0b903e61a283ee2a4ace07da3d1fabdd779f6'
+   AND target_node = 'orn:koi-net.node:friend-e2e+ccca71d04bde1a77eebb4c941b542c6e2edf222c50cfb10f17f41ee499469002';
+```
+
+Before → after: `{Organization,Person,Project,Concept,Location,Vault-file}` →
+`{Organization,Person,Project,Concept,Location}`.
+
+**Verify (expect `f` on both nodes):**
+```sql
+SELECT 'Vault-file' = ANY(rid_types) AS still_scoped
+  FROM koi_net_edges
+ WHERE source_node LIKE '%darren-personal%' AND target_node LIKE '%friend-e2e%';
+```
+
+**Rollback:** `SET rid_types = array_append(rid_types, 'Vault-file')` with the same
+WHERE clause.
+
+**Not doing:** deleting the 1,226 / 413 queued events. They expire by
+**2026-09-02** and deleting them is a separate decision. After that date:
+```sql
+SELECT count(*) FROM koi_net_events
+ WHERE expires_at > now() AND target_node LIKE '%friend-e2e%';   -- expect 0
+```
+
+## Change 2 — Gate 2 ownership config
+
+**Affected: 2 config lines, 168 tracked files** (Locations 162, Bridges 6).
+Config only; no SQL, no data migration.
+
+```diff
+ # MacBook  config/personal.env:115
+-KOI_VAULT_READONLY_PATHS=Meetings/,People/,Organizations/,Projects/
++KOI_VAULT_READONLY_PATHS=Meetings/,People/,Organizations/,Projects/,Locations/,Bridges/
+
+ # NUC  config/personal.env:95
+-KOI_VAULT_MIRROR_PATHS=Meetings/,People/,Organizations/,Projects/
++KOI_VAULT_MIRROR_PATHS=Meetings/,People/,Organizations/,Projects/,Locations/,Bridges/
+```
+
+Both require a service restart to take effect (read via `os.getenv` at import).
+
+**Verify:** with vault sync still OFF, restart and confirm the process picked them
+up, then check that an inbound UPDATE for `Locations/…` is rejected on the Mac and
+mirrored on the NUC during the soak.
+
+**Rollback:** restore the four-folder value and restart.
+
+## Change 3 — nothing (Gate 3)
+
+`Shared/` stays out of both lists, deliberately. It is the bidirectional folder.
+
+## What is explicitly NOT in this dry run
+
+* re-enabling `VAULT_SYNC_ENABLED` anywhere
+* purging any events
+* deleting or de-peering any node, or touching the relay's WireGuard config
+* flipping `KOI_VAULT_FILE_NAMESPACE` (divergence 1 cutover)
+* messaging Shawn
+
+## Order of operations, once approved
+
+1. Recount Change 1's queue figures; apply Change 1 on both nodes; verify.
+2. Apply Change 2 on both nodes; restart both; confirm the env is live.
+3. Detector on both nodes → must read `clear`.
+4. Confirm the NUC vault autocommit is recent **and** the Mac mirror matches its
+   HEAD (the mirror had no schedule until 2026-08-26 and went 3.6h stale in a day).
+5. `VAULT_SYNC_ENABLED=true` on the **NUC only**; restart; watch the first
+   post-restart scan — that is the exact condition that produced the storm.
+6. Detector after one scan cycle, then after an hour. Any trip → disable, restart,
+   investigate. Do not debug with it on.
+7. Only then the MacBook, same watch.
+
+Only Mac↔NUC will sync: `friend-e2e` and `shawn` are both `enabled=f`.
