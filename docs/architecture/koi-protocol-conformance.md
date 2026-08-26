@@ -202,17 +202,38 @@ Upstream has no status field at all; trust is the edge plus a pinned key.
 
 A single `rid_types` list is matched against *both* a RID type (`Vault-file`,
 `Person`) and a domain-event name (`entity`, `task`, `knowledge_episode`). These
-are different axes, and the conflation has a concrete consequence:
+are different axes. Measured on 2026-08-26, joining the queue to the registry on
+the canonical URI rather than trusting the payload label:
 
-- There are **236 `SpecDoc` entities** in the graph.
-- They travel as `_koi_domain = "entity"`.
-- An edge scoped `{SpecDoc}` — intended as a "SpecDoc review channel" — matches on
-  the domain name `entity`, which is absent, so **it carries none of them**. It
-  carries only RID-typed `orn:koi-net.specdoc:*` objects.
+| measurement | value |
+|---|---|
+| `SpecDoc` entities in `entity_registry` | **236** |
+| federation events whose payload `fuseki_uri` is one of them | **21** |
+| their `_koi_domain` | **`entity`** (21 of 21) |
+| their payload `entity_type` | **`Project`** (21 of 21) |
+| RID-typed `orn:koi-net.specdoc:*` events, all time | **0** |
+| positive control: events for `Person` URIs | 27,187 |
 
-So a peer can negotiate a channel that appears to be about SpecDocs and receives
-no SpecDocs. **Fix direction:** either a qualified form (`entity:SpecDoc`) or
-separate `domains` and `rid_types` columns on the edge.
+So an edge scoped `{SpecDoc}` matches against the domain name `entity`, which is
+not in the list, and **carries none of them**. It carries only RID-typed
+`orn:koi-net.specdoc:*` objects, of which this node has never emitted one. The
+channel is empty except for whatever the peer puts into it — which is exactly
+what Shawn's canary is.
+
+**Two further traps found while measuring this**, both of which cost a wrong
+intermediate answer before the join above was written:
+
+1. Querying `contents->'payload'->>'entity_type' = 'SpecDoc'` returns **zero**
+   and looks like proof that SpecDocs never federate. It is a query artifact: the
+   payload carries the *extraction-time* label, not the canonical type. All 21
+   say `Project`. Any scoping built on the payload label would therefore also
+   miss them.
+2. `SpecDoc` entities *do* reach the resolve path (41 `document_entity_links`),
+   so "they are never resolved, therefore never emitted" is also wrong.
+
+**Fix direction:** either a qualified form (`entity:SpecDoc`) or separate
+`domains` and `rid_types` columns on the edge. Whichever is chosen, it must key
+off the canonical `entity_registry.entity_type`, not the payload label.
 
 ### 10. An unrecognized RID namespace bypasses the edge scope — **DEFECT (fixed 2026-08-26)**
 
