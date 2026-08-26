@@ -15,6 +15,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from api.vault_sync import _build_vault_manifest
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -348,6 +350,60 @@ async def test_cold_cache_does_not_truncate_and_real_delete_still_forgets(
     assert rids == {"orn:koi-net.vault-file:Shared/cold-doomed.md"}, (
         f"expected exactly the genuinely deleted file to be forgotten, got {rids}"
     )
+
+
+def test_vault_file_manifest_is_koi_net_conformant():
+    """Our vault-file manifest must satisfy the upstream KOI-net Manifest contract.
+
+    rid_lib.ext.Manifest requires exactly three fields — rid, timestamp,
+    sha256_hash — and koi_net.protocol.Event.manifest is typed as that model.
+    We were emitting `content_hash` (the same sha256 value under a different
+    name) and no `rid` at all, so a stock KOI-net node rejected every vault-file
+    event we sent with:
+
+        2 validation errors for Event
+          manifest.rid          Field required
+          manifest.sha256_hash  Field required
+
+    Verified against koi-net 2.1.2 + rid-lib 3.3.0 on 2026-08-26 using real
+    payloads pulled from koi_net_events. Domain events were unaffected: they
+    carry manifest=None, so there is nothing to validate.
+
+    We already held all three values, so this is a naming mismatch, not a
+    missing capability. The extension fields (relative_path, origin_seq,
+    origin_node, base_hash, bytes, deleted, content_hash) are additive and
+    survive, because pydantic ignores unknown keys by default.
+
+    This test asserts the contract WITHOUT importing koi-net, so it does not add
+    a dependency to run the suite.
+    """
+    UPSTREAM_MANIFEST_REQUIRED = {"rid", "timestamp", "sha256_hash"}
+
+    relative_path = "Shared/conformance-probe.md"
+    content_hash = "a" * 64
+    manifest = _build_vault_manifest(
+        relative_path=relative_path,
+        content_hash=content_hash,
+        base_hash=None,
+        origin_node="orn:koi-net.node:test+deadbeef",
+        origin_seq=7,
+        file_size=123,
+        event_type="UPDATE",
+        now="2026-08-26T00:00:00+00:00",
+    )
+
+    missing = UPSTREAM_MANIFEST_REQUIRED - set(manifest)
+    assert not missing, f"manifest is missing upstream-required field(s): {missing}"
+
+    assert manifest["rid"] == f"orn:koi-net.vault-file:{relative_path}", (
+        "manifest.rid must be the event's RID"
+    )
+    assert manifest["sha256_hash"] == content_hash, (
+        "manifest.sha256_hash must carry the same value as content_hash"
+    )
+    # The extensions that make our vault sync work must not be dropped.
+    for ext in ("relative_path", "origin_seq", "origin_node", "bytes", "deleted", "content_hash"):
+        assert ext in manifest, f"extension field {ext} was lost"
 
 
 @pytest.mark.anyio

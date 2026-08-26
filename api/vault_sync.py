@@ -327,6 +327,40 @@ class VaultWatcher:
         self._debounce_handle = None
 
 
+def _build_vault_manifest(
+    *, relative_path: str, content_hash: str, base_hash: Optional[str],
+    origin_node: str, origin_seq: int, file_size: int, event_type: str, now,
+) -> Dict[str, Any]:
+    """Build a vault-file manifest that satisfies the upstream KOI-net contract.
+
+    `rid_lib.ext.Manifest` requires exactly {rid, timestamp, sha256_hash}, and
+    `koi_net.protocol.Event.manifest` is typed as that model. We previously
+    emitted `content_hash` and no `rid`, so a stock KOI-net node rejected every
+    vault-file event we sent (verified against koi-net 2.1.2 / rid-lib 3.3.0).
+
+    We already had all three values, so `rid` and `sha256_hash` are added rather
+    than computed. Everything else is our extension and is carried alongside:
+    pydantic ignores unknown keys, so upstream reads the three it needs and our
+    own apply path keeps using the rest. Do not remove `content_hash` — the
+    inbound path at _apply_new_or_update still reads it, and peers running the
+    older shape still send it.
+    """
+    return {
+        # --- upstream KOI-net Manifest contract ---
+        "rid": f"orn:koi-net.vault-file:{relative_path}",
+        "timestamp": now,
+        "sha256_hash": content_hash,
+        # --- our extensions (additive; ignored by upstream parsers) ---
+        "relative_path": relative_path,
+        "content_hash": content_hash,
+        "base_hash": base_hash,
+        "origin_node": origin_node,
+        "origin_seq": origin_seq,
+        "bytes": file_size,
+        "deleted": event_type == "FORGET",
+    }
+
+
 class VaultSyncManager:
     """Manages bidirectional markdown file sync over KOI-net events."""
 
@@ -554,11 +588,23 @@ class VaultSyncManager:
         if not isinstance(manifest, dict):
             self._reject("missing_fields", rid, source_node, event_id, "manifest is not a dict")
             return
-        if not manifest.get("content_hash"):
-            self._reject("missing_fields", rid, source_node, event_id, "manifest.content_hash missing")
+        # Accept either spelling. Upstream KOI-net names this field sha256_hash
+        # (rid_lib.ext.Manifest); our own emitter has always written
+        # content_hash and still does, so peers on the older shape keep working.
+        # Without this a stock KOI-net node's events are rejected outright.
+        if not (manifest.get("content_hash") or manifest.get("sha256_hash")):
+            self._reject("missing_fields", rid, source_node, event_id,
+                         "manifest hash missing (neither content_hash nor sha256_hash)")
             return
 
-        relative_path = manifest.get("relative_path") or contents.get("relative_path")
+        # Derive relative_path from the RID when the peer only sent the upstream
+        # three-field manifest, which has no relative_path.
+        relative_path = (
+            manifest.get("relative_path")
+            or contents.get("relative_path")
+            or (rid.split("orn:koi-net.vault-file:", 1)[1]
+                if isinstance(rid, str) and rid.startswith("orn:koi-net.vault-file:") else None)
+        )
         if not relative_path:
             self._reject("missing_fields", rid, source_node, event_id, "relative_path missing")
             return
@@ -652,7 +698,7 @@ class VaultSyncManager:
                 self._metrics.events_skipped_dedup += 1
                 return
 
-        content_hash = manifest["content_hash"]
+        content_hash = manifest.get("content_hash") or manifest["sha256_hash"]
         base_hash = manifest.get("base_hash")
         origin_seq = manifest.get("origin_seq", 1)
         origin_node = manifest.get("origin_node", source_node)
@@ -1954,16 +2000,16 @@ class VaultSyncManager:
             if self._encryption_private_key:
                 logger.debug("vault_sync.e2ee_unavailable peer=%s (no peer encryption key)", peer_node_rid)
 
-        manifest = {
-            "relative_path": relative_path,
-            "content_hash": content_hash,
-            "base_hash": base_hash,
-            "origin_node": self.node_rid,
-            "origin_seq": origin_seq,
-            "bytes": file_size,
-            "deleted": event_type == "FORGET",
-            "timestamp": now,
-        }
+        manifest = _build_vault_manifest(
+            relative_path=relative_path,
+            content_hash=content_hash,
+            base_hash=base_hash,
+            origin_node=self.node_rid,
+            origin_seq=origin_seq,
+            file_size=file_size,
+            event_type=event_type,
+            now=now,
+        )
 
         await self.event_queue.add(
             event_type=event_type,

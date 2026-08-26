@@ -45,8 +45,26 @@ syncing and no deletion detection. It is **not** a replacement for our 91 KB
 
 ## B2 — Decision: do NOT port to upstream `koi-net`
 
-**Decision:** keep the local implementation. Bump `rid-lib` to 3.3.0 on its own
-merits. Revisit if the constraints below change.
+> **CORRECTED 2026-08-26.** The decision below was stated as "do not port to
+> upstream `koi-net`" and justified entirely with `components/` reasons — the
+> Postgres store, the durable queue. Those reasons are sound, and they say
+> **nothing about `koi_net.protocol`**, which is a separate 676-line layer that
+> imports only `rid_lib` and pydantic and never touches `components/` (verified
+> by reading the imports of every module in `protocol/`). Treating one decision
+> as covering both layers is how a storage constraint silently became a licence
+> to diverge on the wire format — and we did diverge, in a way that made our
+> vault-file events unparseable by any stock KOI-net node (divergence 11).
+>
+> **The decision is now split:**
+>
+> | layer | LOC | decision |
+> |---|---|---|
+> | `koi_net.protocol` (wire format, API paths, Event/Manifest/Edge/Node) | 676 | **CONFORM.** Match it. Validate against it. |
+> | `koi_net.components` (cache, event buffers, effector, server) | 2,881 | **INTENTIONAL FORK**, for the reasons below. |
+
+**Decision:** keep the local `components` implementation; conform to
+`koi_net.protocol`. Bump `rid-lib` to 3.3.0 on its own merits. Revisit if the
+constraints below change.
 
 **Reasons, in order of weight:**
 
@@ -276,6 +294,51 @@ and is already the status quo in effect — the Telegram engineering log records
 events as "silently unapplied". The real repair is divergence 1, the namespace
 migration.
 
+### 11. Vault-file manifests were unparseable by a stock KOI-net node — **DEFECT (fixed 2026-08-26)**
+
+The most consequential divergence found so far, and it was invisible because
+both ends of this mesh run our code.
+
+`koi_net.protocol.Event.manifest` is typed as `rid_lib.ext.Manifest`, which
+requires exactly three fields: `rid`, `timestamp`, `sha256_hash`. We emitted:
+
+```json
+{"bytes": 333, "deleted": false, "base_hash": null,
+ "timestamp": "...", "origin_seq": 251, "origin_node": "orn:koi-net.node:...",
+ "content_hash": "a40683fd...", "relative_path": "Meetings/..."}
+```
+
+`timestamp` matched. `rid` was absent. `sha256_hash` was present under the name
+`content_hash`. Validating a **real payload pulled from `koi_net_events`**
+against koi-net 2.1.2 + rid-lib 3.3.0:
+
+```
+2 validation errors for Event
+  manifest.rid          Field required
+  manifest.sha256_hash  Field required
+```
+
+So **every vault-file event this node has ever sent would be rejected by a stock
+KOI-net node.** Domain events were unaffected — they carry `manifest=None`, so
+there is nothing to validate, which is why the defect never surfaced.
+
+We already held all three values, so this was a naming mismatch, not a missing
+capability. `rid` and `sha256_hash` are now emitted alongside the existing
+fields; pydantic ignores unknown keys, so upstream reads the three it needs and
+all seven of our extensions survive on the wire. Verified: `Event`,
+`EventsPayload` (the `/events/poll` response body) and the bundle round-trip all
+parse.
+
+The **inbound** path was fixed symmetrically: it read `manifest["content_hash"]`
+and would have rejected a stock node's events. It now accepts either spelling and
+derives `relative_path` from the RID when the peer sends only the upstream
+three-field manifest.
+
+**Not a divergence, worth recording:** our five KOI-net endpoint paths already
+match `koi_net.protocol.api.paths` exactly (`/events/broadcast`, `/events/poll`,
+`/rids/fetch`, `/manifests/fetch`, `/bundles/fetch`, under a `/koi-net` prefix).
+The transport surface conformed all along; only the payload did not.
+
 ---
 
 ## Conformance summary
@@ -292,6 +355,7 @@ migration.
 | 8 | Two identities per `base_url` | DEFECT (operational) |
 | 9 | `rid_types` conflates domain and entity type | DEFECT (design) |
 | 10 | Unrecognized RID namespace bypasses edge scope | DEFECT (fixed 2026-08-26) |
+| 11 | Vault-file manifest unparseable by stock KOI-net | DEFECT (fixed 2026-08-26) |
 
 **Not a divergence, and worth stating plainly:** none of the above caused the
 2026-08-25 FORGET storm. That defect is entirely inside `api/vault_sync.py`, before
