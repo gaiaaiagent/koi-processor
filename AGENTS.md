@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-08-26 10:40 PDT
+**Updated:** 2026-08-26 11:05 PDT
 
-**Current status:** tree clean, 0 ahead/behind `origin/regen-prod` (`74edb67`). Cleaned a real 3rd conflict-storm wave (240 files, zero loss), built + pinned `com.personal-koi.vault-conflict-sweep` (30-min job, anti-storm tested), and fixed (not skipped) `tests/test_koi_flow_integration.py`'s months-stale collection failure — full suite runs clean with no `--ignore` needed anymore.
+**Current status:** Tree clean at `61b8fb1`, synced with origin. Full suite **43 failed / 1586 passed** with **no `--ignore` needed** — zero new vs the measured `763ede4` baseline. The iCloud conflict sweep (`com.personal-koi.vault-conflict-sweep`, 30-min) is **canary-proven firing unattended**; conflict files at 0.
 
-**Next:** 1) koi 8386 re-measure (due 08-31, clock-gated). 2) Confirm sweep job fires unattended ~10:48. 3) Watch the `vault-conflict-review` task queue. 4) Optional items in PROJECT_HANDOFF.md.
+**Next:** 1) **koi 8386** — re-measure entity creation after the strict flip; clock-gated to **08-31**, nothing to do before then. 2) *(optional)* 2 pre-existing gap notes + 6 unregistered notes; an unrun defect-class sweep on the `curl -sf … || echo '<fallback>'` idiom.
 
-**Watch:** `/entities/retype` mints a new row on a type change — `dry_run:true` first, never `vault_register_entity`. `PATCH /tasks/{task_key}` 404s on a key containing `/`. `koi-sensors-runtime` pinned to `main`, not `regen-prod`.
+**Watch:** `test_vault_sync.py` has **order-dependent** failures — they pass in isolation and did not reproduce at clean HEAD, so a count delta there is not evidence of a regression. The iCloud hazard is **detected, not eliminated**: the vault is in iCloud sync with several concurrent writers. `docs/planning/` + `docs/soak-results/` are gitignored — docs written there are silently never committed. **This checkout is shared**: scope every `git add` to your own files.
 
-**Verification:** full suite at `74edb67`, no `--ignore` needed: 43 failed / 1584 passed, zero regressions (same 43 pre-existing every run). launchd-guard 52/52. 0 non-canonical entity-type rows. All backups reversible.
+**Verification:** measured at `61b8fb1`. Gate 10/10; governance 4/4; 73 focused tests. An earlier 46-failed reading was an artifact of a concurrent session's uncommitted work, not a regression.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
