@@ -1122,6 +1122,11 @@ class VaultSyncManager:
         files_scanned = 0
         files_changed = 0
         bytes_this_cycle = 0
+        # A1: set when the glob below exits early on backpressure. A truncated
+        # enumeration leaves present files out of `seen_paths`, and the deletion
+        # pass treats "not in seen_paths" as "deleted" — so a partial scan must
+        # never be allowed to justify a delete.
+        scan_truncated = False
         create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
 
         for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
@@ -1189,10 +1194,12 @@ class VaultSyncManager:
             # Backpressure checks (WP3)
             if files_changed >= MAX_FILES_PER_SCAN:
                 self._metrics.scans_capped += 1
+                scan_truncated = True
                 logger.info("vault_sync.scan_capped reason=max_files cap=%d", MAX_FILES_PER_SCAN)
                 break
             if bytes_this_cycle + size > MAX_BYTES_PER_SCAN:
                 self._metrics.scans_capped += 1
+                scan_truncated = True
                 logger.info("vault_sync.scan_capped reason=max_bytes cap=%d", MAX_BYTES_PER_SCAN)
                 break
 
@@ -1279,8 +1286,14 @@ class VaultSyncManager:
 
             # Deletion loop — uses remaining budget up to MAX_EVENTS_PER_SCAN
             # Only check files in THIS shared_folder
+            if scan_truncated:
+                logger.warning(
+                    "vault_sync.deletions_skipped reason=scan_truncated folder=%s files_seen=%d — "
+                    "a partial enumeration cannot distinguish 'absent' from 'not reached'",
+                    shared_folder, len(seen_paths),
+                )
             async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
+                rows = [] if scan_truncated else await conn.fetch(
                     "SELECT relative_path, content_hash, origin_seq, local_edit_seq FROM vault_sync_state "
                     "WHERE is_deleted=FALSE AND relative_path LIKE $1",
                     shared_folder + "/%",

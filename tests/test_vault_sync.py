@@ -244,6 +244,59 @@ async def test_scan_deleted_file(pool, setup_peer, tmp_vault, mock_event_queue):
 
 
 @pytest.mark.anyio
+async def test_truncated_scan_emits_no_forget(pool, setup_peer, tmp_vault, mock_event_queue, monkeypatch):
+    """A scan that hits the backpressure cap must delete nothing.
+
+    Regression test for the 2026-08-25 FORGET storm. `seen_paths` is the only
+    record of "this file exists on disk", so a glob that breaks early on
+    MAX_FILES_PER_SCAN leaves present files out of it, and the deletion pass
+    reads "not in seen_paths" as "deleted" and tombstones them. On the live
+    node that produced 1,139 tombstones for files that were never deleted, and
+    the resulting FORGET events removed real notes from a peer's vault.
+
+    The positive control for this fix is test_scan_deleted_file above: a
+    COMPLETE scan must still emit a FORGET for a genuinely absent file.
+    """
+    import api.vault_sync as vs
+
+    mgr = _make_manager(pool, tmp_vault, mock_event_queue)
+    shared = tmp_vault / "Shared"
+    for i in range(6):
+        (shared / f"trunc-{i:02d}.md").write_text(f"# note {i}")
+
+    # Register all six with a cap high enough that the scan completes.
+    monkeypatch.setattr(vs, "MAX_FILES_PER_SCAN", 100)
+    await mgr._scan_async()
+
+    # Force truncation: a cold stat cache makes every file look changed, so a
+    # tiny cap breaks the glob after two files. This is exactly the state a
+    # service restart produces, which is what triggered the live incident.
+    mock_event_queue.add.reset_mock()
+    mgr._stat_cache.clear()
+    monkeypatch.setattr(vs, "MAX_FILES_PER_SCAN", 2)
+    await mgr._scan_async()
+
+    forgets = [
+        c for c in mock_event_queue.add.call_args_list
+        if c.kwargs.get("event_type") == "FORGET"
+    ]
+    assert forgets == [], (
+        f"truncated scan emitted {len(forgets)} FORGET event(s); a partial "
+        f"enumeration cannot distinguish 'absent' from 'not reached'"
+    )
+
+    async with pool.acquire() as conn:
+        tombstoned = await conn.fetchval(
+            "SELECT count(*) FROM vault_sync_state "
+            "WHERE relative_path LIKE 'Shared/trunc-%' AND is_deleted=TRUE"
+        )
+        # This test registers six extra rows; remove them so later tests that
+        # assert on row counts are not perturbed by it.
+        await conn.execute("DELETE FROM vault_sync_state WHERE relative_path LIKE 'Shared/trunc-%'")
+    assert tombstoned == 0, f"{tombstoned} present file(s) tombstoned by a truncated scan"
+
+
+@pytest.mark.anyio
 async def test_scan_skips_unsupported_extensions(pool, setup_peer, tmp_vault, mock_event_queue):
     """Files with extensions not in VAULT_SYNC_PATTERNS (e.g. .pdf, .png) are ignored.
 
