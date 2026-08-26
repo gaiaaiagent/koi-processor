@@ -17,7 +17,7 @@
          waves to fully materialize (see Meta/Entity Resolution Issues.md,
          2026-08-25/26 entries), so this needs to be more frequent than a
          one-shot "check right after a write burst" and cheap enough to run
-         often -- a glob + per-file diff over the vault is fast. -->
+         often: a glob plus a per-file diff over the vault is fast. -->
     <key>StartInterval</key>
     <integer>1800</integer>
 
