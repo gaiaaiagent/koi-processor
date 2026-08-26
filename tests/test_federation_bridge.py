@@ -189,6 +189,65 @@ class TestEventQueueRidTypesFilter:
         )
 
     @pytest.mark.anyio
+    async def test_unrecognized_rid_namespace_is_not_delivered(self, pool, conn):
+        """An RID whose type cannot be extracted must NOT bypass rid_types.
+
+        `extract_rid_type` returns None for any namespace outside `koi-net.*`
+        and `entity:` — including `orn:obsidian.note:`, which is the namespace
+        our own vault frontmatter already uses (divergence #1). The gate read
+
+            excluded = bool(rid_type) and rid_type.lower() not in lowered
+
+        so `rid_type is None` short-circuited to excluded=False and the event
+        was delivered to every peer regardless of the edge scope. That is the
+        same fail-open shape as the empty-rid_types defect above, one branch
+        further down: there the *edge* declared nothing, here the *event*
+        resolves to nothing.
+
+        Concretely: an edge scoped {SpecDoc} — the scope both of Shawn's old
+        Legion identities are pinned to — would still have received a vault
+        file emitted under an `obsidian.note` RID. 40 such events exist on the
+        laptop and 23 on the NUC.
+
+        Unknown type must mean "matches no declared type", i.e. excluded.
+        """
+        from api.event_queue import EventQueue, extract_rid_type
+
+        # Guard the premise rather than assuming it.
+        assert extract_rid_type("orn:obsidian.note:Shared/x.md") is None
+
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
+        requesting_node = f"orn:koi-net.node:requester-{_uid()}"
+
+        note_rid = f"orn:obsidian.note:Shared/leak-{_uid()}.md"
+        await eq.add(event_type="NEW", rid=note_rid, contents={"text": "secret"})
+
+        delivered = await eq.poll(requesting_node, limit=5000, rid_types=["SpecDoc"])
+        assert note_rid not in [e["rid"] for e in delivered], (
+            "an unrecognized RID namespace must not bypass the edge scope"
+        )
+
+    @pytest.mark.anyio
+    async def test_recognized_rid_still_delivered_when_listed(self, pool, conn):
+        """Positive control for the above — the tightening must not deliver nothing.
+
+        Without this, a filter that excluded *everything* would pass the
+        fail-open test while breaking the transport.
+        """
+        from api.event_queue import EventQueue
+
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
+        requesting_node = f"orn:koi-net.node:requester-{_uid()}"
+
+        vf_rid = f"orn:koi-net.vault-file:Shared/ok-{_uid()}.md"
+        await eq.add(event_type="NEW", rid=vf_rid, contents={"text": "fine"})
+
+        delivered = await eq.poll(requesting_node, limit=5000, rid_types=["Vault-file"])
+        assert vf_rid in [e["rid"] for e in delivered], (
+            "a listed, recognizable rid type must still be delivered"
+        )
+
+    @pytest.mark.anyio
     async def test_non_domain_event_filtered_by_rid_types(self, pool, conn):
         """A non-domain event with extractable type should be filtered by rid_types."""
         from api.event_queue import EventQueue

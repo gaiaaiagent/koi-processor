@@ -164,8 +164,15 @@ class EventQueue:
                         excluded = not domain or str(domain).lower() not in lowered
                     else:
                         # RID format: orn:koi-net.{type}:{slug}+{hash}
+                        #
+                        # Fail closed on an unrecognized namespace. extract_rid_type
+                        # returns None for anything outside koi-net.* / entity:,
+                        # which includes orn:obsidian.note: — the namespace our own
+                        # vault frontmatter uses. Treating None as "no opinion" let
+                        # such events through every edge scope regardless of what
+                        # the edge declared. Unknown type matches no declared type.
                         rid_type = extract_rid_type(row["rid"])
-                        excluded = bool(rid_type) and rid_type.lower() not in lowered
+                        excluded = rid_type is None or rid_type.lower() not in lowered
 
                     if excluded:
                         # Mark excluded events delivered rather than skipping
@@ -267,8 +274,9 @@ class EventQueue:
                         if not domain or str(domain).lower() not in lowered:
                             continue
                     else:
+                        # Fail closed on an unrecognized namespace — see poll().
                         rid_type = extract_rid_type(row["rid"])
-                        if rid_type and rid_type.lower() not in lowered:
+                        if rid_type is None or rid_type.lower() not in lowered:
                             continue
 
                 events.append({

@@ -136,9 +136,20 @@ fail-closed by construction.
 everything. Upstream does a membership test against a declared set, which is
 fail-closed.
 
-There is **one such edge live on the NUC today** (a PROPOSED edge to
-`legion-koi+cf8b5829…`). PROPOSED means it delivers nothing, so this is latent —
-but approving it would silently grant full access.
+There is **one such edge live on the NUC today**, and the first version of this
+entry described it wrongly. Re-read from the table on 2026-08-26:
+
+| direction | status | rid_types |
+|---|---|---|
+| `legion-koi+cf8b5829… -> nuc-personal` | **APPROVED** | `{}` |
+| `nuc-personal -> legion-koi+cf8b5829…` | PROPOSED | `{Organization,Person,Project,Concept,Location,Vault-file}` |
+
+The empty-`rid_types` edge is APPROVED, not PROPOSED — but it is the **inbound**
+edge, and our poll gate reads the **outbound** one
+(`source_node = self AND target_node = requester`). So the empty list governs what
+*Legion* serves *us*, which Legion's own code enforces. Nothing is served from here
+either way, because our outbound edge to that RID is PROPOSED. Latent, but for a
+different reason than originally written.
 
 **Fix:** `if rid_types is not None:`, and treat an empty list as "nothing".
 
@@ -203,6 +214,47 @@ So a peer can negotiate a channel that appears to be about SpecDocs and receives
 no SpecDocs. **Fix direction:** either a qualified form (`entity:SpecDoc`) or
 separate `domains` and `rid_types` columns on the edge.
 
+### 10. An unrecognized RID namespace bypasses the edge scope — **DEFECT (fixed 2026-08-26)**
+
+Found while verifying divergence 9, and it is the same fail-open shape as defect 4
+one branch further down. `extract_rid_type` returns `None` for any namespace outside
+`koi-net.*` and `entity:`. The RID branch of the filter read:
+
+```python
+excluded = bool(rid_type) and rid_type.lower() not in lowered
+```
+
+`bool(None)` is `False`, so an unrecognized RID short-circuited to *not excluded* and
+was delivered to every peer **regardless of what its edge declared**. Where defect 4
+was "the edge declares nothing", this is "the event resolves to nothing".
+
+Measured against the live queue:
+
+| namespace | `extract_rid_type` | non-domain events (Mac / NUC) | effect |
+|---|---|---|---|
+| `koi-net.vault-file` | `Vault-file` | 22,843 / 100,313 | filtered correctly |
+| `obsidian.note` | **`None`** | **40 / 23** | **bypassed the scope** |
+| `personal-koi.testdoc`, `test` | `None` | 2 / – | bypassed the scope |
+| `personal-koi.doclink`, `.knowledge-episode` | `None` | 0 / 0 | *not* affected — they carry `_koi_domain` and take the domain branch |
+
+The exposure is narrow but it is precisely the wrong one. `orn:obsidian.note:` is the
+namespace **our own vault frontmatter already uses** (divergence 1), so a vault file
+emitted under it would have been served to an edge scoped `{SpecDoc}` — the scope both
+of Shawn's old Legion identities are currently pinned to, and the basis on which he was
+told on 2026-08-26 06:01 that "there is no vault-file path to either one now". That
+statement was true for `orn:koi-net.vault-file:` RIDs and **not** for `obsidian.note`
+ones. It has been corrected to him.
+
+No such event was actually delivered — all 40 are expired and both Legion nodes have
+been unreachable — so this is a latent hole that was closed, not an incident.
+
+**Fix:** `excluded = rid_type is None or rid_type.lower() not in lowered`, in both
+`poll()` and `peek_undelivered()`. Unknown type matches no declared type. This makes
+`obsidian.note` events undeliverable to *any* scoped edge, which is the safe default
+and is already the status quo in effect — the Telegram engineering log records these
+events as "silently unapplied". The real repair is divergence 1, the namespace
+migration.
+
 ---
 
 ## Conformance summary
@@ -218,6 +270,7 @@ separate `domains` and `rid_types` columns on the edge.
 | 7 | `/handshake` auto-APPROVE | INTENTIONAL FORK (caveated) |
 | 8 | Two identities per `base_url` | DEFECT (operational) |
 | 9 | `rid_types` conflates domain and entity type | DEFECT (design) |
+| 10 | Unrecognized RID namespace bypasses edge scope | DEFECT (fixed 2026-08-26) |
 
 **Not a divergence, and worth stating plainly:** none of the above caused the
 2026-08-25 FORGET storm. That defect is entirely inside `api/vault_sync.py`, before
