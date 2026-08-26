@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-koi.vault-conflict-sweep</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/darrenzal/.config/personal-koi/vault-conflict-sweep-run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/darrenzal/projects/koi-processor-runtime</string>
+
+    <!-- Run every 30 minutes: storms have taken up to ~40-60 min across two
+         waves to fully materialize (see Meta/Entity Resolution Issues.md,
+         2026-08-25/26 entries), so this needs to be more frequent than a
+         one-shot "check right after a write burst" and cheap enough to run
+         often -- a glob + per-file diff over the vault is fast. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/darrenzal</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/darrenzal/.config/personal-koi/vault-conflict-sweep/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/darrenzal/.config/personal-koi/vault-conflict-sweep/stderr.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

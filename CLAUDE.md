@@ -107,6 +107,31 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 >
 > Manual run: `~/projects/koi-processor-runtime/scripts/run_embedding_repair.sh --dry-run`.
 > To force a run inside an open circuit breaker, add `--ignore-backoff`.
+>
+> **VAULT CONFLICT SWEEP (2026-08-26).** The vault (`~/Documents/Notes`) is synced via
+> iCloud Drive with multiple concurrent writers (parallel Claude sessions'
+> `vault_write_note`/`vault_register_entity` calls, the weekly `koi-knowledge-health` job,
+> Obsidian itself, other devices). That combination produces `NAME (conflict TIMESTAMP).md`
+> sibling files — three storms totaling 240 files hit on 2026-08-25/26 alone, arriving in
+> waves up to ~60 minutes apart. Left alone, a conflict file is inert until a vault sync
+> reads it and registers it as a duplicate entity — exactly what the strict resolver flip
+> was meant to stop.
+>
+> `com.personal-koi.vault-conflict-sweep` (`scripts/vault_conflict_sweep.py`, every 30 min,
+> committed plist at `scripts/com.personal-koi.vault-conflict-sweep.plist`, runs from
+> `koi-processor-runtime`) detects them proactively instead of relying on a session to
+> notice. Safety method: only the note **body** (everything after the closing `---`) is
+> diffed — frontmatter fields (`last_synced`, `canonical_uri`, `mentionedIn`, etc.) are
+> machine-managed and expected to differ. A conflict copy whose body is identical to or a
+> subset of the live file's is the stale pre-write version and is backed up
+> (`~/.config/personal-koi/vault-conflict-backups/<run-id>/`) then deleted. Anything with
+> real unique body content is left in place and filed as a `personal-koi` task
+> (`sourceType: vault-conflict-sweep`) for manual review — never auto-deleted. Task keys use
+> `__` instead of `/` for the vault-relative path segment: `PATCH /tasks/{task_key}` cannot
+> match a literal `/` in the path parameter (confirmed live while building this — the
+> obvious `rel/path/style` key 404'd on every PATCH attempt).
+>
+> Manual run: `OBSIDIAN_VAULT_PATH=~/Documents/Notes ~/venvs/koi-server/bin/python3 ~/projects/koi-processor-runtime/scripts/vault_conflict_sweep.py --dry-run`.
 
 **Project**: Regen Network Knowledge Graph Quality Improvement
 **Status**: ✅ COMPLETE - Production Deployed (2025-12-25)
