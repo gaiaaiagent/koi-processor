@@ -70,18 +70,27 @@ def _uid():
 # ---------------------------------------------------------------------------
 
 class TestEventQueueRidTypesFilter:
-    """Events with _koi_domain in contents must bypass the rid_types filter."""
+    """Domain events are scoped by the edge's rid_types, not exempt from it.
+
+    These tests previously asserted the opposite — that a `_koi_domain` event
+    BYPASSES rid_types. That bypass was the defect: every domain event is queued
+    with target_node NULL (broadcast), so exempting them handed the full
+    entity/task/intent/knowledge stream to every peer holding an approved edge
+    regardless of what that edge declared. Three third-party nodes had each
+    accumulated ~32,300 such events, including ~873 task events.
+
+    The domain name is now matched as a pseudo rid-type: an edge opts in by
+    listing it.
+    """
 
     @pytest.mark.anyio
-    async def test_domain_event_bypasses_rid_types(self, pool, conn):
-        """A domain event should be delivered even when its RID doesn't match rid_types."""
+    async def test_domain_event_excluded_when_domain_not_listed(self, pool, conn):
+        """A domain event is NOT delivered when the edge does not list its domain."""
         from api.event_queue import EventQueue
 
-        node_rid = f"orn:koi-net.node:test-{_uid()}"
-        eq = EventQueue(pool, node_rid)
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
         requesting_node = f"orn:koi-net.node:requester-{_uid()}"
 
-        # Queue a domain event with an entity RID (won't match "Vault-file" type)
         entity_rid = f"orn:personal-koi.entity:person-test-{_uid()}"
         await eq.add(
             event_type="NEW",
@@ -89,40 +98,82 @@ class TestEventQueueRidTypesFilter:
             contents={"_koi_domain": "entity", "payload": {"fuseki_uri": entity_rid}},
         )
 
-        # Poll with large limit (pre-existing events in live DB) and rid_types filter
         events = await eq.poll(requesting_node, limit=5000, rid_types=["Vault-file"])
-        rids = [e["rid"] for e in events]
-        assert entity_rid in rids, "Domain event should bypass rid_types filter"
+        assert entity_rid not in [e["rid"] for e in events], (
+            "a Vault-file-scoped edge must not receive an entity domain event"
+        )
+
+    @pytest.mark.anyio
+    async def test_domain_event_delivered_when_domain_listed(self, pool, conn):
+        """Positive control: listing the domain opts the edge in."""
+        from api.event_queue import EventQueue
+
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
+        requesting_node = f"orn:koi-net.node:requester-{_uid()}"
+
+        entity_rid = f"orn:personal-koi.entity:person-test-{_uid()}"
+        await eq.add(
+            event_type="NEW",
+            rid=entity_rid,
+            contents={"_koi_domain": "entity", "payload": {"fuseki_uri": entity_rid}},
+        )
+
+        events = await eq.poll(requesting_node, limit=5000, rid_types=["Vault-file", "entity"])
+        assert entity_rid in [e["rid"] for e in events], (
+            "an edge listing 'entity' must still receive entity domain events"
+        )
+
+    @pytest.mark.anyio
+    async def test_excluded_event_is_marked_delivered(self, pool, conn):
+        """An excluded event must not stay at the head of the peer's queue.
+
+        poll() selects a page ORDER BY queued_at ASC before filtering. If
+        excluded events are skipped without being marked, every later poll
+        re-reads and re-drops the same rows and the peer receives nothing until
+        the 24h TTL lapses — a narrow edge starves permanently.
+        """
+        from api.event_queue import EventQueue
+
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
+        requesting_node = f"orn:koi-net.node:requester-{_uid()}"
+
+        entity_rid = f"orn:personal-koi.entity:person-test-{_uid()}"
+        await eq.add(
+            event_type="NEW",
+            rid=entity_rid,
+            contents={"_koi_domain": "entity", "payload": {"fuseki_uri": entity_rid}},
+        )
+
+        await eq.poll(requesting_node, limit=5000, rid_types=["Vault-file"])
+
+        row = await conn.fetchrow(
+            "SELECT delivered_to FROM koi_net_events WHERE rid = $1 ORDER BY id DESC LIMIT 1",
+            entity_rid,
+        )
+        assert requesting_node in (row["delivered_to"] or []), (
+            "excluded event was not marked delivered; the peer will starve behind it"
+        )
 
     @pytest.mark.anyio
     async def test_non_domain_event_filtered_by_rid_types(self, pool, conn):
         """A non-domain event with extractable type should be filtered by rid_types."""
         from api.event_queue import EventQueue
 
-        node_rid = f"orn:koi-net.node:test-{_uid()}"
-        eq = EventQueue(pool, node_rid)
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
         requesting_node = f"orn:koi-net.node:requester-{_uid()}"
 
-        # Queue a normal (non-domain) event with an entity-like RID
         entity_rid = f"orn:personal-koi.entity:person-test-{_uid()}"
-        await eq.add(
-            event_type="NEW",
-            rid=entity_rid,
-            contents={"name": "just a normal event"},
-        )
+        await eq.add(event_type="NEW", rid=entity_rid, contents={"name": "just a normal event"})
 
-        # Poll with Vault-file filter — should NOT include entity RID
         events = await eq.poll(requesting_node, limit=5000, rid_types=["Vault-file"])
-        rids = [e["rid"] for e in events]
-        assert entity_rid not in rids, "Non-domain event should be filtered by rid_types"
+        assert entity_rid not in [e["rid"] for e in events], "Non-domain event should be filtered"
 
     @pytest.mark.anyio
-    async def test_domain_event_bypasses_rid_types_in_peek(self, pool, conn):
-        """peek_undelivered should also bypass rid_types for domain events."""
+    async def test_domain_event_respects_rid_types_in_peek(self, pool, conn):
+        """peek_undelivered applies the same scope rule as poll()."""
         from api.event_queue import EventQueue
 
-        node_rid = f"orn:koi-net.node:test-{_uid()}"
-        eq = EventQueue(pool, node_rid)
+        eq = EventQueue(pool, f"orn:koi-net.node:test-{_uid()}")
         target = f"orn:koi-net.node:target-{_uid()}"
 
         task_rid = f"test-task-{_uid()}"
@@ -132,9 +183,15 @@ class TestEventQueueRidTypesFilter:
             contents={"_koi_domain": "task", "payload": {"task_key": task_rid}},
         )
 
-        events = await eq.peek_undelivered(target, limit=5000, rid_types=["Organization"])
-        rids = [e["rid"] for e in events]
-        assert task_rid in rids, "Domain event should bypass rid_types in peek_undelivered"
+        excluded = await eq.peek_undelivered(target, limit=5000, rid_types=["Organization"])
+        assert task_rid not in [e["rid"] for e in excluded], (
+            "an Organization-scoped edge must not peek a task domain event"
+        )
+
+        included = await eq.peek_undelivered(target, limit=5000, rid_types=["Organization", "task"])
+        assert task_rid in [e["rid"] for e in included], (
+            "an edge listing 'task' must still peek task domain events"
+        )
 
 
 # ---------------------------------------------------------------------------

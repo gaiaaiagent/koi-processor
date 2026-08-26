@@ -240,16 +240,35 @@ class EventQueue:
 
             events = []
             for row in rows:
+                # Same scope rule as poll(): a domain event is matched on its
+                # _koi_domain value rather than bypassing the edge filter. The
+                # old bypass handed the full entity/task/intent/knowledge stream
+                # to any peer holding an approved edge regardless of what that
+                # edge declared, because domain events are queued with
+                # target_node NULL (broadcast).
+                #
+                # NOTE: poll() additionally marks excluded events delivered, so a
+                # narrow edge cannot starve behind a filtered queue head. peek()
+                # is deliberately non-marking (peek -> push -> mark), so that half
+                # belongs to the CALLER: WEBHOOK delivery must mark excluded ids
+                # too. Zero WEBHOOK edges exist on either node (verified 0/0) —
+                # do not approve one until that caller-side marking exists.
                 if rid_types:
                     contents_raw = row["contents"]
                     is_domain_event = False
+                    domain = None
                     if contents_raw:
                         c = json.loads(contents_raw) if isinstance(contents_raw, str) else contents_raw
-                        is_domain_event = isinstance(c, dict) and "_koi_domain" in c
-                    if not is_domain_event:
-                        rid = row["rid"]
-                        rid_type = extract_rid_type(rid)
-                        if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
+                        if isinstance(c, dict) and "_koi_domain" in c:
+                            is_domain_event = True
+                            domain = c.get("_koi_domain")
+                    lowered = [rt.lower() for rt in rid_types]
+                    if is_domain_event:
+                        if not domain or str(domain).lower() not in lowered:
+                            continue
+                    else:
+                        rid_type = extract_rid_type(row["rid"])
+                        if rid_type and rid_type.lower() not in lowered:
                             continue
 
                 events.append({
