@@ -394,7 +394,7 @@ HIST=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_even
 
 # 5. canonical file intact on BOTH nodes — asserted, not printed
 MS=$(shasum -a 256 "$MAC_VAULT/$UPPER" | cut -d' ' -f1)
-MZ=$(stat -f %z "$MAC_VAULT/$UPPER")
+MZ=$(wc -c < "$MAC_VAULT/$UPPER" | tr -d ' ')   # NOT stat — see note below
 [ "$MS" = "$CANON_SHA" ]   || fail "MacBook canonical sha $MS"
 [ "$MZ" -eq "$CANON_SIZE" ] || fail "MacBook canonical size $MZ"
 NS=$(ssh -n "$NUC" "sha256sum '$NUC_VAULT/$UPPER' | cut -d' ' -f1")
@@ -409,9 +409,68 @@ python3 ~/projects/dobby/scripts/vault_sync_detectors.py --quiet || fail "MacBoo
 echo "STEP5 VERIFY OK"
 ```
 
+> **Do not use `stat` for the MacBook size check.** `/usr/local/bin/stat` (GNU
+> coreutils) shadows `/usr/bin/stat` on this machine, and **both** `stat -f %z`
+> (BSD form) and `stat -c %s` (GNU form) return an **empty string** here. During the
+> live run this made check 5a report FAIL with the sha matching exactly and
+> `size=` blank — a broken measurement masquerading as a data fault, which is
+> precisely the kind of false signal that gets a healthy state rolled back.
+> `wc -c` and `ls -l` both return 6262. The NUC side keeps `stat -c %s`, which works
+> correctly on Linux.
+
+> **This step makes many SSH round-trips and can outlive a command timeout.** The
+> live run was killed with **exit 137 (SIGKILL)** after four of six check groups.
+> That is an execution artifact, **not** a failed assertion, and the two are not
+> interchangeable: `set -e` aborts on a failed guard and prints which one, whereas a
+> SIGKILL simply stops with no verdict. **Distinguish them before rolling anything
+> back** — re-run the remaining groups individually and let them return their own
+> verdicts. Rolling back a healthy state because the harness ran out of time is its
+> own failure. Prefer running the six groups as separate invocations.
+
 ### Step 6 — MacBook reconcile, read-only
 
-Re-run the MacBook reconcile in **detect** mode. Expected `missing_on_disk`:
+**The HTTP endpoint cannot be used here.** `POST /koi-net/vault-sync/reconcile`
+returns `{"error": "Vault sync is not enabled"}` while the MacBook is off, and
+enabling it to run the check is exactly what this step exists to gate. Instead,
+instantiate the real `VaultSyncManager` and call the real `reconcile(mode="detect")`
+— the actual code path, not a reimplementation of it — with an event queue that
+**raises** if anything attempts to queue, which proves the run emitted nothing:
+
+```bash
+. "$OUT/MANIFEST.env"
+cd ~/projects/koi-processor-service
+NODE_RID='orn:koi-net.node:darren-personal+80e26aab6b59178cd605c93b1aa0b903e61a283ee2a4ace07da3d1fabdd779f6'
+
+KOI_VAULT_READONLY_PATHS="$(grep '^KOI_VAULT_READONLY_PATHS' config/personal.env | cut -d= -f2-)" \
+KOI_VAULT_EXCLUDE_PATHS="$(grep '^KOI_VAULT_EXCLUDE_PATHS' config/personal.env | cut -d= -f2- | tr -d "'")" \
+~/venvs/koi-server/bin/python - "$NODE_RID" "$MAC_VAULT" > "$OUT/step6_reconcile_detect.json" <<'PY'
+import asyncio, json, sys
+sys.path.insert(0, '.')
+import asyncpg
+from api.vault_sync import VaultSyncManager
+
+node_rid, vault_path = sys.argv[1], sys.argv[2]
+
+class _NullQueue:                      # detect mode must not emit
+    async def add(self, *a, **k):
+        raise AssertionError("detect mode must not queue events")
+
+async def main():
+    pool = await asyncpg.create_pool(database="personal_koi", min_size=1, max_size=2)
+    mgr = VaultSyncManager(pool=pool, node_rid=node_rid, event_queue=_NullQueue(), vault_path=vault_path)
+    print(json.dumps(await mgr.reconcile(mode="detect"), indent=2, default=str))
+    await pool.close()
+
+asyncio.run(main())
+PY
+```
+
+The environment variables must be passed explicitly — the exclusion and readonly
+path lists are read via `os.getenv` at import, and a bare interpreter has neither,
+which would silently widen the comparison. `node_rid` is hardcoded because the
+MacBook has **no self-row** in `koi_net_nodes`; a `SELECT` for it returns empty.
+
+Expected `missing_on_disk`:
 
 ```
 Meetings/Civic Intelligence Engine/2026-08-05 - CIE Reconvene.md
