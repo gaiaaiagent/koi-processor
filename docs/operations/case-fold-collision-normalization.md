@@ -175,9 +175,9 @@ QUAR=/home/dobby/.vault-casefold-trash/$RUN
 NUC=dobby@192.168.1.69
 NUC_VAULT=/home/dobby/Documents/Notes
 MAC_VAULT=$HOME/Documents/Notes
-LOWER=Organizations/Regenerate cascadia.md
-UPPER=Organizations/Regenerate Cascadia.md
-LOWER_RID=orn:koi-net.vault-file:Organizations/Regenerate cascadia.md
+LOWER='Organizations/Regenerate cascadia.md'
+UPPER='Organizations/Regenerate Cascadia.md'
+LOWER_RID='orn:koi-net.vault-file:Organizations/Regenerate cascadia.md'
 MAC_STALE_ID=3354
 NUC_LOWER_ID=3335
 CANON_SHA=38ecc42bc96f46b6767eff248dc09fc0ed0e4e57ca1f882c05153b8603d2c9be
@@ -208,7 +208,7 @@ ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM va
 scp "$NUC:/tmp/nuc_lower_row.tsv" "$OUT/nuc_lower_row.tsv"
 
 # all 47 event rows, exported as a record even though none are deleted
-ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM koi_net_events WHERE rid = '\$LOWER_RID') TO '/tmp/nuc_events.tsv'\""
+ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM koi_net_events WHERE rid = '$LOWER_RID') TO '/tmp/nuc_events.tsv'\""
 scp "$NUC:/tmp/nuc_events.tsv" "$OUT/nuc_events.tsv"
 
 scp "$NUC:$NUC_VAULT/$LOWER" "$OUT/lower.md"
@@ -233,7 +233,7 @@ NUC_UNIQ=$(ssh "$NUC" "cd '$NUC_VAULT/Organizations' && sha256sum 'Regenerate ca
 [ "$NUC_UNIQ" -eq 1 ] || fail "NUC duplicates are NOT byte-identical; this procedure assumes they are"
 
 # the safety property, not a historical-row count
-PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
 [ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery for the lowercase RID"
 
 echo "PREFLIGHT OK — run $RUN"
@@ -361,23 +361,27 @@ fail() { echo "VERIFY FAIL: $*" >&2; exit 1; }
 
 # 1. DB case-fold collisions — output must be EMPTY on both nodes
 Q="SELECT lower(relative_path) FROM vault_sync_state WHERE is_deleted=FALSE GROUP BY 1 HAVING count(*)>1;"
-[ -z "$(psql personal_koi -tAc "$Q" | tr -d '[:space:]')" ] || fail "MacBook DB collision remains"
-[ -z "$(ssh "$NUC" "psql personal_koi -tAc \"$Q\"" | tr -d '[:space:]')" ] || fail "NUC DB collision remains"
+# Capture separately: a psql that FAILS prints nothing, and `[ -z "$(...)" ]`
+# swallows its exit code — an error would read as "no collisions".
+MACCOL=$(psql personal_koi -v ON_ERROR_STOP=1 -tAc "$Q") || fail "MacBook collision query failed"
+NUCCOL=$(ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -tAc \"$Q\"") || fail "NUC collision query failed"
+[ -z "$(printf %s "$MACCOL" | tr -d '[:space:]')" ] || fail "MacBook DB collision remains: $MACCOL"
+[ -z "$(printf %s "$NUCCOL" | tr -d '[:space:]')" ] || fail "NUC DB collision remains: $NUCCOL"
 
 # 2. NUC filesystem collisions across all 7 folders — output must be EMPTY
 FS=$(ssh "$NUC" 'cd ~/Documents/Notes && for d in Shared Meetings People Organizations Projects Locations Bridges; do
   [ -d "$d" ] || continue
   find "$d" -type f -name "*.md" | awk "{print tolower(\$0)\"\t\"\$0}" | sort |
     awk -F"\t" "{if(\$1==p) print \"COLLISION \"po\" <> \"\$2; p=\$1; po=\$2}"
-done')
+done') || fail "NUC filesystem audit failed to run"
 [ -z "$(printf %s "$FS" | tr -d '[:space:]')" ] || fail "NUC filesystem collision remains: $FS"
 
 # 3. safety property: zero unexpired events PENDING DELIVERY for the lowercase RID
-PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
 [ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery"
 
 # 4. audit history must still be exactly 47 — a DROP means something deleted history
-HIST=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID';\"" | tr -d ' ')
+HIST=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID';\"" | tr -d ' ')
 [ "$HIST" -eq "$EVENT_HISTORY_EXPECTED" ] || fail "event history is $HIST, expected $EVENT_HISTORY_EXPECTED"
 
 # 5. canonical file intact on BOTH nodes — asserted, not printed
@@ -456,36 +460,41 @@ jc() { ssh "$NUC" "journalctl -u dobby-koi-processor --since '@$MARK_EPOCH' --no
 # 1. POSITIVE CONTROL — a scan must be PROVEN to have run before any zero counts.
 SCANS=0
 for _ in $(seq 1 60); do
-  SCANS=$(jc | grep -c 'vault_sync.scan_complete' || true)
+  PROBE=$(jc) || fail "journal read failed during positive control"
+  SCANS=$(printf %s "$PROBE" | grep -c 'vault_sync.scan_complete' || true)
   [ "$SCANS" -ge 1 ] && break
   sleep 10
 done
 [ "$SCANS" -ge 1 ] || fail "no vault_sync.scan_complete after @$MARK_EPOCH — the scan never ran, or the window is wrong. Every count below would be a false zero."
 echo "positive control OK: $SCANS scan_complete"
 
-# 2. Only now are zero counts meaningful.
-[ "$(jc | grep -c 'vault_sync.scan_capped')"          -eq 0 ] || fail "scan_capped > 0"
-[ "$(jc | grep -c 'vault_sync.tombstone_blocked')"     -eq 0 ] || fail "tombstone_blocked > 0 — STOP"
-[ "$(jc | grep -c 'vault_sync.absence_unverifiable')"  -eq 0 ] || fail "absence_unverifiable > 0"
+# 2. Capture the journal ONCE and make a read failure fatal. Counting straight
+#    off `jc |` would turn a dropped SSH connection into three reassuring zeros.
+LOG=$(jc) || fail "journal read failed — cannot evaluate any signal below"
+[ -n "$LOG" ] || fail "journal returned empty after a proven scan_complete — window is wrong"
+
+[ "$(printf %s "$LOG" | grep -c 'vault_sync.scan_capped')"         -eq 0 ] || fail "scan_capped > 0"
+[ "$(printf %s "$LOG" | grep -c 'vault_sync.tombstone_blocked')"    -eq 0 ] || fail "tombstone_blocked > 0 — STOP"
+[ "$(printf %s "$LOG" | grep -c 'vault_sync.absence_unverifiable')" -eq 0 ] || fail "absence_unverifiable > 0"
 
 # 3. THE forbidden event: a FORGET for the exact lowercase Vault-file RID. Scoped
 #    deliberately — "any FORGET" was already proven the wrong discriminator, since a
 #    genuine deletion must produce one.
-BAD=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid = '\$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
+BAD=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid = '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
 [ "$BAD" -eq 0 ] || fail "$BAD FORGET(s) emitted for the lowercase RID — this is the event the whole procedure exists to prevent"
 
 # 4. Other FORGETs are RECORDED for review, not failed on. Armed deletions are the
 #    detectors' job: a FORGET whose path still exists is what actually matters.
-OTHER=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid <> '\$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
+OTHER=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid <> '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
 echo "NOTE: $OTHER other FORGET(s) since the marker — review, do not auto-fail:"
-ssh "$NUC" "psql personal_koi -tAc \"SELECT rid FROM koi_net_events WHERE event_type='FORGET' AND rid <> '\$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\""
+ssh "$NUC" "psql personal_koi -tAc \"SELECT rid FROM koi_net_events WHERE event_type='FORGET' AND rid <> '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\""
 
 # 5. Detectors decide whether any of those are armed.
 ssh "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes' || fail "NUC detector tripped"
 python3 ~/projects/dobby/scripts/vault_sync_detectors.py || fail "MacBook detector tripped"
 
 # 6. Safety property again, post-enable.
-PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
 [ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery"
 
 echo "POST-ENABLE VERIFY OK"
@@ -505,10 +514,22 @@ set -euo pipefail
 fail() { echo "SNAPSHOT FAIL: $*" >&2; exit 1; }
 
 ssh "$NUC" 'systemctl start dobby-vault-autocommit.service || sudo systemctl start dobby-vault-autocommit.service; sleep 5'
-WORK=$(ssh "$NUC" 'cd ~/Documents/Notes && git rev-parse --short HEAD')
-BARE=$(ssh "$NUC" 'cd ~/backups/git/vault-nuc.git && git rev-parse --short refs/heads/main')
-~/.local/bin/mirror-nuc-vault.sh
-MIRR=$(cd ~/backups/git/vault-nuc-mirror.git && git rev-parse --short refs/heads/main)
+
+# The snapshot is worthless if the tree still holds uncommitted changes — those
+# are exactly the bytes not protected by the bare repo or the mirror.
+DIRTY=$(ssh "$NUC" 'cd ~/Documents/Notes && git status --porcelain') || fail "could not read NUC git status"
+[ -z "$DIRTY" ] || fail "NUC working tree is NOT clean; uncommitted paths are unprotected:
+$DIRTY"
+
+# FULL 40-char SHAs. Abbreviations can collide and, worse, differ in length
+# between repos, so a string compare of short forms can pass on unequal commits.
+WORK=$(ssh "$NUC" 'cd ~/Documents/Notes && git rev-parse HEAD')                    || fail "working tree rev-parse failed"
+BARE=$(ssh "$NUC" 'cd ~/backups/git/vault-nuc.git && git rev-parse refs/heads/main') || fail "bare repo rev-parse failed"
+~/.local/bin/mirror-nuc-vault.sh || fail "mirror pull failed"
+MIRR=$(cd ~/backups/git/vault-nuc-mirror.git && git rev-parse refs/heads/main)     || fail "mirror rev-parse failed"
+for v in "$WORK" "$BARE" "$MIRR"; do
+  [ ${#v} -eq 40 ] || fail "expected a full 40-char SHA, got '$v'"
+done
 
 echo "  working tree : $WORK"
 echo "  bare repo    : $BARE"
