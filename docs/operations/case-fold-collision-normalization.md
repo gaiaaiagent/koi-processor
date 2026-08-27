@@ -161,6 +161,14 @@ Every step begins by sourcing the manifest written in step 0, so no path is ever
 retyped or remembered. Every step is `set -euo pipefail` and exits non-zero on the
 first failed assertion.
 
+> **Every `ssh` here is `ssh -n`, and it is not optional.** `ssh` reads stdin, and
+> inside a `bash <<EOS` block **stdin is the script itself** — so an un-`-n` ssh
+> consumes the remaining steps and the shell exits **0**. Demonstrated during the
+> step-0 run: without `-n`, the line after an ssh never executes; with `-n`, it
+> does. A procedure that silently skips its own assertions and reports success is
+> the exact failure mode this document exists to prevent. This is the same defect
+> class as the `stdin=DEVNULL` fix in `dobby/agent_runner.py` (2026-04-24).
+
 ### Step 0 — pre-flight: durable paths, type-safe export, mechanical assertions
 
 ```bash
@@ -204,11 +212,11 @@ set -euo pipefail
 psql personal_koi -v ON_ERROR_STOP=1 \
   -c "\copy (SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID) TO '$OUT/mac_stale_row.tsv'"
 
-ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID) TO '/tmp/nuc_lower_row.tsv'\""
+ssh -n "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID) TO '/tmp/nuc_lower_row.tsv'\""
 scp "$NUC:/tmp/nuc_lower_row.tsv" "$OUT/nuc_lower_row.tsv"
 
 # all 47 event rows, exported as a record even though none are deleted
-ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM koi_net_events WHERE rid = '$LOWER_RID') TO '/tmp/nuc_events.tsv'\""
+ssh -n "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM koi_net_events WHERE rid = '$LOWER_RID') TO '/tmp/nuc_events.tsv'\""
 scp "$NUC:/tmp/nuc_events.tsv" "$OUT/nuc_events.tsv"
 
 scp "$NUC:$NUC_VAULT/$LOWER" "$OUT/lower.md"
@@ -229,11 +237,11 @@ fail() { echo "PREFLIGHT FAIL: $*" >&2; exit 1; }
   || fail "exported file sha != CANON_SHA"
 
 # the two NUC files must be byte-identical BEFORE anything moves
-NUC_UNIQ=$(ssh "$NUC" "cd '$NUC_VAULT/Organizations' && sha256sum 'Regenerate cascadia.md' 'Regenerate Cascadia.md' | cut -d' ' -f1 | sort -u | wc -l")
+NUC_UNIQ=$(ssh -n "$NUC" "cd '$NUC_VAULT/Organizations' && sha256sum 'Regenerate cascadia.md' 'Regenerate Cascadia.md' | cut -d' ' -f1 | sort -u | wc -l")
 [ "$NUC_UNIQ" -eq 1 ] || fail "NUC duplicates are NOT byte-identical; this procedure assumes they are"
 
 # the safety property, not a historical-row count
-PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+PEND=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
 [ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery for the lowercase RID"
 
 echo "PREFLIGHT OK — run $RUN"
@@ -246,7 +254,7 @@ Then run **both** restore proofs below (MacBook and NUC) before touching anythin
 ```bash
 set -euo pipefail
 . "$OUT/MANIFEST.env"
-ssh "$NUC" 'set -euo pipefail
+ssh -n "$NUC" 'set -euo pipefail
   cd ~/projects/RegenAI/koi-processor
   cp config/personal.env "config/personal.env.bak-casefold-'"$RUN"'"
   sed -i "s|^VAULT_SYNC_ENABLED=true|VAULT_SYNC_ENABLED=false|" config/personal.env
@@ -266,7 +274,7 @@ Asserts the **process** environment, not the file.
 set -euo pipefail
 . "$OUT/MANIFEST.env"
 
-ssh "$NUC" "set -euo pipefail
+ssh -n "$NUC" "set -euo pipefail
   QUAR='$QUAR'; V='$NUC_VAULT'; CANON='$CANON_SHA'; SIZE=$CANON_SIZE
   cd \"\$V/Organizations\"
 
@@ -364,12 +372,12 @@ Q="SELECT lower(relative_path) FROM vault_sync_state WHERE is_deleted=FALSE GROU
 # Capture separately: a psql that FAILS prints nothing, and `[ -z "$(...)" ]`
 # swallows its exit code — an error would read as "no collisions".
 MACCOL=$(psql personal_koi -v ON_ERROR_STOP=1 -tAc "$Q") || fail "MacBook collision query failed"
-NUCCOL=$(ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -tAc \"$Q\"") || fail "NUC collision query failed"
+NUCCOL=$(ssh -n "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -tAc \"$Q\"") || fail "NUC collision query failed"
 [ -z "$(printf %s "$MACCOL" | tr -d '[:space:]')" ] || fail "MacBook DB collision remains: $MACCOL"
 [ -z "$(printf %s "$NUCCOL" | tr -d '[:space:]')" ] || fail "NUC DB collision remains: $NUCCOL"
 
 # 2. NUC filesystem collisions across all 7 folders — output must be EMPTY
-FS=$(ssh "$NUC" 'cd ~/Documents/Notes && for d in Shared Meetings People Organizations Projects Locations Bridges; do
+FS=$(ssh -n "$NUC" 'cd ~/Documents/Notes && for d in Shared Meetings People Organizations Projects Locations Bridges; do
   [ -d "$d" ] || continue
   find "$d" -type f -name "*.md" | awk "{print tolower(\$0)\"\t\"\$0}" | sort |
     awk -F"\t" "{if(\$1==p) print \"COLLISION \"po\" <> \"\$2; p=\$1; po=\$2}"
@@ -377,11 +385,11 @@ done') || fail "NUC filesystem audit failed to run"
 [ -z "$(printf %s "$FS" | tr -d '[:space:]')" ] || fail "NUC filesystem collision remains: $FS"
 
 # 3. safety property: zero unexpired events PENDING DELIVERY for the lowercase RID
-PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+PEND=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
 [ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery"
 
 # 4. audit history must still be exactly 47 — a DROP means something deleted history
-HIST=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID';\"" | tr -d ' ')
+HIST=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID';\"" | tr -d ' ')
 [ "$HIST" -eq "$EVENT_HISTORY_EXPECTED" ] || fail "event history is $HIST, expected $EVENT_HISTORY_EXPECTED"
 
 # 5. canonical file intact on BOTH nodes — asserted, not printed
@@ -389,13 +397,13 @@ MS=$(shasum -a 256 "$MAC_VAULT/$UPPER" | cut -d' ' -f1)
 MZ=$(stat -f %z "$MAC_VAULT/$UPPER")
 [ "$MS" = "$CANON_SHA" ]   || fail "MacBook canonical sha $MS"
 [ "$MZ" -eq "$CANON_SIZE" ] || fail "MacBook canonical size $MZ"
-NS=$(ssh "$NUC" "sha256sum '$NUC_VAULT/$UPPER' | cut -d' ' -f1")
-NZ=$(ssh "$NUC" "stat -c %s '$NUC_VAULT/$UPPER'")
+NS=$(ssh -n "$NUC" "sha256sum '$NUC_VAULT/$UPPER' | cut -d' ' -f1")
+NZ=$(ssh -n "$NUC" "stat -c %s '$NUC_VAULT/$UPPER'")
 [ "$NS" = "$CANON_SHA" ]   || fail "NUC canonical sha $NS"
 [ "$NZ" -eq "$CANON_SIZE" ] || fail "NUC canonical size $NZ"
 
 # 6. detectors — their exit codes are the assertion
-ssh "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes --quiet' || fail "NUC detector tripped"
+ssh -n "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes --quiet' || fail "NUC detector tripped"
 python3 ~/projects/dobby/scripts/vault_sync_detectors.py --quiet || fail "MacBook detector tripped"
 
 echo "STEP5 VERIFY OK"
@@ -420,10 +428,10 @@ set -euo pipefail
 . "$OUT/MANIFEST.env"
 
 # Marker as an EPOCH, taken on the NUC, immediately before the restart. See step 8.
-MARK_EPOCH=$(ssh "$NUC" 'date +%s')
+MARK_EPOCH=$(ssh -n "$NUC" 'date +%s')
 echo "MARK_EPOCH=$MARK_EPOCH" >> "$OUT/MANIFEST.env"
 
-ssh "$NUC" 'set -euo pipefail
+ssh -n "$NUC" 'set -euo pipefail
   cd ~/projects/RegenAI/koi-processor
   sed -i "s|^VAULT_SYNC_ENABLED=false|VAULT_SYNC_ENABLED=true|" config/personal.env
   sudo systemctl restart dobby-koi-processor
@@ -455,7 +463,7 @@ ssh "$NUC" 'set -euo pipefail
 set -euo pipefail
 . "$OUT/MANIFEST.env"          # provides MARK_EPOCH from step 7
 fail() { echo "VERIFY FAIL: $*" >&2; exit 1; }
-jc() { ssh "$NUC" "journalctl -u dobby-koi-processor --since '@$MARK_EPOCH' --no-pager"; }
+jc() { ssh -n "$NUC" "journalctl -u dobby-koi-processor --since '@$MARK_EPOCH' --no-pager"; }
 
 # 1. POSITIVE CONTROL — a scan must be PROVEN to have run before any zero counts.
 SCANS=0
@@ -480,21 +488,21 @@ LOG=$(jc) || fail "journal read failed — cannot evaluate any signal below"
 # 3. THE forbidden event: a FORGET for the exact lowercase Vault-file RID. Scoped
 #    deliberately — "any FORGET" was already proven the wrong discriminator, since a
 #    genuine deletion must produce one.
-BAD=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid = '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
+BAD=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid = '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
 [ "$BAD" -eq 0 ] || fail "$BAD FORGET(s) emitted for the lowercase RID — this is the event the whole procedure exists to prevent"
 
 # 4. Other FORGETs are RECORDED for review, not failed on. Armed deletions are the
 #    detectors' job: a FORGET whose path still exists is what actually matters.
-OTHER=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid <> '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
+OTHER=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid <> '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
 echo "NOTE: $OTHER other FORGET(s) since the marker — review, do not auto-fail:"
-ssh "$NUC" "psql personal_koi -tAc \"SELECT rid FROM koi_net_events WHERE event_type='FORGET' AND rid <> '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\""
+ssh -n "$NUC" "psql personal_koi -tAc \"SELECT rid FROM koi_net_events WHERE event_type='FORGET' AND rid <> '$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\""
 
 # 5. Detectors decide whether any of those are armed.
-ssh "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes' || fail "NUC detector tripped"
+ssh -n "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes' || fail "NUC detector tripped"
 python3 ~/projects/dobby/scripts/vault_sync_detectors.py || fail "MacBook detector tripped"
 
 # 6. Safety property again, post-enable.
-PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+PEND=$(ssh -n "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
 [ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery"
 
 echo "POST-ENABLE VERIFY OK"
@@ -513,18 +521,18 @@ set -euo pipefail
 . "$OUT/MANIFEST.env"
 fail() { echo "SNAPSHOT FAIL: $*" >&2; exit 1; }
 
-ssh "$NUC" 'systemctl start dobby-vault-autocommit.service || sudo systemctl start dobby-vault-autocommit.service; sleep 5'
+ssh -n "$NUC" 'systemctl start dobby-vault-autocommit.service || sudo systemctl start dobby-vault-autocommit.service; sleep 5'
 
 # The snapshot is worthless if the tree still holds uncommitted changes — those
 # are exactly the bytes not protected by the bare repo or the mirror.
-DIRTY=$(ssh "$NUC" 'cd ~/Documents/Notes && git status --porcelain') || fail "could not read NUC git status"
+DIRTY=$(ssh -n "$NUC" 'cd ~/Documents/Notes && git status --porcelain') || fail "could not read NUC git status"
 [ -z "$DIRTY" ] || fail "NUC working tree is NOT clean; uncommitted paths are unprotected:
 $DIRTY"
 
 # FULL 40-char SHAs. Abbreviations can collide and, worse, differ in length
 # between repos, so a string compare of short forms can pass on unequal commits.
-WORK=$(ssh "$NUC" 'cd ~/Documents/Notes && git rev-parse HEAD')                    || fail "working tree rev-parse failed"
-BARE=$(ssh "$NUC" 'cd ~/backups/git/vault-nuc.git && git rev-parse refs/heads/main') || fail "bare repo rev-parse failed"
+WORK=$(ssh -n "$NUC" 'cd ~/Documents/Notes && git rev-parse HEAD')                    || fail "working tree rev-parse failed"
+BARE=$(ssh -n "$NUC" 'cd ~/backups/git/vault-nuc.git && git rev-parse refs/heads/main') || fail "bare repo rev-parse failed"
 ~/.local/bin/mirror-nuc-vault.sh || fail "mirror pull failed"
 MIRR=$(cd ~/backups/git/vault-nuc-mirror.git && git rev-parse refs/heads/main)     || fail "mirror rev-parse failed"
 for v in "$WORK" "$BARE" "$MIRR"; do
@@ -560,18 +568,29 @@ set -euo pipefail
 psql personal_koi -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 CREATE TEMP TABLE _orig AS SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID;
-SELECT CASE WHEN count(*) = 1 THEN 'snapshot ok' ELSE (SELECT 1/0)::text END FROM _orig;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM _orig) <> 1 THEN
+    RAISE EXCEPTION 'snapshot: expected exactly 1 row';
+  END IF;
+END $$;
 
 DELETE FROM vault_sync_state WHERE id = $MAC_STALE_ID;
 \copy vault_sync_state FROM '$OUT/mac_stale_row.tsv'
 
-SELECT CASE WHEN (SELECT count(*) FROM (
-        (SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID EXCEPT SELECT * FROM _orig)
-        UNION ALL
-        (SELECT * FROM _orig EXCEPT SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID)
-     ) d) = 0
-     THEN 'MAC RESTORE PROVEN: round-trip exact'
-     ELSE (SELECT 1/0)::text END;
+DO $$
+DECLARE d int;
+BEGIN
+  SELECT count(*) INTO d FROM (
+      (SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID EXCEPT SELECT * FROM _orig)
+      UNION ALL
+      (SELECT * FROM _orig EXCEPT SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID)
+  ) t;
+  IF d <> 0 THEN
+    RAISE EXCEPTION 'restore is NOT exact: % differing row(s)', d;
+  END IF;
+  RAISE NOTICE 'MAC RESTORE PROVEN: round-trip exact';
+END $$;
 ROLLBACK;
 SQL
 ```
@@ -582,27 +601,47 @@ SQL
 set -euo pipefail
 . "$OUT/MANIFEST.env"
 scp "$OUT/nuc_lower_row.tsv" "$NUC:/tmp/nuc_lower_row.tsv"
-ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 <<SQL
+ssh -n "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 CREATE TEMP TABLE _orig AS SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID;
-SELECT CASE WHEN count(*) = 1 THEN 'snapshot ok' ELSE (SELECT 1/0)::text END FROM _orig;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM _orig) <> 1 THEN
+    RAISE EXCEPTION 'snapshot: expected exactly 1 row';
+  END IF;
+END $$;
 
 DELETE FROM vault_sync_state WHERE id = $NUC_LOWER_ID;
 \\copy vault_sync_state FROM '/tmp/nuc_lower_row.tsv'
 
-SELECT CASE WHEN (SELECT count(*) FROM (
-        (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID EXCEPT SELECT * FROM _orig)
-        UNION ALL
-        (SELECT * FROM _orig EXCEPT SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID)
-     ) d) = 0
-     THEN 'NUC RESTORE PROVEN: round-trip exact'
-     ELSE (SELECT 1/0)::text END;
+DO $$
+DECLARE d int;
+BEGIN
+  SELECT count(*) INTO d FROM (
+      (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID EXCEPT SELECT * FROM _orig)
+      UNION ALL
+      (SELECT * FROM _orig EXCEPT SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID)
+  ) t;
+  IF d <> 0 THEN
+    RAISE EXCEPTION 'restore is NOT exact: % differing row(s)', d;
+  END IF;
+  RAISE NOTICE 'NUC RESTORE PROVEN: round-trip exact';
+END $$;
 ROLLBACK;
 SQL"
 ```
 
-Either proof failing raises `division by zero` and rolls back. **Both must print
-PROVEN before step 1.**
+Either proof failing raises an exception and rolls back. **Both must print PROVEN
+before step 1.**
+
+> **Why `DO … RAISE EXCEPTION` and not `CASE WHEN … ELSE (SELECT 1/0)`.** The first
+> version of these proofs used the `CASE` form and **failed on a healthy row**:
+> PostgreSQL folds the constant subquery `(SELECT 1/0)` at plan time, so the ELSE
+> branch raises even when the condition is true. Observed live — the MacBook proof
+> errored `division by zero` immediately after `SELECT 1` confirmed the snapshot had
+> exactly one row. This is the same trap that broke the Change-1 guard earlier the
+> same day; `GET DIAGNOSTICS` / `RAISE EXCEPTION` inside a `DO` block is the form
+> that actually works.
 
 ### Actual rollback, in reverse order
 
@@ -615,10 +654,10 @@ psql personal_koi -v ON_ERROR_STOP=1 -c "\copy vault_sync_state FROM '$OUT/mac_s
 
 # 3'. NUC lowercase row
 scp "$OUT/nuc_lower_row.tsv" "$NUC:/tmp/nuc_lower_row.tsv"
-ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy vault_sync_state FROM '/tmp/nuc_lower_row.tsv'\""
+ssh -n "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy vault_sync_state FROM '/tmp/nuc_lower_row.tsv'\""
 
 # 2'. the quarantined file, from the manifest's exact QUAR
-ssh "$NUC" "mv '$QUAR/Regenerate cascadia.md' '$NUC_VAULT/$LOWER'"
+ssh -n "$NUC" "mv '$QUAR/Regenerate cascadia.md' '$NUC_VAULT/$LOWER'"
 
 # 1'. re-enable NUC sync if rolling back mid-procedure (step 7)
 ```
