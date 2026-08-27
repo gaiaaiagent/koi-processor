@@ -148,8 +148,8 @@ yields that spelling.
 1. With sync ON, quarantining the lowercase file causes the next scan to observe a
    genuine absence on ext4 → A4 confirms it → tombstone → **FORGET emitted**. That
    is exactly the event that must never exist.
-2. The existing queued lowercase `UPDATE` must be removed, and removing it while
-   the emitter can regenerate it is pointless.
+2. It keeps the window free of new emissions while the filesystem is changed. No
+   events are removed by this procedure — all 47 deliberately remain.
 
 It is re-enabled in step 7 and verified in step 8.
 
@@ -157,106 +157,148 @@ It is re-enabled in step 7 and verified in step 8.
 
 ## Procedure
 
-### Step 0 — pre-flight: durable paths, type-safe export, mechanical assertions
+Every step begins by sourcing the manifest written in step 0, so no path is ever
+retyped or remembered. Every step is `set -euo pipefail` and exits non-zero on the
+first failed assertion.
 
-Paths are recorded to a manifest so every later step and the rollback reference the
-same location instead of a remembered one.
+### Step 0 — pre-flight: durable paths, type-safe export, mechanical assertions
 
 ```bash
 set -euo pipefail
 RUN=$(date +%Y%m%d-%H%M%S)
 OUT="$HOME/backups/casefold-$RUN"
-QUAR="/home/dobby/.vault-casefold-trash/$RUN"          # created in step 2
 mkdir -p "$OUT"
 cat > "$OUT/MANIFEST.env" <<EOF
 RUN=$RUN
 OUT=$OUT
-QUAR=$QUAR
-LOWER='Organizations/Regenerate cascadia.md'
-UPPER='Organizations/Regenerate Cascadia.md'
+QUAR=/home/dobby/.vault-casefold-trash/$RUN
+NUC=dobby@192.168.1.69
+NUC_VAULT=/home/dobby/Documents/Notes
+MAC_VAULT=$HOME/Documents/Notes
+LOWER=Organizations/Regenerate cascadia.md
+UPPER=Organizations/Regenerate Cascadia.md
+LOWER_RID=orn:koi-net.vault-file:Organizations/Regenerate cascadia.md
 MAC_STALE_ID=3354
 NUC_LOWER_ID=3335
 CANON_SHA=38ecc42bc96f46b6767eff248dc09fc0ed0e4e57ca1f882c05153b8603d2c9be
 STALE_SHA=ed88466c2fd07942e6b6056a6392b6c4f025b8f1760b81e81109142a0d05c9b4
+CANON_SIZE=6262
+STALE_SIZE=5171
+EVENT_HISTORY_EXPECTED=47
 EOF
 echo "manifest: $OUT/MANIFEST.env"
 ```
 
+`QUAR` is fixed here and used verbatim by step 2 and by the rollback. **Neither may
+compute its own timestamp** — an earlier draft did, and the rollback then pointed at
+a directory that step 2 had never created.
+
 **Export with `COPY`, not `row_to_json`.** `COPY` text format round-trips `jsonb`,
-`text[]`, `uuid` and `timestamptz` exactly; a JSON dump reconstructed through
-Python `str()` does not (correction 3).
+`text[]`, `uuid` and `timestamptz` exactly; a JSON dump rebuilt through Python
+`str()` does not (see Rollback).
 
 ```bash
+set -euo pipefail
 . "$OUT/MANIFEST.env"
 
-psql personal_koi -c "\copy (SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID) TO '$OUT/mac_stale_row.tsv'"
+psql personal_koi -v ON_ERROR_STOP=1 \
+  -c "\copy (SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID) TO '$OUT/mac_stale_row.tsv'"
 
-ssh dobby@192.168.1.69 "psql personal_koi -c \"\\copy (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID) TO '/tmp/nuc_lower_row.tsv'\""
-scp dobby@192.168.1.69:/tmp/nuc_lower_row.tsv "$OUT/nuc_lower_row.tsv"
+ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID) TO '/tmp/nuc_lower_row.tsv'\""
+scp "$NUC:/tmp/nuc_lower_row.tsv" "$OUT/nuc_lower_row.tsv"
 
-# full 47-row event history, exported for the record even though none are deleted
-ssh dobby@192.168.1.69 "psql personal_koi -c \"\\copy (SELECT * FROM koi_net_events WHERE rid LIKE '%Regenerate cascadia.md') TO '/tmp/nuc_events.tsv'\""
-scp dobby@192.168.1.69:/tmp/nuc_events.tsv "$OUT/nuc_events.tsv"
+# all 47 event rows, exported as a record even though none are deleted
+ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy (SELECT * FROM koi_net_events WHERE rid = '\$LOWER_RID') TO '/tmp/nuc_events.tsv'\""
+scp "$NUC:/tmp/nuc_events.tsv" "$OUT/nuc_events.tsv"
 
-scp "dobby@192.168.1.69:/home/dobby/Documents/Notes/$LOWER" "$OUT/lower.md"
+scp "$NUC:$NUC_VAULT/$LOWER" "$OUT/lower.md"
 ```
 
-**Mechanical assertions — the script must exit non-zero on any failure.**
+**Assertions — every one fails the run.**
 
 ```bash
+set -euo pipefail
 . "$OUT/MANIFEST.env"
 fail() { echo "PREFLIGHT FAIL: $*" >&2; exit 1; }
 
-[ "$(wc -l < "$OUT/mac_stale_row.tsv")"  -eq 1 ]  || fail "mac_stale_row.tsv != 1 line"
-[ "$(wc -l < "$OUT/nuc_lower_row.tsv")"  -eq 1 ]  || fail "nuc_lower_row.tsv != 1 line"
-[ "$(wc -l < "$OUT/nuc_events.tsv")"     -eq 47 ] || fail "event history != 47 rows"
-[ "$(shasum -a 256 "$OUT/lower.md" | cut -d' ' -f1)" = "$CANON_SHA" ] || fail "exported file sha != canonical"
+[ "$(wc -l < "$OUT/mac_stale_row.tsv")" -eq 1 ] || fail "mac_stale_row.tsv != 1 line"
+[ "$(wc -l < "$OUT/nuc_lower_row.tsv")" -eq 1 ] || fail "nuc_lower_row.tsv != 1 line"
+[ "$(wc -l < "$OUT/nuc_events.tsv")" -eq "$EVENT_HISTORY_EXPECTED" ] \
+  || fail "event history != $EVENT_HISTORY_EXPECTED rows"
+[ "$(shasum -a 256 "$OUT/lower.md" | cut -d' ' -f1)" = "$CANON_SHA" ] \
+  || fail "exported file sha != CANON_SHA"
 
-# the two NUC files must be byte-identical BEFORE anything is moved
-NUC_SHAS=$(ssh dobby@192.168.1.69 "cd '/home/dobby/Documents/Notes/Organizations' && sha256sum 'Regenerate cascadia.md' 'Regenerate Cascadia.md' | cut -d' ' -f1 | sort -u | wc -l")
-[ "$NUC_SHAS" -eq 1 ] || fail "NUC duplicates are NOT byte-identical — stop, this procedure assumes they are"
+# the two NUC files must be byte-identical BEFORE anything moves
+NUC_UNIQ=$(ssh "$NUC" "cd '$NUC_VAULT/Organizations' && sha256sum 'Regenerate cascadia.md' 'Regenerate Cascadia.md' | cut -d' ' -f1 | sort -u | wc -l")
+[ "$NUC_UNIQ" -eq 1 ] || fail "NUC duplicates are NOT byte-identical; this procedure assumes they are"
 
 # the safety property, not a historical-row count
-PEND=$(ssh dobby@192.168.1.69 "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid LIKE '%Regenerate cascadia.md' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
-[ "$PEND" -eq 0 ] || fail "there are $PEND unexpired events pending delivery for this RID"
+PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+[ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery for the lowercase RID"
 
 echo "PREFLIGHT OK — run $RUN"
 ```
 
-Record `$OUT/MANIFEST.env` in the execution log. Every subsequent step begins with
-`. "$OUT/MANIFEST.env"`.
+Then run **both** restore proofs below (MacBook and NUC) before touching anything.
 
 ### Step 1 — disable NUC vault sync
 
 ```bash
-ssh dobby@192.168.1.69 '
+set -euo pipefail
+. "$OUT/MANIFEST.env"
+ssh "$NUC" 'set -euo pipefail
   cd ~/projects/RegenAI/koi-processor
-  cp config/personal.env config/personal.env.bak-casefold-$(date +%Y%m%d-%H%M%S)
+  cp config/personal.env "config/personal.env.bak-casefold-'"$RUN"'"
   sed -i "s|^VAULT_SYNC_ENABLED=true|VAULT_SYNC_ENABLED=false|" config/personal.env
-  sudo systemctl restart dobby-koi-processor && sleep 12
+  sudo systemctl restart dobby-koi-processor
+  sleep 12
   PID=$(systemctl show dobby-koi-processor -p MainPID --value)
-  tr "\0" "\n" < /proc/$PID/environ | grep ^VAULT_SYNC_ENABLED='
+  LIVE=$(tr "\0" "\n" < /proc/$PID/environ | grep "^VAULT_SYNC_ENABLED=" | cut -d= -f2)
+  [ "$LIVE" = "false" ] || { echo "FAIL: live env is $LIVE"; exit 1; }
+  echo "NUC sync disabled (live env verified)"'
 ```
-**Assert:** live env reads `VAULT_SYNC_ENABLED=false`. Not the file — the process.
 
-### Step 2 — quarantine the NUC duplicate (move, never delete)
+Asserts the **process** environment, not the file.
+
+### Step 2 — quarantine the NUC duplicate (fail-fast, move never delete)
 
 ```bash
-ssh dobby@192.168.1.69 '
-  Q=~/.vault-casefold-trash/$(date +%Y%m%d-%H%M%S); mkdir -p "$Q"
-  cd ~/Documents/Notes/Organizations
-  sha256sum "Regenerate cascadia.md" "Regenerate Cascadia.md"    # must be identical
-  mv "Regenerate cascadia.md" "$Q/"
-  ls -la | grep -i "regenerate cascadia"                          # expect ONE file
-  echo "$Q"'
+set -euo pipefail
+. "$OUT/MANIFEST.env"
+
+ssh "$NUC" "set -euo pipefail
+  QUAR='$QUAR'; V='$NUC_VAULT'; CANON='$CANON_SHA'; SIZE=$CANON_SIZE
+  cd \"\$V/Organizations\"
+
+  # 1. BOTH files must hash to CANON before anything moves.
+  L=\$(sha256sum 'Regenerate cascadia.md' | cut -d' ' -f1)
+  U=\$(sha256sum 'Regenerate Cascadia.md' | cut -d' ' -f1)
+  [ \"\$L\" = \"\$CANON\" ] || { echo \"FAIL lowercase sha \$L != \$CANON\"; exit 1; }
+  [ \"\$U\" = \"\$CANON\" ] || { echo \"FAIL uppercase sha \$U != \$CANON\"; exit 1; }
+
+  # 2. move into the EXACT manifest path
+  mkdir -p \"\$QUAR\"
+  mv 'Regenerate cascadia.md' \"\$QUAR/\"
+
+  # 3. post-conditions
+  [ ! -e 'Regenerate cascadia.md' ] || { echo 'FAIL lowercase still present'; exit 1; }
+  [ -e 'Regenerate Cascadia.md' ]   || { echo 'FAIL uppercase missing'; exit 1; }
+  U2=\$(sha256sum 'Regenerate Cascadia.md' | cut -d' ' -f1)
+  [ \"\$U2\" = \"\$CANON\" ] || { echo \"FAIL uppercase sha changed: \$U2\"; exit 1; }
+  S2=\$(stat -c %s 'Regenerate Cascadia.md')
+  [ \"\$S2\" -eq \"\$SIZE\" ] || { echo \"FAIL uppercase size \$S2 != \$SIZE\"; exit 1; }
+  N=\$(ls -1 | grep -ic '^regenerate cascadia\.md\$')
+  [ \"\$N\" -eq 1 ] || { echo \"FAIL case-insensitive matches = \$N, expected 1\"; exit 1; }
+  [ -f \"\$QUAR/Regenerate cascadia.md\" ] || { echo 'FAIL quarantined copy missing'; exit 1; }
+
+  echo \"STEP2 OK — quarantined to \$QUAR\""
 ```
-**Assert:** the two sha256 values are identical **before** the move, and exactly
-one file matches afterwards. `Regenerate Cascadia.md` (inode `6470157`) survives.
+
+`set -euo pipefail` plus an explicit exit on each check; the closing `echo` is
+reached only if every assertion passed. The case-insensitive count is asserted as
+**exactly 1** rather than eyeballed from `grep` output (it is **2** today).
 
 ### Step 3 — NUC: delete the lowercase state row (events untouched)
-
-Guards on the **complete** 64-character hash plus row id, path, both sequences and
-size. Any drift matches zero rows and aborts.
 
 ```sql
 BEGIN;
@@ -264,33 +306,25 @@ DO $$
 DECLARE n int;
 BEGIN
   DELETE FROM vault_sync_state
-   WHERE id                = 3335
-     AND relative_path     = 'Organizations/Regenerate cascadia.md'
-     AND content_hash      = '38ecc42bc96f46b6767eff248dc09fc0ed0e4e57ca1f882c05153b8603d2c9be'
-     AND origin_seq        = 129
-     AND local_edit_seq    = 129
-     AND file_size_bytes   = 6262
-     AND is_deleted        = FALSE;
+   WHERE id              = 3335
+     AND relative_path   = 'Organizations/Regenerate cascadia.md'
+     AND content_hash    = '38ecc42bc96f46b6767eff248dc09fc0ed0e4e57ca1f882c05153b8603d2c9be'
+     AND origin_seq      = 129
+     AND local_edit_seq  = 129
+     AND file_size_bytes = 6262
+     AND is_deleted      = FALSE;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n <> 1 THEN
-    RAISE EXCEPTION 'NUC vault_sync_state: expected 1 row, got % — state moved since the dry run, abort', n;
+    RAISE EXCEPTION 'NUC vault_sync_state: expected 1 row, got % — state moved, abort', n;
   END IF;
   RAISE NOTICE 'NUC: 1 state row deleted (id=3335)';
 END $$;
 COMMIT;
 ```
 
-**No event rows are deleted.** See "Events: leave all 47 to age out".
-
-The uppercase row (`id=123692`, seq 6/6) is untouched and continues to track the
-surviving file.
+**No event rows are deleted.** The uppercase row (`id=123692`, seq 6/6) is untouched.
 
 ### Step 4 — MacBook: delete the stale row only
-
-**Corrected.** The earlier draft guarded on `left(content_hash,16) = 'ed88466c2fd079'`
-— a **14-character** literal against a 16-character value. It could never match, so
-the delete would have aborted on every run. Guard on the full hash and the row's
-complete identity instead.
 
 ```sql
 BEGIN;
@@ -298,63 +332,69 @@ DO $$
 DECLARE n int;
 BEGIN
   DELETE FROM vault_sync_state
-   WHERE id                = 3354
-     AND relative_path     = 'Organizations/Regenerate cascadia.md'
-     AND content_hash      = 'ed88466c2fd07942e6b6056a6392b6c4f025b8f1760b81e81109142a0d05c9b4'
-     AND origin_seq        = 229
-     AND local_edit_seq    = 229
-     AND file_size_bytes   = 5171
-     AND is_deleted        = FALSE;
+   WHERE id              = 3354
+     AND relative_path   = 'Organizations/Regenerate cascadia.md'
+     AND content_hash    = 'ed88466c2fd07942e6b6056a6392b6c4f025b8f1760b81e81109142a0d05c9b4'
+     AND origin_seq      = 229
+     AND local_edit_seq  = 229
+     AND file_size_bytes = 5171
+     AND is_deleted      = FALSE;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n <> 1 THEN
-    RAISE EXCEPTION 'MacBook vault_sync_state: expected 1 row, got % — state moved since the dry run, abort', n;
+    RAISE EXCEPTION 'MacBook vault_sync_state: expected 1 row, got % — state moved, abort', n;
   END IF;
   RAISE NOTICE 'MacBook: 1 stale row deleted (id=3354)';
 END $$;
 COMMIT;
 ```
 
-Note `file_size_bytes = 5171` — the stale row does not merely have the wrong hash,
-it describes a **different, smaller** file than the 6,262 bytes on disk. It is a
-leftover from older content, not a duplicate of the current row.
+`file_size_bytes = 5171` against 6,262 on disk: the stale row describes a
+**different, smaller** file. It is leftover content, not a duplicate of the current
+row. Nothing on the MacBook filesystem is touched.
 
-Nothing on the MacBook filesystem is touched. The canonical row (`id=25958`, hash
-`38ecc42b…`) continues to track inode `181086141`.
-
-### Step 5 — verify before re-enabling
+### Step 5 — verify before re-enabling (mechanical)
 
 ```bash
-# 1. DB case-fold audit, both nodes — expect ZERO rows
-psql personal_koi -tAc "SELECT lower(relative_path), count(*) FROM vault_sync_state
-  WHERE is_deleted=FALSE GROUP BY 1 HAVING count(*)>1;"
-ssh dobby@192.168.1.69 "psql personal_koi -tAc \"SELECT lower(relative_path), count(*)
-  FROM vault_sync_state WHERE is_deleted=FALSE GROUP BY 1 HAVING count(*)>1;\""
+set -euo pipefail
+. "$OUT/MANIFEST.env"
+fail() { echo "VERIFY FAIL: $*" >&2; exit 1; }
 
-# 2. NUC filesystem case-fold audit across all 7 folders — expect ZERO
-ssh dobby@192.168.1.69 'cd ~/Documents/Notes && for d in Shared Meetings People \
-  Organizations Projects Locations Bridges; do [ -d "$d" ] || continue
-  find "$d" -type f -name "*.md" | awk "{print tolower(\$0)\"\t\"\$0}" | sort \
-   | awk -F"\t" "{if(\$1==p) print \"COLLISION \"po\" <> \"\$2; p=\$1; po=\$2}"; done'
+# 1. DB case-fold collisions — output must be EMPTY on both nodes
+Q="SELECT lower(relative_path) FROM vault_sync_state WHERE is_deleted=FALSE GROUP BY 1 HAVING count(*)>1;"
+[ -z "$(psql personal_koi -tAc "$Q" | tr -d '[:space:]')" ] || fail "MacBook DB collision remains"
+[ -z "$(ssh "$NUC" "psql personal_koi -tAc \"$Q\"" | tr -d '[:space:]')" ] || fail "NUC DB collision remains"
 
-# 3. THE SAFETY PROPERTY — zero unexpired events PENDING DELIVERY for that RID.
-#    NOT "zero historical rows": there are 47 and they are audit history that stays.
-#    Expect 0 on the NUC. The MacBook is not the emitter for this RID.
-PEND=$(ssh dobby@192.168.1.69 "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events \
-  WHERE rid LIKE '%Regenerate cascadia.md' AND expires_at>now() \
-    AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
-[ "$PEND" -eq 0 ] || { echo "FAIL: $PEND unexpired events pending delivery"; exit 1; }
+# 2. NUC filesystem collisions across all 7 folders — output must be EMPTY
+FS=$(ssh "$NUC" 'cd ~/Documents/Notes && for d in Shared Meetings People Organizations Projects Locations Bridges; do
+  [ -d "$d" ] || continue
+  find "$d" -type f -name "*.md" | awk "{print tolower(\$0)\"\t\"\$0}" | sort |
+    awk -F"\t" "{if(\$1==p) print \"COLLISION \"po\" <> \"\$2; p=\$1; po=\$2}"
+done')
+[ -z "$(printf %s "$FS" | tr -d '[:space:]')" ] || fail "NUC filesystem collision remains: $FS"
 
-#    For the record only — expect 47, unchanged. A DROP here means something
-#    deleted audit history that this procedure never touches.
-ssh dobby@192.168.1.69 "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid LIKE '%Regenerate cascadia.md';\""
+# 3. safety property: zero unexpired events PENDING DELIVERY for the lowercase RID
+PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+[ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery"
 
-# 4. the canonical file is intact on both nodes — expect 38ecc42b…, 6262 bytes
-shasum -a 256 "$HOME/Documents/Notes/Organizations/Regenerate Cascadia.md"
-ssh dobby@192.168.1.69 'sha256sum ~/Documents/Notes/Organizations/"Regenerate Cascadia.md"'
+# 4. audit history must still be exactly 47 — a DROP means something deleted history
+HIST=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID';\"" | tr -d ' ')
+[ "$HIST" -eq "$EVENT_HISTORY_EXPECTED" ] || fail "event history is $HIST, expected $EVENT_HISTORY_EXPECTED"
 
-# 5. both detectors — expect clear
-python3 ~/projects/dobby/scripts/vault_sync_detectors.py
-ssh dobby@192.168.1.69 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes'
+# 5. canonical file intact on BOTH nodes — asserted, not printed
+MS=$(shasum -a 256 "$MAC_VAULT/$UPPER" | cut -d' ' -f1)
+MZ=$(stat -f %z "$MAC_VAULT/$UPPER")
+[ "$MS" = "$CANON_SHA" ]   || fail "MacBook canonical sha $MS"
+[ "$MZ" -eq "$CANON_SIZE" ] || fail "MacBook canonical size $MZ"
+NS=$(ssh "$NUC" "sha256sum '$NUC_VAULT/$UPPER' | cut -d' ' -f1")
+NZ=$(ssh "$NUC" "stat -c %s '$NUC_VAULT/$UPPER'")
+[ "$NS" = "$CANON_SHA" ]   || fail "NUC canonical sha $NS"
+[ "$NZ" -eq "$CANON_SIZE" ] || fail "NUC canonical size $NZ"
+
+# 6. detectors — their exit codes are the assertion
+ssh "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes --quiet' || fail "NUC detector tripped"
+python3 ~/projects/dobby/scripts/vault_sync_detectors.py --quiet || fail "MacBook detector tripped"
+
+echo "STEP5 VERIFY OK"
 ```
 
 ### Step 6 — MacBook reconcile, read-only
@@ -369,149 +409,201 @@ Meetings/Civic Intelligence Engine/2026-08-05 - CIE Reconvene.md
 take. A different entry means something else changed and this procedure is stale —
 stop and re-derive.
 
-### Step 7 — re-enable NUC vault sync
-
-Reverse of step 1, then assert the live process env reads `true`.
-
-### Step 8 — post-enable verification (positive control first)
-
-**An empty journal must FAIL, not look clean.** Earlier today a UTC marker passed to
-`journalctl --since`, which reads **local** time, returned an empty journal that was
-briefly read as "nothing went wrong". Every counter below is a `grep -c` and would
-have reported a reassuring `0` against that same empty result.
-
-So the first assertion is a **positive control**: a scan must be proven to have run
-before any zero-count is allowed to mean anything.
+### Step 7 — re-enable NUC vault sync (exact, guarded)
 
 ```bash
 set -euo pipefail
 . "$OUT/MANIFEST.env"
+
+# Marker as an EPOCH, taken on the NUC, immediately before the restart. See step 8.
+MARK_EPOCH=$(ssh "$NUC" 'date +%s')
+echo "MARK_EPOCH=$MARK_EPOCH" >> "$OUT/MANIFEST.env"
+
+ssh "$NUC" 'set -euo pipefail
+  cd ~/projects/RegenAI/koi-processor
+  sed -i "s|^VAULT_SYNC_ENABLED=false|VAULT_SYNC_ENABLED=true|" config/personal.env
+  sudo systemctl restart dobby-koi-processor
+  sleep 12
+  systemctl is-active dobby-koi-processor >/dev/null || { echo "FAIL: service not active"; exit 1; }
+  PID=$(systemctl show dobby-koi-processor -p MainPID --value)
+  LIVE=$(tr "\0" "\n" < /proc/$PID/environ | grep "^VAULT_SYNC_ENABLED=" | cut -d= -f2)
+  [ "$LIVE" = "true" ] || { echo "FAIL: live env is $LIVE"; exit 1; }
+  echo "NUC sync re-enabled (live env verified)"'
+```
+
+### Step 8 — post-enable verification (epoch-correct, positive control first)
+
+**Two timezone traps, both hit for real today.**
+
+* `journalctl --since` reads **OS-local** time. A UTC marker returned an empty
+  journal that read as healthy — every `grep -c` below would have said a reassuring
+  `0`.
+* PostgreSQL on the NUC runs `TimeZone = Etc/UTC` while the OS is **PDT**. A
+  NUC-local marker string in SQL is read as UTC, i.e. **7 hours early**. Measured
+  live: with a marker of `2026-08-26 18:14:25`, `FORGETs > local-string` = **1**
+  and `FORGETs > to_timestamp(epoch)` = **0**. The string form would have failed a
+  healthy run on the legitimate CIE FORGET from hours earlier.
+
+**One epoch value drives both.** `journalctl --since "@$MARK_EPOCH"` and
+`to_timestamp($MARK_EPOCH)` are unambiguous everywhere.
+
+```bash
+set -euo pipefail
+. "$OUT/MANIFEST.env"          # provides MARK_EPOCH from step 7
 fail() { echo "VERIFY FAIL: $*" >&2; exit 1; }
+jc() { ssh "$NUC" "journalctl -u dobby-koi-processor --since '@$MARK_EPOCH' --no-pager"; }
 
-# MARK is recorded in the NUC's LOCAL time, immediately before the step-7 restart.
-MARK=$(ssh dobby@192.168.1.69 'date +"%Y-%m-%d %H:%M:%S"')
-# ... step 7 restart happens here ...
-
-jc() { ssh dobby@192.168.1.69 "journalctl -u dobby-koi-processor --since '$MARK' --no-pager"; }
-
-# 1. POSITIVE CONTROL — wait up to 10 min for a completed scan after the marker.
-for i in $(seq 1 60); do
+# 1. POSITIVE CONTROL — a scan must be PROVEN to have run before any zero counts.
+SCANS=0
+for _ in $(seq 1 60); do
   SCANS=$(jc | grep -c 'vault_sync.scan_complete' || true)
-  [ "${SCANS:-0}" -ge 1 ] && break
+  [ "$SCANS" -ge 1 ] && break
   sleep 10
 done
-[ "${SCANS:-0}" -ge 1 ] || fail "no vault_sync.scan_complete after $MARK — the scan never ran, or the journal window is wrong. Every count below would be a false zero."
-echo "positive control OK: $SCANS scan_complete since $MARK"
+[ "$SCANS" -ge 1 ] || fail "no vault_sync.scan_complete after @$MARK_EPOCH — the scan never ran, or the window is wrong. Every count below would be a false zero."
+echo "positive control OK: $SCANS scan_complete"
 
-# 2. Only now are zero-counts meaningful.
-[ "$(jc | grep -c 'vault_sync.scan_capped')"      -eq 0 ] || fail "scan_capped > 0"
-[ "$(jc | grep -c 'vault_sync.tombstone_blocked')" -eq 0 ] || fail "tombstone_blocked > 0 — STOP"
-[ "$(jc | grep -c 'vault_sync.absence_unverifiable')" -eq 0 ] || fail "absence_unverifiable > 0"
+# 2. Only now are zero counts meaningful.
+[ "$(jc | grep -c 'vault_sync.scan_capped')"          -eq 0 ] || fail "scan_capped > 0"
+[ "$(jc | grep -c 'vault_sync.tombstone_blocked')"     -eq 0 ] || fail "tombstone_blocked > 0 — STOP"
+[ "$(jc | grep -c 'vault_sync.absence_unverifiable')"  -eq 0 ] || fail "absence_unverifiable > 0"
 
-# 3. Detector on both nodes (its own exit code is the assertion).
-ssh dobby@192.168.1.69 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes --quiet' || fail "NUC detector tripped"
-python3 ~/projects/dobby/scripts/vault_sync_detectors.py --quiet || fail "MacBook detector tripped"
+# 3. THE forbidden event: a FORGET for the exact lowercase Vault-file RID. Scoped
+#    deliberately — "any FORGET" was already proven the wrong discriminator, since a
+#    genuine deletion must produce one.
+BAD=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid = '\$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
+[ "$BAD" -eq 0 ] || fail "$BAD FORGET(s) emitted for the lowercase RID — this is the event the whole procedure exists to prevent"
 
-# 4. Zero unexpired events PENDING DELIVERY for the lowercase RID (not "zero rows").
-PEND=$(ssh dobby@192.168.1.69 "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid LIKE '%Regenerate cascadia.md' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
-[ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery for the lowercase RID"
+# 4. Other FORGETs are RECORDED for review, not failed on. Armed deletions are the
+#    detectors' job: a FORGET whose path still exists is what actually matters.
+OTHER=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND rid <> '\$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\"" | tr -d ' ')
+echo "NOTE: $OTHER other FORGET(s) since the marker — review, do not auto-fail:"
+ssh "$NUC" "psql personal_koi -tAc \"SELECT rid FROM koi_net_events WHERE event_type='FORGET' AND rid <> '\$LOWER_RID' AND queued_at > to_timestamp($MARK_EPOCH);\""
 
-# 5. No NEW FORGET emitted since the marker.
-NEWFG=$(ssh dobby@192.168.1.69 "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE event_type='FORGET' AND queued_at > timestamp '$MARK';\"" | tr -d ' ')
-[ "$NEWFG" -eq 0 ] || fail "$NEWFG new FORGET(s) since $MARK"
+# 5. Detectors decide whether any of those are armed.
+ssh "$NUC" 'python3 ~/bin/vault_sync_detectors.py --vault ~/Documents/Notes' || fail "NUC detector tripped"
+python3 ~/projects/dobby/scripts/vault_sync_detectors.py || fail "MacBook detector tripped"
+
+# 6. Safety property again, post-enable.
+PEND=$(ssh "$NUC" "psql personal_koi -tAc \"SELECT count(*) FROM koi_net_events WHERE rid = '\$LOWER_RID' AND expires_at>now() AND NOT (COALESCE(target_node,'') = ANY(COALESCE(delivered_to,ARRAY[]::text[])));\"" | tr -d ' ')
+[ "$PEND" -eq 0 ] || fail "$PEND unexpired events pending delivery"
 
 echo "POST-ENABLE VERIFY OK"
 ```
 
 `vault_sync.scan_complete` is emitted at `api/vault_sync.py:1524` with
-`folder=… files_changed=… events_queued=… duration_ms=…`, so it is a real
-completion signal and not an inferred one.
+`folder=… files_changed=… events_queued=… duration_ms=…` — a real completion line.
+Observed 175 times in a 30-minute window, so the control is frequent, not rare.
 
 ### Step 9 — fresh snapshot, followed through all three copies
 
-Immediately before any MacBook enable:
+Immediately before any MacBook enable.
 
 ```bash
-ssh dobby@192.168.1.69 'systemctl start dobby-vault-autocommit.service; sleep 4
-  cd ~/Documents/Notes && git log --oneline -1
-  cd ~/backups/git/vault-nuc.git && git log --oneline -1 refs/heads/main'
-~/.local/bin/mirror-nuc-vault.sh
-cd ~/backups/git/vault-nuc-mirror.git && git log --oneline -1 refs/heads/main
-```
-**Assert the same SHA in all three:** NUC working tree → NUC bare repo → MacBook
-off-machine mirror. The mirror had no schedule until 2026-08-26 and went 3.6 h
-stale within a day; confirm it, do not assume it.
+set -euo pipefail
+. "$OUT/MANIFEST.env"
+fail() { echo "SNAPSHOT FAIL: $*" >&2; exit 1; }
 
----
+ssh "$NUC" 'systemctl start dobby-vault-autocommit.service || sudo systemctl start dobby-vault-autocommit.service; sleep 5'
+WORK=$(ssh "$NUC" 'cd ~/Documents/Notes && git rev-parse --short HEAD')
+BARE=$(ssh "$NUC" 'cd ~/backups/git/vault-nuc.git && git rev-parse --short refs/heads/main')
+~/.local/bin/mirror-nuc-vault.sh
+MIRR=$(cd ~/backups/git/vault-nuc-mirror.git && git rev-parse --short refs/heads/main)
+
+echo "  working tree : $WORK"
+echo "  bare repo    : $BARE"
+echo "  off-machine  : $MIRR"
+[ "$WORK" = "$BARE" ] && [ "$BARE" = "$MIRR" ] || fail "snapshot SHAs diverge"
+echo "SNAPSHOT OK — same SHA in all three"
+```
+
+The mirror had no schedule until 2026-08-26 and went 3.6 h stale within a day.
+Assert it; do not assume it.
 
 ## Rollback — type-safe, and proven before it is needed
 
-**Corrected.** The earlier draft emitted `INSERT` statements from `row_to_json` by
-stringifying each value in Python. That cannot reconstruct this schema:
-`koi_net_events` has `manifest jsonb`, `contents jsonb`, `delivered_to text[]`,
-`confirmed_by text[]`, `event_id uuid`, `queued_at`/`expires_at timestamptz`.
-Python `str()` on a parsed list yields `['a', 'b']`, which is not valid Postgres
-array input, and on a dict yields single-quoted pseudo-JSON. The restore would
-have failed, or worse, silently written malformed values.
+An earlier draft emitted `INSERT`s from `row_to_json` by stringifying each value in
+Python. That cannot reconstruct this schema: `koi_net_events` has `manifest jsonb`,
+`contents jsonb`, `delivered_to text[]`, `confirmed_by text[]`, `event_id uuid`,
+`queued_at`/`expires_at timestamptz`. Python `str()` on a parsed list yields
+`['a', 'b']`, which is not valid Postgres array input. The restore would have
+failed, or silently written malformed values.
 
-**Use `COPY`**, which round-trips every one of those types exactly. The exports in
-step 0 are already in that format.
+**`COPY` round-trips all of those.** The step-0 exports are already in that format.
 
-### Prove the restore before relying on it
-
-Run this **during step 0**, before anything is deleted. It restores into a
-transaction and asserts exact row equality in both directions, then rolls back so
-nothing is changed.
+### Proof 1 — MacBook (run during step 0, before anything is deleted)
 
 ```bash
+set -euo pipefail
 . "$OUT/MANIFEST.env"
-
 psql personal_koi -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 CREATE TEMP TABLE _orig AS SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID;
-SELECT CASE WHEN count(*) = 1 THEN 'snapshot ok'
-            ELSE (SELECT 1/0)::text END FROM _orig;
+SELECT CASE WHEN count(*) = 1 THEN 'snapshot ok' ELSE (SELECT 1/0)::text END FROM _orig;
 
 DELETE FROM vault_sync_state WHERE id = $MAC_STALE_ID;
 \copy vault_sync_state FROM '$OUT/mac_stale_row.tsv'
 
--- exact equality, BOTH directions: a missing column or coerced type shows up here
-SELECT CASE WHEN (
-    (SELECT count(*) FROM (
+SELECT CASE WHEN (SELECT count(*) FROM (
         (SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID EXCEPT SELECT * FROM _orig)
         UNION ALL
         (SELECT * FROM _orig EXCEPT SELECT * FROM vault_sync_state WHERE id = $MAC_STALE_ID)
-    ) d)
-  ) = 0 THEN 'RESTORE PROVEN: round-trip is byte-exact'
-       ELSE (SELECT 1/0)::text END;
+     ) d) = 0
+     THEN 'MAC RESTORE PROVEN: round-trip exact'
+     ELSE (SELECT 1/0)::text END;
 ROLLBACK;
 SQL
 ```
 
-A non-zero difference raises `division by zero` and the whole thing rolls back.
-**Repeat the identical proof on the NUC** for `id = $NUC_LOWER_ID` against
-`nuc_lower_row.tsv` before proceeding.
+### Proof 2 — NUC (written out in full; do not improvise it)
+
+```bash
+set -euo pipefail
+. "$OUT/MANIFEST.env"
+scp "$OUT/nuc_lower_row.tsv" "$NUC:/tmp/nuc_lower_row.tsv"
+ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
+CREATE TEMP TABLE _orig AS SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID;
+SELECT CASE WHEN count(*) = 1 THEN 'snapshot ok' ELSE (SELECT 1/0)::text END FROM _orig;
+
+DELETE FROM vault_sync_state WHERE id = $NUC_LOWER_ID;
+\\copy vault_sync_state FROM '/tmp/nuc_lower_row.tsv'
+
+SELECT CASE WHEN (SELECT count(*) FROM (
+        (SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID EXCEPT SELECT * FROM _orig)
+        UNION ALL
+        (SELECT * FROM _orig EXCEPT SELECT * FROM vault_sync_state WHERE id = $NUC_LOWER_ID)
+     ) d) = 0
+     THEN 'NUC RESTORE PROVEN: round-trip exact'
+     ELSE (SELECT 1/0)::text END;
+ROLLBACK;
+SQL"
+```
+
+Either proof failing raises `division by zero` and rolls back. **Both must print
+PROVEN before step 1.**
 
 ### Actual rollback, in reverse order
 
 ```bash
+set -euo pipefail
 . "$OUT/MANIFEST.env"
 
 # 4'. MacBook stale row
 psql personal_koi -v ON_ERROR_STOP=1 -c "\copy vault_sync_state FROM '$OUT/mac_stale_row.tsv'"
 
 # 3'. NUC lowercase row
-scp "$OUT/nuc_lower_row.tsv" dobby@192.168.1.69:/tmp/
-ssh dobby@192.168.1.69 "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\copy vault_sync_state FROM '/tmp/nuc_lower_row.tsv'\""
+scp "$OUT/nuc_lower_row.tsv" "$NUC:/tmp/nuc_lower_row.tsv"
+ssh "$NUC" "psql personal_koi -v ON_ERROR_STOP=1 -c \"\\\\copy vault_sync_state FROM '/tmp/nuc_lower_row.tsv'\""
 
-# 2'. the quarantined file, from the path recorded in the manifest
-ssh dobby@192.168.1.69 "mv '$QUAR/Regenerate cascadia.md' '/home/dobby/Documents/Notes/$LOWER'"
+# 2'. the quarantined file, from the manifest's exact QUAR
+ssh "$NUC" "mv '$QUAR/Regenerate cascadia.md' '$NUC_VAULT/$LOWER'"
 
-# 1'. re-enable NUC sync if rolling back mid-procedure
+# 1'. re-enable NUC sync if rolling back mid-procedure (step 7)
 ```
 
-No event rows are ever deleted, so there is nothing to restore in
-`koi_net_events`; `$OUT/nuc_events.tsv` is retained as a record only.
+No event rows are ever deleted, so there is nothing to restore in `koi_net_events`;
+`$OUT/nuc_events.tsv` is retained as a record only.
 
 The quarantine directory is never emptied by this procedure. Remove it only after
 the MacBook has been enabled and soaked clean.
@@ -524,4 +616,5 @@ the MacBook has been enabled and soaked clean.
   emitted its one legitimate FORGET during the soak. **Left deliberately** as the
   expected single FORGET of the controlled first MacBook scan.
 * Enabling MacBook vault sync. Separate, explicit approval.
+* Deleting any event row. All 47 remain.
 * Any other rename, tombstone, event purge, or edge change.
