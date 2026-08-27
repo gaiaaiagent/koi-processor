@@ -1,7 +1,29 @@
 # Runbook: re-enabling vault sync after the 2026-08 FORGET storm
 
-**Status:** NOT EXECUTED. Written 2026-08-26. `VAULT_SYNC_ENABLED=false` on both
-nodes and must stay that way until every gate below is closed **by the operator**.
+**Status — 2026-08-26 17:30 PDT: NUC ON, MacBook OFF.**
+
+| node | `VAULT_SYNC_ENABLED` | evidence |
+|---|---|---|
+| **NUC** | **`true`** since 14:44 PDT | 62-minute soak clean: `scan_capped=0` (was **1,949** on 08-25), `tombstone_blocked=0`, detector clear at all 14 samples, tombstones 2→3 then flat, 1 FORGET (legitimate — see below), 67 vault-file events all unicast to `darren-personal` |
+| **MacBook** | **`false`** | not enabled; requires separate explicit approval |
+
+Gates 1 and 2 are **closed**:
+
+* **Gate 1** — `Vault-file` removed from the outbound `darren-personal -> friend-e2e`
+  edge on both nodes (1 row each, `ROW_COUNT`-guarded). Reverse edge untouched by
+  instruction. Peer, node identity and WireGuard preserved. Queue left to expire.
+* **Gate 2** — `Locations/,Bridges/` added to MacBook `READONLY_PATHS` and NUC
+  `MIRROR_PATHS`; confirmed live in-process via
+  `vault_sync.mirror_mode_active patterns=[…'Locations/','Bridges/']`.
+
+**Blocking the MacBook enable:** one case-fold collision,
+`Organizations/Regenerate cascadia.md`. A4 will fire `tombstone_blocked` on it,
+which this runbook treats as a full stop. Dry run prepared, **not executed**:
+[`case-fold-collision-normalization.md`](./case-fold-collision-normalization.md).
+
+After that is applied, the MacBook's first scan should show exactly **one**
+`missing_on_disk` — the retired 241-byte CIE stub — which is the expected single
+legitimate FORGET.
 
 This is deliberately a runbook and not a script. Every remaining step is a policy
 decision about who may delete whose files, and none of them should be taken by an
