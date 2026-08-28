@@ -443,7 +443,15 @@ async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema:
             logger.info("  repair pass %d/%d (temp=%.1f): %s",
                         i + 1, DOC_EXTRACTOR_REPAIR_PASSES, temp, last_err.detail[:80])
             try:
-                raw = await _call_openai(repair_prompt, http, temperature=temp)
+                # 2026-08-28: was `_call_openai(...)`, which contradicted this function's own
+                # docstring ("a repair loop on EVERY transport") and the comment above. The
+                # gating comment was updated when repair was generalised; the CALL was not.
+                # Effect: a claude_p/api run's schema-invalid window was repaired by
+                # gpt-4o-mini on api.openai.com, billed to the embeddings key, then recorded
+                # with the original route_used — so the logs attributed OpenAI output to
+                # Claude. Route through the same dispatcher as the first attempt.
+                raw = await _extract_window(repair_prompt, http, model=model,
+                                            temperature=temp)
                 return parse_and_validate(raw, schema)
             except ExtractionError as e:
                 last_err = e

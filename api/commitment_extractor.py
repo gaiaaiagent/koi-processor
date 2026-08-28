@@ -191,6 +191,11 @@ def _normalize_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
     c.setdefault("pledger_organization", None)
     c.setdefault("title", "")
     c.setdefault("description", "")
+    # NOTE: these two setdefaults are themselves coercions — a MISSING declaration_type
+    # silently becomes "commitment", the strongest state on the gradient. Recorded below
+    # rather than changed, so no downstream value shifts; see _coercions.
+    _missing_decl = "declaration_type" not in c or c.get("declaration_type") is None
+    _missing_offer = "offer_type" not in c or c.get("offer_type") is None
     c.setdefault("declaration_type", "commitment")
     c.setdefault("offer_type", "labor")
     c.setdefault("need_category", None)
@@ -207,14 +212,54 @@ def _normalize_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
     c.setdefault("routing_tags", [])
     c.setdefault("confidence", 0.5)
 
+    # --- Coercion audit (added 2026-08-28) -------------------------------------------
+    # This function had FOUR silent coercions. The declaration_type ones are the sharp
+    # end: an unrecognised or missing value became "commitment" — the STRONGEST reading
+    # on the care -> offer/need -> promise -> witnessed-commitment gradient — and that
+    # path has already produced a real on-chain mint from what the source text called an
+    # "offer". Failing toward the strongest claim is the coercive direction.
+    #
+    # Deliberately behaviour-preserving: the resulting VALUES are unchanged, so nothing
+    # downstream shifts. What changes is that the coercion is no longer silent. Widening
+    # declaration_type to carry the full gradient (offer/promise) is a schema change and
+    # is tracked separately — it must not be smuggled in under a logging fix.
+    # Defect class: feedback_silent_coercion_of_unknown_states.
+    _coercions: List[Dict[str, Any]] = []
+    if _missing_decl:
+        _coercions.append({"field": "declaration_type", "raw": None, "assigned": "commitment",
+                           "reason": "absent from LLM output"})
+    if _missing_offer:
+        _coercions.append({"field": "offer_type", "raw": None, "assigned": "labor",
+                           "reason": "absent from LLM output"})
+
     # Validate offer_type
     valid_types = {"labor", "goods", "service", "knowledge", "stewardship"}
     if c["offer_type"] not in valid_types:
+        _coercions.append({"field": "offer_type", "raw": c["offer_type"], "assigned": "labor",
+                           "reason": "not in valid_types"})
         c["offer_type"] = "labor"
 
     # Validate declaration_type
     if c["declaration_type"] not in ("commitment", "need"):
+        _coercions.append({"field": "declaration_type", "raw": c["declaration_type"],
+                           "assigned": "commitment",
+                           "reason": "not in (commitment, need) — coerced to STRONGEST state"})
         c["declaration_type"] = "commitment"
+
+    if _coercions:
+        c["_coercions"] = _coercions
+        # requires_review is the signal a human/automated acceptance step must honour.
+        # A coerced declaration_type must never reach a minting path unreviewed.
+        c["requires_review"] = True
+        for _c in _coercions:
+            logger.warning(
+                "commitment_extractor: coerced %s=%r -> %r (%s); candidate marked requires_review. "
+                "title=%r pledger=%r",
+                _c["field"], _c["raw"], _c["assigned"], _c["reason"],
+                c.get("title", "")[:60], c.get("pledger_name", "")[:40],
+            )
+    else:
+        c.setdefault("requires_review", False)
 
     # For needs, carry estimated_value_usd from monthly_amount_usd if not set
     if c["declaration_type"] == "need" and not c["estimated_value_usd"] and c["monthly_amount_usd"]:
