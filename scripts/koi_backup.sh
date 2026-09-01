@@ -25,6 +25,15 @@ log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
 log "START backup ${DB} -> ${OUT}"
 
+# Clean up after an interrupted run. Twice on 2026-08-31 a dump was killed
+# mid-write (once by a harness background-task teardown, once unexplained),
+# each time leaving a partial .dump on disk with no FAIL line in the log --
+# i.e. a stub that looks exactly like a backup to anyone listing the
+# directory, and that the guards below never got a chance to reject because
+# the script died before reaching them. A partial is worse than no file:
+# nothing downstream distinguishes it from a real dump until a restore fails.
+trap 'rc=$?; if [ -f "$OUT" ]; then rm -f "$OUT"; log "ABORTED (rc=${rc}): removed partial ${OUT}"; fi; exit $rc' INT TERM HUP
+
 # Guard: need room for roughly the DB size (dump is smaller, but be safe).
 AVAIL_MB=$(df -Pm "$DEST" | awk 'NR==2{print $4}')
 if [ "$AVAIL_MB" -lt 8000 ]; then
