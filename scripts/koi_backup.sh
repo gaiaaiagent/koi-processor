@@ -48,15 +48,50 @@ if ! pg_restore --list "$OUT" > /dev/null 2>&1; then
   exit 1
 fi
 
-# Minimum-size guard: pg_restore --list only reads the TOC, so a dump
-# truncated mid-write (disk full partway through, killed process) can still
-# list cleanly while missing most of its data. 500MB is well under the
-# smallest healthy dump we've seen (~1GB+ compressed on a 27GB DB) and well
-# above a truncated stub.
-MIN_BYTES=$((500 * 1024 * 1024))
-ACTUAL_BYTES=$(stat -f%z "$OUT")
+# Minimum-size guard. pg_restore --list only reads the TOC, so a dump
+# truncated mid-write (disk full partway, or the process killed -- which is
+# exactly how the 2026-08-31 14:44 manual run died) still lists CLEANLY while
+# missing most of its data. Verified against that dump: it passes --list.
+#
+# The threshold is derived from this machine's real dump history, not guessed.
+# Complete personal_koi dumps here have been 8.6 GB (2026-05-13), 8.6 GB
+# (2026-05-14) and 9.4 GB (2026-07-14). The dead partial was 1.29 GB -- 14% of
+# a real dump. An earlier version of this guard used a flat 500 MB floor, which
+# that partial would have passed; the floor was sized on the NUC's 2.6-2.8 GB
+# dumps (smaller DB) rather than this host's.
+#
+# Primary check is RELATIVE to the newest previous good dump, so it tracks DB
+# growth instead of going stale. ABS_FLOOR only covers the first-ever run.
+# NOTE: deliberately uses `wc -c`, never `stat`. On this machine
+# /usr/local/bin/stat SHADOWS /usr/bin/stat and silently emits NOTHING for
+# every form tried (-f%z, -c%s, --version). A guard written with bare `stat`
+# reads an empty string, the [ ] comparison errors, and under `set -e` a
+# perfectly good dump reports as a failed run having never checked a size --
+# i.e. the guard is inert while looking present. `wc -c` needs no such luck.
+ABS_FLOOR=$((4 * 1024 * 1024 * 1024))       # 4 GB; < half the smallest real dump
+ACTUAL_BYTES=$(wc -c < "$OUT" | tr -d '[:space:]')
+
+# Newest previous dump by mtime (ls -t), excluding the one just written.
+# `|| true` is load-bearing: on the first run $OUT is the ONLY match, grep
+# filters it out, exits 1, and `set -euo pipefail` would abort the script
+# immediately after a perfectly good dump. Verified by test.
+PREV_FILE=$(ls -t "$DEST"/personal_koi-*.dump 2>/dev/null | grep -vxF "$OUT" | head -1 || true)
+PREV=""
+if [ -n "$PREV_FILE" ] && [ -f "$PREV_FILE" ]; then
+  PREV=$(wc -c < "$PREV_FILE" | tr -d '[:space:]')
+fi
+
+if [ -n "$PREV" ] && [ "$PREV" -gt 0 ]; then
+  # 70% of the last good dump: absorbs normal compression variance and modest
+  # shrinkage, still catches any serious truncation.
+  MIN_BYTES=$(( PREV * 70 / 100 ))
+  [ "$MIN_BYTES" -lt "$ABS_FLOOR" ] && MIN_BYTES=$ABS_FLOOR
+else
+  MIN_BYTES=$ABS_FLOOR
+fi
+
 if [ "$ACTUAL_BYTES" -lt "$MIN_BYTES" ]; then
-  log "FAIL: dump is ${ACTUAL_BYTES} bytes, below ${MIN_BYTES}-byte minimum; removing"
+  log "FAIL: dump is ${ACTUAL_BYTES} bytes, below ${MIN_BYTES}-byte minimum (prev good: ${PREV:-none}); removing"
   rm -f "$OUT"
   exit 1
 fi
