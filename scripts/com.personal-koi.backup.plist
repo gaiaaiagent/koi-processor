@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/darrenzal</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<!-- No KeepAlive -- this is a StartCalendarInterval (once-nightly) job, not a
+	     StartInterval polling job, so the storm-generator failure mode that hit
+	     embedding-repair (KeepAlive + no ThrottleInterval = thousands of runs in
+	     one night on repeated failure) does not apply the same way, but there is
+	     still no reason for launchd to relaunch it on exit; koi_backup.sh's own
+	     retention logic assumes at most one run per calendar day. -->
+	<key>Label</key>
+	<string>com.personal-koi.backup</string>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/darrenzal/projects/koi-processor-service/scripts/koi_backup.sh</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>15</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/darrenzal/koi-backups/launchd.error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/darrenzal/koi-backups/launchd.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/darrenzal/projects/koi-processor-service</string>
+</dict>
+</plist>
