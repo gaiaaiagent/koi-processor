@@ -68,13 +68,31 @@ from api.node_identity import (
 from api.event_queue import EventQueue
 from api.vault_sync import VaultSyncManager, VaultUnavailableError
 
+# RFC 8785 (JCS) canonicalization. Pinned at requirements.txt:91. Imported at
+# module scope on purpose: a missing pinned dependency should fail loudly at
+# startup rather than silently degrade the hash back to the non-JCS form this
+# import replaced (see _jcs_sha256 below).
+from rid_lib.ext.utils import sha256_hash_json as _rid_lib_sha256_hash_json
+
 logger = logging.getLogger(__name__)
 
 def _jcs_sha256(data) -> str:
-    """JCS-canonical SHA256 hash (inlined from rid_lib to avoid dependency)."""
-    # JSON Canonicalization Scheme: sort keys, no whitespace, ensure consistent output
-    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """JCS-canonical (RFC 8785) SHA-256 hash, via rid-lib.
+
+    Previously this was inlined as ``json.dumps(sort_keys=True,
+    separators=(",", ":"), ensure_ascii=False)`` with the comment "inlined from
+    rid_lib to avoid dependency" — but rid-lib is a pinned, installed dependency
+    (requirements.txt:91) and `koi_protocol.WireManifest` already documents this
+    field as "JCS-canonical hash via rid-lib". The inlined form is not JCS:
+    measured against the 448 coordinator newsletter bundles, it disagreed with
+    the peer-computed `manifest.sha256_hash` on **336 of 448 (75%)**, while
+    `rid_lib.ext.utils.sha256_hash_json` agreed on **448 of 448**.
+
+    No code path in this repo verifies a *received* sha256_hash (grep for
+    `sha256_hash` across api/ scripts/ shows emit sites only), so correcting the
+    implementation changes what this node emits and breaks no comparison.
+    """
+    return _rid_lib_sha256_hash_json(data)
 
 rid_sha256_hash_json = _jcs_sha256
 
@@ -962,8 +980,22 @@ async def events_poll(request: Request):
         )
         if edge:
             has_approved_edge = True
-            if edge["rid_types"]:
-                rid_types = edge["rid_types"]
+            # Pass rid_types through verbatim, INCLUDING an empty list. Collapsing
+            # empty -> None made the filter fail OPEN: an edge declaring nothing
+            # received everything. poll() distinguishes None (no filter declared)
+            # from [] (declares nothing, so receives nothing).
+            rid_types = edge["rid_types"]
+            # Divergence 6: last_seen was written only by handshake/key-bootstrap,
+            # so every value went stale in March while peers polled continuously —
+            # and a peer was wrongly reported offline for three months on that
+            # basis. A poll is proof of life; record it.
+            try:
+                await conn.execute(
+                    "UPDATE koi_net_nodes SET last_seen = NOW() WHERE node_rid = $1",
+                    requesting_node,
+                )
+            except Exception:
+                pass  # liveness bookkeeping must never fail a poll
 
     policy = _security_policy()
     if not has_approved_edge and policy["require_approved_edge_for_poll"]:
@@ -1140,6 +1172,52 @@ async def bundles_fetch(request: Request):
     )
 
 
+def _federation_rid_groups() -> Optional[List[str]]:
+    """Optional group_id allowlist for the federation RID directory.
+
+    KOI_FEDERATION_RID_GROUPS is a comma-separated list of group_ids
+    (e.g. "bioregional-coordination,biofi"). When set, /rids/fetch only
+    lists entities whose metadata.group_id is in the list. Unset/empty
+    means no group restriction.
+    """
+    raw = os.getenv("KOI_FEDERATION_RID_GROUPS", "").strip()
+    if not raw:
+        return None
+    groups = [g.strip() for g in raw.split(",") if g.strip()]
+    return groups or None
+
+
+def _build_rids_fetch_query(
+    rid_types: Optional[List[str]],
+    allowed_groups: Optional[List[str]],
+) -> tuple:
+    """Build the /rids/fetch directory query.
+
+    The RID directory is peer-visible, so it must never list entities that
+    are node-private or that were tombstoned by a merge (merged_into set) —
+    peers should only discover live, shareable identities.
+    """
+    conditions = [
+        "er.koi_rid IS NOT NULL",
+        "er.merged_into IS NULL",
+        "NOT COALESCE(er.node_private, FALSE)",
+    ]
+    params: List[Any] = []
+    if rid_types:
+        params.append(rid_types)
+        conditions.append(f"er.entity_type = ANY(${len(params)})")
+    if allowed_groups:
+        params.append(allowed_groups)
+        conditions.append(f"er.metadata->>'group_id' = ANY(${len(params)})")
+    sql = (
+        "SELECT DISTINCT er.koi_rid\n"
+        "FROM entity_registry er\n"
+        "WHERE " + "\n  AND ".join(conditions) + "\n"
+        "ORDER BY er.koi_rid"
+    )
+    return sql, params
+
+
 @koi_net_router.post("/rids/fetch")
 async def rids_fetch(request: Request):
     """List available RIDs, optionally filtered by type."""
@@ -1162,27 +1240,9 @@ async def rids_fetch(request: Request):
             resp = RidsPayloadResponse(rids=[])
             return JSONResponse(content=_wrap_response(resp.model_dump(), source_node, signed))
 
+    sql, params = _build_rids_fetch_query(rid_types, _federation_rid_groups())
     async with _db_pool.acquire() as conn:
-        if rid_types:
-            rows = await conn.fetch(
-                """
-                SELECT DISTINCT er.koi_rid
-                FROM entity_registry er
-                WHERE er.koi_rid IS NOT NULL
-                  AND er.entity_type = ANY($1)
-                ORDER BY er.koi_rid
-                """,
-                rid_types,
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT DISTINCT koi_rid
-                FROM entity_registry
-                WHERE koi_rid IS NOT NULL
-                ORDER BY koi_rid
-                """
-            )
+        rows = await conn.fetch(sql, *params)
 
     rids = [row["koi_rid"] for row in rows]
     resp = RidsPayloadResponse(rids=rids)

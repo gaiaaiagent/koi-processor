@@ -59,6 +59,23 @@ _VAULT_MIRROR_PATTERNS: list = [
     for p in os.getenv("KOI_VAULT_MIRROR_PATHS", "").split(",")
     if p.strip()
 ]
+# Per-file-origin ownership (KOI_VAULT_OWNER_UPDATE_ACCEPT). When true, a readonly
+# path accepts an incoming UPDATE iff the file's stored origin_node == the event's
+# origin_node — the original author (e.g. the NUC dobby pipeline) updating a note it
+# created. Default OFF: deploying the code is inert until the owner opts in; rollback
+# = unset + restart. FORGET is never accepted this way (Mac stays the durable home).
+_VAULT_OWNER_UPDATE_ACCEPT: bool = os.getenv(
+    "KOI_VAULT_OWNER_UPDATE_ACCEPT", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+# Stub-collapse guard (0 disables): refuse an owner UPDATE whose content is
+# < RATIO * current file size when current size >= MIN_BYTES. base_hash cannot
+# catch a rich->stub regression; this can.
+_VAULT_OWNER_UPDATE_SHRINK_RATIO: float = float(
+    os.getenv("KOI_VAULT_OWNER_UPDATE_SHRINK_RATIO", "0.5") or 0
+)
+_VAULT_OWNER_UPDATE_SHRINK_MIN_BYTES: int = int(
+    os.getenv("KOI_VAULT_OWNER_UPDATE_SHRINK_MIN_BYTES", "512") or 0
+)
 _GLOB_META_RE = re.compile(r"[*?\[]")
 
 
@@ -206,6 +223,9 @@ class SyncMetrics:
     mirror_authorship_change: int = 0
     mirror_forget_rejected_no_state: int = 0
     mirror_forget_rejected_non_owner: int = 0
+    # Per-file-origin ownership (KOI_VAULT_OWNER_UPDATE_ACCEPT)
+    readonly_owner_update_accepted: int = 0
+    readonly_owner_update_shrink_guarded: int = 0
     # Timestamps
     last_scan_started_at: Optional[str] = None
     last_scan_completed_at: Optional[str] = None
@@ -305,6 +325,109 @@ class VaultWatcher:
     def _signal(self):
         self._change_event.set()
         self._debounce_handle = None
+
+
+# ---------------------------------------------------------------------------
+# Vault-file RID namespace (divergence 1)
+# ---------------------------------------------------------------------------
+#
+# `rid_lib.types` reserves the `koi-net.*` namespace for exactly two protocol
+# objects — `koi-net.node` and `koi-net.edge`. `orn:koi-net.vault-file:` is
+# application data wearing protocol clothes, and it squats a namespace we do not
+# own.
+#
+# We are NOT migrating to upstream's `obsidian.note`, and the reason is measured
+# rather than aesthetic: `koi-net-obsidian-manager-node`'s `ObsidianNote`
+# requires a reference of exactly two '/'-separated components
+# (`<vault_id>/<note_id>`), and **766 of our 2,595 tracked paths are deeper than
+# that** — `Shared/Projects/IndigenomicsAI.md` raises ValueError. Upstream's
+# grammar cannot express a nested vault, so adopting it would break 29.5% of the
+# vault. That is a deliberate fork with a reason, which is the bar.
+#
+# Instead we move to a namespace we actually own, matching the
+# `personal-koi.*` convention already used for entity/doclink/knowledge-episode.
+#
+# MIGRATION IS STAGED (expand → migrate → contract). Today we ACCEPT both and
+# still EMIT the legacy one, so no peer breaks. Flip KOI_VAULT_FILE_NAMESPACE
+# only once every peer accepts both — Shawn's node included.
+#
+# The cutover is safe for edge scoping because both namespaces resolve to the
+# same rid type, `Vault-file` (pinned by
+# tests/test_rid_type_extraction.py::test_legacy_and_migrated_namespaces_agree).
+VAULT_FILE_NS_LEGACY = "koi-net.vault-file"
+VAULT_FILE_NS_OWNED = "personal-koi.vault-file"
+
+#: Namespace used for OUTBOUND RIDs. Legacy until every peer accepts both.
+VAULT_FILE_NS_EMIT = os.getenv("KOI_VAULT_FILE_NAMESPACE", VAULT_FILE_NS_LEGACY)
+
+#: Namespaces accepted on INBOUND events. Always both.
+VAULT_FILE_RID_PREFIXES = (
+    f"orn:{VAULT_FILE_NS_LEGACY}:",
+    f"orn:{VAULT_FILE_NS_OWNED}:",
+)
+
+
+def vault_file_rid(relative_path: str) -> str:
+    """Build the outbound RID for a vault file."""
+    return f"orn:{VAULT_FILE_NS_EMIT}:{relative_path}"
+
+
+def parse_vault_file_rid(rid: Any) -> Optional[str]:
+    """Return the relative path from a vault-file RID in EITHER namespace.
+
+    Returns None if the RID is not a vault-file RID at all, so callers can tell
+    "not mine" from "mine but empty".
+    """
+    if not isinstance(rid, str):
+        return None
+    for prefix in VAULT_FILE_RID_PREFIXES:
+        if rid.startswith(prefix):
+            return rid[len(prefix):]
+    return None
+
+
+def vault_file_rid_sql_clause(column: str = "rid") -> str:
+    """SQL matching a vault-file RID in either namespace.
+
+    A single LIKE on the legacy prefix silently stops matching the moment
+    emission flips, which would make every vault row invisible to cleanup,
+    doctor and metrics queries at once.
+    """
+    return "(" + " OR ".join(f"{column} LIKE '{p}%'" for p in VAULT_FILE_RID_PREFIXES) + ")"
+
+
+def _build_vault_manifest(
+    *, relative_path: str, content_hash: str, base_hash: Optional[str],
+    origin_node: str, origin_seq: int, file_size: int, event_type: str, now,
+) -> Dict[str, Any]:
+    """Build a vault-file manifest that satisfies the upstream KOI-net contract.
+
+    `rid_lib.ext.Manifest` requires exactly {rid, timestamp, sha256_hash}, and
+    `koi_net.protocol.Event.manifest` is typed as that model. We previously
+    emitted `content_hash` and no `rid`, so a stock KOI-net node rejected every
+    vault-file event we sent (verified against koi-net 2.1.2 / rid-lib 3.3.0).
+
+    We already had all three values, so `rid` and `sha256_hash` are added rather
+    than computed. Everything else is our extension and is carried alongside:
+    pydantic ignores unknown keys, so upstream reads the three it needs and our
+    own apply path keeps using the rest. Do not remove `content_hash` — the
+    inbound path at _apply_new_or_update still reads it, and peers running the
+    older shape still send it.
+    """
+    return {
+        # --- upstream KOI-net Manifest contract ---
+        "rid": vault_file_rid(relative_path),
+        "timestamp": now,
+        "sha256_hash": content_hash,
+        # --- our extensions (additive; ignored by upstream parsers) ---
+        "relative_path": relative_path,
+        "content_hash": content_hash,
+        "base_hash": base_hash,
+        "origin_node": origin_node,
+        "origin_seq": origin_seq,
+        "bytes": file_size,
+        "deleted": event_type == "FORGET",
+    }
 
 
 class VaultSyncManager:
@@ -534,11 +657,22 @@ class VaultSyncManager:
         if not isinstance(manifest, dict):
             self._reject("missing_fields", rid, source_node, event_id, "manifest is not a dict")
             return
-        if not manifest.get("content_hash"):
-            self._reject("missing_fields", rid, source_node, event_id, "manifest.content_hash missing")
+        # Accept either spelling. Upstream KOI-net names this field sha256_hash
+        # (rid_lib.ext.Manifest); our own emitter has always written
+        # content_hash and still does, so peers on the older shape keep working.
+        # Without this a stock KOI-net node's events are rejected outright.
+        if not (manifest.get("content_hash") or manifest.get("sha256_hash")):
+            self._reject("missing_fields", rid, source_node, event_id,
+                         "manifest hash missing (neither content_hash nor sha256_hash)")
             return
 
-        relative_path = manifest.get("relative_path") or contents.get("relative_path")
+        # Derive relative_path from the RID when the peer only sent the upstream
+        # three-field manifest, which has no relative_path.
+        relative_path = (
+            manifest.get("relative_path")
+            or contents.get("relative_path")
+            or parse_vault_file_rid(rid)
+        )
         if not relative_path:
             self._reject("missing_fields", rid, source_node, event_id, "relative_path missing")
             return
@@ -579,14 +713,10 @@ class VaultSyncManager:
                          f"path excluded by config: {relative_path}")
             return
 
-        # Locally-authoritative path guard — reject UPDATE/FORGET from remote peers for
-        # paths this node owns. NEW events are still accepted so peers can create new files.
-        if event_type in ("UPDATE", "FORGET") and _VAULT_READONLY_INCOMING_PATHS:
-            for prefix in _VAULT_READONLY_INCOMING_PATHS:
-                if relative_path.startswith(prefix):
-                    self._reject("path_authoritative_local", rid, source_node, event_id,
-                                 f"incoming {event_type} rejected: {relative_path} is locally authoritative")
-                    return
+        # Locally-authoritative path guard MOVED inside the write lock (after the
+        # stale-event guard) so it can be origin-aware — see KOI_VAULT_OWNER_UPDATE_ACCEPT.
+        # Non-owner readonly UPDATE/FORGET is still rejected there; those events now run
+        # E2EE-decrypt + dedup first (negligible extra work, correctness unchanged).
 
         # Size check
         manifest_bytes = manifest.get("bytes", 0)
@@ -636,7 +766,7 @@ class VaultSyncManager:
                 self._metrics.events_skipped_dedup += 1
                 return
 
-        content_hash = manifest["content_hash"]
+        content_hash = manifest.get("content_hash") or manifest["sha256_hash"]
         base_hash = manifest.get("base_hash")
         origin_seq = manifest.get("origin_seq", 1)
         origin_node = manifest.get("origin_node", source_node)
@@ -658,6 +788,41 @@ class VaultSyncManager:
                     self._reject("stale_event", rid, source_node, event_id,
                                  f"origin_seq {origin_seq} <= local {local_row['origin_seq']}")
                     return
+
+            # ── PER-FILE-ORIGIN OWNERSHIP (KOI_VAULT_OWNER_UPDATE_ACCEPT) ──
+            # Readonly paths reject incoming UPDATE/FORGET so remote enrichment can't
+            # overwrite files THIS node authored. Exception (flag-gated, UPDATE-only):
+            # accept when the file's stored origin_node == the incoming origin_node — the
+            # peer that ORIGINALLY created the file (its NEW event) updating its own file
+            # (e.g. the NUC dobby pipeline enriching a Meetings/ note it authored). A note
+            # this node authored (origin=self) still rejects any peer-origin UPDATE.
+            if event_type in ("UPDATE", "FORGET") and _VAULT_READONLY_INCOMING_PATHS \
+                    and any(relative_path.startswith(p) for p in _VAULT_READONLY_INCOMING_PATHS):
+                owner_updating_own = (
+                    _VAULT_OWNER_UPDATE_ACCEPT
+                    and event_type == "UPDATE"        # UPDATE-only; FORGET stays rejected
+                    and local_row is not None
+                    and not local_row["is_deleted"]
+                    and local_row["origin_node"] == origin_node
+                )
+                if owner_updating_own and _VAULT_OWNER_UPDATE_SHRINK_RATIO > 0:
+                    # Stub-collapse guard: reject a rich->stub owner UPDATE (base_hash
+                    # cannot catch it — a stub legitimately bases on the prior rich hash).
+                    local_len = local_row["file_size_bytes"] or 0
+                    incoming_len = len(markdown.encode("utf-8"))
+                    if local_len >= _VAULT_OWNER_UPDATE_SHRINK_MIN_BYTES \
+                            and incoming_len < local_len * _VAULT_OWNER_UPDATE_SHRINK_RATIO:
+                        self._metrics.readonly_owner_update_shrink_guarded += 1
+                        self._reject("path_authoritative_local", rid, source_node, event_id,
+                                     f"owner UPDATE to {relative_path} shrinks "
+                                     f"{local_len}->{incoming_len} bytes; refusing stub-collapse")
+                        return
+                if not owner_updating_own:
+                    self._reject("path_authoritative_local", rid, source_node, event_id,
+                                 f"incoming {event_type} rejected: {relative_path} is locally authoritative")
+                    return
+                self._metrics.readonly_owner_update_accepted += 1
+            # ── end per-file-origin ownership ──
 
             if event_type == "FORGET":
                 await self._apply_forget(
@@ -693,8 +858,8 @@ class VaultSyncManager:
             total = await conn.fetchval("SELECT COUNT(*) FROM vault_sync_state WHERE is_deleted=FALSE")
             tombstones = await conn.fetchval("SELECT COUNT(*) FROM vault_sync_state WHERE is_deleted=TRUE")
             pending = await conn.fetchval(
-                """SELECT COUNT(*) FROM koi_net_events
-                   WHERE rid LIKE 'orn:koi-net.vault-file:%'
+                f"""SELECT COUNT(*) FROM koi_net_events
+                   WHERE {vault_file_rid_sql_clause()}
                    AND expires_at > NOW()
                    AND array_length(delivered_to, 1) IS NULL""",
             )
@@ -856,27 +1021,54 @@ class VaultSyncManager:
                     db_rows.extend(rows)
 
         # Compare against filesystem (no lock) — scan each folder
-        db_map = {r["relative_path"]: r["content_hash"] for r in db_rows}
+        # A3: exclude the same paths the disk side skips, or an excluded file
+        # lands in missing_on_disk and the repair path queues a FORGET for it.
+        db_map = {
+            r["relative_path"]: r["content_hash"]
+            for r in db_rows
+            if not _path_excluded(r["relative_path"])
+        }
         disk_files: Dict[str, str] = {}
+        # A5: a path we could not examine is UNKNOWN, not ABSENT. rglob already
+        # yielded it, so the file exists; the only thing that happened is that
+        # this process could not read it (permissions, transient I/O, an
+        # unmaterialised cloud-sync placeholder, a concurrent writer). Without
+        # this set those paths fall straight through to missing_on_disk and the
+        # repair loop tombstones them and FORGETs them to every peer — a
+        # permanent cross-peer delete caused by a temporary read failure.
+        # Deliberate skips (symlink, excluded, hidden dir) are NOT unknown:
+        # they are decisions, and they are handled by the db_map exclusion above.
+        unknown_paths: set = set()
         for shared_folder in folder_set:
             base_dir = self.vault_path / shared_folder
             for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
-                if md_file.is_symlink() or not md_file.is_file():
+                if md_file.is_symlink():
                     continue
                 try:
                     _inner = md_file.relative_to(base_dir)
                     rel_path = f"{shared_folder}/{_inner}"
                 except ValueError:
+                    # Cannot even name it, so cannot judge its absence.
                     continue
                 if any(part.startswith(".") for part in _inner.parts[:-1]):
                     continue
                 if _path_excluded(rel_path):
                     continue
+                if not md_file.is_file():
+                    # Enumerated but not a regular file right now — a race with
+                    # a writer, or a type change. Unknown, not absent.
+                    unknown_paths.add(rel_path)
+                    continue
                 try:
                     content = md_file.read_bytes()
                     disk_files[rel_path] = hashlib.sha256(content).hexdigest()
-                except OSError:
-                    continue
+                except OSError as e:
+                    unknown_paths.add(rel_path)
+                    logger.warning(
+                        "vault_sync.reconcile_unreadable path=%s error=%s — "
+                        "recorded UNKNOWN, will not be treated as deleted",
+                        rel_path, e,
+                    )
 
         missing_on_disk = []
         hash_mismatch = []
@@ -887,6 +1079,9 @@ class VaultSyncManager:
 
         for rel_path, db_hash in db_map.items():
             if check_paths and rel_path not in check_paths:
+                continue
+            if rel_path in unknown_paths:
+                # A5: absence was never established for this path.
                 continue
             if rel_path not in disk_files:
                 missing_on_disk.append(rel_path)
@@ -901,12 +1096,23 @@ class VaultSyncManager:
 
         total_drift = len(missing_on_disk) + len(hash_mismatch) + len(missing_in_db)
 
+        if unknown_paths:
+            logger.warning(
+                "vault_sync.reconcile_unknown_paths count=%d — these were enumerated but "
+                "could not be examined, and are excluded from missing_on_disk",
+                len(unknown_paths),
+            )
+
         result: Dict[str, Any] = {
             "mode": mode,
             "missing_on_disk": missing_on_disk,
             "missing_in_db": missing_in_db,
             "hash_mismatch": hash_mismatch,
             "total_drift": total_drift,
+            # A5: report coverage, so a caller can tell a clean reconcile from
+            # one that simply could not see part of the vault.
+            "unknown_on_disk": sorted(unknown_paths),
+            "unknown_count": len(unknown_paths),
         }
 
         if mode == "repair":
@@ -1007,6 +1213,10 @@ class VaultSyncManager:
                 if actions_taken >= max_actions:
                     remaining += 1
                     continue
+                # A4: the enumeration above and this write are not atomic, and
+                # the enumeration can miss a file that is present.
+                if not self._absence_confirmed(rel_path, source="reconcile"):
+                    continue
                 prev_hash = db_map.get(rel_path)
                 async with self._write_lock:
                     async with self.pool.acquire() as conn:
@@ -1071,7 +1281,30 @@ class VaultSyncManager:
         files_scanned = 0
         files_changed = 0
         bytes_this_cycle = 0
+        # A1: set when the glob below exits early on backpressure. A truncated
+        # enumeration leaves present files out of `seen_paths`, and the deletion
+        # pass treats "not in seen_paths" as "deleted" — so a partial scan must
+        # never be allowed to justify a delete.
+        scan_truncated = False
         create_update_budget = max(0, MAX_EVENTS_PER_SCAN - DELETE_EVENT_RESERVE)
+
+        # A2: the mtime+size pre-check below is backed by an in-memory cache that
+        # starts empty on every process start, so after a restart EVERY file is a
+        # cache miss and counts toward MAX_FILES_PER_SCAN regardless of whether its
+        # content actually changed — which guarantees truncation. Compare against
+        # the hashes already in the DB so only genuinely-changed files consume the
+        # cap. One query per folder scan, taken without the write lock.
+        db_hashes: Dict[str, str] = {}
+        try:
+            async with self.pool.acquire() as conn:
+                for r in await conn.fetch(
+                    "SELECT relative_path, content_hash FROM vault_sync_state "
+                    "WHERE is_deleted=FALSE AND relative_path LIKE $1",
+                    shared_folder + "/%",
+                ):
+                    db_hashes[r["relative_path"]] = r["content_hash"]
+        except Exception as e:  # never let this optimisation break a scan
+            logger.warning("vault_sync.scan_hash_preload_failed folder=%s error=%s", shared_folder, e)
 
         for md_file in itertools.chain(*(base_dir.rglob(p) for p in VAULT_SYNC_PATTERNS)):
             if md_file.is_symlink():
@@ -1135,13 +1368,22 @@ class VaultSyncManager:
             # Update stat cache
             self._stat_cache[rel_path] = (mtime_ns, size, content_hash)
 
+            # A2: content is byte-identical to what the DB already has, so this
+            # file is not "changed" — warm the cache and move on WITHOUT charging
+            # it against the scan budget. Without this, a cold cache spends the
+            # entire cap on unchanged files and the scan truncates every time.
+            if db_hashes.get(rel_path) == content_hash:
+                continue
+
             # Backpressure checks (WP3)
             if files_changed >= MAX_FILES_PER_SCAN:
                 self._metrics.scans_capped += 1
+                scan_truncated = True
                 logger.info("vault_sync.scan_capped reason=max_files cap=%d", MAX_FILES_PER_SCAN)
                 break
             if bytes_this_cycle + size > MAX_BYTES_PER_SCAN:
                 self._metrics.scans_capped += 1
+                scan_truncated = True
                 logger.info("vault_sync.scan_capped reason=max_bytes cap=%d", MAX_BYTES_PER_SCAN)
                 break
 
@@ -1228,12 +1470,26 @@ class VaultSyncManager:
 
             # Deletion loop — uses remaining budget up to MAX_EVENTS_PER_SCAN
             # Only check files in THIS shared_folder
+            if scan_truncated:
+                logger.warning(
+                    "vault_sync.deletions_skipped reason=scan_truncated folder=%s files_seen=%d — "
+                    "a partial enumeration cannot distinguish 'absent' from 'not reached'",
+                    shared_folder, len(seen_paths),
+                )
             async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
+                rows = [] if scan_truncated else await conn.fetch(
                     "SELECT relative_path, content_hash, origin_seq, local_edit_seq FROM vault_sync_state "
                     "WHERE is_deleted=FALSE AND relative_path LIKE $1",
                     shared_folder + "/%",
                 )
+                # A3: the glob skips excluded paths BEFORE adding them to
+                # seen_paths, but this query does not exclude them — so any
+                # tracked path matching an exclude pattern is in the DB set and
+                # absent from seen_paths by construction, and gets tombstoned.
+                # That is why every conflict copy self-destructed seconds after
+                # creation (KOI_VAULT_EXCLUDE_PATHS matches '*(conflict *).md')
+                # and why 992 of the NUC's false tombstones were conflict paths.
+                rows = [r for r in rows if not _path_excluded(r["relative_path"])]
                 for row in rows:
                     if row["relative_path"] not in seen_paths:
                         if events_this_cycle >= MAX_EVENTS_PER_SCAN:
@@ -1241,6 +1497,11 @@ class VaultSyncManager:
                             logger.info("vault_sync.scan_capped reason=event_cap_deletes total=%d", events_this_cycle)
                             break
                         rel_path = row["relative_path"]
+                        # A4: confirm absence against the filesystem before the
+                        # destructive write, independently of why this path was
+                        # selected as a deletion candidate.
+                        if not self._absence_confirmed(rel_path, source="scan"):
+                            continue
                         new_seq = row["local_edit_seq"] + 1
                         # Remove from stat cache
                         self._stat_cache.pop(rel_path, None)
@@ -1437,6 +1698,45 @@ class VaultSyncManager:
 
         await self._record_applied(source_node, event_id, rid)
 
+    def _absence_confirmed(self, rel_path: str, source: str) -> bool:
+        """Re-stat the path at the moment of the tombstone write.
+
+        A4. Every other guard in this file reasons about coverage: was the scan
+        truncated (A1), did the budget run out (A2), could we read it (A5). This
+        one does not reason. It asks the filesystem, at the point of the
+        destructive write, whether the file is there.
+
+        That independence is the point. On 2026-08-25 the storm tombstoned 1,339
+        paths of which 1,139 were still on disk — this check alone would have
+        blocked all 1,139 no matter what the coverage logic concluded.
+
+        Applies ONLY where WE decide a file is absent. An inbound FORGET is a
+        decision a peer already made and the file existing locally is the normal
+        case; guarding that on exists() would break every legitimate remote
+        deletion, which is the mirror image of the storm.
+
+        Returns True when the file really is gone and the tombstone may proceed.
+        """
+        try:
+            present = (self.vault_path / rel_path).exists()
+        except OSError as e:
+            # Cannot even stat it, so absence is not established. A5's rule.
+            logger.warning(
+                "vault_sync.absence_unverifiable path=%s source=%s error=%s — refusing to tombstone",
+                rel_path, source, e,
+            )
+            return False
+        if present:
+            self._metrics.tombstones_blocked_present = getattr(
+                self._metrics, "tombstones_blocked_present", 0) + 1
+            logger.warning(
+                "vault_sync.tombstone_blocked path=%s source=%s reason=file_present_on_disk — "
+                "a deletion candidate that is still on disk is a bug upstream of here, not a delete",
+                rel_path, source,
+            )
+            return False
+        return True
+
     async def _apply_forget(
         self, target_path: Path, relative_path: str,
         local_row, base_hash: Optional[str],
@@ -1552,6 +1852,19 @@ class VaultSyncManager:
 
         await self._atomic_write(conflict_path, markdown)
 
+        # A3: do not register a path the scanner is configured to ignore. The
+        # live config excludes '*(conflict *).md', so registering the copy here
+        # created a row the glob would never see again — tracked but
+        # unscannable. The file itself is still written; only the state row is
+        # skipped.
+        if _path_excluded(conflict_rel):
+            await self._record_applied(source_node, event_id, rid)
+            logger.warning(
+                "vault_sync.conflict_created path=%s state=unregistered "
+                "reason=path_excluded", conflict_rel,
+            )
+            return
+
         # Insert sync state for the conflict copy
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -1651,7 +1964,7 @@ class VaultSyncManager:
                 event_type="UPDATE",
                 # Keep reconcile events under the vault-file RID type so edge rid_types
                 # filters allow delivery without requiring an extra capability type.
-                rid=f"orn:koi-net.vault-file:reconcile/{self.node_rid}",
+                rid=vault_file_rid(f"reconcile/{self.node_rid}"),
                 manifest={"type": "reconcile", "timestamp": now, "entry_count": len(manifest_entries)},
                 contents={"_vault_sync": True, "_reconcile": True, "entries": manifest_entries},
                 ttl_hours=24,
@@ -1781,7 +2094,7 @@ class VaultSyncManager:
     ):
         """Queue a vault-sync event for delivery."""
         now = datetime.now(timezone.utc).isoformat()
-        rid = f"orn:koi-net.vault-file:{relative_path}"
+        rid = vault_file_rid(relative_path)
 
         contents = {
             "relative_path": relative_path,
@@ -1803,16 +2116,16 @@ class VaultSyncManager:
             if self._encryption_private_key:
                 logger.debug("vault_sync.e2ee_unavailable peer=%s (no peer encryption key)", peer_node_rid)
 
-        manifest = {
-            "relative_path": relative_path,
-            "content_hash": content_hash,
-            "base_hash": base_hash,
-            "origin_node": self.node_rid,
-            "origin_seq": origin_seq,
-            "bytes": file_size,
-            "deleted": event_type == "FORGET",
-            "timestamp": now,
-        }
+        manifest = _build_vault_manifest(
+            relative_path=relative_path,
+            content_hash=content_hash,
+            base_hash=base_hash,
+            origin_node=self.node_rid,
+            origin_seq=origin_seq,
+            file_size=file_size,
+            event_type=event_type,
+            now=now,
+        )
 
         await self.event_queue.add(
             event_type=event_type,
@@ -1908,7 +2221,7 @@ class VaultSyncManager:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
                     f"""DELETE FROM koi_net_events
-                        WHERE rid LIKE 'orn:koi-net.vault-file:%'
+                        WHERE {vault_file_rid_sql_clause()}
                         AND array_length(delivered_to, 1) IS NOT NULL
                         AND queued_at < NOW() - INTERVAL '{EVENT_QUEUE_RETENTION_DAYS} days'"""
                 )

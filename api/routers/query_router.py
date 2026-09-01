@@ -26,6 +26,13 @@ ALLOWED_TABLES = frozenset({
     "entity_registry",
     "entity_relationships",
     "task_registry",
+    # Derived knowledge graph. Omitted until 2026-08-26, which meant the /sql
+    # escape hatch could find an entity but never its facts — 59,343 rows that
+    # every other surface (search_facts, /knowledge/facts/search) already
+    # served. Read-only exposure here is the same data, joinable.
+    "knowledge_facts",
+    "knowledge_episodes",
+    "document_entity_links",
     "claims",
     "claim_attestations",
     # Content
@@ -50,9 +57,21 @@ _DANGEROUS_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-# Catalog / information_schema access
+# Catalog / information_schema access, and server-side file/large-object
+# functions.
+#
+# The trailing \b was a bug (found 2026-08-26): \bpg_\b requires a non-word
+# character after the underscore, so it matched only a bare `pg_` token and
+# NOT `pg_class`, `pg_read_file`, or `pg_ls_dir`. Table position was still
+# covered by the allowlist guard, but a bare function call has no FROM clause
+# to catch — `SELECT pg_read_file($1)` passed every guard. Matching `pg_` as a
+# PREFIX closes that. Verified no allowlisted table has a pg_-prefixed column,
+# so this costs no legitimate query.
+#
+# This is a blocklist and blocklists leak. The durable fix is to stop
+# connecting as a superuser; see the read-only-role task.
 _CATALOG_ACCESS = re.compile(
-    r"\b(pg_|information_schema)\b",
+    r"\b(pg_|information_schema\b|lo_import\b|lo_export\b|dblink\b)",
     re.IGNORECASE,
 )
 

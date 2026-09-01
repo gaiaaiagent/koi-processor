@@ -88,7 +88,12 @@ mypy==1.7.1
 # =============================================================================
 # KOI Protocol Alignment (P0)
 # =============================================================================
-rid-lib==3.2.12
+rid-lib==3.3.0
+
+# =============================================================================
+# Claims Engine Phase 3 — Graph IRI generation (URDNA2015 canonicalization)
+# =============================================================================
+pyld>=2.0.4
 
 # =============================================================================
 # TerminusDB Graph Storage (Phase 1) — removed, unused and blocks Python 3.13+
@@ -102,11 +107,4 @@ scrapling>=0.4
 tldextract>=5.0
 tiktoken>=0.7
 feedparser>=6.0.10
-
-# =============================================================================
-# Document ingestion governor (scripts/classify_document.py)
-# =============================================================================
-# PDF → markdown conversion for the optional PDF input path. Markdown/txt inputs
-# need no extra dependency (classify_document errors cleanly if a PDF is passed
-# without this installed).
-pymupdf4llm>=0.0.17
+playwright==1.61.0

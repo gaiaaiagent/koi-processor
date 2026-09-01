@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
+from rid_lib.core import RID as _RidLibRID
 
 from api.koi_protocol import EventType, WireEvent, WireManifest, timestamp_to_z_format
 
@@ -135,21 +136,56 @@ class EventQueue:
             ids_to_mark = []
 
             for row in rows:
-                # If rid_types filter specified, check entity type from RID
-                # Domain events (_koi_domain marker) bypass the filter — they
-                # carry their own routing and should always be delivered.
-                if rid_types:
+                # If rid_types filter specified, gate BOTH rid-typed events and
+                # domain events against the edge's declared types.
+                #
+                # Domain events used to bypass this filter entirely, on the
+                # stated assumption that they "carry their own routing". They do
+                # not: every domain event is queued with target_node NULL, i.e.
+                # broadcast. The bypass therefore delivered the full
+                # entity/task/intent/knowledge stream to every peer holding an
+                # approved POLL edge, regardless of what that edge declared.
+                # The domain name is now matched as a pseudo rid-type, so an
+                # edge must opt in by listing it (e.g. "task", "entity").
+                if rid_types is not None:
                     contents_raw = row["contents"]
                     is_domain_event = False
+                    domain = None
                     if contents_raw:
                         c = json.loads(contents_raw) if isinstance(contents_raw, str) else contents_raw
-                        is_domain_event = isinstance(c, dict) and "_koi_domain" in c
-                    if not is_domain_event:
+                        if isinstance(c, dict) and "_koi_domain" in c:
+                            is_domain_event = True
+                            domain = c.get("_koi_domain")
+                    lowered = [rt.lower() for rt in rid_types]
+                    excluded = False
+                    if is_domain_event:
+                        # Fail closed: a malformed domain event carrying no
+                        # domain name cannot be matched against the edge, so it
+                        # is not delivered.
+                        excluded = not domain or str(domain).lower() not in lowered
+                    else:
                         # RID format: orn:koi-net.{type}:{slug}+{hash}
-                        rid = row["rid"]
-                        rid_type = extract_rid_type(rid)
-                        if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
-                            continue
+                        #
+                        # Fail closed on an unrecognized namespace. extract_rid_type
+                        # returns None for anything outside koi-net.* / entity:,
+                        # which includes orn:obsidian.note: — the namespace our own
+                        # vault frontmatter uses. Treating None as "no opinion" let
+                        # such events through every edge scope regardless of what
+                        # the edge declared. Unknown type matches no declared type.
+                        rid_type = extract_rid_type(row["rid"])
+                        excluded = rid_type is None or rid_type.lower() not in lowered
+
+                    if excluded:
+                        # Mark excluded events delivered rather than skipping
+                        # them. A filter decision is PERMANENT for this peer,
+                        # not a deferral — if we leave them unmarked they stay
+                        # at the head of the peer's queue (ORDER BY queued_at
+                        # ASC LIMIT n) and every subsequent poll re-reads and
+                        # re-drops the same rows, returning an empty list
+                        # forever. That starves the peer of everything behind
+                        # them until the 24h TTL lapses.
+                        ids_to_mark.append(row["id"])
+                        continue
 
                 event = {
                     "event_id": row["event_id"],
@@ -212,16 +248,36 @@ class EventQueue:
 
             events = []
             for row in rows:
-                if rid_types:
+                # Same scope rule as poll(): a domain event is matched on its
+                # _koi_domain value rather than bypassing the edge filter. The
+                # old bypass handed the full entity/task/intent/knowledge stream
+                # to any peer holding an approved edge regardless of what that
+                # edge declared, because domain events are queued with
+                # target_node NULL (broadcast).
+                #
+                # NOTE: poll() additionally marks excluded events delivered, so a
+                # narrow edge cannot starve behind a filtered queue head. peek()
+                # is deliberately non-marking (peek -> push -> mark), so that half
+                # belongs to the CALLER: WEBHOOK delivery must mark excluded ids
+                # too. Zero WEBHOOK edges exist on either node (verified 0/0) —
+                # do not approve one until that caller-side marking exists.
+                if rid_types is not None:
                     contents_raw = row["contents"]
                     is_domain_event = False
+                    domain = None
                     if contents_raw:
                         c = json.loads(contents_raw) if isinstance(contents_raw, str) else contents_raw
-                        is_domain_event = isinstance(c, dict) and "_koi_domain" in c
-                    if not is_domain_event:
-                        rid = row["rid"]
-                        rid_type = extract_rid_type(rid)
-                        if rid_type and rid_type.lower() not in [rt.lower() for rt in rid_types]:
+                        if isinstance(c, dict) and "_koi_domain" in c:
+                            is_domain_event = True
+                            domain = c.get("_koi_domain")
+                    lowered = [rt.lower() for rt in rid_types]
+                    if is_domain_event:
+                        if not domain or str(domain).lower() not in lowered:
+                            continue
+                    else:
+                        # Fail closed on an unrecognized namespace — see poll().
+                        rid_type = extract_rid_type(row["rid"])
+                        if rid_type is None or rid_type.lower() not in lowered:
                             continue
 
                 events.append({
@@ -310,24 +366,43 @@ class EventQueue:
 
 
 def extract_rid_type(rid: str) -> Optional[str]:
-    """Extract entity type from RID string.
+    """Extract the type segment of an ORN, using rid-lib's own parser.
 
-    Expected formats:
-    - orn:koi-net.practice:slug+hash -> Practice
-    - orn:entity:practice/slug+hash -> Practice
+    An ORN is `orn:<namespace>:<reference>`, and the type is the last
+    dot-separated segment of the namespace:
+
+        orn:koi-net.vault-file:Shared/x.md      -> Vault-file
+        orn:personal-koi.entity:abc             -> Entity
+        orn:obsidian.note:Shared/x.md           -> Note
+
+    This replaced two hardcoded substring branches (`"koi-net." in rid`,
+    `"entity:" in rid`). Substring-matching a structured identifier was wrong in
+    three ways that only became dangerous once the poll filter began failing
+    closed (divergence 10):
+
+      * `orn:personal-koi.entity:abc` contains "entity:", so the old code
+        returned 'Abc' — the slug, capitalized, presented as a type.
+      * `orn:personal-koi.doclink:*` matched neither branch and returned None,
+        which now means "excluded from every edge".
+      * `orn:personal-koi.vault-file:*` likewise, which blocked the divergence-1
+        migration off the squatted koi-net.* namespace: vault files would have
+        become undeliverable the moment the namespace changed.
+
+    Both the legacy `koi-net.vault-file` and the migration target
+    `personal-koi.vault-file` resolve to `Vault-file`, so the cutover is a no-op
+    for edge scoping.
+
+    The `orn:entity:{type}/{slug}` form the second branch handled has zero rows
+    on either node, so nothing depended on it.
+
+    Returns None for anything unparseable — including non-str input, which the
+    old code raised on. A raise here aborts the poll for every peer.
     """
-    if "koi-net." in rid:
-        # orn:koi-net.{type}:{slug}+{hash}
-        try:
-            type_part = rid.split("koi-net.")[1].split(":")[0]
-            return type_part.capitalize()
-        except (IndexError, AttributeError):
-            return None
-    if "entity:" in rid:
-        # orn:entity:{type}/{slug}+{hash}
-        try:
-            type_part = rid.split("entity:")[1].split("/")[0]
-            return type_part.capitalize()
-        except (IndexError, AttributeError):
-            return None
-    return None
+    try:
+        parsed = _RidLibRID.from_string(rid)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    namespace = getattr(parsed, "namespace", None)
+    if not namespace or "." not in namespace:
+        return None
+    return namespace.rsplit(".", 1)[1].capitalize()
