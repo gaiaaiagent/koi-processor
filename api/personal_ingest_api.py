@@ -175,6 +175,7 @@ from api.resolution_primitives import (
     resolve_to_live_uri,
 )
 from api.resolver_shadow import emitter_status, start_attempt, shutdown_emitter
+from api.resolver_decisions_log import log_decision as _log_resolver_decision
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -1060,6 +1061,9 @@ async def resolve_entity(
 
     Returns: (CanonicalEntity, is_new)
     """
+    # Durable (unsampled) accept/reject/create log for this call -- see
+    # api/resolver_decisions_log.py. Correlates every row logged below.
+    resolver_attempt_id = uuid.uuid4().hex
     normalized = normalize_entity_text(entity.name)
 
     # Get schema-driven config for this entity type
@@ -1086,6 +1090,13 @@ async def resolve_entity(
         """, normalized)
 
     if exact_match:
+        _log_resolver_decision(
+            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+            tier="tier1_exact", decision="accepted",
+            candidate_uri=exact_match['fuseki_uri'], candidate_text=exact_match['entity_text'],
+            score=1.0, reason="normalized_text exact match",
+        )
         return CanonicalEntity(
             name=exact_match['entity_text'],
             uri=exact_match['fuseki_uri'],
@@ -1098,6 +1109,12 @@ async def resolve_entity(
     if skip_fuzzy:
         logger.info("Exact-only resolution miss for '%s' (%s); creating new entity", entity.name, entity.type)
         new_uri = generate_entity_uri(entity.name, entity.type)
+        _log_resolver_decision(
+            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+            tier="tier3_create", decision="created",
+            candidate_uri=new_uri, reason="skip_fuzzy exact-only miss",
+        )
         return CanonicalEntity(
             name=entity.name,
             uri=new_uri,
@@ -1134,6 +1151,13 @@ async def resolve_entity(
     if alias_match:
         # Alias match = Tier-1 exact (short-circuit, don't enter contextual pool)
         logger.info(f"Tier 1.1 alias match: '{entity.name}' → '{alias_match['entity_text']}'")
+        _log_resolver_decision(
+            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+            tier="tier1_1_alias", decision="accepted",
+            candidate_uri=alias_match['fuseki_uri'], candidate_text=alias_match['entity_text'],
+            score=1.0, reason="registered alias match",
+        )
         return CanonicalEntity(
             name=alias_match["entity_text"],
             uri=alias_match["fuseki_uri"],
@@ -1172,6 +1196,13 @@ async def resolve_entity(
             logger.info(
                 "Tier 1.1b cross-type match: '%s' (hint=%s) → '%s' (%s)",
                 entity.name, entity.type, row["entity_text"], row["entity_type"],
+            )
+            _log_resolver_decision(
+                db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                tier="tier1_1b_cross_type", decision="accepted",
+                candidate_uri=row['fuseki_uri'], candidate_text=row['entity_text'],
+                score=1.0, reason=f"unique cross-type exact/alias match (found_type={row['entity_type']})",
             )
             return CanonicalEntity(
                 name=row["entity_text"],
@@ -1217,12 +1248,26 @@ async def resolve_entity(
                     logger.info(f"Tier 1.5 contextual match REJECTED (zero token overlap): "
                                f"'{entity.name}' -> '{best['name']}' "
                                f"(tokens: {query_tokens} vs {candidate_tokens})")
+                    _log_resolver_decision(
+                        db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                        entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                        tier="tier1_5_contextual", decision="rejected",
+                        candidate_uri=best.get('uri'), candidate_text=best.get('name'),
+                        score=best.get("combined_score"), reason="zero token overlap",
+                    )
                 elif entity.type == "Person" and not passes_person_name_guard(normalized, best_norm):
                     # Person name guard: a bare first name must not collapse into
                     # a full name (or a different full name) on context alone.
                     # Registered aliases resolve at Tier 1.1 before this runs.
                     logger.info(f"Tier 1.5 contextual match REJECTED (person name guard): "
                                f"'{entity.name}' -> '{best['name']}'")
+                    _log_resolver_decision(
+                        db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                        entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                        tier="tier1_5_contextual", decision="rejected",
+                        candidate_uri=best.get('uri'), candidate_text=best.get('name'),
+                        score=best.get("combined_score"), reason="person name guard",
+                    )
                 else:
                     # Two-tier threshold: phonetic matches get lower bar (strong evidence)
                     # Non-phonetic matches need higher score to avoid false positives
@@ -1235,6 +1280,14 @@ async def resolve_entity(
                         logger.info(f"Tier 1.5 contextual match: '{entity.name}' -> '{best['name']}' "
                                    f"(combined_score: {best['combined_score']:.3f}, "
                                    f"phonetic: {has_phonetic}, threshold: {effective_threshold})")
+                        _log_resolver_decision(
+                            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                            tier="tier1_5_contextual", decision="accepted",
+                            candidate_uri=best["uri"], candidate_text=best["name"],
+                            score=best["combined_score"],
+                            reason=f"phonetic={has_phonetic} threshold={effective_threshold}",
+                        )
                         return CanonicalEntity(
                             name=best["name"],
                             uri=best["uri"],
@@ -1247,6 +1300,14 @@ async def resolve_entity(
                         logger.info(f"Tier 1.5 contextual match REJECTED: '{entity.name}' -> '{best['name']}' "
                                    f"(score: {best['combined_score']:.3f} < threshold: {effective_threshold}, "
                                    f"phonetic: {has_phonetic})")
+                        _log_resolver_decision(
+                            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                            tier="tier1_5_contextual", decision="rejected",
+                            candidate_uri=best.get("uri"), candidate_text=best.get("name"),
+                            score=best["combined_score"],
+                            reason=f"below threshold={effective_threshold} phonetic={has_phonetic}",
+                        )
 
     # Tier 2a: Fuzzy match (Jaro-Winkler with token overlap check)
     if entity.type:
@@ -1311,6 +1372,13 @@ async def resolve_entity(
             if length_rejected:
                 logger.info(f"Fuzzy match REJECTED (length ratio {len_longer/len_shorter:.1f}x): "
                            f"{entity.name} vs {candidate['entity_text']} | JW={score:.3f}")
+                _log_resolver_decision(
+                    db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                    entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                    tier="tier2a_fuzzy", decision="rejected",
+                    candidate_uri=candidate['fuseki_uri'], candidate_text=candidate['entity_text'],
+                    score=score, reason=f"length ratio {len_longer/len_shorter:.1f}x",
+                )
                 continue
 
             # Additional check: token overlap for Organization/Project/Concept
@@ -1318,6 +1386,13 @@ async def resolve_entity(
             logger.info(f"Fuzzy candidate: {entity.name} vs {candidate['entity_text']} | JW={score:.3f} | overlap={overlap_count} ({overlap_ratio:.2f})")
             if not passes_token_overlap_strict(normalized, cand_norm, entity.type):
                 logger.info(f"Fuzzy match REJECTED due to low token overlap: {entity.name} vs {candidate['entity_text']}")
+                _log_resolver_decision(
+                    db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                    entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                    tier="tier2a_fuzzy", decision="rejected",
+                    candidate_uri=candidate['fuseki_uri'], candidate_text=candidate['entity_text'],
+                    score=score, reason="low token overlap",
+                )
                 continue
             best_score = score
             best_match = candidate
@@ -1328,6 +1403,13 @@ async def resolve_entity(
             active_outcome="fuzzy",
             legacy_fallback="fallthrough_unobserved",
             strict_fallback="fallthrough_unobserved",
+        )
+        _log_resolver_decision(
+            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+            tier="tier2a_fuzzy", decision="accepted",
+            candidate_uri=best_match['fuseki_uri'], candidate_text=best_match['entity_text'],
+            score=best_score, reason="jaro-winkler >= threshold, passed length + token-overlap guards",
         )
         return CanonicalEntity(
             name=best_match['entity_text'],
@@ -1418,6 +1500,13 @@ async def resolve_entity(
                         f"'{semantic_match['entity_text']}' "
                         f"(similarity: {semantic_match['similarity']:.3f}); creating new entity"
                     )
+                    _log_resolver_decision(
+                        db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                        entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                        tier="tier2b_semantic", decision="rejected",
+                        candidate_uri=semantic_match['fuseki_uri'], candidate_text=semantic_match['entity_text'],
+                        score=similarity, reason="name-shape guard",
+                    )
                 else:
                     logger.info(f"Tier 2b semantic match: '{entity.name}' -> '{semantic_match['entity_text']}' "
                                f"(similarity: {semantic_match['similarity']:.3f})")
@@ -1426,6 +1515,13 @@ async def resolve_entity(
                         active_outcome="semantic",
                         legacy_fallback="create_unobserved",
                         strict_fallback="create_unobserved",
+                    )
+                    _log_resolver_decision(
+                        db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                        entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                        tier="tier2b_semantic", decision="accepted",
+                        candidate_uri=semantic_match['fuseki_uri'], candidate_text=semantic_match['entity_text'],
+                        score=similarity, reason="cosine similarity >= threshold, passed name-shape guard",
                     )
                     return CanonicalEntity(
                         name=semantic_match['entity_text'],
@@ -1444,6 +1540,12 @@ async def resolve_entity(
         active_outcome="create",
         legacy_fallback=create_outcome,
         strict_fallback=create_outcome,
+    )
+    _log_resolver_decision(
+        db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+        entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+        tier="tier3_create", decision="created",
+        candidate_uri=new_uri, reason="no tier matched",
     )
 
     return CanonicalEntity(

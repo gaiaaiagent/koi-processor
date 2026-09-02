@@ -4,6 +4,20 @@ FIX-006 Enhancements:
 - Per-type semantic thresholds (PERSON: 0.92, ORG: 0.95, etc.)
 - Tier 1.x fuzzy string matching using rapidfuzz
 - Improved normalization via shared entity_normalizer module
+
+SCOPE (2026-08-31): this is NOT dead code and is NOT the resolver for
+personal_koi. It is the live dedup engine for the separate `eliza` /
+RegenAI production KG (port 5433), reached via graph_integration.py ->
+koi_event_bridge_semantic.py. personal_koi's entity resolution lives in
+api/personal_ingest_api.py::resolve_entity() instead -- that function has
+its own tiers, its own thresholds, and does not import anything from this
+module. The 2026-08-31 pipeline hardening audit incorrectly recommended
+deleting this file as an unreachable decoy; it validated against
+personal_koi's schema (this file's occurrence_count UPDATE targets a
+column that schema doesn't have) without checking the eliza-side callers.
+Deleting it would break ~32 tests and 3 scripts and silently disable
+dedup on the eliza pipeline. Keep it; do not merge its thresholds with
+personal_koi's.
 """
 
 import logging

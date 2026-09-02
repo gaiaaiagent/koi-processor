@@ -407,19 +407,32 @@ async def text_search(
                 logger.warning(f"Vector dimension mismatch (variant {q_idx}), BM25-only fallback: {e}")
                 try:
                     chunk_rows = await conn.fetch(f"""
-                        SELECT c.id, c.document_rid,
-                               m.content->>'title' AS title,
-                               LEFT(c.content->>'text', 2000) AS chunk_text,
-                               c.content->>'context' AS chunk_context,
-                               c.content->>'section_id' AS section_id,
-                               c.content->>'section_title' AS section_title,
-                               c.content->>'wiki_url' AS wiki_url,
-                               ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) AS rrf_score
-                        FROM koi_memory_chunks c
-                        JOIN koi_memories m ON m.rid = c.document_rid
-                        {field_join_bm25}
-                        WHERE c.tsv @@ plainto_tsquery('english', $1) {code_filter}
-                        ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
+                        WITH bm25_only AS (
+                            SELECT c.id, c.document_rid,
+                                   m.content->>'title' AS title,
+                                   LEFT(c.content->>'text', 2000) AS chunk_text,
+                                   c.content->>'context' AS chunk_context,
+                                   c.content->>'section_id' AS section_id,
+                                   c.content->>'section_title' AS section_title,
+                                   c.content->>'wiki_url' AS wiki_url,
+                                   ROW_NUMBER() OVER (
+                                       ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('english', $1)) DESC
+                                   ) AS brank
+                            FROM koi_memory_chunks c
+                            JOIN koi_memories m ON m.rid = c.document_rid
+                            {field_join_bm25}
+                            WHERE c.tsv @@ plainto_tsquery('english', $1) {code_filter}
+                        )
+                        SELECT id, document_rid, title, chunk_text, chunk_context,
+                               section_id, section_title, wiki_url,
+                               -- Same RRF formula (k=60) as the primary hybrid path
+                               -- above, so this fallback's contribution stays on the
+                               -- same ~0-0.0164 scale instead of an unbounded raw
+                               -- ts_rank_cd value that would otherwise dominate the
+                               -- fused ranking whenever this fallback fires.
+                               1.0/(brank+60) AS rrf_score
+                        FROM bm25_only
+                        ORDER BY brank
                         LIMIT {max_rrf_candidates}
                     """, q_text, *field_args)
                     for cr in chunk_rows:

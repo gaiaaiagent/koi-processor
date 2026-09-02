@@ -215,9 +215,14 @@ class EntityMergeRequest(BaseModel):
     merged_by: Optional[str] = Field(
         None, description="Audit actor; defaults to the authenticated identity")
     dry_run: bool = Field(
-        False,
-        description="If true, perform the full rewire inside a transaction, report "
-                    "the per-table counts, then ROLL BACK — nothing is committed.")
+        ...,
+        description="REQUIRED — no default. If true, perform the full rewire inside a "
+                    "transaction, report the per-table counts, then ROLL BACK — nothing is "
+                    "committed. If false, the merge is applied and committed "
+                    "(loser tombstoned; rewire is NOT easily reversible — colliding rows in "
+                    "UNIQUE-constrained tables are deduped/deleted outright and only "
+                    "per-table counts are logged, not row-level before-state). Every caller "
+                    "must explicitly choose; there is no safe default for this operation.")
 
 
 class EntityMergeResponse(BaseModel):

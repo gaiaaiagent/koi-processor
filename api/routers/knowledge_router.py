@@ -18,12 +18,12 @@ import time
 
 import asyncpg
 from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Literal, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Pack 2.2 (2026-04-28): per-request fallback-fired observability.
 # `was_fallback_fired()` reports whether FallbackChainEmbeddingProvider
@@ -62,6 +62,20 @@ UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS = _float_env(
     "UNIFIED_SEARCH_SESSIONS_TIMEOUT_SECONDS",
     8.0,
 )
+
+# The complete set of surface names /knowledge/unified-search accepts via
+# `include=`. Keep in sync with every `if "<name>" in surfaces:` branch in
+# unified_search() below -- entities/facts/sessions/docs/wiki/memories run
+# inside the pooled-connection block, vault runs as a subprocess after it.
+UNIFIED_SEARCH_VALID_SURFACES: frozenset = frozenset({
+    "entities",
+    "facts",
+    "sessions",
+    "docs",
+    "wiki",
+    "vault",
+    "memories",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +173,23 @@ def _resolve_supersession_policy(predicate_upper: str, request_flag: bool) -> bo
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+# Documented mapping from the extraction schema's confidence enum to
+# knowledge_facts.confidence (REAL). See migration 115. .get() on an absent
+# or None key returns None, which binds to NULL -- the correct behavior for
+# a caller that omits confidence entirely.
+_CONFIDENCE_TO_REAL = {"high": 1.0, "medium": 0.6, "low": 0.3}
+
+
 class FactInput(BaseModel):
+    # extra='forbid': the deep-extraction schema REQUIRES a `confidence` field
+    # (enum high/medium/low) on every fact it emits. Before this field existed
+    # here, Pydantic's default extra='ignore' silently dropped it on every
+    # write -- verified by execution (model_dump had no confidence key). A
+    # future field this model doesn't yet know about should fail loud (422),
+    # not vanish the same way. Migration 115 (2026-08-31) adds the matching
+    # knowledge_facts.confidence column.
+    model_config = ConfigDict(extra="forbid")
+
     subject: str = Field(..., description="Entity name for the subject")
     subject_type: Optional[str] = Field(
         None,
@@ -171,7 +201,7 @@ class FactInput(BaseModel):
                     "clearly typed (e.g. a Person predicate like SIBLING_OF) so newly "
                     "created entities get the right type."
     )
-    predicate: str = Field(..., description="Relationship type (UPPER_CASE)")
+    predicate: str = Field(..., description="Relationship type. Stored exactly as sent (no case-folding as of 2026-08-31).")
     object: Optional[str] = Field(None, description="Entity name for the object (if entity)")
     object_type: Optional[str] = Field(
         None,
@@ -181,6 +211,11 @@ class FactInput(BaseModel):
     fact_text: str = Field(..., description="Natural language sentence")
     valid_from: Optional[str] = Field(None, description="ISO datetime when fact became true")
     valid_to: Optional[str] = Field(None, description="ISO datetime when fact stopped being true")
+    confidence: Optional[Literal["high", "medium", "low"]] = Field(
+        None,
+        description="Extraction confidence. Mapped to knowledge_facts.confidence "
+                    "as high=1.0, medium=0.6, low=0.3; omitted -> NULL."
+    )
 
 
 class EpisodeCreateRequest(BaseModel):
@@ -1017,7 +1052,7 @@ def create_router(
                             "fact written without fact_embedding_3072 and will "
                             "BYPASS future cosine dedup until re-embedded",
                             subject_uri,
-                            fact.predicate.upper(),
+                            fact.predicate,
                             body.group_id,
                             episode_id,
                         )
@@ -1032,13 +1067,14 @@ def create_router(
                         INSERT INTO knowledge_facts
                             (episode_id, subject_uri, predicate, object_uri,
                              object_literal, fact_text, fact_embedding_3072,
-                             valid_from, valid_to, group_id)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10)
+                             valid_from, valid_to, group_id, predicate_raw, confidence)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, $9, $10, $11, $12)
                         RETURNING id, created_at, source_node_rid
-                    """, episode_id, subject_uri, fact.predicate.upper(),
+                    """, episode_id, subject_uri, fact.predicate,
                         object_uri, fact.object_literal, fact.fact_text,
                         str(fact_embedding) if fact_embedding else None,
-                        _dt(fact.valid_from), _dt(fact.valid_to), body.group_id)
+                        _dt(fact.valid_from), _dt(fact.valid_to), body.group_id,
+                        fact.predicate, _CONFIDENCE_TO_REAL.get(fact.confidence))
                     facts_created += 1
 
                     # Federation 2e: accumulate per-fact bundled-emit payload.
@@ -1051,7 +1087,7 @@ def create_router(
                     emit_facts.append({
                         "id": str(fact_row["id"]),
                         "subject_uri": subject_uri,
-                        "predicate": fact.predicate.upper(),
+                        "predicate": fact.predicate,
                         "object_uri": object_uri,
                         "object_literal": fact.object_literal,
                         "fact_text": fact.fact_text,
@@ -1570,7 +1606,17 @@ def create_router(
         # Tier-2 instrumentation: per-route latency_ms (Step 6).
         _t_route_start = time.monotonic()
 
-        surfaces = [s.strip() for s in include.split(",")]
+        surfaces = [s.strip() for s in include.split(",") if s.strip()]
+        invalid_surfaces = sorted(set(surfaces) - UNIFIED_SEARCH_VALID_SURFACES)
+        if invalid_surfaces:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "unknown surface(s) in 'include'",
+                    "invalid": invalid_surfaces,
+                    "valid_surfaces": sorted(UNIFIED_SEARCH_VALID_SURFACES),
+                },
+            )
         k = 60  # RRF constant
         facts_surface_available = _facts_surface_available(request)
         response.headers.update(_facts_surface_headers(request))
@@ -1887,6 +1933,7 @@ def create_router(
                             LIMIT 20
                         """, emb_str)
                     except asyncpg.exceptions.DataError as e:
+                        surface_errors["facts"] = "data_error"
                         logger.warning("facts surface vector query skipped: %s", e)
                         rows = []
                     f_url_map = await _build_source_url_map(
@@ -2276,11 +2323,16 @@ def create_router(
                                 },
                             })
                 except Exception as _e:
+                    surface_errors["vault"] = type(_e).__name__
                     logger.warning("unified-search vault surface failed: %s", _e)
 
         # Sort by RRF score descending; truncate to a 2× candidate pool when
         # MMR is requested, otherwise straight to limit.
         all_results.sort(key=lambda x: x["score"], reverse=True)
+        # Candidate count BEFORE the limit cut -- the only way to distinguish
+        # "we returned everything we found" from "we found more than `limit`
+        # and cut it off" for the `truncated` three-state field below.
+        _candidate_count_before_limit = len(all_results)
 
         rerank_mode = (rerank or "rrf").lower()
         rerank_applied = "rrf"
@@ -2364,6 +2416,31 @@ def create_router(
         # Tier-2: latency_ms field on response (Step 6 instrumentation).
         _latency_ms = round((time.monotonic() - _t_route_start) * 1000, 1)
 
+        # A surface the caller explicitly asked for but that this node can't
+        # serve (capability-gated, not a runtime error) is the same kind of
+        # gap as a timeout or exception -- fold it into surface_errors so it
+        # drives `truncated` below instead of silently vanishing from the
+        # results with only an HTTP header (X-Facts-Surface) as a trace.
+        if "facts" in surfaces and not facts_surface_available:
+            surface_errors.setdefault("facts", "surface_unavailable")
+
+        # Three-state completeness signal -- previously indistinguishable:
+        #   "complete"       -- every requested surface ran and nothing was cut.
+        #   "truncated"      -- all requested surfaces ran, but there were more
+        #                       candidates than `limit`; this response is a
+        #                       top-N slice, not the full match set.
+        #   "partial_source" -- at least one requested surface (see
+        #                       surface_errors) errored, timed out, or was
+        #                       unavailable and contributed zero results -- the
+        #                       response may be missing a whole surface,
+        #                       independent of whether `limit` was also hit.
+        if surface_errors:
+            truncated = "partial_source"
+        elif _candidate_count_before_limit > limit:
+            truncated = "truncated"
+        else:
+            truncated = "complete"
+
         response: dict = {
             "results": all_results,
             "facts": facts_results,
@@ -2374,6 +2451,7 @@ def create_router(
             "latency_ms": _latency_ms,
             "rerank_applied": rerank_applied,
             "mmr_lambda": mmr_lambda if rerank_applied == "mmr" else None,
+            "truncated": truncated,
         }
         if degraded:
             response["degraded"] = True
