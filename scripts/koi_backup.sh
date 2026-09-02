@@ -13,6 +13,14 @@ set -euo pipefail
 DB="personal_koi"
 DEST="${HOME}/koi-backups"
 LOG="${DEST}/backup.log"
+# NOTE ON THE TWO TIMESTAMPS a dump carries, because they differ by hours and
+# the difference looks like a contradiction to anyone who finds it later:
+#   filename stamp  = when the dump STARTED   (this variable)
+#   file mtime      = when the dump COMPLETED (last write by pg_dump)
+# The 2026-08-31 dump is stamped 19:42:31 and has mtime 21:40:06 -- a ~2h run
+# for 12.18GB, not a discrepancy. backup.log records both events explicitly;
+# a directory listing shows only the second. When citing "when the backup was
+# taken", say which event you mean.
 STAMP="$(date +%Y%m%d-%H%M%S)"
 DOW="$(date +%u)"          # 7 = Sunday
 OUT="${DEST}/personal_koi-${STAMP}.dump"
