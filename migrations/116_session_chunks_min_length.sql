@@ -65,9 +65,10 @@
 -- sessions retrieval surface queries -- forming a large near-duplicate cluster
 -- that wins ANN on unspecific queries and occupies a guaranteed answer slot.
 --
--- 100 is not arbitrary: TextChunker.min_chunk_size = 100 already exists in the
--- Python chunker and is simply not applied on this path. This makes the
--- database agree with the value the code already declares.
+-- (The audit proposed 100 here, reasoning that TextChunker.min_chunk_size=100
+-- already exists in the Python chunker and is simply not applied on this path.
+-- That reasoning does not survive measurement -- see the THRESHOLD section
+-- below, which is why this constraint is > 18 and not >= 100.)
 --
 -- TO VALIDATE LATER (after the 322k rows are dealt with, which is a separate
 -- operator decision -- it is a deletion plus a REINDEX of a 3.6GB index):
@@ -76,16 +77,48 @@
 -- reads or writes; it will simply fail while any violating row remains.
 -- =============================================================================
 
+-- =============================================================================
+-- THRESHOLD: 19, NOT 100. Derived from the format, then verified against data.
+-- =============================================================================
+-- The audit specified >= 100, borrowed from TextChunker.min_chunk_size. That
+-- value governs DOCUMENT prose chunking. These are conversational turn-pairs,
+-- which are legitimately short, and 100 would keep rejecting real content long
+-- after the producer is fixed.
+--
+-- Measured on a 17,281-row sample of the last 2 days (2026-09-02):
+--
+--     the exact empty stub          14,480   83.8%   <- what we want to reject
+--     real content, under 100 chars    544    3.1%   <- would ALSO be rejected at 100
+--     over 100 chars                 2,257   13.1%
+--
+-- So at >= 100, roughly 1 in 5 of the remaining REAL chunks (544 of 2,801)
+-- would still fail after the producer fix. That is the same outage one level
+-- down, just quieter.
+--
+-- The correct boundary is structural. The chunk is:
+--     "User: " + user_text + "\n\nAssistant: " + assistant_text
+--      = 19 characters of scaffold + content
+-- With both halves empty, trimming the trailing space leaves exactly 18.
+-- One single character of content anywhere makes it 19 or more. So:
+--
+--     length(trim(chunk_text)) > 18   <=>   "carries at least one character
+--                                            that is not scaffold"
+--
+-- Confirmed against the same sample: shortest real chunk = 20, count under
+-- 20 = 0, and the stub = 18. The threshold separates them with no overlap and
+-- does not depend on the distribution holding -- it depends on the format.
+-- =============================================================================
+
 ALTER TABLE session_chunks
     DROP CONSTRAINT IF EXISTS chk_session_chunks_min_length;
 
 ALTER TABLE session_chunks
     ADD CONSTRAINT chk_session_chunks_min_length
-    CHECK (length(trim(chunk_text)) >= 100)
+    CHECK (length(trim(chunk_text)) > 18)
     NOT VALID;
 
 COMMENT ON CONSTRAINT chk_session_chunks_min_length ON session_chunks IS
-  'Minimum meaningful chunk length, mirroring TextChunker.min_chunk_size=100 which the Python chunker declares but does not apply on this path. Added NOT VALID on 2026-09-02: 322,662 of 481,846 existing rows (67%) violate it, dominated by the 18-char "User: \nAssistant:" empty-turn-pair stub. Guard-before-repair is deliberate -- validating requires deleting those rows first, then ALTER TABLE ... VALIDATE CONSTRAINT.';
+  'Rejects scaffold-only session chunks. The turn-pair format is "User: " + user_text + E''\n\nAssistant: " + assistant_text = 19 chars of scaffold; with both halves empty, trimming leaves exactly 18, and one character of real content anywhere makes it 19+. So >18 means "carries at least one non-scaffold character". Deliberately NOT the >=100 the audit proposed (that is TextChunker.min_chunk_size, for document prose): measured 2026-09-02, 544 of 2,801 real chunks in a 2-day sample were under 100 chars, so >=100 would keep rejecting legitimate short turns. Added NOT VALID -- the producer (koi-sensors claude_session_sensor.py, fixed 2026-09-02) had been emitting the 18-char stub at 79-91% of daily writes, so a large historical population violates. Count the violators before ALTER TABLE ... VALIDATE CONSTRAINT.';
 
 
 -- -----------------------------------------------------------------------------
