@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field
 
 from api.auth_deps import make_service_token_auth
 from api.resolution_primitives import normalize_alias_list
+from api.merge_reversal import capture_reversal, unmerge
 
 logger = logging.getLogger(__name__)
 
@@ -643,6 +644,15 @@ def create_router(pool) -> APIRouter:
             tx = conn.transaction()
             await tx.start()
             try:
+                # Capture the undo BEFORE rewiring. A merge is a blind UPDATE:
+                # afterwards the loser's rows are indistinguishable from rows
+                # the survivor already held, so the identities an undo needs are
+                # destroyed by the act of merging. This is deliberately NOT in a
+                # try/except -- a merge that cannot be reversed must fail rather
+                # than silently record itself as one that can. That is the whole
+                # difference between this and the 262 pre-118 merges.
+                reversal = await capture_reversal(conn, loser=loser, survivor=survivor)
+
                 rewired = await _do_merge(conn, survivor, loser, merged_by)
                 survivor_aliases = await conn.fetchval(
                     "SELECT aliases FROM entity_registry WHERE fuseki_uri = $1", survivor)
@@ -651,10 +661,11 @@ def create_router(pool) -> APIRouter:
                 if not body.dry_run:
                     merge_log_id = await conn.fetchval("""
                         INSERT INTO entity_merge_log
-                            (survivor_uri, loser_uri, rewired, merged_by)
-                        VALUES ($1, $2, $3::jsonb, $4)
+                            (survivor_uri, loser_uri, rewired, merged_by, reversal)
+                        VALUES ($1, $2, $3::jsonb, $4, $5::jsonb)
                         RETURNING id
-                    """, survivor, loser, json.dumps(rewired), merged_by)
+                    """, survivor, loser, json.dumps(rewired), merged_by,
+                         json.dumps(reversal))
 
                 if body.dry_run:
                     await tx.rollback()
