@@ -32,7 +32,14 @@
 -- REQUIRED ORDER (starting anywhere else is an outage or a re-fill):
 --   1. Fix the sensor to skip empty turn-pairs.        <-- BLOCKS THIS FILE
 --   2. Apply this migration (NOT VALID; new writes only).
---   3. Delete the ~322k historical stubs, then REINDEX the 3.6GB HNSW index.
+--   3. Delete the historical stubs, then REINDEX the 3.6GB HNSW index.
+--      MEASURED 2026-09-02, the exact repair population at this threshold:
+--          length(trim(chunk_text)) <= 18   ->  294,937 rows
+--      (At the audit's >=100 it would have been 322,662 -- so the corrected
+--      threshold spares 27,725 rows of real short content that the audit's
+--      number would have deleted as junk. Worth re-counting immediately
+--      before the delete; the producer fix stops it growing, but it has not
+--      reached koi-sensors-runtime yet.)
 --   4. ALTER TABLE session_chunks VALIDATE CONSTRAINT chk_session_chunks_min_length;
 --
 -- Step 2 before step 1 breaks ingestion. Step 3 before step 2 lets the
