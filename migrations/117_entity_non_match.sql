@@ -1,11 +1,13 @@
 -- =============================================================================
 -- DRAFT Migration: entity_non_match (hard veto on known false-merge pairs)
 -- =============================================================================
--- Status:   DRAFT -- NOT numbered into the applied sequence, NOT applied to any
---           database. Deliberately named DRAFT_* instead of NNN_* so it cannot
---           be picked up by anything that globs migrations/[0-9]*.sql. Review,
---           then rename to the next sequence number (116 as of 2026-08-31) and
---           add a paired _down.sql before it is ever run for real.
+-- Apply:    psql -d personal_koi -v ON_ERROR_STOP=1 -1 -f migrations/117_entity_non_match.sql
+-- Rollback: psql -d personal_koi -v ON_ERROR_STOP=1 -1 -f migrations/117_entity_non_match_down.sql
+--
+-- Promoted from DRAFT_ to the numbered sequence 2026-09-02, at operator
+-- direction, to precede the 94-decision merge worklist. The veto table has to
+-- exist BEFORE merges execute, not after: it is what stops an operator's split
+-- being silently re-merged by the next ingest.
 --
 -- Date:     2026-08-31 (drafted)
 -- Plan:     ~/.claude/plans/koi-pipeline-hardening-audit-2026-08-31.md,
@@ -161,12 +163,8 @@ COMMENT ON FUNCTION entity_non_match_partners(TEXT) IS
     'Typically 0 rows -- this is the hot-path call resolve_entity() makes at every accept point.';
 
 -- -----------------------------------------------------------------------------
--- Migration bookkeeping -- COMMENTED OUT. Do not INSERT into koi_migrations
--- until this file is reviewed, renamed off the DRAFT_ prefix into the real
--- numbered sequence (116_entity_non_match.sql as of 2026-08-31), and a paired
--- 116_entity_non_match_down.sql exists (see migration 115 for the pattern:
--- DROP TRIGGER, DROP FUNCTION x3, DROP TABLE).
+-- Migration bookkeeping
 -- -----------------------------------------------------------------------------
--- INSERT INTO koi_migrations (migration_id, checksum)
--- VALUES ('116_entity_non_match', 'TBD')
--- ON CONFLICT (migration_id) DO NOTHING;
+INSERT INTO koi_migrations (migration_id, checksum)
+VALUES ('117_entity_non_match', 'v1_nonmatch_veto')
+ON CONFLICT (migration_id) DO NOTHING;
