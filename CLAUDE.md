@@ -80,6 +80,35 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > Note the venv is `/Users/darrenzal/venvs/koi-server`; bare `python3` has no `asyncpg` and
 > most of this repo's tests do not even collect under it.
 >
+> **The check that enforces the rule: ask the running process, never read the layout.** The
+> test above covers plists — what a job is *configured* to load. It cannot tell you what an
+> already-running process actually loaded, and that is the question every incident above
+> turns on. A plausible directory is not evidence:
+>
+> ```bash
+> # Linux (NUC): which checkout is it REALLY in?
+> readlink /proc/<PID>/cwd
+> # macOS (laptop; there is no /proc). sed strips lsof's -F field marker.
+> lsof -a -p <PID> -d cwd -Fn | tail -1 | sed 's/^n//'
+> # did it start before or after your edits?
+> ps -p <PID> -o lstart=
+> ```
+>
+> Use `ps -o lstart`, never `ps aux`: the latter's START column prints a bare clock time for
+> a process started *yesterday*, which reads as today.
+>
+> This is not academic. Uncommitted code in the serving checkout **is not live until
+> something restarts the process** — so `git status` shows a hazard while `ps -o lstart`
+> shows whether it has actually fired. On 2026-08-31→09-01 that gap ran 24 hours and closed
+> as five minutes of 500s on every `POST /knowledge/episodes`, when an unrelated restart
+> picked up a tree whose migration was unapplied.
+>
+> **Corollary, for when there is no process to ask: group by the EVENT that changed
+> behaviour, never by the calendar day containing it.** A day-scoped query straddling a
+> deploy mixes two populations and manufactures an artifact. The same `predicate_raw`
+> measurement read as a coverage gap by day, and as a clean 100% when grouped at the
+> migration timestamp — one produced a bug report for a bug that did not exist.
+>
 > Translation: commit to `regen-prod` → NUC gets it via Dobby's deploy; the local backend needs `restart.sh`; the local sensors need a `git pull` in the runtime clone. RegenAI public production needs an explicit cherry-pick + push to `stable`.
 >
 > **EMBEDDING SELF-HEAL (2026-08-14).** `com.personal-koi.chunk-embedder` is **retired**
