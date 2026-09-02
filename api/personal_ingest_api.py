@@ -2462,6 +2462,79 @@ def _embedding_health() -> dict:
                                 "last_success_at": st.get("last_success_at")}}
 
 
+# --- null-embed gauges: cached, single-flight -------------------------------
+# These five COUNT(*) probes are drift detection, not liveness. Each one was added
+# after a real silent failure (a dead chunk embedder unnoticed for three days;
+# 3,464 entity rows invisible to Tier-2 resolution), so they are worth keeping —
+# but they were being recomputed synchronously on EVERY /health call.
+#
+# 2026-09-01: measured on a loaded box they cost 285s in total for one call
+# (session_chunks alone 198s). Because an abandoned HTTP request does not cancel
+# the server-side query, short-timeout pollers stacked identical scans faster than
+# they drained: 10+ concurrent copies observed, /health and then the whole API
+# stopped answering while Postgres sat at 0.8% CPU — queued, not working.
+#
+# Two changes: results are cached for _NULL_EMBED_TTL, and a single-flight lock
+# means a concurrent caller serves the stale value instead of starting another
+# scan. Freshness is reported to the caller as null_embed_gauges_age_seconds, in
+# the same spirit as embedding_check.age_seconds above. Partial indexes on each
+# IS NULL predicate make the refresh itself cheap.
+# 300s, not 60s: these gauges detect an embedder that has died, and the incidents
+# they were built for ran for DAYS undetected — sub-minute resolution buys nothing.
+# It matters here because two of the five probes (koi_memory_chunks, session_chunks)
+# still lack their partial index, so a refresh is not yet cheap. Once
+# scripts/ops/build_null_embed_indexes.sh has been run on a quiet box, this can
+# safely drop back to 60.
+_NULL_EMBED_TTL = 300.0
+_null_embed_cache: dict = {"values": None, "at": 0.0}
+_null_embed_lock = asyncio.Lock()
+_NULL_EMBED_KEYS = ("db", "live", "chunks", "entities", "sessions")
+
+
+async def _null_embed_gauges():
+    """Return (values_dict, age_seconds). Never runs more than one refresh at a time."""
+    now = time.monotonic()
+    cached = _null_embed_cache["values"]
+    age = now - _null_embed_cache["at"] if cached is not None else None
+
+    if cached is not None and age < _NULL_EMBED_TTL:
+        return cached, age
+
+    # A refresh is already in flight: serve stale rather than pile on. This is the
+    # specific behaviour that prevents the stampede described above.
+    if _null_embed_lock.locked():
+        if cached is not None:
+            return cached, age
+        return {k: -1 for k in _NULL_EMBED_KEYS}, None
+
+    async with _null_embed_lock:
+        # Re-check: another caller may have refreshed while we waited.
+        now = time.monotonic()
+        cached = _null_embed_cache["values"]
+        if cached is not None and (now - _null_embed_cache["at"]) < _NULL_EMBED_TTL:
+            return cached, now - _null_embed_cache["at"]
+        try:
+            async with db_pool.acquire() as conn:
+                values = {
+                    "db": await conn.fetchval(
+                        "SELECT COUNT(*) FROM knowledge_facts WHERE fact_embedding_3072 IS NULL") or 0,
+                    "live": await conn.fetchval(
+                        "SELECT COUNT(*) FROM knowledge_facts WHERE fact_embedding_3072 IS NULL"
+                        " AND valid_to IS NULL") or 0,
+                    "chunks": await conn.fetchval(
+                        "SELECT COUNT(*) FROM koi_memory_chunks WHERE embedding_3072 IS NULL") or 0,
+                    "entities": await conn.fetchval(
+                        "SELECT COUNT(*) FROM entity_registry WHERE embedding_3072 IS NULL") or 0,
+                    "sessions": await conn.fetchval(
+                        "SELECT COUNT(*) FROM session_chunks WHERE embedding_3072 IS NULL") or 0,
+                }
+        except Exception:
+            values = {k: -1 for k in _NULL_EMBED_KEYS}  # signal "query failed"
+        _null_embed_cache["values"] = values
+        _null_embed_cache["at"] = time.monotonic()
+        return values, 0.0
+
+
 @app.get("/health")
 async def health_check(request: Request):
     """Health check endpoint.
@@ -2481,65 +2554,18 @@ async def health_check(request: Request):
     total (matching this docstring), `_live` is the actionable subset.
     """
     try:
-        null_embed_count_db = 0
-        null_embed_count_live = 0
-        null_embed_count_chunks = 0
-        null_embed_count_entities = 0
-        null_embed_count_sessions = 0
+        # Liveness: a real round-trip to the DB, kept cheap and always on the hot path.
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-            try:
-                null_embed_count_db = await conn.fetchval("""
-                    SELECT COUNT(*) FROM knowledge_facts
-                    WHERE fact_embedding_3072 IS NULL
-                """) or 0
-                null_embed_count_live = await conn.fetchval("""
-                    SELECT COUNT(*) FROM knowledge_facts
-                    WHERE fact_embedding_3072 IS NULL
-                      AND valid_to IS NULL
-                """) or 0
-                # CHUNKS were not gauged at all, which is why a dead chunk-embedder
-                # LaunchAgent went unnoticed 2026-07-31..08-03 while 334 chunks landed
-                # with no vector — /health stayed green the whole time because it only
-                # watched facts. A sustained non-zero here means the embedder is down.
-                null_embed_count_chunks = await conn.fetchval("""
-                    SELECT COUNT(*) FROM koi_memory_chunks
-                    WHERE embedding_3072 IS NULL
-                """) or 0
-                # ENTITIES were the third surface, and the lesson above was never swept
-                # to them: the chunk gauge was added after a dead embedder went unnoticed
-                # for three days, and entity_registry kept the same blind spot for months.
-                # A failed embed here returns None at the create sites in
-                # knowledge_router.py and this file, and the row is committed anyway with
-                # embedding_3072 NULL and no warning. It is not merely degraded: every
-                # semantic entity read filters `embedding_3072 IS NOT NULL`, so such a row
-                # is invisible to Tier-2 resolution and to semantic search entirely, and
-                # will be silently duplicated the next time the same name arrives.
-                # 2026-08-13: 3,464 of 29,460 rows (11.8%) — incl. 164 Person, 117
-                # Organization, 1,230 Claim — and still accruing (83 on 2026-08-12).
-                null_embed_count_entities = await conn.fetchval("""
-                    SELECT COUNT(*) FROM entity_registry
-                    WHERE embedding_3072 IS NULL
-                """) or 0
-                # FOURTH surface, ungauged until 2026-08-14 — the same sweep gap
-                # again. Read with the identical hard IS NOT NULL filter (this
-                # file :4976, 4996, 5011, 5038, 5050; knowledge_router.py :1677,
-                # 1927, 1938), but its ONLY writer lives in a different repo
-                # (RegenAI/koi-sensors .../claude_session_sensor.py:640) on a
-                # dev-area checkout. It reads 0/442,890 today only because that
-                # sensor DELETEs and reinserts per session — a partial write, or
-                # that sensor stopping mid-run, would leave rows unreachable with
-                # nothing reporting it.
-                null_embed_count_sessions = await conn.fetchval("""
-                    SELECT COUNT(*) FROM session_chunks
-                    WHERE embedding_3072 IS NULL
-                """) or 0
-            except Exception:
-                null_embed_count_db = -1  # signal "query failed"
-                null_embed_count_live = -1
-                null_embed_count_chunks = -1
-                null_embed_count_entities = -1
-                null_embed_count_sessions = -1
+
+        # Drift gauges: cached + single-flight, so /health cost is bounded no
+        # matter how often it is polled. See _null_embed_gauges above.
+        _gauges, _gauges_age = await _null_embed_gauges()
+        null_embed_count_db = _gauges["db"]
+        null_embed_count_live = _gauges["live"]
+        null_embed_count_chunks = _gauges["chunks"]
+        null_embed_count_entities = _gauges["entities"]
+        null_embed_count_sessions = _gauges["sessions"]
 
         # Get loaded entity types from schema
         schemas = get_entity_schemas()
@@ -2578,6 +2604,8 @@ async def health_check(request: Request):
             # Behavior-neutral policy measurement. Includes the runtime kill
             # switch state, sample rate, bounded-queue depth, and dropped count.
             "resolver_shadow": emitter_status(),
+            # How stale the five gauges below are (seconds); None = never computed.
+            "null_embed_gauges_age_seconds": (round(_gauges_age, 1) if _gauges_age is not None else None),
             "null_embed_fact_count_db": null_embed_count_db,
             # actionable subset: excludes superseded rows (valid_to set). The _db
             # figure above is the honest total — see the docstring.
