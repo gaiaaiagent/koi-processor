@@ -1,0 +1,15 @@
+CORRECTION (2026-09-01, same day): this commit message asserts that launchd rejected the malformed plist and that the backup was consequently not loaded. That causation is FALSE.
+
+Verified with Apple's own parser, which is the one launchd uses:
+  plutil -lint  -> OK        (accepts the '--' inside the XML comment)
+  plistlib      -> REJECTS   (not well-formed, line 12 col 21)
+
+launchd would have loaded the file. The backup was not scheduled because the job had been
+deliberately unloaded, which is unrelated to the plist's XML.
+
+The FIX stands regardless — invalid XML that a strict parser rejects is a defect, and it
+was failing three real tests. Only the causal claim was wrong.
+
+The error is itself the pattern this commit is about: taking a strict parser's verdict as
+evidence about a different parser downstream. plistlib was the adjacent signal; plutil was
+the authority, one command away.
