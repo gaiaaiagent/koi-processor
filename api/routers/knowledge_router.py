@@ -23,7 +23,9 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from api.secret_guard import check_fact as check_credential_fact
 
 # Pack 2.2 (2026-04-28): per-request fallback-fired observability.
 # `was_fallback_fired()` reports whether FallbackChainEmbeddingProvider
@@ -216,6 +218,26 @@ class FactInput(BaseModel):
         description="Extraction confidence. Mapped to knowledge_facts.confidence "
                     "as high=1.0, medium=0.6, low=0.3; omitted -> NULL."
     )
+
+    @model_validator(mode="after")
+    def _reject_credential_facts(self):
+        """Refuse credential-shaped facts at the boundary, before any write.
+
+        The extraction pipeline minted HAS_PASSWORD / HAS_TOKEN / SSH_USERNAME
+        facts that sat current for ~4.5 months behind an unauthenticated API.
+        A 422 here is the loud failure; the alternative is a silent one that
+        nothing notices until someone reads the table.
+
+        Calibrated against live data (8/9 real credential facts caught, 1 false
+        positive in 1,233 legitimate literals) -- see api/secret_guard.py for
+        the measurements and for the two rules that reading the code alone
+        would have gotten wrong.
+        """
+        flagged, reason = check_credential_fact(self.predicate, self.object_literal)
+        if flagged:
+            # The reason deliberately never echoes the value.
+            raise ValueError(f"refusing credential-shaped fact: {reason}")
+        return self
 
 
 class EpisodeCreateRequest(BaseModel):
