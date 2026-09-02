@@ -9,7 +9,7 @@
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
-	<!-- No KeepAlive -- this is a StartCalendarInterval (once-nightly) job, not a
+	<!-- No KeepAlive — this is a StartCalendarInterval (once-nightly) job, not a
 	     StartInterval polling job, so the storm-generator failure mode that hit
 	     embedding-repair (KeepAlive + no ThrottleInterval = thousands of runs in
 	     one night on repeated failure) does not apply the same way, but there is

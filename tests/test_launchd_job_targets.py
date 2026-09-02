@@ -302,3 +302,139 @@ def test_the_repo_copy_of_the_sensor_launcher_matches_the_installed_one() -> Non
         f"path that pointed the doc sensors at the shared dev checkout lived in this file, "
         f"so a stale committed copy hides exactly the class of defect it was added to pin."
     )
+
+
+# ---------------------------------------------------------------------------
+# What a job is CONFIGURED to load vs. what a running process actually loaded.
+#
+# Everything above reads plists: configuration. None of it can tell you what an
+# already-running process is executing, and that is the question every incident on
+# 2026-09-01 turned on. Three agents, seven times in one day, read a plausible directory
+# layout instead of asking the process — including reporting `~/koi-processor`
+# (regen-prod @ d8fe44e, May 14, no venv, serving nothing) as "the NUC's state" while the
+# service actually ran from `~/projects/RegenAI/koi-processor` on branch nuc-runtime.
+# The conclusion drawn happened to be right; the evidence for it was not.
+#
+# The rule for that already lived in CLAUDE.md, with three worked incidents, and was read
+# past by all three of us. Prose wired to attention decays as it becomes furniture. This
+# is the same rule wired to a gate, so it fails on its own.
+#
+# Two traps, both of which turn a working guard back into no guard:
+#   - Comparing an UNRESOLVED plist WorkingDirectory against a resolved /proc or lsof path
+#     goes red on a correctly configured job the moment a symlink is involved. A test that
+#     fails on healthy systems does not get fixed, it gets disabled.
+#   - Enumerating nothing and passing. A quiet box must skip loudly, never report green.
+# ---------------------------------------------------------------------------
+
+
+def running_koi_jobs() -> list[tuple[str, int]]:
+    """(label, pid) for every loaded personal-KOI job that currently has a live PID.
+
+    `launchctl list` prints PID, last exit status, label. A '-' PID means loaded but not
+    running, which is not a cwd question and is skipped here rather than failed — several
+    of these jobs are intentionally interval-triggered.
+    """
+    try:
+        out = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=15
+        ).stdout
+    except Exception:
+        return []
+    jobs: list[tuple[str, int]] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        pid, _status, label = parts
+        if not (label.startswith("com.personal-koi.") or label.startswith("com.personal.koi")):
+            continue
+        if pid.isdigit():
+            jobs.append((label, int(pid)))
+    return jobs
+
+
+def process_cwd(pid: int) -> str | None:
+    """The cwd a process ACTUALLY has. /proc on Linux, lsof on macOS (there is no /proc)."""
+    proc_cwd = Path("/proc") / str(pid) / "cwd"
+    try:
+        if proc_cwd.exists():
+            return str(proc_cwd.resolve())
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+    except Exception:
+        return None
+    for line in reversed(out.splitlines()):
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def _real(path: str) -> str:
+    """Resolve symlinks and ~ on BOTH sides before comparing.
+
+    A plist may legitimately name a symlinked or ~-relative WorkingDirectory while /proc
+    and lsof always report the real path. Comparing the raw strings fails on a healthy
+    job, which is how a guard gets disabled instead of fixed.
+    """
+    try:
+        return str(Path(path).expanduser().resolve())
+    except OSError:
+        return str(Path(path).expanduser())
+
+
+@pytest.mark.skipif(not running_koi_jobs(), reason="no personal-KOI job is currently running")
+@pytest.mark.parametrize("label,pid", running_koi_jobs(), ids=lambda v: str(v))
+def test_running_process_cwd_matches_its_plist(label: str, pid: int) -> None:
+    """A running job must be executing from the checkout its plist names.
+
+    Configuration drift is caught above. This catches RUNTIME drift: a process that was
+    started from somewhere else, or whose checkout moved under it after launch. Both are
+    invisible to every plist-reading check in this file.
+    """
+    plist = LAUNCH_AGENTS / f"{label}.plist"
+    if not plist.exists():
+        pytest.skip(f"{label} is loaded but has no installed plist to compare against")
+    declared = working_directory(plist)
+    if not declared:
+        pytest.skip(f"{label} declares no WorkingDirectory")
+    actual = process_cwd(pid)
+    if actual is None:
+        pytest.skip(f"could not read cwd for pid {pid} ({label})")
+    assert _real(actual) == _real(declared[0]), (
+        f"{label} (pid {pid}) is RUNNING from {actual}, but its plist declares "
+        f"WorkingDirectory={declared[0]}. The plist is not what this process loaded — "
+        f"which is the divergence no configuration check can see."
+    )
+
+
+def test_the_runtime_check_is_checked_against_something() -> None:
+    """A runtime check that enumerates nothing passes, which is worse than failing.
+
+    Mirrors test_the_rule_is_checked_against_something above. If launchd reports live PIDs
+    for personal-KOI jobs, this enumeration must find them; a parser that silently matches
+    zero rows would let the assertion above report green on every machine forever.
+    """
+    try:
+        out = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=15
+        ).stdout
+    except Exception:
+        pytest.skip("launchctl unavailable on this machine")
+    live = [
+        ln for ln in out.splitlines()
+        if ("com.personal-koi." in ln or "com.personal.koi" in ln) and ln.split()[:1]
+        and ln.split()[0].isdigit()
+    ]
+    if not live:
+        pytest.skip("no personal-KOI job currently has a live PID")
+    assert running_koi_jobs(), (
+        f"launchctl reports {len(live)} running personal-KOI job(s) but running_koi_jobs() "
+        f"enumerated none. The cwd assertion would then pass vacuously — the same "
+        f"subset-enumeration failure that let com.personal.koi-repo-doc-sensors run from "
+        f"the shared dev checkout while this suite reported green."
+    )
