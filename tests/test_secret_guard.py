@@ -97,3 +97,37 @@ def test_reason_never_contains_the_value():
     flagged, reason = check_fact("MENTIONS", secret)
     assert flagged
     assert secret not in reason
+
+
+# --- USERNAME tier (added 2026-09-02 at operator request) --------------------
+
+def test_username_with_a_literal_is_refused():
+    """The real SSH_USERNAME fact was a 10-char lowercase string.
+
+    No entropy or shape test can distinguish that from prose, so the predicate
+    name is the only signal available. If this rule misses it, nothing else
+    catches it.
+    """
+    assert check_fact("SSH_USERNAME", "darrenzal")[0]
+    assert check_fact("HAS_USERNAME", "darren.zal")[0]
+
+
+@pytest.mark.parametrize("predicate", ["SENT_GITHUB_USERNAME_TO", "USERNAME_FOR"])
+def test_relational_username_facts_with_no_literal_are_allowed(predicate):
+    """Measured from the live corpus: these carry an ENTITY object, not a value.
+
+    object_literal IS NULL means there is nothing to leak, so refusing them
+    would be a false positive.
+    """
+    assert not check_fact(predicate, None)[0]
+    assert not check_fact(predicate, "")[0]
+
+
+def test_strong_credential_predicates_are_refused_even_with_no_literal():
+    """Unlike usernames, these are refused unconditionally.
+
+    A fact asserting a password/token is wrong regardless of where the value
+    sits -- it may be in fact_text rather than object_literal.
+    """
+    for predicate in ("HAS_PASSWORD", "HAS_TOKEN", "API_KEY", "PRIVATE_KEY_FOR"):
+        assert check_fact(predicate, None)[0], f"{predicate} must be refused even with no literal"

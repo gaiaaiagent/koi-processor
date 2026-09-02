@@ -49,10 +49,31 @@ import re
 from typing import Optional, Tuple
 
 # Operator-specified predicate pattern. PLAIN SUBSTRINGS -- see note 2 above.
+# These are refused unconditionally: a fact asserting a password/token/key is
+# wrong whether or not it carries a literal, because the value may sit in
+# fact_text instead of object_literal.
 SECRET_PREDICATE = re.compile(
     r"(PASSWORD|PASSWD|TOKEN|SECRET|API_?KEY|APIKEY|ACCESS_?KEY|CREDENTIAL|PRIVATE_?KEY)",
     re.IGNORECASE,
 )
+
+# USERNAME is a SEPARATE, WEAKER tier, and the reason is worth stating because
+# the next person will ask why it isn't just appended to the pattern above.
+#
+# WHY PATTERN-ONLY IS THE ONLY MECHANISM THAT CAN WORK HERE: the real
+# SSH_USERNAME fact was a 10-character lowercase string. It has no entropy, no
+# distinguishing shape, and is indistinguishable from ordinary prose by any
+# value-based test. No entropy threshold, length rule, or character-class check
+# will ever catch it. The predicate name is the ONLY available signal -- so if
+# the predicate rule does not catch a username, nothing downstream will.
+#
+# WHY IT IS CONDITIONAL: measured against the live corpus, USERNAME predicates
+# split into two kinds. Ones carrying a literal (HAS_USERNAME, 3 current facts
+# of 19/11/5 chars) are account handles -- half of a credential pair, correctly
+# refused. Ones with an ENTITY object and object_literal IS NULL
+# (SENT_GITHUB_USERNAME_TO, USERNAME_FOR) assert a relationship and carry no
+# value at all; there is nothing to leak, and refusing them is a false positive.
+USERNAME_PREDICATE = re.compile(r"(USERNAME|USER_?NAME|LOGIN_?NAME)", re.IGNORECASE)
 
 # Predicates whose values are legitimately long hex. Exempt from the hex rule
 # ONLY -- the predicate rule above still applies to them if it matches.
@@ -98,6 +119,15 @@ def check_fact(predicate: Optional[str], object_literal: Optional[str]) -> Tuple
             f"predicate {predicate!r} matches the credential pattern "
             f"(PASSWORD|TOKEN|SECRET|API_KEY|CREDENTIAL|PRIVATE_KEY). "
             f"Credentials must not be stored as facts."
+        )
+
+    # Weaker tier: refuse a username only when it actually carries a value.
+    # A relational username fact with an entity object has nothing to leak.
+    if predicate and USERNAME_PREDICATE.search(predicate) and (object_literal or "").strip():
+        return True, (
+            f"predicate {predicate!r} names a username and carries a literal value. "
+            f"Account identifiers are half of a credential pair and must not be "
+            f"stored as facts. (A relational form with an entity object is allowed.)"
         )
 
     value = object_literal or ""
