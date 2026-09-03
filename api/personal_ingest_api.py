@@ -1029,6 +1029,71 @@ async def lookup_entity(
     return alias["fuseki_uri"] if alias else None
 
 
+async def is_vetoed_match(
+    conn: asyncpg.Connection, query_normalized: str, candidate_uri: str
+) -> Optional[str]:
+    """Return the veto reason if resolving this query to this candidate is forbidden.
+
+    entity_non_match records that two REGISTRY ROWS are different real things.
+    Resolution compares a NAME to a candidate row, so the two need bridging.
+
+    THE OBVIOUS BRIDGE DOES NOT WORK, and it fails silently. Synthesising the
+    query's URI with generate_entity_uri(name, type) and looking that up misses
+    28% of the register: measured 2026-09-02, 21 of 75 vetoed URIs do not
+    reproduce from their current (name, type) -- retyped since creation, renamed,
+    or in the `org:` namespace entirely. Among the missed were Salt Spring
+    Digital Ecologies and Raven Trust, two of the five operator overrides, i.e.
+    exactly the rows that exist in no corpus and cannot be re-derived.
+
+    So the bridge is the REGISTRY, not a hash: is there a LIVE row carrying the
+    query's normalized name that is vetoed against this candidate? That is the
+    real question, it uses stored rows rather than a reconstruction, and it
+    needs no URI to be reproducible.
+    """
+    # entity_non_match arrives with migration 117. A deployment or scratch schema
+    # without it must not break RESOLUTION -- but it must not silently lose the
+    # veto either, which is the fail-open pattern this whole guard exists to
+    # oppose. So: tolerate the absence, and say so LOUDLY, once per process.
+    # Probed PER CALL, not cached in a module global. A global would be a
+    # process-wide fact about a per-CONNECTION property: tests (and any
+    # multi-database process) hold connections to different databases, so a
+    # True cached from one is simply wrong for the next -- which is exactly how
+    # this broke test_entity_retype on first attempt.
+    #
+    # The cost is one extra round trip, and it is small in practice because
+    # resolve_entity RETURNS at the first accept: this runs once or twice per
+    # resolution, not once per tier.
+    # Unqualified on purpose: to_regclass('public.x') resolves in public, while
+    # the query below resolves through search_path. A caller using an isolated
+    # schema (the retype tests do) would get "present" from the probe and then
+    # UndefinedTableError from the query -- the probe must ask the same question
+    # the query does.
+    if not await conn.fetchval("SELECT to_regclass('entity_non_match') IS NOT NULL"):
+        logger.warning(
+            "entity_non_match is ABSENT (migration 117 not applied to this database) -- "
+            "the operator-adjudicated do-not-merge vetoes are NOT enforced here. "
+            "Resolution continues without them.")
+        return None
+
+    row = await conn.fetchrow(
+        """
+        SELECT n.reason, n.asserted_by, e.fuseki_uri AS query_uri
+        FROM entity_registry e
+        JOIN entity_non_match n
+          ON (n.uri_lo = e.fuseki_uri AND n.uri_hi = $2)
+          OR (n.uri_hi = e.fuseki_uri AND n.uri_lo = $2)
+        WHERE e.normalized_text = $1
+          AND e.merged_into IS NULL
+          AND e.fuseki_uri <> $2
+        LIMIT 1
+        """,
+        query_normalized, candidate_uri,
+    )
+    if row is None:
+        return None
+    return f"{row['reason']} [asserted_by: {row['asserted_by']}]"
+
+
 async def resolve_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,
@@ -1090,6 +1155,21 @@ async def resolve_entity(
         """, normalized)
 
     if exact_match:
+        _veto = await is_vetoed_match(conn, normalized, exact_match['fuseki_uri'])
+        if _veto:
+            logger.info("Tier 1 exact match VETOED: '%s' -/-> '%s' (%s)",
+                        entity.name, exact_match['entity_text'], _veto[:140])
+            _log_resolver_decision(
+                db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                tier="tier1_exact", decision="rejected",
+                candidate_uri=exact_match['fuseki_uri'],
+                candidate_text=exact_match['entity_text'],
+                score=1.0, reason=f"entity_non_match veto: {_veto[:160]}",
+            )
+            exact_match = None
+
+    if exact_match:
         _log_resolver_decision(
             db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
             entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
@@ -1149,6 +1229,21 @@ async def resolve_entity(
         """, normalized_name)
 
     if alias_match:
+        _veto = await is_vetoed_match(conn, normalized, alias_match['fuseki_uri'])
+        if _veto:
+            logger.info("Tier 1.1 alias match VETOED: '%s' -/-> '%s' (%s)",
+                        entity.name, alias_match['entity_text'], _veto[:140])
+            _log_resolver_decision(
+                db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                tier="tier1_1_alias", decision="rejected",
+                candidate_uri=alias_match['fuseki_uri'],
+                candidate_text=alias_match['entity_text'],
+                score=1.0, reason=f"entity_non_match veto: {_veto[:160]}",
+            )
+            alias_match = None
+
+    if alias_match:
         # Alias match = Tier-1 exact (short-circuit, don't enter contextual pool)
         logger.info(f"Tier 1.1 alias match: '{entity.name}' → '{alias_match['entity_text']}'")
         _log_resolver_decision(
@@ -1190,6 +1285,21 @@ async def resolve_entity(
               AND (normalized_text = $1 OR $2 = ANY(aliases))
             LIMIT 2
         """, normalized, normalized_name)
+
+        if len(cross_type_rows) == 1 and await is_vetoed_match(
+                conn, normalized, cross_type_rows[0]["fuseki_uri"]):
+            _veto = await is_vetoed_match(conn, normalized, cross_type_rows[0]["fuseki_uri"])
+            logger.info("Tier 1.1b cross-type match VETOED: '%s' -/-> '%s' (%s)",
+                        entity.name, cross_type_rows[0]["entity_text"], _veto[:140])
+            _log_resolver_decision(
+                db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                tier="tier1_1b_cross_type", decision="rejected",
+                candidate_uri=cross_type_rows[0]["fuseki_uri"],
+                candidate_text=cross_type_rows[0]["entity_text"],
+                score=1.0, reason=f"entity_non_match veto: {_veto[:160]}",
+            )
+            cross_type_rows = []
 
         if len(cross_type_rows) == 1:
             row = cross_type_rows[0]
@@ -1276,7 +1386,19 @@ async def resolve_entity(
 
                     effective_threshold = threshold_phonetic if has_phonetic else threshold_no_phonetic
 
-                    if best["combined_score"] >= effective_threshold:
+                    _veto = await is_vetoed_match(conn, normalized, best["uri"])
+                    if _veto:
+                        logger.info("Tier 1.5 contextual match VETOED: '%s' -/-> '%s' (%s)",
+                                    entity.name, best["name"], _veto[:140])
+                        _log_resolver_decision(
+                            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                            entity_type=entity.type, query_text=entity.name,
+                            query_normalized=normalized, tier="tier1_5_contextual",
+                            decision="rejected", candidate_uri=best["uri"],
+                            candidate_text=best["name"], score=best.get("combined_score"),
+                            reason=f"entity_non_match veto: {_veto[:160]}",
+                        )
+                    elif best["combined_score"] >= effective_threshold:
                         logger.info(f"Tier 1.5 contextual match: '{entity.name}' -> '{best['name']}' "
                                    f"(combined_score: {best['combined_score']:.3f}, "
                                    f"phonetic: {has_phonetic}, threshold: {effective_threshold})")
@@ -1398,6 +1520,21 @@ async def resolve_entity(
             best_match = candidate
 
     if best_match:
+        _veto = await is_vetoed_match(conn, normalized, best_match['fuseki_uri'])
+        if _veto:
+            logger.info("Tier 2a fuzzy match VETOED: '%s' -/-> '%s' (JW=%.3f) (%s)",
+                        entity.name, best_match['entity_text'], best_score, _veto[:140])
+            _log_resolver_decision(
+                db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                tier="tier2a_fuzzy", decision="rejected",
+                candidate_uri=best_match['fuseki_uri'],
+                candidate_text=best_match['entity_text'], score=best_score,
+                reason=f"entity_non_match veto: {_veto[:160]}",
+            )
+            best_match = None
+
+    if best_match:
         shadow.finish(
             active_uri=best_match['fuseki_uri'],
             active_outcome="fuzzy",
@@ -1494,7 +1631,20 @@ async def resolve_entity(
                         strict_accepts=strict_accepts,
                         elapsed_ns=time.perf_counter_ns() - shadow_started,
                     )
-                if not legacy_accepts:
+                _veto = await is_vetoed_match(
+                    conn, normalized, semantic_match['fuseki_uri'])
+                if _veto:
+                    logger.info("Tier 2b semantic match VETOED: '%s' -/-> '%s' (%s)",
+                                entity.name, semantic_match['entity_text'], _veto[:140])
+                    _log_resolver_decision(
+                        db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                        entity_type=entity.type, query_text=entity.name,
+                        query_normalized=normalized, tier="tier2b_semantic",
+                        decision="rejected", candidate_uri=semantic_match['fuseki_uri'],
+                        candidate_text=semantic_match['entity_text'], score=similarity,
+                        reason=f"entity_non_match veto: {_veto[:160]}",
+                    )
+                elif not legacy_accepts:
                     logger.info(
                         f"Tier 2b REJECTED (name guard): '{entity.name}' -> "
                         f"'{semantic_match['entity_text']}' "
