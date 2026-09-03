@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-08-26 11:05 PDT
+**Updated:** 2026-09-02 22:50 PDT
 
-**Current status:** Tree clean at `61b8fb1`, synced with origin. Full suite **43 failed / 1586 passed** with **no `--ignore` needed** — zero new vs the measured `763ede4` baseline. The iCloud conflict sweep (`com.personal-koi.vault-conflict-sweep`, 30-min) is **canary-proven firing unattended**; conflict files at 0.
+**Current status:** Tree clean on `regen-prod`, **12 commits ahead of origin (unpushed)**. Phase 0 complete, Phase 1 substantially landed: backup restore-verified, `unmerge` live and proven on 57 real merges, `entity_non_match` enforcing at six resolver tiers, credential + persona guards shipped, `:8351` LAN hole closed and A/B-verified.
 
-**Next:** 1) **koi 8386** — re-measure entity creation after the strict flip; clock-gated to **08-31**, nothing to do before then. 2) *(optional)* 2 pre-existing gap notes + 6 unregistered notes; an unrun defect-class sweep on the `curl -sf … || echo '<fallback>'` idiom.
+**Next:** 1) Push the 12 commits (operator-present gate). 2) Deploy the two parked sensor fixes to `koi-sensors-runtime` — **migration 116 is blocked on the chunker one**; applying it first breaks session ingestion. 3) NUC cutover memo refreshed; execution parked pending operator go.
 
-**Watch:** `test_vault_sync.py` has **order-dependent** failures — they pass in isolation and did not reproduce at clean HEAD, so a count delta there is not evidence of a regression. The iCloud hazard is **detected, not eliminated**: the vault is in iCloud sync with several concurrent writers. `docs/planning/` + `docs/soak-results/` are gitignored — docs written there are silently never committed. **This checkout is shared**: scope every `git add` to your own files.
+**Watch:** Apply migrations to BOTH `personal_koi` and `personal_koi_test` — `conftest.py:41` rewrites `POSTGRES_URL`; applying 115 only to the live DB left 19 tests red. 116 is written and deliberately unapplied. The Organization→Person experiment does NOT work: zero email-sourced, dormant since before the guard existed.
 
-**Verification:** measured at `61b8fb1`. Gate 10/10; governance 4/4; 73 focused tests. An earlier 46-failed reading was an artifact of a concurrent session's uncommitted work, not a regression.
+**Verification:** Focused suite 3 failed / 72 passed / 2 skipped; the 3 are pre-existing `401 != 503` auth failures, proven by stashing. `git diff --check` clean. No canon validator in this repo.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
