@@ -828,28 +828,96 @@ async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
 
 
 async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: str, tm: dict) -> None:
-    """Record the mismatch in the dead-letter table AND file a best-effort cleanup task."""
-    with contextlib.suppress(Exception):
+    """Record the mismatch once, and keep ONE rolling task per mismatch CLASS.
+
+    WHAT WAS WRONG WITH THE OLD SHAPE (fixed 2026-09-02)
+    ----------------------------------------------------
+    This filed ONE TASK PER (document, entity). Over 95 days that produced
+    **1,023 open tasks, every one owner=None, never triaged, still accruing** --
+    the extraction pipeline reporting its own failures into a void. And the same
+    finding was written to TWO places: this task AND the dead-letter row below,
+    so one failure filled two voids.
+
+    1,023 undifferentiated tasks are unreadable. Their AGGREGATE is not:
+
+        Protocol     -> Concept              339
+        Project      -> Concept              179
+        Organization <-> Project             165  (both directions)
+        Organization -> Person                60
+        Location     -> Place                 22  } dead types, cancelled
+        Project      -> SoftwareApplication   19  } 2026-09-02
+
+    Six classes, not 1,023 decisions -- and 51% is a single story (Concept
+    absorbing specific types). The per-document granularity never carried
+    information the aggregate lacks, because nobody was ever going to read
+    1,023 rows one at a time.
+
+    THE NEW SHAPE. document_extraction_item_errors is the SINGLE HOME for the
+    detail -- every occurrence still lands there, with the full payload, so
+    nothing is lost and per-document forensics stay possible. The task layer
+    now READS that table rather than duplicating it: one rolling task per
+    class, carrying an occurrence count and last-seen, updated in place.
+
+    WHY THIS MATTERS BEYOND TIDINESS: the count makes a prediction testable.
+    Organization->Person (60) is the email From-name class, whose guard is
+    committed but deploy-parked in koi-sensors-runtime. If that guard works,
+    THIS class stops accruing on deploy while the other five continue. A
+    per-document task pile could not show that; a counter can.
+    """
+    requested = tm.get("requested_type") or "?"
+    resolved = tm.get("resolved_type") or "?"
+    error_sig = f"requested={requested} resolved={resolved}"
+
+    # 1. The single durable home. Deliberately NOT silently suppressed: if the
+    #    dead-letter write fails, the finding is gone and the aggregate below
+    #    under-counts. Failing loudly here is the point -- but it must not kill
+    #    the extraction that produced it, so it warns rather than raises.
+    try:
         await conn.execute(
             "INSERT INTO document_extraction_item_errors (document_rid, item_type, payload, error) "
             "VALUES ($1, 'type_mismatch', $2::jsonb, $3)",
-            document_rid, json.dumps(tm), f"requested={tm.get('requested_type')} resolved={tm.get('resolved_type')}")
-    name = tm.get("name", "?")
-    task_key = "doc-ingest-typemismatch-" + hashlib.sha1(
-        f"{document_rid}:{_norm(name)}".encode()).hexdigest()[:12]
+            document_rid, json.dumps(tm), error_sig)
+    except Exception as e:
+        logger.warning(
+            "dead-letter write FAILED for type_mismatch %s on %s (%s) -- this occurrence "
+            "is lost and the class counter will under-report", error_sig, document_rid, e)
+        return
+
+    # 2. One rolling task per class, counted FROM the dead-letter table so the
+    #    two can never disagree.
+    try:
+        n = await conn.fetchval(
+            "SELECT count(*) FROM document_extraction_item_errors "
+            "WHERE item_type = 'type_mismatch' AND error = $1", error_sig)
+        first_seen = await conn.fetchval(
+            "SELECT min(created_at)::date FROM document_extraction_item_errors "
+            "WHERE item_type = 'type_mismatch' AND error = $1", error_sig)
+    except Exception as e:
+        logger.warning("could not read type-mismatch aggregate for %s: %s", error_sig, e)
+        return
+
+    slug = f"{requested}-{resolved}".lower().replace(" ", "-")
     payload = {
-        "taskKey": task_key,
-        "title": f"Review entity type-mismatch: {name} ({tm.get('requested_type')} vs {tm.get('resolved_type')})",
+        "taskKey": f"doc-ingest-typemismatch-class-{slug}",
+        "title": f"Type-mismatch class: {requested} -> {resolved} ({n} occurrences)",
         "status": "open", "priority": "low", "sourceType": "document-ingest",
-        "context": f"Document {document_rid} extraction hinted type {tm.get('requested_type')!r} for "
-                   f"{name!r} but it resolved to existing {tm.get('resolved_type')!r} ({tm.get('resolved_uri')}). "
-                   f"Review/merge if the existing entity is mis-typed.",
-        "tags": ["document-ingest", "type-mismatch"],
+        "context": (
+            f"Extraction requested type {requested!r} but resolution returned {resolved!r}. "
+            f"{n} occurrences since {first_seen}; most recent from document {document_rid}. "
+            f"Full per-occurrence detail lives in document_extraction_item_errors "
+            f"(item_type='type_mismatch', error='{error_sig}') -- this task is a rolling "
+            f"summary of that table, not a second copy of it.\n\n"
+            f"Concept-absorption classes (…->Concept) are NOT triage work: they are the "
+            f"extractor enum and allowed_entity_types disagreeing, and resolve as a side "
+            f"effect of generating the prompt enum from the registry (audit D4b). "
+            f"Classifying them by hand spends the effort twice."),
+        "tags": ["document-ingest", "type-mismatch", "aggregate",
+                 f"class:{requested}->{resolved}"],
     }
     with contextlib.suppress(Exception):
         r = await http.post(f"{KOI_BASE_URL}/tasks/ingest", json=payload, timeout=30.0)
         if r.status_code >= 300:
-            logger.warning("task_ingest non-2xx (%s) for %s", r.status_code, name)
+            logger.warning("task_ingest non-2xx (%s) for class %s", r.status_code, error_sig)
 
 
 # ── Orchestration ──────────────────────────────────────────────────────────────────
