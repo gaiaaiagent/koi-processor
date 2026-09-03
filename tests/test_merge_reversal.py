@@ -162,3 +162,68 @@ async def test_unmerge_leaves_rows_moved_after_the_merge_alone(conn):
         "SELECT subject_uri FROM knowledge_facts WHERE id=$1", fid) == C, \
         "unmerge clobbered a row that had been deliberately moved elsewhere"
     assert result["restored"]["knowledge_facts.subject_uri"] == 0
+
+
+# --- adversarial URIs --------------------------------------------------------
+# Live data contains 93 URIs with '&', 10 with '?', 4 with '%', and one with
+# double quotes:
+#   orn:personal-koi.entity:person-anita-&-sam-from-"whats-happening?"-newsletter-…
+# Anything that concatenates a URI into SQL rather than parameterising it is
+# fragile and injection-shaped. These assert the round trip survives the worst
+# real example plus the characters that break naive quoting.
+
+HOSTILE = [
+    'orn:personal-koi.entity:person-anita-&-sam-from-"whats-happening?"-newsletter-4f416ae9d5c2',
+    "orn:personal-koi.entity:concept-o'brien-and-sons-111111111111",   # apostrophe
+    "orn:personal-koi.entity:concept-100%-coverage-222222222222",      # LIKE wildcard
+    "orn:personal-koi.entity:concept-back\\slash-333333333333",        # backslash
+    "orn:personal-koi.entity:concept-semi;colon--drop-444444444444",   # statement break
+]
+
+
+@pytest.mark.parametrize("hostile_uri", HOSTILE)
+async def test_capture_and_unmerge_survive_hostile_uris(conn, hostile_uri):
+    """Capture + restore must round-trip a URI full of SQL metacharacters."""
+    survivor = "orn:personal-koi.entity:concept-hostile-survivor-555555555555"
+    await _mk(conn, survivor, "Hostile Survivor", [])
+    await _mk(conn, hostile_uri, "Hostile Loser", [])
+
+    ep = await conn.fetchval(
+        "INSERT INTO knowledge_episodes (name) VALUES ('hostile-uri-test') RETURNING id")
+    fid = await conn.fetchval(
+        "INSERT INTO knowledge_facts (episode_id, subject_uri, predicate, fact_text) "
+        "VALUES ($1,$2,'TESTS','hostile') RETURNING id", ep, hostile_uri)
+
+    reversal = await capture_reversal(conn, loser=hostile_uri, survivor=survivor)
+    assert str(fid) in reversal["refs"]["knowledge_facts.subject_uri"], \
+        "capture missed a row because the URI contains SQL metacharacters"
+
+    await conn.execute(
+        "UPDATE knowledge_facts SET subject_uri=$1 WHERE subject_uri=$2", survivor, hostile_uri)
+    await conn.execute(
+        "UPDATE entity_registry SET merged_into=$2 WHERE fuseki_uri=$1", hostile_uri, survivor)
+    mid = await conn.fetchval(
+        "INSERT INTO entity_merge_log (survivor_uri, loser_uri, rewired, merged_by, reversal) "
+        "VALUES ($1,$2,'{}'::jsonb,'test',$3::jsonb) RETURNING id",
+        survivor, hostile_uri, json.dumps(reversal))
+
+    await unmerge(conn, mid)
+
+    assert await conn.fetchval(
+        "SELECT subject_uri FROM knowledge_facts WHERE id=$1", fid) == hostile_uri, \
+        "unmerge failed to restore a row whose URI contains SQL metacharacters"
+    assert await conn.fetchval(
+        "SELECT merged_into FROM entity_registry WHERE fuseki_uri=$1", hostile_uri) is None
+
+
+async def test_no_sql_injection_via_uri(conn):
+    """A URI shaped like an injection payload must be inert data, not SQL."""
+    payload = "orn:personal-koi.entity:concept-x'; DROP TABLE knowledge_facts; --666666666666"
+    survivor = "orn:personal-koi.entity:concept-inject-survivor-777777777777"
+    await _mk(conn, survivor, "Inject Survivor", [])
+    await _mk(conn, payload, "Inject Loser", [])
+
+    rev = await capture_reversal(conn, loser=payload, survivor=survivor)
+    assert rev["loser"] == payload
+    # The table it tried to drop is still there.
+    assert await conn.fetchval("SELECT to_regclass('public.knowledge_facts') IS NOT NULL")
