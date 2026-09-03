@@ -227,3 +227,51 @@ async def test_no_sql_injection_via_uri(conn):
     assert rev["loser"] == payload
     # The table it tried to drop is still there.
     assert await conn.fetchval("SELECT to_regclass('public.knowledge_facts') IS NOT NULL")
+
+
+# --- persona guard -----------------------------------------------------------
+
+async def test_persona_with_no_independent_principal_is_refused(conn):
+    """A '(via X)' row whose principal has no other live row IS that principal.
+
+    Operator finding after Batch A: "Clare Brodeur (via Hylo)" is the only
+    Brodeur in the graph, so a cleanup folding every persona into its apparent
+    principal would have merged a real person into a different Clare.
+    """
+    from api.merge_reversal import persona_merge_hazard
+
+    uri = "orn:personal-koi.entity:person-lone-persona-via-hylo-999999999999"
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text) "
+        "VALUES ($1,'Lone Persona (via Hylo)','Person','lone persona (via hylo)') "
+        "ON CONFLICT (fuseki_uri) DO NOTHING", uri)
+    hazard = await persona_merge_hazard(conn, uri)
+    assert hazard, "a persona with no independent principal must be refused"
+    assert "only record" in hazard
+
+
+async def test_persona_with_an_existing_principal_is_allowed(conn):
+    from api.merge_reversal import persona_merge_hazard
+
+    persona = "orn:personal-koi.entity:person-paired-persona-via-hylo-888888888888"
+    principal = "orn:personal-koi.entity:person-paired-persona-777777777777"
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text) "
+        "VALUES ($1,'Paired Persona (via Hylo)','Person','paired persona (via hylo)') "
+        "ON CONFLICT (fuseki_uri) DO NOTHING", persona)
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text) "
+        "VALUES ($1,'Paired Persona','Person','paired persona') "
+        "ON CONFLICT (fuseki_uri) DO NOTHING", principal)
+    assert await persona_merge_hazard(conn, persona) is None
+
+
+async def test_non_persona_is_unaffected(conn):
+    from api.merge_reversal import persona_merge_hazard
+
+    uri = "orn:personal-koi.entity:organization-plain-org-666666666666"
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, normalized_text) "
+        "VALUES ($1,'Plain Org','Organization','plain org') "
+        "ON CONFLICT (fuseki_uri) DO NOTHING", uri)
+    assert await persona_merge_hazard(conn, uri) is None

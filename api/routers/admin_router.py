@@ -59,7 +59,7 @@ from pydantic import BaseModel, Field
 
 from api.auth_deps import make_service_token_auth
 from api.resolution_primitives import normalize_alias_list
-from api.merge_reversal import capture_reversal, unmerge
+from api.merge_reversal import capture_reversal, unmerge, persona_merge_hazard
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,14 @@ class EntityUnmergeResponse(BaseModel):
 
 
 class EntityMergeRequest(BaseModel):
+    allow_persona_merge: bool = Field(
+        False,
+        description="Override the persona guard. A '(via Platform)' row whose principal "
+                    "has NO independent live row is the ONLY record of that referent -- "
+                    "merging it erases a real person rather than deduplicating one. "
+                    "21 Person rows and 9 Claim rows are in that state (measured "
+                    "2026-09-02). Set true only after confirming the survivor is the "
+                    "same referent.")
     survivor_uri: str = Field(..., description="fuseki_uri of the entity to KEEP")
     loser_uri: str = Field(..., description="fuseki_uri of the entity to merge in + tombstone")
     merged_by: Optional[str] = Field(
@@ -727,6 +735,12 @@ def create_router(pool) -> APIRouter:
                 # try/except -- a merge that cannot be reversed must fail rather
                 # than silently record itself as one that can. That is the whole
                 # difference between this and the 262 pre-118 merges.
+                if not body.allow_persona_merge:
+                    hazard = await persona_merge_hazard(conn, loser)
+                    if hazard:
+                        await tx.rollback()
+                        raise HTTPException(status_code=409, detail=hazard)
+
                 reversal = await capture_reversal(conn, loser=loser, survivor=survivor)
 
                 rewired = await _do_merge(conn, survivor, loser, merged_by)

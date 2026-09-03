@@ -52,6 +52,62 @@ def _ref_cols() -> List[tuple]:
     return list(dict.fromkeys(list(_PLAIN_REF_COLS) + collision))
 
 
+async def persona_merge_hazard(conn, loser: str) -> Optional[str]:
+    """Refuse to merge away a persona that is the ONLY record of its principal.
+
+    Rows shaped "Name (via Platform)" are platform sender-name artifacts, and the
+    obvious cleanup -- fold every "(via X)" row into its apparent principal --
+    is safe only when that principal independently exists. Measured 2026-09-02:
+
+        Person personas   54   principal exists 33   PRINCIPAL ABSENT 21
+        Claim  personas    9   principal exists  0   PRINCIPAL ABSENT  9
+
+    For those 21, the persona IS the canonical row. "Clare Brodeur (via Hylo)"
+    is the only Brodeur in the graph; a cleanup pass merging it into its
+    "apparent principal" would have merged a real person into somebody else --
+    most likely one of the other Clares -- and erased her, along with 4 document
+    links. Building Hylo carries 47, Collaborative Technology Alliance 17.
+
+    The 9 Claim rows are not personas at all: "(via X)" there denotes citation
+    provenance and entity_text is a whole sentence. A regex-driven cleanup hits
+    both classes identically.
+
+    This cannot be expressed as an entity_non_match veto, which relates two
+    URIs -- the hazard is exactly that the second URI does not exist.
+
+    Operator finding, 2026-09-02, after the 57-merge Batch A run.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT entity_text, entity_type,
+               lower(trim(regexp_replace(entity_text, '\\s*\\(via [^)]*\\)\\s*$', ''))) AS principal
+        FROM entity_registry WHERE fuseki_uri = $1
+        """,
+        loser,
+    )
+    if row is None or " (via " not in (row["entity_text"] or ""):
+        return None
+
+    principal_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM entity_registry WHERE normalized_text = $1 "
+        "AND merged_into IS NULL AND fuseki_uri <> $2)",
+        row["principal"], loser,
+    )
+    if principal_exists:
+        return None
+
+    links = await conn.fetchval(
+        "SELECT count(*) FROM document_entity_links WHERE entity_uri = $1", loser)
+    return (
+        f"{row['entity_text']!r} is a '(via …)' persona whose principal "
+        f"({row['principal']!r}) has NO independent live row -- so this persona is the "
+        f"only record of it in the graph, carrying {links} document link(s). Merging it "
+        f"away erases a real referent rather than deduplicating one. 21 Person rows and "
+        f"9 Claim rows are in this state. Pass allow_persona_merge=true only if you have "
+        f"confirmed the survivor is genuinely the same referent."
+    )
+
+
 async def capture_reversal(conn, loser: str, survivor: str) -> Dict[str, Any]:
     """Snapshot what a merge is about to change. Call BEFORE rewiring."""
     refs: Dict[str, List[str]] = {}
