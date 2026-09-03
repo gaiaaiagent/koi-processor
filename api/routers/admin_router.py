@@ -210,6 +210,32 @@ def _act_from_row(row) -> ClosureAct:
     )
 
 
+class EntityUnmergeRequest(BaseModel):
+    merge_log_id: int = Field(
+        ..., description="entity_merge_log.id of the merge to reverse")
+    unmerged_by: Optional[str] = Field(
+        None, description="Audit actor; defaults to the authenticated identity")
+    dry_run: bool = Field(
+        ...,
+        description="REQUIRED — no default, matching /merge. If true, perform the full "
+                    "reversal inside a transaction, report per-table restored counts, then "
+                    "ROLL BACK. Merges predating migration 118 (2026-09-02) are REFUSED "
+                    "in either mode: the old log recorded only counts, so the row "
+                    "identities an exact undo needs no longer exist, and a best-effort "
+                    "reversal would repoint arbitrary rows and manufacture wrong "
+                    "provenance while reporting success.")
+
+
+class EntityUnmergeResponse(BaseModel):
+    merge_log_id: int
+    loser: str
+    survivor: str
+    dry_run: bool
+    applied: bool
+    restored: Dict[str, int] = {}
+    not_reversed: Dict[str, Any] = {}
+
+
 class EntityMergeRequest(BaseModel):
     survivor_uri: str = Field(..., description="fuseki_uri of the entity to KEEP")
     loser_uri: str = Field(..., description="fuseki_uri of the entity to merge in + tombstone")
@@ -583,6 +609,56 @@ def create_router(pool) -> APIRouter:
             elif isinstance(v, int):
                 total += v
         return total
+
+    @router.post("/unmerge", response_model=EntityUnmergeResponse)
+    async def unmerge_entities(
+        body: EntityUnmergeRequest,
+        identity: str = Depends(require_service_auth),
+    ):
+        """Reverse a merge recorded with reversal data (migration 118+).
+
+        This route exists because the capability without it is unreachable:
+        unmerge() was written, tested and committed with no HTTP surface at all
+        -- a correctly-built function with no caller, which is the same defect
+        this session spent the day cataloguing elsewhere. Caught by the operator
+        asking whether the route appeared in /openapi.json.
+        """
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                result = await unmerge(
+                    conn, body.merge_log_id, body.unmerged_by or identity)
+                # Surface what the reversal did NOT restore, so a caller is never
+                # told "reverted" when array/jsonb/no-PK references still point at
+                # the survivor.
+                rev = await conn.fetchval(
+                    "SELECT reversal FROM entity_merge_log WHERE id = $1",
+                    body.merge_log_id)
+                if isinstance(rev, str):
+                    rev = json.loads(rev)
+                not_reversed = (rev or {}).get("not_reversed", {})
+
+                if body.dry_run:
+                    await tx.rollback()
+                else:
+                    await tx.commit()
+            except ValueError as e:
+                await tx.rollback()
+                raise HTTPException(status_code=409, detail=str(e))
+            except Exception:
+                await tx.rollback()
+                raise
+
+        return EntityUnmergeResponse(
+            merge_log_id=body.merge_log_id,
+            loser=result["loser"],
+            survivor=result["survivor"],
+            dry_run=body.dry_run,
+            applied=not body.dry_run,
+            restored=result["restored"],
+            not_reversed=not_reversed,
+        )
 
     @router.post("/merge", response_model=EntityMergeResponse)
     async def merge_entities(
