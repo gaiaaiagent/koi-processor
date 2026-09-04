@@ -2,7 +2,7 @@
 
 **Updated:** 2026-09-04 13:05 PDT
 **Session:** Claude Code · 1e1f2abb-70f1-4639-9612-cd74c6cde36d · decisions 9315/9317 prepared and double-audited; email guard completed; 116 cleared
-**Status:** Tree clean on `regen-prod` @ `9f55e66`, **1 commit ahead of origin (unpublished)**. `koi-sensors` is **2 ahead of origin/main, unpublished** (`aad40dd`, `d5dde85`). Decisions **9315** and **9317** are PREPARED, not decided — full evidence pack at `~/.claude/plans/koi-vocabulary-decisions-9315-9317-2026-09-04.md`, attached to both koi tasks. **Migration 116 is NOT blocked** and applies cleanly today (verified). The email From-name guard is now complete at all three call sites. A `claude_sessions` venv has been built in `koi-sensors-runtime`, which is one of the two remaining conditions for retiring the dev-checkout exemption.
+**Status:** Tree clean on `regen-prod` @ `f3e46b3`, **1 commit ahead (unpublished)**. The 2026-09-04 deploy sequence is **EXECUTED and verified**: 5 commits published, `koi-sensors-runtime` pulled to `d5dde85`, the email From-name guard live at all three call sites, `com.darren.claude-session-sensor` repointed off the dev checkout, **migration 116 applied to both databases** and proven to discriminate, and the dev-checkout exemption retired (71 passed / 2 skipped). Decisions **9315** and **9317** remain PREPARED, not decided — pack at `~/.claude/plans/koi-vocabulary-decisions-9315-9317-2026-09-04.md`.
 
 > ## ⚠ START KOI SESSIONS IN THIS CHECKOUT
 >
@@ -31,43 +31,45 @@
 
 ## Next steps
 
-**Everything below is gated on ONE operator action: publishing `koi-sensors` (2 commits).** A local
-unattended-git guard declines to act on any remote that is not the OpenCivics-Labs CIE repo and does
-not prompt, so a session cannot do it. Nothing is blocked at the remote.
+**The 2026-09-04 deploy sequence is EXECUTED.** Operator published all 5 commits at ~15:02; steps
+1-6 ran and were verified by asking the running process, never by reading the layout.
 
-Operator decisions taken 2026-09-04: close the 116 fragility *before* applying it, and on the sensor
-side pull **and kickstart all three jobs** rather than letting the timer carry it.
+- ✅ **Published + verified reachable** — `git merge-base --is-ancestor` for all five against their
+  remotes, with a fabricated-SHA control to prove the check discriminates. Both repos 0 ahead.
+- ✅ **`koi-sensors-runtime` pulled** `0b5584e → d5dde85` (fast-forward; no `clean -fd`, both
+  untracked venvs survived). All three From-name call sites now present.
+- ✅ **Email guard LIVE at all three sites.** Kickstarted `proton-email-sensor`, `email-watcher` and
+  `email-sensor` — new PIDs 35323/36930/36958 at 15:03:0x against a source mtime of 15:02:36, each
+  `lsof`-confirmed running from the runtime clone. A bare pull would have reached only one of the
+  three; the two KeepAlive daemons were 8 days old and hold modules at import.
+- ✅ **`com.darren.claude-session-sensor` repointed** at `koi-sensors-runtime` (PID 55489, cwd
+  confirmed, started 15:04:42 vs source 15:02:36 and plist 15:04:26). The plist named the dev
+  checkout in **five** places, not two. Backup at `…plist.bak-20260904-150426`. **Canary, because an
+  exit code is not evidence:** one scan processed 7 sessions, wrote **442 chunks, 0 stubs, 0 errors**.
+- ✅ **Migration 116 applied to BOTH** `personal_koi` and `personal_koi_test`, `convalidated=false`,
+  registry rows present in both, 291,078 historical rows untouched. **Proven to discriminate**, not
+  assumed: real chunk accepted · the exact `User: \n\nAssistant: ` stub **refused** · 18-char refused ·
+  19-char accepted. Test DB left at 0 rows.
+- ✅ **Dev-checkout exemption retired** (`f3e46b3`). The suite demanded it —
+  `test_every_known_dev_checkout_exception_is_still_real` failed the moment the plist moved. Now
+  71 passed / 2 skipped, and pointing the plist back makes the guard fail, so it is not inert.
+- ⏸ **Deliberately NOT done:** step 3 of migration 116, the historical stub deletion. It needs a
+  REINDEX of a 3,745 MB index and a fresh re-count immediately before — the population is
+  self-healing via the sensor's per-session DELETE (479,475 → 479,503 total while 442 were written).
 
-**Ordered sequence. Starting anywhere else reinstates a bug.**
+**Unpublished: 1 commit** (`f3e46b3`, the exemption retirement).
 
-1. **Publish** `koi-sensors` `f5c7f88..d5dde85` (`aad40dd` third call site, `d5dde85` requirements).
-2. **Pull** `git -C ~/projects/koi-sensors-runtime pull` → `0b5584e..d5dde85`. This is the step that
-   deploys the email guard to all three sites at once. ⚠ Do **not** `git clean -fd` — the jobs run
-   from untracked venvs, and a freshly built `venv/` now sits at the repo root.
-3. **Kickstart the three email jobs.** A bare pull reaches only `email-sensor` (StartInterval 1800,
-   observed 40–65 min in practice). `proton-email-sensor` (PID 870) and `email-watcher` (PID 871)
-   are KeepAlive daemons ~8 days old that import `EmailSensor` at module load and hold stale code
-   until kickstarted. Verify each with `ps -p <PID> -o lstart=` against source mtime — never
-   `/openapi.json`, never the directory layout.
-4. **Repoint** `com.darren.claude-session-sensor` at `koi-sensors-runtime`. The venv is **already
-   built and positive-controlled** (the module imports cleanly under it; asyncpg 0.31.0 / openai
-   2.20.0 pinned to match the running job). ⚠ The plist names the dev checkout in **five** places,
-   not two: `PATH`, the interpreter, the script, the config, and `WorkingDirectory`. Two `.bak`
-   copies already exist in `~/Library/LaunchAgents`. **This must come after step 2** — repointing at
-   `0b5584e` reinstates the empty-turn-pair stub producer.
-5. **Apply migration 116 to BOTH** `personal_koi` and `personal_koi_test`. Verified applicable:
-   0 violating rows written since 2026-09-02 13:07:59.714772, positive control 291,078 pre-boundary.
-   `NOT VALID`, so no rewrite and no scan. The test DB has an empty `session_chunks`, so it is free
-   there. Standing watch-item: 115 was applied only to the live DB and left 19 tests red.
-6. **Retire** the `KNOWN_DEV_CHECKOUT_EXCEPTIONS` entry in `tests/test_launchd_job_targets.py` and
-   run that suite. As of now only **one** of its three retirement conditions holds (published);
-   step 2 satisfies the second and step 4 the third.
-7. **Do NOT** run step 3 of migration 116 (the historical stub deletion) as part of this. It needs a
-   REINDEX of a 3,745 MB index and a fresh re-count — the population moved 3,859 rows in two days
-   and is self-healing via the sensor's per-session DELETE.
+**Still open, unchanged:** decisions 9315 / 9317 (evidence pack prepared, due 2026-09-17) · migration
+113, gated on them · NUC cutover (PR #43 `CONFLICTING`, 180 behind) · Dependabot 9323 (due 2026-10-01)
+· the ontology generator (audit D4b).
 
-**Also open, unchanged:** NUC cutover (memo parked; PR #43 `CONFLICTING`, 180 behind); the ontology
-generator (audit D4b), blocked on 9315/9317; Dependabot task 9323 (JS surface, due 2026-10-01).
+**New, filed this session:** task 9386 — the session sensor's deep-extraction step has been a silent
+no-op since **2026-06-01** (2,620 skips). Its shim path in `config.personal.yaml:59` points into the
+shared dev `koi-processor` checkout, which sits on `darren/tenant-stamping-phase1` where that file is
+not tracked. Same class as the chunk-embedder branch-switch orphaning, ~3 months instead of 2 days.
+⚠ **Not yet established whether anything was lost** — 3,759 untagged session-shaped episodes exist
+through 2026-09-02, so a different producer was doing session work meanwhile. Identify it before
+concluding the shim mattered. Unrelated to the repoint above.
 
 ## Open questions
 
