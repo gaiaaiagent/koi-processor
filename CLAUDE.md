@@ -38,7 +38,7 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 >
 > | Branch | Surface | How it deploys |
 > |---|---|---|
-> | **`regen-prod`** | Local personal-koi (backend + sensors, above) + **NUC federation** | NUC: Dobby's `deploy.sh` rsyncs. Local backend: `restart.sh`. Local sensors: `git pull` in runtime clone. |
+> | **`regen-prod`** | Local personal-koi (backend + sensors, above) | Local backend: `restart.sh`. Local sensors: `git pull` in runtime clone. ⚠ **NOT the NUC** — see the correction below. |
 > | **`stable`** | **RegenAI public production** (`$KOI_PROD_HOST`) | Operator-controlled promotion only — `git pull origin stable` on the prod host. Cherry-pick from `regen-prod` when ready. Keep clean. |
 > | **`server/stable`** | ⚠️ **Orphaned** (pre-Mar-12 topology) | Do not push here. |
 >
@@ -109,7 +109,27 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > measurement read as a coverage gap by day, and as a clean 100% when grouped at the
 > migration timestamp — one produced a bug report for a bug that did not exist.
 >
-> Translation: commit to `regen-prod` → NUC gets it via Dobby's deploy; the local backend needs `restart.sh`; the local sensors need a `git pull` in the runtime clone. RegenAI public production needs an explicit cherry-pick + push to `stable`.
+> ⚠ **CORRECTED 2026-09-04 — "commit to `regen-prod` → the NUC gets it" is FALSE.** Dobby's
+> `~/projects/dobby/scripts/deploy.sh` rsyncs **`~/projects/RegenAI/koi-processor/`, the shared DEV
+> checkout** — not `regen-prod`, and not `koi-processor-service`. The script says so itself at
+> `deploy.sh:105` ("The koi-processor rsync's SOURCE is the shared dev checkout"), and it runs from
+> the laptop with `.git` excluded, then `ssh dobby sudo systemctl restart dobby-koi-processor`.
+> Consequence: **what reaches the NUC is whatever branch a session last left the dev checkout on** —
+> the checkout this same file elsewhere says to "assume moves under you".
+>
+> **The NUC does not apply migrations, and cannot.** `deploy.sh` contains **zero** `psql` /
+> `apply_migration` / `migrate` invocations (positive control: 3 `systemctl`). Its scheduler surface
+> was fully enumerated — 28 system timers, 4 user timers, no crontab for `dobby` or `root`, stock
+> `/etc/crontab` — and the only KOI timers are `koi-backup.timer` (nightly `pg_dump`) and
+> `dobby-drift-sweep.timer`, a **row-count-only** parity check, so a value rewrite would not alert.
+> Hard proof that application is manual and out-of-band: **111, 114 and 115 are recorded APPLIED in
+> the NUC's ledger while their `.sql` files do not exist in the NUC's serving tree.** Any NUC
+> migration leg needs the file hand-delivered; the rsync never puts it there.
+>
+> Translation: commit to `regen-prod` → the **local** backend needs `restart.sh` and the **local**
+> sensors need a `git pull` in the runtime clone. The **NUC** needs the dev checkout on the right
+> branch, a `deploy.sh` run, and — separately, by hand — any migration. RegenAI public production
+> needs an explicit cherry-pick + push to `stable`.
 >
 > **EMBEDDING SELF-HEAL (2026-08-14).** `com.personal-koi.chunk-embedder` is **retired**
 > (plist kept as `.retired-20260814`). Its replacement is
