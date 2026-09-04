@@ -907,10 +907,22 @@ async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: s
             f"Full per-occurrence detail lives in document_extraction_item_errors "
             f"(item_type='type_mismatch', error='{error_sig}') -- this task is a rolling "
             f"summary of that table, not a second copy of it.\n\n"
-            f"Concept-absorption classes (…->Concept) are NOT triage work: they are the "
-            f"extractor enum and allowed_entity_types disagreeing, and resolve as a side "
-            f"effect of generating the prompt enum from the registry (audit D4b). "
-            f"Classifying them by hand spends the effort twice."),
+            f"On …->Concept classes: an earlier version of this text said they were the "
+            f"extractor enum and allowed_entity_types disagreeing, and would resolve as a "
+            f"side effect of generating the prompt enum (audit D4b). That was WRONG and is "
+            f"corrected here (2026-09-03). The extractor already emits {requested!r} and "
+            f"does so freely -- the enum is not the constraint. What happens is that a typed "
+            f"Tier-1 miss falls through to an UNTYPED lookup which accepts any type "
+            f"(api/routers/knowledge_router.py:1253-1288), and the cross-type refusal there "
+            f"fires only when the HINT is Concept, never when the existing ROW is. So a "
+            f"{requested!r} hint binds to whatever Concept row already holds the name. "
+            f"Regenerating the enum resolves none of these.\n\n"
+            f"Nor are they uniformly non-triage. Measured across the whole …->Concept set: "
+            f"621 occurrences over 215 distinct entities -- ~46 of them "
+            f"(Person/Organization/Location stored as Concept, e.g. people and universities) "
+            f"are real defects worth retyping, ~176 (Protocol/Project) are a genuine "
+            f"modelling question rather than a bug, and the remainder want a type neither "
+            f"side proposed."),
         "tags": ["document-ingest", "type-mismatch", "aggregate",
                  f"class:{requested}->{resolved}"],
     }
