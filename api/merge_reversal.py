@@ -28,7 +28,17 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-REVERSAL_SCHEMA = 1
+REVERSAL_SCHEMA = 2
+
+# Schema 1 = merge-only capture (the 57 rows written 2026-09-02).
+# Schema 2 adds the optional "retype" block: /entities/retype performs a merge
+# whose survivor may not have existed beforehand, so an undo has to do more than
+# repoint rows back -- see _apply_retype_reversal.
+#
+# Both are still applied. Bumping REVERSAL_SCHEMA alone would have made unmerge()
+# refuse every one of the 57 existing captures, turning a widening change into a
+# silent loss of the reversibility it was meant to extend.
+_SUPPORTED_SCHEMAS = (1, 2)
 
 # The set of columns a merge repoints is DERIVED from the merge's own list, not
 # restated here. An earlier version of this module duplicated a partial copy (17
@@ -39,6 +49,14 @@ REVERSAL_SCHEMA = 1
 #
 # The three collision-prone tables are handled separately by the merge (rewire-
 # then-dedupe) and are appended here explicitly.
+def _n(result: Optional[str]) -> int:
+    """Row count from an asyncpg status tag ('UPDATE 3' -> 3, 'DELETE 1' -> 1)."""
+    try:
+        return int(result.split()[-1]) if result else 0
+    except (ValueError, IndexError, AttributeError):
+        return 0
+
+
 def _ref_cols() -> List[tuple]:
     from api.routers.admin_router import _PLAIN_REF_COLS
 
@@ -235,14 +253,45 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
     rev = row["reversal"]
     if isinstance(rev, str):
         rev = json.loads(rev)
-    if rev.get("schema") != REVERSAL_SCHEMA:
+    if rev.get("schema") not in _SUPPORTED_SCHEMAS:
         raise ValueError(
-            f"merge {merge_log_id} reversal schema {rev.get('schema')} != "
-            f"{REVERSAL_SCHEMA}; refusing to apply an undo written by different code"
+            f"merge {merge_log_id} reversal schema {rev.get('schema')} not in "
+            f"{_SUPPORTED_SCHEMAS}; refusing to apply an undo written by different code"
         )
 
     survivor, loser = row["survivor_uri"], row["loser_uri"]
     restored: Dict[str, int] = {}
+    retype = rev.get("retype") or {}
+
+    # An in-place retype ('person' -> 'Person') changes the type label without
+    # changing the deterministic URI, so no merge happened: nothing was rewired
+    # and the row was never tombstoned. Running the merge-undo below would fail
+    # at the "un-tombstone exactly 1 loser" assertion, which is why this returns
+    # early rather than falling through.
+    if retype.get("branch") == "in_place":
+        n = _n(await conn.execute(
+            "UPDATE entity_registry SET entity_type = $1, phonetic_code = $2 "
+            "WHERE fuseki_uri = $3 AND entity_type = $4",
+            retype["from"], retype.get("prev_phonetic_code"), survivor, retype["to"],
+        ))
+        if n != 1:
+            raise ValueError(
+                f"merge {merge_log_id}: in-place retype undo expected to restore exactly "
+                f"1 row to {retype['from']!r}, affected {n}. The type has changed again "
+                f"since. Rolling back."
+            )
+        restored["entity_type_restored"] = n
+        restored["entity_rid_mappings_type_restored"] = _n(await conn.execute(
+            "UPDATE entity_rid_mappings SET entity_type = $1 WHERE canonical_uri = $2",
+            retype["from"], survivor,
+        ))
+        await conn.execute(
+            "UPDATE entity_merge_log SET reverted_at = NOW() WHERE id = $1", merge_log_id
+        )
+        logger.info("unmerge %s: in-place retype %s -> %s restored on %s",
+                    merge_log_id, retype["to"], retype["from"], survivor)
+        return {"merge_log_id": merge_log_id, "loser": loser, "survivor": survivor,
+                "restored": restored}
 
     # 1. Repoint exactly the captured rows back to the loser. The `= survivor`
     #    guard means a row someone has since moved elsewhere is left alone
@@ -292,6 +341,74 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
             f"affected {restored['loser_restored']}. The loser may have been merged "
             f"onward into a third entity. Rolling back."
         )
+
+    # 4. Retype-specific restoration. A retype is a merge whose survivor URI
+    #    encodes the NEW type, so undoing the rewiring is necessary but not
+    #    sufficient: the survivor row itself may have been created (or
+    #    resurrected) by the retype, and entity_rid_mappings carries a type
+    #    column that _do_merge does not touch.
+    if retype:
+        restored["entity_rid_mappings_type_restored"] = _n(await conn.execute(
+            "UPDATE entity_rid_mappings SET entity_type = $1 WHERE canonical_uri = $2",
+            retype["from"], loser,
+        ))
+
+        # koi_rid / wallet_address carry UNIQUE partial indexes, so the mint
+        # branch MOVED them off the source row. Move them back before the
+        # survivor is deleted, or the unique values are destroyed with it.
+        if retype.get("moved_koi_rid") is not None or retype.get("moved_wallet") is not None:
+            await conn.execute(
+                "UPDATE entity_registry SET koi_rid = NULL, wallet_address = NULL "
+                "WHERE fuseki_uri = $1", survivor)
+            restored["identifiers_moved_back"] = _n(await conn.execute(
+                "UPDATE entity_registry SET koi_rid = $1, wallet_address = $2 "
+                "WHERE fuseki_uri = $3",
+                retype.get("moved_koi_rid"), retype.get("moved_wallet"), loser))
+
+        if retype.get("survivor_minted"):
+            # THE reason this branch exists. _do_retype INSERTs a new-typed row
+            # copying entity_text, normalized_text and both embeddings. Restoring
+            # the loser without deleting it leaves TWO live rows sharing a
+            # normalized_text, both embedded, both competing in exact, fuzzy and
+            # ANN resolution -- manufacturing the duplicate identity a retype
+            # exists to remove, while reporting a successful undo.
+            leftover = await conn.fetchval(
+                "SELECT count(*) FROM entity_registry WHERE merged_into = $1", survivor)
+            if leftover:
+                raise ValueError(
+                    f"merge {merge_log_id}: refusing to delete minted survivor "
+                    f"{survivor} -- {leftover} row(s) are still merged into it. "
+                    f"Unmerge those first."
+                )
+            n_del = _n(await conn.execute(
+                "DELETE FROM entity_registry WHERE fuseki_uri = $1", survivor))
+            if n_del != 1:
+                raise ValueError(
+                    f"merge {merge_log_id}: expected to delete exactly 1 minted "
+                    f"survivor row ({survivor}), deleted {n_del}. Rolling back."
+                )
+            restored["minted_survivor_deleted"] = n_del
+
+        elif retype.get("survivor_resurrected"):
+            # The survivor URI was held by a TOMBSTONE that _do_retype revived.
+            # Put it back the way it was, or the undo leaves a row live that was
+            # tombstoned before the retype ran.
+            # merged_at is bound through ::text::timestamptz because the payload
+            # was serialized with json.dumps(default=str), so it comes back as a
+            # string; asyncpg binds by inferred type and would reject a str for a
+            # timestamptz parameter.
+            restored["survivor_re_tombstoned"] = _n(await conn.execute(
+                "UPDATE entity_registry SET merged_into = $1, merged_at = $2::text::timestamptz, "
+                "merged_by = $3, entity_type = $4, phonetic_code = $5 "
+                "WHERE fuseki_uri = $6",
+                retype.get("resurrected_merged_into"),
+                (str(retype["resurrected_merged_at"])
+                 if retype.get("resurrected_merged_at") is not None else None),
+                retype.get("resurrected_merged_by"),
+                retype.get("resurrected_entity_type"),
+                retype.get("resurrected_phonetic_code"),
+                survivor,
+            ))
 
     await conn.execute(
         "UPDATE entity_merge_log SET reverted_at = NOW() WHERE id = $1", merge_log_id

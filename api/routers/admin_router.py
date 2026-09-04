@@ -59,7 +59,9 @@ from pydantic import BaseModel, Field
 
 from api.auth_deps import make_service_token_auth
 from api.resolution_primitives import normalize_alias_list
-from api.merge_reversal import capture_reversal, unmerge, persona_merge_hazard
+from api.merge_reversal import (
+    REVERSAL_SCHEMA, capture_reversal, unmerge, persona_merge_hazard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -475,7 +477,16 @@ def create_router(pool) -> APIRouter:
         case/prefix), we update the type in place.
 
         Assumes validation already passed (row exists, not tombstoned, new_type
-        canonical + != old_type). Returns ``(new_uri, merged_into_existing, rewired)``.
+        canonical + != old_type). Returns
+        ``(new_uri, merged_into_existing, rewired, reversal)``.
+
+        The 4th element is the undo payload, and it is built here rather than in
+        ``_do_merge`` because three of the four branches do something _do_merge
+        cannot see: the in-place branch performs no merge at all, the mint branch
+        CREATES the survivor (so an undo must delete it), and the resurrection
+        branch revives a tombstone (so an undo must re-tombstone it). Wiring the
+        capture into _do_merge instead would silently miss the in-place branch
+        and would still leave the mint branch's orphan behind.
         """
         # Deferred imports: generate_entity_uri lives in personal_ingest_api,
         # which imports this module (circular) — import inside the function body.
@@ -485,7 +496,7 @@ def create_router(pool) -> APIRouter:
         from api.entity_schema import get_schema_for_type
 
         src = await conn.fetchrow(
-            "SELECT entity_text, normalized_text, koi_rid, wallet_address "
+            "SELECT entity_text, normalized_text, koi_rid, wallet_address, phonetic_code "
             "FROM entity_registry WHERE fuseki_uri = $1", old_uri)
         entity_text = src["entity_text"]
         normalized = src["normalized_text"]
@@ -515,15 +526,48 @@ def create_router(pool) -> APIRouter:
                 "entity_rid_mappings_type_updated": n_rid,
                 "retype": {"from": old_type, "to": new_type},
             }
-            return old_uri, False, rewired
+            # No merge occurred, so there are no rows to repoint and no tombstone
+            # to lift -- but the type change still has to be undoable, and
+            # unmerge() branches on this to skip the merge-undo entirely.
+            reversal = {
+                "schema": REVERSAL_SCHEMA,
+                "loser": old_uri,
+                "survivor": old_uri,
+                "refs": {},
+                "aliases_added": [],
+                "retype": {
+                    "branch": "in_place",
+                    "from": old_type,
+                    "to": new_type,
+                    "prev_phonetic_code": src["phonetic_code"],
+                },
+            }
+            return old_uri, False, rewired, reversal
 
+        # merged_at/merged_by/entity_type/phonetic_code are read for the
+        # resurrection branch below: reviving a tombstone is only undoable if the
+        # state being overwritten was recorded first.
         twin = await conn.fetchrow(
-            "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1", new_uri)
+            "SELECT merged_into, merged_at, merged_by, entity_type, phonetic_code "
+            "FROM entity_registry WHERE fuseki_uri = $1", new_uri)
+
+        retype_block: Dict[str, Any] = {
+            "branch": None,
+            "from": old_type,
+            "to": new_type,
+            "survivor_minted": False,
+            "survivor_resurrected": False,
+            "moved_koi_rid": None,
+            "moved_wallet": None,
+        }
+        reversal: Dict[str, Any] = {}
 
         merged_into_existing = False
         if twin is not None and twin["merged_into"] is None:
             # A live entity already occupies the new-typed URI — merge into it.
             merged_into_existing = True
+            retype_block["branch"] = "live_twin"
+            reversal = await capture_reversal(conn, loser=old_uri, survivor=new_uri)
             rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
         elif twin is not None:
             # A TOMBSTONED row occupies the new-typed URI. The old code fell
@@ -562,6 +606,15 @@ def create_router(pool) -> APIRouter:
                     ),
                 )
 
+            retype_block.update({
+                "branch": "resurrected_tombstone",
+                "survivor_resurrected": True,
+                "resurrected_merged_into": twin["merged_into"],
+                "resurrected_merged_at": twin["merged_at"],
+                "resurrected_merged_by": twin["merged_by"],
+                "resurrected_entity_type": twin["entity_type"],
+                "resurrected_phonetic_code": twin["phonetic_code"],
+            })
             await conn.execute(
                 "UPDATE entity_registry "
                 "SET merged_into = NULL, merged_at = NULL, merged_by = NULL, "
@@ -569,6 +622,7 @@ def create_router(pool) -> APIRouter:
                 "WHERE fuseki_uri = $3",
                 new_type, phonetic_code, new_uri)
             merged_into_existing = True
+            reversal = await capture_reversal(conn, loser=old_uri, survivor=new_uri)
             rewired = await _do_merge(
                 conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
             rewired["resurrected_tombstone"] = 1
@@ -598,6 +652,15 @@ def create_router(pool) -> APIRouter:
                        description, embedding_3072, 'manual'
                 FROM entity_registry WHERE fuseki_uri = $6
             """, new_uri, new_type, phonetic_code, moved_wallet, moved_koi_rid, old_uri)
+            retype_block.update({
+                "branch": "mint",
+                "survivor_minted": True,
+                "moved_koi_rid": moved_koi_rid,
+                "moved_wallet": moved_wallet,
+            })
+            # Captured AFTER the INSERT (the survivor must exist to read its
+            # aliases) but BEFORE _do_merge rewires anything.
+            reversal = await capture_reversal(conn, loser=old_uri, survivor=new_uri)
             rewired = await _do_merge(conn, survivor=new_uri, loser=old_uri, merged_by=retyped_by)
 
         # _do_merge rewrites entity_rid_mappings.canonical_uri old->new but NOT
@@ -607,7 +670,8 @@ def create_router(pool) -> APIRouter:
             new_type, new_uri))
         rewired["entity_rid_mappings_type_updated"] = n_rid
         rewired["retype"] = {"from": old_type, "to": new_type}
-        return new_uri, merged_into_existing, rewired
+        reversal["retype"] = retype_block
+        return new_uri, merged_into_existing, rewired, reversal
 
     def _total(rewired: Dict[str, Any]) -> int:
         total = 0
@@ -829,17 +893,23 @@ def create_router(pool) -> APIRouter:
             tx = conn.transaction()
             await tx.start()
             try:
-                new_uri, merged_into_existing, rewired = await _do_retype(
+                new_uri, merged_into_existing, rewired, reversal = await _do_retype(
                     conn, old_uri, old_type, canon_new_type, retyped_by)
 
                 merge_log_id: Optional[int] = None
                 if not body.dry_run:
+                    # reversal is persisted here, not inside _do_merge: a retype
+                    # needs to record things _do_merge cannot know (whether the
+                    # survivor was minted, what type the rid mappings held). The
+                    # first 142 retypes wrote no reversal at all and are
+                    # permanently irreversible.
                     merge_log_id = await conn.fetchval("""
                         INSERT INTO entity_merge_log
-                            (survivor_uri, loser_uri, rewired, merged_by)
-                        VALUES ($1, $2, $3::jsonb, $4)
+                            (survivor_uri, loser_uri, rewired, merged_by, reversal)
+                        VALUES ($1, $2, $3::jsonb, $4, $5::jsonb)
                         RETURNING id
-                    """, new_uri, old_uri, json.dumps(rewired), retyped_by)
+                    """, new_uri, old_uri, json.dumps(rewired), retyped_by,
+                        json.dumps(reversal, default=str))
 
                 if body.dry_run:
                     await tx.rollback()

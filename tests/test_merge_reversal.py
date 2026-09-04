@@ -275,3 +275,151 @@ async def test_non_persona_is_unaffected(conn):
         "VALUES ($1,'Plain Org','Organization','plain org') "
         "ON CONFLICT (fuseki_uri) DO NOTHING", uri)
     assert await persona_merge_hazard(conn, uri) is None
+
+
+# ---------------------------------------------------------------------------
+# Retype round trips (2026-09-03)
+#
+# /entities/retype performed 142 merges with reversal IS NULL before this: it
+# calls _do_merge, but capture_reversal lived only in the /merge ROUTE, so the
+# sibling entry point to the same helper captured nothing.
+#
+# The assertion below is deliberately NOT "unmerge ran" or "the row does not
+# bind". Both pass on the mint branch while an orphan is created: _do_retype
+# INSERTs a new-typed row copying entity_text, normalized_text and both
+# embeddings, and unmerge() restores the loser without deleting it -- leaving
+# TWO live rows sharing a normalized_text, both embedded, both competing in
+# exact, fuzzy and ANN resolution. So the terminal state is what is asserted:
+# the live rows for that normalized_text must be EXACTLY what they were before.
+# ---------------------------------------------------------------------------
+
+def _do_retype_fn():
+    """The real nested _do_retype the /retype route calls, via its closure."""
+    from api.routers.admin_router import create_router
+
+    for route in create_router(None).routes:
+        if getattr(route, "path", "") == "/retype":
+            fn = route.endpoint
+            free = dict(zip(fn.__code__.co_freevars,
+                            [c.cell_contents for c in (fn.__closure__ or ())]))
+            assert "_do_retype" in free, f"closure has {sorted(free)}"
+            return free["_do_retype"]
+    raise AssertionError("/retype route not found — the wiring changed")
+
+
+async def _live(conn, normalized):
+    rows = await conn.fetch(
+        "SELECT fuseki_uri, entity_type FROM entity_registry "
+        "WHERE normalized_text = $1 AND merged_into IS NULL", normalized)
+    return sorted((r["fuseki_uri"], r["entity_type"]) for r in rows)
+
+
+async def _log(conn, new_uri, old_uri, rewired, reversal):
+    return await conn.fetchval(
+        "INSERT INTO entity_merge_log (survivor_uri, loser_uri, rewired, merged_by, "
+        "reversal) VALUES ($1,$2,$3::jsonb,'test',$4::jsonb) RETURNING id",
+        new_uri, old_uri, json.dumps(rewired), json.dumps(reversal, default=str))
+
+
+async def _mk_typed(conn, uri, text, etype):
+    await conn.execute(
+        "INSERT INTO entity_registry (fuseki_uri, entity_text, entity_type, "
+        "normalized_text) VALUES ($1,$2,$3,$4) ON CONFLICT (fuseki_uri) DO NOTHING",
+        uri, text, etype, text.lower())
+
+
+async def test_retype_mint_round_trip_leaves_no_orphan(conn):
+    """The branch that motivated this: the survivor is CREATED, so undo must delete it."""
+    from api.personal_ingest_api import generate_entity_uri
+
+    do_retype = _do_retype_fn()
+    text = "Zz Retype Mint Probe"
+    norm = text.lower()
+    old_uri = generate_entity_uri(text, "Concept")
+    await _mk_typed(conn, old_uri, text, "Concept")
+
+    before = await _live(conn, norm)
+    assert len(before) == 1
+
+    new_uri, _, rewired, reversal = await do_retype(
+        conn, old_uri, "Concept", "Person", "test")
+    assert new_uri != old_uri, "expected the mint branch, got an in-place retype"
+    assert reversal["retype"]["survivor_minted"] is True
+    assert len(await _live(conn, norm)) == 1, "retype itself should leave one live row"
+
+    await unmerge(conn, await _log(conn, new_uri, old_uri, rewired, reversal))
+
+    after = await _live(conn, norm)
+    assert after == before, (
+        f"retype/unmerge did not restore the graph: before={before} after={after}. "
+        f"Two live rows here means the minted survivor was left behind."
+    )
+    assert not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM entity_registry WHERE fuseki_uri=$1)", new_uri)
+
+
+async def test_retype_live_twin_round_trip(conn):
+    """Survivor pre-existed: undo must restore BOTH rows, and delete neither."""
+    from api.personal_ingest_api import generate_entity_uri
+
+    do_retype = _do_retype_fn()
+    text = "Zz Retype Twin Probe"
+    norm = text.lower()
+    old_uri = generate_entity_uri(text, "Concept")
+    twin_uri = generate_entity_uri(text, "Person")
+    await _mk_typed(conn, old_uri, text, "Concept")
+    await _mk_typed(conn, twin_uri, text, "Person")
+
+    before = await _live(conn, norm)
+    assert len(before) == 2
+
+    new_uri, merged_into_existing, rewired, reversal = await do_retype(
+        conn, old_uri, "Concept", "Person", "test")
+    assert merged_into_existing and new_uri == twin_uri
+    assert reversal["retype"]["survivor_minted"] is False
+    assert len(await _live(conn, norm)) == 1
+
+    await unmerge(conn, await _log(conn, new_uri, old_uri, rewired, reversal))
+
+    after = await _live(conn, norm)
+    assert after == before, (
+        f"before={before} after={after}. The pre-existing twin must survive the undo — "
+        f"deleting it would destroy a row the retype never created."
+    )
+
+
+async def test_retype_in_place_round_trip(conn):
+    """No merge happens, so the merge-undo path would fail its tombstone assertion."""
+    from api.personal_ingest_api import generate_entity_uri
+
+    do_retype = _do_retype_fn()
+    text = "Zz Retype Inplace Probe"
+    norm = text.lower()
+    # A row minted at the canonical Person URI but carrying a drifted type label
+    # — the shape of the 156 namespace-prefixed rows in the registry.
+    uri = generate_entity_uri(text, "Person")
+    await _mk_typed(conn, uri, text, "schema:Person")
+
+    before = await _live(conn, norm)
+
+    new_uri, _, rewired, reversal = await do_retype(
+        conn, uri, "schema:Person", "Person", "test")
+    assert new_uri == uri, "expected the in-place branch"
+    assert reversal["retype"]["branch"] == "in_place"
+    assert (await _live(conn, norm))[0][1] == "Person"
+
+    await unmerge(conn, await _log(conn, new_uri, uri, rewired, reversal))
+
+    after = await _live(conn, norm)
+    assert after == before, f"before={before} after={after}"
+
+
+async def test_schema_1_reversals_are_still_accepted(conn):
+    """Bumping REVERSAL_SCHEMA must not orphan the 57 captures written 2026-09-02."""
+    from api.merge_reversal import REVERSAL_SCHEMA, _SUPPORTED_SCHEMAS
+
+    assert REVERSAL_SCHEMA == 2
+    assert 1 in _SUPPORTED_SCHEMAS, (
+        "schema 1 dropped: every merge captured on 2026-09-02 would become "
+        "un-undoable, which is the opposite of what widening the capture is for"
+    )
