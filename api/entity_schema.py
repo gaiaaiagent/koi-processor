@@ -57,6 +57,12 @@ FOLDER_FALLBACKS = {
     'Risk': 'Risks',
     'Metric': 'Metrics',
     'SpecDoc': 'Specs',
+    # Self-model types (migration-era rows inserted 2026-09-03; code side added
+    # 2026-09-04 per operator decision E3). Not vault-authored: these are written
+    # by the meta-learning walker/enricher via the API, so the folder is a fallback
+    # for any that ever do get materialised as notes.
+    'Component': 'Components',
+    'Incident': 'Incidents',
 }
 
 # Global default stopwords (union with per-type)
@@ -360,6 +366,39 @@ DEFAULT_SCHEMAS = {
         phonetic_matching=False,
         similarity_threshold=0.90,
         semantic_threshold=0.92,
+        require_token_overlap=True,
+    ),
+    # --- Self-model types (operator decision E3, 2026-09-04) ---------------------
+    # Added so the code vocabulary matches allowed_entity_types, which the
+    # meta-learning lane inserted these into on 2026-09-03. Until now
+    # test_canonical_entity_types::test_the_code_defaults_and_the_database_allowlist_agree
+    # was RED on exactly these two, which mattered beyond tidiness: that test is the
+    # ONLY mechanism that would catch a mistaken type removal under the pending
+    # types-vs-facets decision, because nothing under api/ reads allowed_entity_types
+    # and no FK can reference it. A red tripwire is a disabled tripwire.
+    #
+    # Thresholds are deliberately TIGHTER than SpecDoc's 0.90. These names are
+    # machine-generated identifiers -- 'skill:slack-send', 'doc:skills/tasks/CLAUDE.md',
+    # 'incident::<scope>::<mechanism-slug>' -- so near-identical paths are COMMON and
+    # semantically distinct. Fuzzy-merging two of them silently fuses two real
+    # components, which is exactly the duplicate-identity failure the entity work
+    # exists to prevent.
+    'Component': EntityTypeConfig(
+        type_key='Component',
+        label='Component',
+        folder='Components',
+        phonetic_matching=False,
+        similarity_threshold=0.97,
+        semantic_threshold=0.97,
+        require_token_overlap=True,
+    ),
+    'Incident': EntityTypeConfig(
+        type_key='Incident',
+        label='Incident',
+        folder='Incidents',
+        phonetic_matching=False,
+        similarity_threshold=0.97,
+        semantic_threshold=0.97,
         require_token_overlap=True,
     ),
     # ── Ingest-pipeline types, admitted 2026-08-24 ──────────────────────
