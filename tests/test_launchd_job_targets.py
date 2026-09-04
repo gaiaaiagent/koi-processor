@@ -79,14 +79,6 @@ PLIST_GLOBS = (
 # the job points somewhere else — an exemption that survives a change of target is just a
 # hole. Empty is the goal state.
 KNOWN_DEV_CHECKOUT_EXCEPTIONS: dict[tuple[str, str], str] = {
-    ("com.darren.claude-session-sensor.plist", "projects/RegenAI/koi-sensors"): (
-        "Repointing is BLOCKED, not merely unscheduled: koi-sensors-runtime sits at "
-        "pre-fix 0b5584e and has no venv for this sensor, so moving the plist there today "
-        "would silently reinstate the empty-turn-pair chunk bug that commit f5c7f88 fixed "
-        "and re-block migration 116. The fix is live only because this job runs from the "
-        "dev checkout. Retire this entry once f5c7f88 is pushed, pulled into "
-        "koi-sensors-runtime, and that checkout has a working venv."
-    ),
     ("com.darren.sync-events-to-nuc.plist", "projects/RegenAI/koi-processor"): (
         "Different KIND of dependency, surfaced by widening the glob on 2026-09-03. This "
         "job does not EXECUTE code from the dev checkout — it runs `git log --since=yesterday` "
