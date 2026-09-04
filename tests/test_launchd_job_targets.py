@@ -363,17 +363,37 @@ def test_committed_plist_matches_the_installed_one(committed: Path) -> None:
     )
 
 
-def test_the_repo_copy_of_the_sensor_launcher_matches_the_installed_one() -> None:
-    """The launcher, not just the plist. The dev-checkout dependency lived in this file."""
-    committed = REPO_PLISTS / "repo-doc-sensors-start.sh"
-    installed = Path.home() / ".config" / "personal-koi" / "repo-doc-sensors-start.sh"
+# Operator scripts under ~/.config/personal-koi are machine-local: no repo, no test, no
+# review. That is precisely why defects survive in them. Each entry here has already cost
+# something:
+#   repo-doc-sensors-start.sh  held the hardcoded KOI_PROCESSOR path that pointed the doc
+#                              sensors at the shared dev checkout.
+#   restart.sh                 waited 30 iterations of `curl --max-time 4; sleep 1`. Against
+#                              a refused port curl fails in microseconds, so the budget was
+#                              ~30s of wall clock while startup under a concurrent pg_dump
+#                              takes 40-73s (measured three times on 2026-09-03). It printed
+#                              ERROR on restarts that had SUCCEEDED — a check that cries
+#                              wolf trains the operator to ignore it, so the next real
+#                              failure goes unbelieved.
+TRACKED_OPERATOR_SCRIPTS = ("repo-doc-sensors-start.sh", "restart.sh")
+
+
+@pytest.mark.parametrize("script_name", TRACKED_OPERATOR_SCRIPTS)
+def test_the_repo_copy_of_an_operator_script_matches_the_installed_one(script_name: str) -> None:
+    """The launcher, not just the plist. These defects lived in the scripts, not the plists."""
+    committed = REPO_PLISTS / script_name
+    installed = Path.home() / ".config" / "personal-koi" / script_name
     if not installed.exists():
-        pytest.skip("sensor launcher not installed on this machine")
-    assert committed.exists(), "the launcher is no longer committed; the repo copy vanished"
+        pytest.skip(f"{script_name} is not installed on this machine")
+    assert committed.exists(), (
+        f"{script_name} is no longer committed under scripts/; the repo copy vanished and "
+        f"the installed one is again the only copy, which is the state that let its last "
+        f"defect survive unreviewed."
+    )
     assert committed.read_text() == installed.read_text(), (
-        f"{committed} differs from the installed {installed}. The hardcoded KOI_PROCESSOR "
-        f"path that pointed the doc sensors at the shared dev checkout lived in this file, "
-        f"so a stale committed copy hides exactly the class of defect it was added to pin."
+        f"{committed} differs from the installed {installed}. A committed copy that has "
+        f"drifted is worse than none: it reads as documentation of what runs while "
+        f"something else runs."
     )
 
 
