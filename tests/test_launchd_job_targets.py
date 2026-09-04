@@ -62,7 +62,43 @@ STABLE_CHECKOUT_MARKERS = (
 # — including `com.personal.koi-repo-doc-sensors`, which was loading code from the shared
 # dev checkout while this suite reported green. A guard that enumerates a subset does not
 # fail; it passes, which is worse.
-PLIST_GLOBS = ("com.personal-koi.*.plist", "com.personal.koi*.plist")
+#
+# `com.darren.*` joined on 2026-09-03, for the third instance of the same shape. The two
+# namespaces above are the ones the KOI jobs were *named* under, but
+# com.darren.claude-session-sensor writes session_chunks — the table migration 116
+# constrains — and loads from projects/RegenAI/koi-sensors. It was invisible to this suite
+# while the suite reported green over 17 plists, in a file whose own comment says a guard
+# that enumerates a subset passes rather than fails. Enumerating it was the fix; the
+# violation it exposes is tracked below rather than silently un-enumerated.
+PLIST_GLOBS = (
+    "com.personal-koi.*.plist", "com.personal.koi*.plist", "com.darren.*.plist",
+)
+
+# Known, ACCEPTED dev-checkout dependencies: (plist name, marker) -> why, and what would
+# retire the entry. Deliberately keyed on the pair, so the exemption evaporates the moment
+# the job points somewhere else — an exemption that survives a change of target is just a
+# hole. Empty is the goal state.
+KNOWN_DEV_CHECKOUT_EXCEPTIONS: dict[tuple[str, str], str] = {
+    ("com.darren.claude-session-sensor.plist", "projects/RegenAI/koi-sensors"): (
+        "Repointing is BLOCKED, not merely unscheduled: koi-sensors-runtime sits at "
+        "pre-fix 0b5584e and has no venv for this sensor, so moving the plist there today "
+        "would silently reinstate the empty-turn-pair chunk bug that commit f5c7f88 fixed "
+        "and re-block migration 116. The fix is live only because this job runs from the "
+        "dev checkout. Retire this entry once f5c7f88 is pushed, pulled into "
+        "koi-sensors-runtime, and that checkout has a working venv."
+    ),
+    ("com.darren.sync-events-to-nuc.plist", "projects/RegenAI/koi-processor"): (
+        "Different KIND of dependency, surfaced by widening the glob on 2026-09-03. This "
+        "job does not EXECUTE code from the dev checkout — it runs `git log --since=yesterday` "
+        "against it to build the morning brief's commit summary "
+        "(darren-workflow/scripts/sync-events-to-nuc.sh:42). So it cannot die silently the "
+        "way calendar-export did; the failure mode is a REPORTING one — the brief summarises "
+        "whatever branch a session happened to leave checked out, so regen-prod commits can "
+        "be missed and feature-branch commits reported as landed. Real, but it belongs to "
+        "darren-workflow, not here. Retire this entry when that script reads "
+        "koi-processor-service instead."
+    ),
+}
 
 
 def installed_plists() -> list[Path]:
@@ -151,9 +187,12 @@ def test_no_job_loads_code_from_the_shared_dev_checkout(plist: Path) -> None:
     shared and expected to move; a deployable checkout is pinned and never switched.
     Depending on the first is the defect even while the file happens to be present.
     """
+    def _exempt(marker: str) -> bool:
+        return (plist.name, marker) in KNOWN_DEV_CHECKOUT_EXCEPTIONS
+
     offenders: list[str] = []
     for path in program_paths(plist) + working_directory(plist):
-        if any(marker in path for marker in DEV_CHECKOUT_MARKERS):
+        if any(marker in path for marker in DEV_CHECKOUT_MARKERS if not _exempt(marker)):
             offenders.append(f"plist names {path}")
     # One level down: a launcher that hardcodes the dev checkout is the same dependency,
     # and is invisible to any check that reads only the plist.
@@ -161,7 +200,7 @@ def test_no_job_loads_code_from_the_shared_dev_checkout(plist: Path) -> None:
         for line_no, line in enumerate(body.splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
-            if any(marker in line for marker in DEV_CHECKOUT_MARKERS):
+            if any(marker in line for marker in DEV_CHECKOUT_MARKERS if not _exempt(marker)):
                 offenders.append(f"{script}:{line_no} {line.strip()}")
     assert not offenders, (
         f"{plist.name} depends on the shared DEV checkout, which sessions branch-switch "
@@ -247,6 +286,40 @@ def test_both_job_namespaces_are_enumerated() -> None:
         "no com.personal.koi-* jobs enumerated. Three existed on 2026-08-23 "
         "(koi-processor, koi-knowledge-health, koi-repo-doc-sensors); if they are truly "
         "gone, delete this assertion deliberately rather than letting the glob shrink."
+    )
+    assert [n for n in names if n.startswith("com.darren.")], (
+        "no com.darren.* jobs enumerated. claude-session-sensor writes session_chunks and "
+        "loaded from the shared dev checkout while this suite was green over 17 plists; "
+        "if that namespace is truly empty now, delete this deliberately."
+    )
+
+
+def test_every_known_dev_checkout_exception_is_still_real() -> None:
+    """An exemption that outlives its violation is a hole, not a record.
+
+    KNOWN_DEV_CHECKOUT_EXCEPTIONS suppresses a specific (plist, marker) pair. If the job is
+    repointed or deleted and the entry stays, it silently pre-authorises the NEXT job that
+    lands on that name — which is the same subset-enumeration failure this file exists to
+    catch, one level up. So each entry must still correspond to an observable violation.
+    """
+    if not LAUNCH_AGENTS.is_dir():
+        pytest.skip("not a machine with LaunchAgents")
+    installed = {p.name: p for p in installed_plists()}
+    stale: list[str] = []
+    for (name, marker) in KNOWN_DEV_CHECKOUT_EXCEPTIONS:
+        plist = installed.get(name)
+        if plist is None:
+            stale.append(f"{name}: no longer installed")
+            continue
+        haystack = program_paths(plist) + working_directory(plist) + [
+            line for _, body in launched_script_bodies(plist)
+            for line in body.splitlines()
+        ]
+        if not any(marker in h for h in haystack):
+            stale.append(f"{name}: no longer references {marker}")
+    assert not stale, (
+        "these exemptions no longer describe a real violation and must be DELETED:\n  "
+        + "\n  ".join(stale)
     )
 
 
