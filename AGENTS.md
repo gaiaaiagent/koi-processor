@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-02 22:50 PDT
+**Updated:** 2026-09-04 16:10 PDT
 
-**Current status:** Tree clean on `regen-prod`, **12 commits ahead of origin (unpushed)**. Phase 0 complete, Phase 1 substantially landed: backup restore-verified, `unmerge` live and proven on 57 real merges, `entity_non_match` enforcing at six resolver tiers, credential + persona guards shipped, `:8351` LAN hole closed and A/B-verified.
+**Current status:** `regen-prod` @ `dcda7f7`, published, 0 ahead / 0 behind, tree clean, 120 passed / 4 skipped. Backup armed and proven unattended; `/entities/retype` now reversible (142 prior merges are not); flood fix live.
 
-**Next:** 1) Push the 12 commits (operator-present gate). 2) Deploy the two parked sensor fixes to `koi-sensors-runtime` — **migration 116 is blocked on the chunker one**; applying it first breaks session ingestion. 3) NUC cutover memo refreshed; execution parked pending operator go.
+**Next:** 1) MCP supply chain — `personal-koi-mcp` has Dependabot DISABLED and `axios 1.12.2` executing in 11 processes; lockfile-only (task 9387). 2) Two-node problem — `deploy.sh` rsyncs the shared DEV checkout, NUC migrations are manual, drift-sweep is row-count-only. 3) Vocabulary decision (9315/9317, gates migration 113) — operator-only, and not to be facilitated by a session that authored the evidence.
 
-**Watch:** Apply migrations to BOTH `personal_koi` and `personal_koi_test` — `conftest.py:41` rewrites `POSTGRES_URL`; applying 115 only to the live DB left 19 tests red. 116 is written and deliberately unapplied. The Organization→Person experiment does NOT work: zero email-sourced, dormant since before the guard existed.
+**Watch:** Route presence does NOT prove module vintage — compare `ps -o lstart` to the **mtime** of the newest loaded source, not commit time. Before deploying, verify reachability: `git merge-base --is-ancestor <sha> origin/<branch>`. `predicate_raw` is satisfiable by construction, not evidence. Never `git clean -fd` in `koi-processor-runtime`.
 
-**Verification:** Focused suite 3 failed / 72 passed / 2 skipped; the 3 are pre-existing `401 != 503` auth failures, proven by stashing. `git diff --check` clean. No canon validator in this repo.
+**Verification:** 120 passed / 4 skipped; every fix proven by a positive control actually run. No canon validator here.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
