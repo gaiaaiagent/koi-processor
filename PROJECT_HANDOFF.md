@@ -1,6 +1,6 @@
 # Project handoff
 
-**Updated:** 2026-09-04 19:50 PDT
+**Updated:** 2026-09-05 01:15 PDT
 **Session:** Claude Code · a0f88bbf · MCP supply chain + the two-node written statement (with `1e1f2abb` in parallel)
 **Status:** `regen-prod` @ `eb4345a`, **published, 0 ahead / 0 behind**, tree clean, 114 passed / 2 skipped in the launchd suite. **Nothing is half-applied here.** One thing is deliberately unpublished and is the single open action: `personal-koi-mcp` @ `409fe9d` (axios lockfile) is 2 ahead of its origin — see Next steps #1.
 
