@@ -14,9 +14,15 @@ follows is the positive statement that correction implied but did not write down
 
 `deploy.sh` moves **files from a checkout the laptop does not serve** to a NUC whose Postgres
 schema is mutated **entirely by hand**; the only automated cross-host check is a weekly 4-table
-row-count sweep whose last OK verdict was 2026-05-17 and which reports into a log nobody gates on, and it is
-structurally incapable of seeing either the 5 phantom migration-ledger rows or the 12 vocabulary
-rows that exist on the laptop and not on the NUC.
+row-count sweep whose last OK verdict was 2026-05-17 and which reports into a log nobody gates on,
+and it is structurally incapable of seeing either the 5 phantom migration-ledger rows or the 12
+vocabulary rows that exist on the laptop and not on the NUC. (A second monitor, `soak-check.sh`,
+runs every 2h and *spans* both hosts, but each half reconciles one node against its own disk — it
+never compares the two to each other. §8 counts both as "cross-host monitors"; this sentence counts
+only the one that actually compares them.)
+
+**And as of 2026-09-04 the koi-processor rsync leg is not running at all** — see §2a. The NUC's
+frozen tree is a consequence, not a coincidence.
 
 ---
 
@@ -31,6 +37,28 @@ repository metadata directory:
 | `~/projects/dobby/` | `:/home/dobby/dobby/` | yes |
 | `~/projects/personal-koi-mcp/` | `:/home/dobby/personal-koi-mcp/` + remote `npm install --production` | yes |
 | `~/projects/RegenAI/koi-processor/` | `:projects/RegenAI/koi-processor/` | yes |
+
+### 2a. ⚠ The koi-processor leg is currently BLOCKED, and in practice SKIPPED
+
+The first table row is aspirational today. `deploy.sh` runs a blast-radius guard before syncing
+koi-processor: it does the rsync as a dry run, counts deletions, and aborts if the count exceeds
+`KOI_DELETE_LIMIT` (default **5**). Measured 2026-09-04, that dry run reports **158 deletions**, so
+the guard exits 1 and *nothing* is synced or restarted.
+
+The script names its own workaround, and it is the one that gets used:
+
+```
+SKIP_KOI_SYNC=1 bash scripts/deploy.sh
+```
+
+Under `SKIP_KOI_SYNC=1` the dobby rsync, the personal-koi-mcp rsync + remote `npm install
+--production`, and **both** `systemctl restart`s still run — only the NUC's koi-processor tree is
+left untouched.
+
+**So the honest statement is stronger than "the deploy source is a moving dev checkout": right now
+koi-processor code does not reach the NUC by `deploy.sh` at all.** That is why the NUC's tree is
+frozen at migration 107 / 2026-07-14 and why someone had to hand-commit its live state on
+2026-08-31. Any plan that assumes `deploy.sh` will carry a fix to the NUC is wrong twice over.
 
 It also pushes **Claude Code OAuth credentials** read from the macOS Keychain to
 `~/.claude/.credentials.json`, then runs `sudo systemctl restart dobby-koi-processor` and
@@ -116,8 +144,19 @@ plus 3 documentation files. The runtime clone's `entity_schema.py` contains **0*
 
 **But it is inert for every scheduled job.** `DEFAULT_SCHEMAS` is consumed by only
 `api/llm_enricher.py`, `api/routers/knowledge_router.py`, `entity_schema.py` itself and one test.
-None of the clone's six LaunchAgent entrypoints imports any of them, and that clone serves no API
+None of the clone's **nine** LaunchAgent jobs reaches any of them, and that clone serves no API
 surface.
+
+⚠ **Nine, not six** — corrected 2026-09-04 after an audit caught the wrong denominator. Six name an
+in-clone script directly in `ProgramArguments` (`calendar-export`, `embedding-repair`,
+`research-author-sensor`, `substack-deep-extract`, `substack-gmail-bridge`, `substack-sensor`).
+**Three more reach clone Python through wrappers** in `~/.config/personal-koi/` while setting
+`WorkingDirectory` to the clone: `vault-conflict-sweep`, `knowledge-health` and `repo-doc-sensors`
+(the last two run `knowledge_health.py` and `doc_scanner.py`, which do real graph writes). This
+repo's own `CLAUDE.md` already said "nine jobs execute from its untracked `venv/`"; enumerating by
+`ProgramArguments` alone silently skipped three. The inertness result is unchanged — all nine come
+back clean — but anyone re-testing "is the clone safe to leave behind?" against six entrypoints
+would miss a third of the surface.
 
 State it that way. *"9 commits behind and nothing checks it"* reads as an active hazard and is
 not one — that is the *populated-is-not-conformant* shape, an unbounded claim standing in for a
@@ -151,7 +190,14 @@ proves nothing about whether the same SQL ran. What does prove hand-application 
 apply times between the two machines — **+11h32m, +14s, +47m27s** — three different gaps, so
 three separate ad-hoc events, not one pipeline.
 
-Contrast `101_entity_merge` and the `personal:08x` rows, which carry real sha256 checksums.
+Contrast `101_entity_merge`, `personal:086_deep_extraction_schema` and the `personal:10x` rows,
+which carry real sha256 content hashes. ⚠ Corrected 2026-09-04: `personal:079`–`082` do **not** —
+they all carry the hand-typed label `v1_protocol_layer`, exactly the pattern this section argues
+against (NUC `personal:08%` = 1 hashed of 4; laptop = 0 of 3). Sharper still, two of the five
+phantom rows — `personal:106` and `personal:107` — *do* carry real sha256 hashes, and those hashes
+match the **laptop's** copies of the corresponding `.sql` files. The phantom-row problem is
+therefore not "no checksum"; it is that a correct checksum can be recorded on a machine where the
+file it hashes has never existed.
 
 ### 6c. The ledgers cannot be diffed by raw id
 
@@ -260,14 +306,29 @@ done casually — it would mark a 55% gap as OK by fiat.
 
 ### 8b. `soak-check.sh` — laptop, every 2 hours
 
-A laptop crontab entry runs `scripts/federation/soak-check.sh` every 2 hours. Its **local** half
-has returned `?` for every field since **2026-08-26T05:04:46Z** — 106 of 114 entries in
-`docs/soak-results/vault-sync-soak.jsonl` — because `VAULT_SYNC_ENABLED=false` makes
-`GET /koi-net/vault-sync/status` return `{enabled:false, reason:...}`, and none of the keys the
-script reads exist in that payload.
+A laptop crontab entry runs `scripts/federation/soak-check.sh` every 2 hours. **It has never
+printed `Status: OK`** — 87 DRIFT and 0 OK across the retained stdout in `/tmp/soak-cron.log`.
 
-It therefore prints `Status: DRIFT DETECTED — investigate before proceeding` on **every run**,
-exits 0, and appends to an untracked log. Tracked as task
+⚠ **Corrected 2026-09-04.** An earlier draft of this section said "`?` for every field since
+2026-08-26T05:04:46Z — 106 of 114 entries." Both operands were wrong and it collapsed two
+distinct phases. `2026-08-26T05:04:46Z` is the **last healthy run**, not the first broken one —
+a boundary timestamp used as the first member of the set it actually terminates. Measured over
+`docs/soak-results/vault-sync-soak.jsonl` (115 entries, 2026-08-25T05:00:04Z → 2026-09-05T01:00:04Z):
+
+| phase | window | entries | what the alarm meant |
+|---|---|---|---|
+| **1 — informative** | 2026-08-25T05:00:04Z → **2026-08-26T05:04:46Z** | 8 with a real local reading | DRIFT was **true**: local reconcile drift 13, rising to **1038** |
+| **2 — uninformative** | **2026-08-26T07:00:03Z** → now | **105 of 115** with all five local fields `?` | the local endpoint cannot be read at all |
+
+Phase 2's cause: `VAULT_SYNC_ENABLED=false` makes `GET /koi-net/vault-sync/status` return
+`{enabled:false, reason:...}` and the reconcile POST return 400, so none of the keys the script
+reads exist and `LOCAL_DRIFT` can never equal `"0"` — the OK branch is unreachable by construction.
+
+**The part worth keeping:** phase 1 was a real signal. A local reconcile drift of **1038** was
+reported and then buried under three months of identical output. That is the actual cost of a
+saturated alarm — not the noise, but the true reading nobody could distinguish from it.
+
+It exits 0 regardless and appends to an untracked log. Tracked as task
 `koi-soak-check-false-drift-alarm`.
 
 ### 8c. What neither can see

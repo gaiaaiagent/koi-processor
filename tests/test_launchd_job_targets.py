@@ -367,7 +367,13 @@ def test_committed_plist_matches_the_installed_one(committed: Path) -> None:
 #                              ERROR on restarts that had SUCCEEDED — a check that cries
 #                              wolf trains the operator to ignore it, so the next real
 #                              failure goes unbelieved.
-TRACKED_OPERATOR_SCRIPTS = ("repo-doc-sensors-start.sh", "restart.sh")
+#   enumerate-mcp-processes.sh  produced at the personal-koi-mcp restart gate. Its first
+#                              version reported 7 in the table and 9 in the count because it
+#                              took two `ps` snapshots; a gate artifact that disagrees with
+#                              itself is worse than none. Committed so the next edit is
+#                              reviewable rather than machine-local.
+TRACKED_OPERATOR_SCRIPTS = ("repo-doc-sensors-start.sh", "restart.sh",
+                           "enumerate-mcp-processes.sh")
 
 
 @pytest.mark.parametrize("script_name", TRACKED_OPERATOR_SCRIPTS)

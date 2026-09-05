@@ -142,9 +142,11 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > were `INSERT`ed directly, two of them on 2026-09-03. `allowed_facets` is empty on both sides
 > but **not inert**: `tr_entity_facets_registered` is ENABLED on both nodes, so every non-empty
 > facet write is rejected today. Both cross-host monitors are saturated: `dobby-drift-sweep` has
-> reported DRIFT on every reachable run since June (against a baseline last taken 2026-05-13)
-> straight into the Telegram morning brief, and `soak-check.sh` has cried DRIFT on 106 of 114
-> runs because it cannot measure its own local half.
+> reported DRIFT on **every reachable run since 2026-05-24** — its last OK was 2026-05-17 — against
+> a baseline last taken 2026-05-13, straight into the Telegram morning brief; and `soak-check.sh`
+> has **never** printed OK (87 DRIFT / 0 OK in retained stdout), with **105 of 115** logged runs
+> unable to read its own local half at all since 2026-08-26T07:00. Its first 8 runs reported a
+> *real* drift of 13→1038 that is now buried under three months of identical output.
 >
 > **EMBEDDING SELF-HEAL (2026-08-14).** `com.personal-koi.chunk-embedder` is **retired**
 > (plist kept as `.retired-20260814`). Its replacement is

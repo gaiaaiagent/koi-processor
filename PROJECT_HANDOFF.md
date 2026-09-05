@@ -47,10 +47,15 @@ All five share a shape: a plausible probe answering a different question than th
 Ordered **by kind, not by number** — #1 is a decision, the rest are execution. Running them in numeric order front-loads the one item that cannot be done by working harder.
 
 1. **MCP supply chain — EXECUTED 2026-09-04 (session `a0f88bbf`); one operator step left.**
-   Lockfile committed as `4c5da81` on `personal-koi-mcp` main (unpushed): `npm update axios
-   --package-lock-only` → axios **1.20.0**, form-data 4.0.4→**4.0.6** (HIGH), follow-redirects
-   1.15.11→**1.16.0**. `package.json` untouched. Before/after `npm audit` set diff: **30
-   advisories resolved, 0 introduced, 11 → 8 vulnerable packages**; +6 lock entries, 0 removals.
+   Lockfile committed as `409fe9d` on `personal-koi-mcp` main (unpushed): `npm update axios
+   --package-lock-only`. **Six** version changes, not the three first reported — axios
+   **1.20.0**, form-data 4.0.4→**4.0.6** (HIGH), follow-redirects 1.15.11→**1.16.0**,
+   **`proxy-from-env` 1.1.0→2.1.0 (SEMVER MAJOR)**, hasown 2.0.2→2.0.4, and a root-version
+   stale-lock resync. `package.json` untouched; +6 entries, 0 removals. The major is
+   **unavoidable** — axios declares `^2.1.0` at both 1.18.0 and 1.20.0 — and resolves no advisory,
+   so it is a carried cost that should be named rather than omitted (its 2.0.0 moved URL parsing
+   from `url.parse` to WHATWG `URL`; public API unchanged). Before/after `npm audit` set diff:
+   **30 advisories resolved, 0 introduced, 11 → 8 vulnerable packages**.
    **⛔ NOT LIVE** — `node_modules` still holds 1.12.2. Needs `npm install` + a restart of every
    running `dist/index.js`. Enumerate with `~/.config/personal-koi/enumerate-mcp-processes.sh`;
    the count is **volatile** (8→9→10→7→9 within an hour), so never carry a number.
@@ -72,8 +77,15 @@ Ordered **by kind, not by number** — #1 is a decision, the rest are execution.
    `security_events` scope, and batch PATCHes silently no-op unless `gh` gets `</dev/null`.
    Also filed: 9401 (graph_tool URL allowlist), 9402 (soak-check false alarm).
 2. **The two-node problem — written statement DONE; the monitor is gated on you.**
-   `docs/operations/two-node-topology.md` (commit `1d7cf67`, unpushed) is the measured statement
-   of what flows to the NUC and what does not, linked from the `DEPLOY TOPOLOGY` block.
+   `docs/operations/two-node-topology.md` (unpushed) is the measured statement of what flows to
+   the NUC and what does not, linked from the `DEPLOY TOPOLOGY` block.
+   **⚠ The headline finding, added after audit: `deploy.sh`'s koi-processor rsync leg is not
+   running at all.** Its blast-radius guard measures **158 deletions against a `KOI_DELETE_LIMIT`
+   of 5** and exits 1 before any rsync; the documented workaround, `SKIP_KOI_SYNC=1`, skips that
+   leg entirely while still running the dobby + personal-koi-mcp rsyncs and both `systemctl
+   restart`s. So koi-processor code does **not** reach the NUC by `deploy.sh` today — which is why
+   its tree is frozen at migration 107 / 2026-07-14 and why someone hand-committed its live state
+   on 2026-08-31. Any plan assuming `deploy.sh` will carry a fix there is wrong twice over.
    **New findings it carries:** the phantom ledger rows are **five, not three** —
    `personal:106_ingest_idempotency` and `personal:107_entity_closure` have the same defect, and
    the NUC holds *different* migrations at those numbers, so **the numbering space has forked**.
@@ -86,10 +98,12 @@ Ordered **by kind, not by number** — #1 is a decision, the rest are execution.
    `tr_entity_facets_registered` is ENABLED on both nodes, so every non-empty facet write is
    rejected today, symmetrically; that is a hard precondition on 9315's facet option.
    **Both cross-host monitors are saturated alarms:** `dobby-drift-sweep` has reported DRIFT on
-   every reachable run since late June (40.81/56.78/54.29/55.77%) against a baseline last taken
-   2026-05-13, straight into the **Telegram morning brief**, and was `WG_UNREACHABLE` for six
-   consecutive weeks; `soak-check.sh` has printed `DRIFT DETECTED` on **106 of 114 runs** because
-   it cannot measure its own local half (task 9402). Re-snapshotting `BASELINE_GAPS` is
+   every reachable run since **2026-05-24** — last OK 2026-05-17 — at 40.81/56.78/54.29/55.77%
+   against a baseline last taken 2026-05-13, straight into the **Telegram morning brief**, and was
+   `WG_UNREACHABLE` for six consecutive weeks (of its last 15 runs: 9 could not measure, 6 cried
+   DRIFT, 0 OK); `soak-check.sh` has **never** printed OK (87 DRIFT / 0 OK), with **105 of 115**
+   runs unable to read its local half since 2026-08-26T07:00 — though its first 8 runs reported a
+   *real* drift of 13→1038, now buried (task 9402). Re-snapshotting `BASELINE_GAPS` is
    deliberately **not** done — inbox task 2736 owns it, and it would mark a real 55% gap OK by fiat.
    **⛔ STILL GATED — the parity monitor was designed, not built.** It installs a recurring
    launchd job that SSHes to another host every 6h and writes tasks; design is in the approved
