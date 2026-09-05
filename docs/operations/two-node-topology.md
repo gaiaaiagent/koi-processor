@@ -85,9 +85,23 @@ grep -ci pg_dump deploy.sh          -> 0
 
 The only `migrat` substring in the entire file is inside a comment on line 111.
 
-**Consequence:** every NUC migration is hand-delivered and hand-applied, out of band. There is
-no scheduler for it — the NUC's full timer surface was enumerated (28 system timers, 4 user
-timers, no crontab for `dobby` or `root`, stock `/etc/crontab`) and contains no migration unit.
+**Consequence — corrected 2026-09-04, and the correction is time-bounded.** An earlier draft said
+"every NUC migration is hand-delivered and hand-applied." The second half is right; **the first is
+false**. The `.sql` *files* arrived by rsync: by ctime, **124 of 128 landed on 2026-06-24** and the
+last **4 on 2026-07-19**. Nothing has arrived since — which is exactly why the tree tops out at
+**107**, and why 111/114/115 could be *applied* there with no file to show for it.
+
+The accurate statement: **files flowed until 2026-07-19 and have not since; execution has always
+been manual.** There is no migration scheduler — the NUC's timer surface (28 system + 4 user
+timers, `systemctl --user` required for the latter, no crontab for `dobby` or `root`, stock
+`/etc/crontab`) contains no migration unit.
+
+*Method note, because it inverted the answer once.* mtime and ctime answer different questions
+here: `rsync -a` preserves the source **mtime**, so mtimes are *authoring* dates, while **ctime**
+is when the inode landed. Whole-second mtimes mark rsync-delivered files (128/128 of the
+migrations, with `api/*.py` as a matching control); sub-second means born on the box. A first pass
+at this test compared the nanosecond field against **ten** zeros when `stat -c %y` emits **nine**,
+so every file failed and the conclusion came out exactly backwards.
 
 ---
 
@@ -306,8 +320,21 @@ done casually — it would mark a 55% gap as OK by fiat.
 
 ### 8b. `soak-check.sh` — laptop, every 2 hours
 
-A laptop crontab entry runs `scripts/federation/soak-check.sh` every 2 hours. **It has never
-printed `Status: OK`** — 87 DRIFT and 0 OK across the retained stdout in `/tmp/soak-cron.log`.
+A laptop crontab entry runs `scripts/federation/soak-check.sh` every 2 hours.
+
+⚠ **Corrected: this monitor worked for six months and then went blind — it did not "never work."**
+An earlier draft said "it has never printed `Status: OK`", sourced from `/tmp/soak-cron.log`
+(87 DRIFT / 0 OK). That log only covers the current window. The durable log **jumped checkouts**,
+and the two halves are one continuous history:
+
+| copy | entries | OK verdicts | window |
+|---|---|---|---|
+| `~/projects/RegenAI/koi-processor/docs/soak-results/` | **1,349** | **592** | 2026-02-26T08:56:30Z → 2026-08-25T**03**:00:02Z |
+| `~/projects/koi-processor-service/docs/soak-results/` | 115 | **0** | 2026-08-25T**05**:00:04Z → now |
+
+Two hours apart — one cron interval. The breakage therefore has a **date**, 2026-08-25, and a
+cause: the crontab `cd`s to `koi-processor-service`, and the durable log path is
+`$PROJECT_DIR/docs/soak-results/`. "It never worked" would have hidden both.
 
 ⚠ **Corrected 2026-09-04.** An earlier draft of this section said "`?` for every field since
 2026-08-26T05:04:46Z — 106 of 114 entries." Both operands were wrong and it collapsed two
@@ -318,7 +345,7 @@ a boundary timestamp used as the first member of the set it actually terminates.
 | phase | window | entries | what the alarm meant |
 |---|---|---|---|
 | **1 — informative** | 2026-08-25T05:00:04Z → **2026-08-26T05:04:46Z** | 8 with a real local reading | DRIFT was **true**: local reconcile drift 13, rising to **1038** |
-| **2 — uninformative** | **2026-08-26T07:00:03Z** → now | **105 of 115** with all five local fields `?` | the local endpoint cannot be read at all |
+| **2 — uninformative** | **2026-08-26T07:00:03Z** → now | **107 of 115** blind on the status endpoint (**105** if `reconcile_drift`, a *different* endpoint, must also be `?`) | the local endpoint cannot be read at all |
 
 Phase 2's cause: `VAULT_SYNC_ENABLED=false` makes `GET /koi-net/vault-sync/status` return
 `{enabled:false, reason:...}` and the reconcile POST return 400, so none of the keys the script

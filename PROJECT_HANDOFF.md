@@ -101,9 +101,10 @@ Ordered **by kind, not by number** — #1 is a decision, the rest are execution.
    every reachable run since **2026-05-24** — last OK 2026-05-17 — at 40.81/56.78/54.29/55.77%
    against a baseline last taken 2026-05-13, straight into the **Telegram morning brief**, and was
    `WG_UNREACHABLE` for six consecutive weeks (of its last 15 runs: 9 could not measure, 6 cried
-   DRIFT, 0 OK); `soak-check.sh` has **never** printed OK (87 DRIFT / 0 OK), with **105 of 115**
-   runs unable to read its local half since 2026-08-26T07:00 — though its first 8 runs reported a
-   *real* drift of 13→1038, now buried (task 9402). Re-snapshotting `BASELINE_GAPS` is
+   DRIFT, 0 OK); `soak-check.sh` **worked for six months then went blind on 2026-08-25** when the
+   cron changed checkouts — the older log copy holds **1,349 entries / 592 OK**, the newer 115 / 0
+   OK, one cron interval apart — and has been blind on **107 of 115** runs since 2026-08-26T07:00,
+   after 8 sighted runs reporting a *real* drift of 13→1038 (task 9402). Re-snapshotting `BASELINE_GAPS` is
    deliberately **not** done — inbox task 2736 owns it, and it would mark a real 55% gap OK by fiat.
    **⛔ STILL GATED — the parity monitor was designed, not built.** It installs a recurring
    launchd job that SSHes to another host every 6h and writes tasks; design is in the approved

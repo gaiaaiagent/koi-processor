@@ -168,9 +168,11 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > facet write is rejected today. Both cross-host monitors are saturated: `dobby-drift-sweep` has
 > reported DRIFT on **every reachable run since 2026-05-24** — its last OK was 2026-05-17 — against
 > a baseline last taken 2026-05-13, straight into the Telegram morning brief; and `soak-check.sh`
-> has **never** printed OK (87 DRIFT / 0 OK in retained stdout), with **105 of 115** logged runs
-> unable to read its own local half at all since 2026-08-26T07:00. Its first 8 runs reported a
-> *real* drift of 13→1038 that is now buried under three months of identical output.
+> **worked for six months and then went blind on 2026-08-25**, when the cron changed checkouts and
+> the durable log jumped with it: the older copy under `RegenAI/koi-processor` holds **1,349
+> entries with 592 OK** (to 2026-08-25T03:00Z), the newer under `koi-processor-service` holds 115
+> with **0 OK** (from 05:00Z — one cron interval later). Since 2026-08-26T07:00 it has been blind
+> on **107 of 115** runs, and its last 8 sighted runs reported a *real* drift of 13→1038.
 >
 > **EMBEDDING SELF-HEAL (2026-08-14).** `com.personal-koi.chunk-embedder` is **retired**
 > (plist kept as `.retired-20260814`). Its replacement is
