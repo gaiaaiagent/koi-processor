@@ -1,8 +1,15 @@
 # Project handoff
 
-**Updated:** 2026-09-04 16:10 PDT
-**Session:** Claude Code · e1dd0df8-3f9d-4a99-8425-1502f553264c · vocabulary arc — backup armed, retype made reversible, five self-corrections
-**Status:** `regen-prod` @ `dcda7f7`, **published, 0 ahead / 0 behind**, tree clean, 120 passed / 4 skipped. Two sessions worked this repo today (`e1dd0df8` and `1e1f2abb`); both are wrapped and everything is on origin. Nothing is half-applied.
+**Updated:** 2026-09-04 19:50 PDT
+**Session:** Claude Code · a0f88bbf · MCP supply chain + the two-node written statement (with `1e1f2abb` in parallel)
+**Status:** `regen-prod` @ `eb4345a`, **published, 0 ahead / 0 behind**, tree clean, 114 passed / 2 skipped in the launchd suite. **Nothing is half-applied here.** One thing is deliberately unpublished and is the single open action: `personal-koi-mcp` @ `409fe9d` (axios lockfile) is 2 ahead of its origin — see Next steps #1.
+
+> **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
+> 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
+> answering a narrower question than the sentence built on it.* Two of my corrections were
+> themselves false. Do not "improve" `docs/operations/two-node-topology.md` from memory or from a
+> sibling file — re-run the reproduce commands it now carries. Proposed rule for the 09-06 cycle,
+> with the full evidence, is koi task `koi-reproduce-command-rule-for-state-claims`.
 
 > ## ⚠ START KOI SESSIONS IN THIS CHECKOUT
 >
@@ -22,13 +29,36 @@
 
 ## Completed this session
 
-- **The nightly backup had never been bootstrapped.** Plist written 2026-09-01, never loaded; newest dump was Aug 31 and hand-run — ~3 days unbacked on 27 GB. Now armed and proven **both ways**: a forced run (12.25 GB, `pg_restore --list` rc=0 over 1,181 TOC entries) and the first unattended `StartCalendarInterval` fire (03:15:04 → 04:09:06, 12.32 GB, verified, kept 3). ⚠ Retention **pruning** is still unexercised.
-- **`/entities/retype` had already made 142 irreversible merges** (`d06b038`). `capture_reversal` had exactly one call site — the `/merge` route — while `/retype` used the same `_do_merge` helper. Capture now lives in `_do_retype`, because three of its four branches do something `_do_merge` cannot see (in-place does no merge; **mint creates the survivor**; resurrect revives a tombstone). Undoing a mint previously left two live rows sharing a `normalized_text`, both embedded.
-- **The launchd guard enumerated a subset** (`4941b1b`, `f3e46b3`) — `com.darren.*` was invisible; widening it found two real violations, one reached only through a launched script.
-- **`restart.sh` reported ERROR on restarts that had succeeded** (`606e4aa`). 30 iterations of `curl --max-time 4; sleep 1` collapses to ~30s wall clock against a refused port, while startup under `pg_dump` takes 40–73s. Now a wall-clock deadline that distinguishes *failed to start* / *crash loop* / *alive but slow*.
-- **E3 shipped** (`4a9e17a`) — `Incident`/`Component` added to `DEFAULT_SCHEMAS`. The point was the tripwire: `test_canonical_entity_types` is the **only** mechanism that would catch a mistaken type removal under 9315, and it was red on exactly those two. Proven by deleting `Protocol` and watching it fire.
-- **Deploy chain executed**: 23 commits published, runtime clone pulled **twice** (the first pull deployed nothing — see Next steps #2 history), flood fix live, canary verified on log mtime + state file.
-- **Five of my own claims were overturned by measurement** and are corrected at every site — see *Corrections* below. That is the session's most reusable output.
+**Session `a0f88bbf`, 2026-09-04.** Scope was `PROJECT_HANDOFF` Next steps #1 and #2, cut to
+"Part 1 in full + the written statement" before starting. Six commits, all published.
+
+- **MCP supply chain.** `409fe9d` on `personal-koi-mcp` (lockfile only): axios 1.12.2→**1.20.0**,
+  form-data→**4.0.6** (HIGH), follow-redirects→**1.16.0**, plus the two undisclosed movers a later
+  audit caught — **`proxy-from-env` 1.1.0→2.1.0 (semver major)** and hasown. Before/after `npm
+  audit` set diff: **30 advisories resolved, 0 introduced, 11→8 vulnerable packages**. All **39
+  Dependabot alerts dismissed**; task 9323 done.
+- **The written statement.** `docs/operations/two-node-topology.md`, linked from `CLAUDE.md`.
+- **The launchd guard now asks "does the target still exist?" of EVERY installed job** (`eb4345a`),
+  after a fourth subset-enumeration instance. Two things it exposed: `com.darren.*` never matched
+  `com.darrenzal.*` (9 vs 24 plists, **zero overlap**), and **three installed plists are malformed
+  XML no parser will read** — two of them loaded at exit 0 from launchd's cache, so they work today
+  and **will not survive a reload**. Three registers, each with a staleness assertion; all controls
+  run and restored.
+- **Ten koi tasks** filed or updated, all dated.
+
+### What this session got wrong, and how it was caught
+
+Kept because it is the session's most reusable output. A 34-agent adversarial workflow raised 29
+findings, 22 survived refutation, and the parallel session `1e1f2abb` caught two more.
+
+| my claim | truth | the defective probe |
+|---|---|---|
+| "every NUC migration is hand-delivered" | files **did** flow by rsync — 124 of 128 landed 2026-06-24, last 4 on 2026-07-19 | compared the nanosecond field against **ten** zeros when `stat -c %y` emits **nine**, so all 128 "failed" and the answer inverted. **Came within one command of publishing a refutation of a correct claim.** |
+| "soak-check never printed OK" | it printed **592 OKs over six months**; the durable log **jumped checkouts** 2026-08-25 | read `/tmp/soak-cron.log`, which only covers the post-jump window — a subset stated as a universal |
+| "six LaunchAgent entrypoints" | **nine** — three reach the clone through wrappers | enumerated `ProgramArguments` only |
+| "`allowed_facets` is the obvious hole" | **0 rows on both sides** — but *not inert*: `tr_entity_facets_registered` is ENABLED on both, so every non-empty facet write is rejected today | — |
+| commit msg listed 3 version changes | **six**, one a semver major | — |
+| "dismissed all 39 alerts" | this session dismissed **29**; 10 predated it | — |
 
 ## Corrections made to this project's own record
 
@@ -44,79 +74,46 @@ All five share a shape: a plausible probe answering a different question than th
 
 ## Next steps
 
-Ordered **by kind, not by number** — #1 is a decision, the rest are execution. Running them in numeric order front-loads the one item that cannot be done by working harder.
+Ordered **by kind, not by number**. #1 is the only thing this session left undone; #2 and #4 are
+parked with reasons; #3 is unchanged and still wants a cold facilitator.
 
-1. **MCP supply chain — EXECUTED 2026-09-04 (session `a0f88bbf`); one operator step left.**
-   Lockfile committed as `409fe9d` on `personal-koi-mcp` main (unpushed): `npm update axios
-   --package-lock-only`. **Six** version changes, not the three first reported — axios
-   **1.20.0**, form-data 4.0.4→**4.0.6** (HIGH), follow-redirects 1.15.11→**1.16.0**,
-   **`proxy-from-env` 1.1.0→2.1.0 (SEMVER MAJOR)**, hasown 2.0.2→2.0.4, and a root-version
-   stale-lock resync. `package.json` untouched; +6 entries, 0 removals. The major is
-   **unavoidable** — axios declares `^2.1.0` at both 1.18.0 and 1.20.0 — and resolves no advisory,
-   so it is a carried cost that should be named rather than omitted (its 2.0.0 moved URL parsing
-   from `url.parse` to WHATWG `URL`; public API unchanged). Before/after `npm audit` set diff:
-   **30 advisories resolved, 0 introduced, 11 → 8 vulnerable packages**.
-   **⛔ NOT LIVE** — `node_modules` still holds 1.12.2. Needs `npm install` + a restart of every
-   running `dist/index.js`. Enumerate with `~/.config/personal-koi/enumerate-mcp-processes.sh`;
-   the count is **volatile** (8→9→10→7→9 within an hour), so never carry a number.
-   **Four figures in the original text were wrong:** 11 processes (it varies, 7 at last count);
-   "26 advisory ranges" was the koi-processor *alert* count, a different population (npm audit
-   says 28 for axios); the poll-URL fetch carries **no credentials** (bare global axios, no
-   interceptors — `open(authUrl)` above it is the sharper hole); and **1.18.0 is not reachable
-   by any lockfile-only operation** — `npm install axios@1.18.0` rewrites `^1.7.7` → `^1.18.0`.
-   **It was never an axios problem:** 11 vulnerable packages, 5 high. The headline is
-   `@modelcontextprotocol/sdk@1.20.0` — GHSA-345p-7cg4-v4c7, **cross-client data leak via shared
-   transport reuse**, with instances live across two different agent harnesses. Task 9399.
-   **The pm2 surface is now measured** (task 9400): `/opt/projects/koi-processor` has no manifest
-   and no `node_modules`; bun resolves *up* to `/opt/projects/node_modules` (installed
-   2025-10-16) holding express 5.1.0, body-parser 2.2.0, qs 6.14.0 and **path-to-regexp 8.3.0
-   (HIGH)** — which nobody had named. axios is absent there. Dependabot can never see it: the
-   manifest is outside the repo. The old "resolved in the repo lockfile" derivation was **wrong**
-   (it read `~/node_modules`); prod matched by coincidence, which is what would have hidden it.
-   **All 39 Dependabot alerts dismissed** `not_used` (task 9323 done) — needed no
-   `security_events` scope, and batch PATCHes silently no-op unless `gh` gets `</dev/null`.
-   Also filed: 9401 (graph_tool URL allowlist), 9402 (soak-check false alarm).
-2. **The two-node problem — written statement DONE; the monitor is gated on you.**
-   `docs/operations/two-node-topology.md` (unpushed) is the measured statement of what flows to
-   the NUC and what does not, linked from the `DEPLOY TOPOLOGY` block.
-   **⚠ The headline finding, added after audit: `deploy.sh`'s koi-processor rsync leg is not
-   running at all.** Its blast-radius guard measures **158 deletions against a `KOI_DELETE_LIMIT`
-   of 5** and exits 1 before any rsync; the documented workaround, `SKIP_KOI_SYNC=1`, skips that
-   leg entirely while still running the dobby + personal-koi-mcp rsyncs and both `systemctl
-   restart`s. So koi-processor code does **not** reach the NUC by `deploy.sh` today — which is why
-   its tree is frozen at migration 107 / 2026-07-14 and why someone hand-committed its live state
-   on 2026-08-31. Any plan assuming `deploy.sh` will carry a fix there is wrong twice over.
-   **New findings it carries:** the phantom ledger rows are **five, not three** —
-   `personal:106_ingest_idempotency` and `personal:107_entity_closure` have the same defect, and
-   the NUC holds *different* migrations at those numbers, so **the numbering space has forked**.
-   The two ledgers use **incompatible id namespaces** (`core:`/bare vs `personal:`) and cannot be
-   diffed by raw id; the NUC has three migration tables to the laptop's two. `checksum` is a
-   hand-typed label, not a content hash — what proves hand-application is the apply-time spread
-   between machines (**+11h32m, +14s, +47m27s** = three separate events). The 12 laptop-only
-   vocabulary rows exist in **no migration file anywhere**; 111 seeds exactly the NUC's 28, so
-   this is drift *after* migration. **`allowed_facets` is empty on both sides but NOT inert** —
-   `tr_entity_facets_registered` is ENABLED on both nodes, so every non-empty facet write is
-   rejected today, symmetrically; that is a hard precondition on 9315's facet option.
-   **Both cross-host monitors are saturated alarms:** `dobby-drift-sweep` has reported DRIFT on
-   every reachable run since **2026-05-24** — last OK 2026-05-17 — at 40.81/56.78/54.29/55.77%
-   against a baseline last taken 2026-05-13, straight into the **Telegram morning brief**, and was
-   `WG_UNREACHABLE` for six consecutive weeks (of its last 15 runs: 9 could not measure, 6 cried
-   DRIFT, 0 OK); `soak-check.sh` **worked for six months then went blind on 2026-08-25** when the
-   cron changed checkouts — the older log copy holds **1,349 entries / 592 OK**, the newer 115 / 0
-   OK, one cron interval apart — and has been blind on **107 of 115** runs since 2026-08-26T07:00,
-   after 8 sighted runs reporting a *real* drift of 13→1038 (task 9402). Re-snapshotting `BASELINE_GAPS` is
-   deliberately **not** done — inbox task 2736 owns it, and it would mark a real 55% gap OK by fiat.
-   **⛔ STILL GATED — the parity monitor was designed, not built.** It installs a recurring
-   launchd job that SSHes to another host every 6h and writes tasks; design is in the approved
-   plan (`~/.claude/plans/start-in-projects-koi-processor-service-curried-flute.md`), including
-   a one-task-ever cap, an acknowledged-divergence baseline whose *staleness* is itself an alarm,
-   `UNREACHABLE` ≠ `DIVERGENT`, and landing the runtime-clone catch-up as its own canary-verified
-   step rather than as a side effect of shipping the monitor.
-   **Correctly bounded, not a hazard:** the runtime clone is 9 commits behind, but they touch two
-   non-doc files and `DEFAULT_SCHEMAS` is imported by no sensor entrypoint (6 verified across 72
-   plists), so it is inert for every scheduled job. Direct imports only were checked.
-3. **The vocabulary decision — needs the operator, rested, with a cold facilitator.** 9315 + 9317, gating migration 113. Both E1 blockers are now answered (federation mirrors verbatim, no normalisation anywhere on the apply path; NUC migration is separate and manual). ⚠ **Neither `e1dd0df8` nor `1e1f2abb` should facilitate this** — both authored the evidence pack (`~/.claude/plans/koi-vocabulary-decisions-9315-9317-2026-09-04.md`, also attached to the `context` of tasks 9315/9317 — that pack and those task contexts, not this file, carry the corrected numbers), and a session that framed the options cannot adversarially test its own framing. It wants a session reading the pack cold. Not urgent: due 2026-09-17 and the divergence grows at single digits/day.
-4. **Residue.** The 45-row retype (~22–29% precision; 3 need merges and `/retype` never calls `persona_merge_hazard`), and the `incident-enrich` / `walk.py` asymmetry — the bug is not unbounded growth, it is that **one producer has a clock and no allowlist while its sibling has neither**.
+1. **⛔ THE ONE OPEN ACTION — make the axios fix live.** `409fe9d` is committed on
+   `personal-koi-mcp` main but **unpublished**, and `node_modules` still holds **1.12.2**, so the
+   fix is *not live*. Two blockers, one of which is a decision:
+   - **Publishing also publishes `d659abb`**, another session's commit already in that branch's
+     history. Separating them needs a rebase. Operator call.
+   - **`npm install` + restarting the MCP processes.** Enumerate at the moment you restart with
+     `~/.config/personal-koi/enumerate-mcp-processes.sh` (committed at
+     `scripts/enumerate-mcp-processes.sh`, drift-asserted) — **never carry a count**, it was 8, 9,
+     10, then 7 within an hour. Note the install also lands ~25 pre-existing `@esbuild` platform
+     packages unrelated to this change.
+   Verification is already done and does not need repeating: scratch tree at 1.20.0, `npm ci` +
+   `tsc` + 5 GET-only MCP tools against live `:8351`, 5/5 pass, **zero row delta** across five
+   tables; control run — unreachable backend gives 0/5 and exit 1. ⚠ **Do not verify with
+   `evals/claims_smoke.ts`**: zero teardown, mints a claim per run, and calls `anchor_claim`,
+   which on this stack targets **mainnet**.
+
+2. **The two-node monitor — designed, approved, deliberately NOT built.** Task
+   `koi-nuc-parity-monitor-rescope`. Both sessions on 2026-09-04 independently concluded the
+   approved design guards the wrong thing: vocabulary drift is slow and bounded and hurt nobody,
+   while **unvalidated prose about system state** was wrong six times in one day and was
+   mechanically checkable throughout. A checker that verifies *the document's own claims* would
+   have caught 4 of the dozen. Also: adding a third monitor beside two saturated ones is how the
+   third gets ignored. **Fresh-eyes design question — should not be picked up by `a0f88bbf` or
+   `1e1f2abb`.** Full approved design is preserved in
+   `~/.claude/plans/start-in-projects-koi-processor-service-curried-flute.md` (Deliverable B).
+
+3. **The vocabulary decision — needs the operator, rested, with a cold facilitator.** 9315 + 9317, gating migration 113. Both E1 blockers are now answered (federation mirrors verbatim, no normalisation anywhere on the apply path; NUC migration is separate and manual). ⚠ **Neither `e1dd0df8` nor `1e1f2abb` should facilitate this** — nor `a0f88bbf`. (Note 2026-09-04: cold facilitation is the right instinct but authorship was **refuted as the variable** — three different authors made the same class of error on the topology paragraph the same day. It is a staffing convention that depends on someone remembering; the mechanical companion is task `koi-reproduce-command-rule-for-state-claims`. Keep both.) Both sessions authored the evidence pack (`~/.claude/plans/koi-vocabulary-decisions-9315-9317-2026-09-04.md`, also attached to the `context` of tasks 9315/9317 — that pack and those task contexts, not this file, carry the corrected numbers), and a session that framed the options cannot adversarially test its own framing. It wants a session reading the pack cold. Not urgent: due 2026-09-17 and the divergence grows at single digits/day.
+4. **Parked for the 09-06 repair cycle, all dated and owned elsewhere.**
+   `koi-reproduce-command-rule-for-state-claims` (the proposed rule + today's full evidence; held
+   because `~/.claude/CLAUDE.md:125` forbids same-session self-modification — *recording* it now is
+   deliberate, since the evidence decays), `koi-malformed-signal-export-plists` (⚠ **do not "fix"
+   casually — both jobs currently work from launchd's cache; a bootout/bootstrap is how you find
+   out**), 9413 (darren-workflow's), and `koi-vault-sync-disabled-on-serving-checkout-only`
+   (**answer this BEFORE the soak-check honesty fix**, or that fix encodes the wrong assumption
+   about what normal is).
+
+5. **Residue.** The 45-row retype (~22–29% precision; 3 need merges and `/retype` never calls `persona_merge_hazard`), and the `incident-enrich` / `walk.py` asymmetry — the bug is not unbounded growth, it is that **one producer has a clock and no allowlist while its sibling has neither**.
 
 ## Open questions
 
@@ -130,13 +127,29 @@ Ordered **by kind, not by number** — #1 is a decision, the rest are execution.
 
 ## Verification and working tree
 
-- **Branch/status:** `regen-prod` @ `dcda7f7`, working tree clean, **0 ahead / 0 behind**, `git diff --check` clean.
-- **Tests:** **120 passed / 4 skipped** across the touched suites. `test_canonical_entity_types` is now GREEN (E3); it was red all session by design.
-- **Positive controls were run, not merely written.** Disabling the minted-survivor delete fails the retype mint round trip while twin and in-place still pass; emptying `KNOWN_DEV_CHECKOUT_EXCEPTIONS` fails exactly the two known launchd violations; appending a line to `scripts/restart.sh` fails the drift test; deleting `Protocol` from `DEFAULT_SCHEMAS` fires the vocabulary tripwire.
-- **Live:** service healthy, embeddings available, backup armed with `runs` incrementing on schedule.
-- **Canon validator:** not applicable — no `scripts/validate_spec_dag.py` in this repo.
-- **⚠ Route presence does not prove module vintage.** Compare `ps -o lstart` against the **mtime** of the newest loaded source file — mtime, not commit time; Python loads from disk. Use `launchctl list` or `lsof -ti :8351 -sTCP:LISTEN`; plain `lsof -ti :8351 | head -1` returned a transient *client* PID this session.
-- **⚠ Before deploying any commit, check it is reachable from where you deploy FROM:** `git merge-base --is-ancestor <sha> origin/<branch>`. A pull cannot deliver an unpublished commit — this cost a wasted deploy and survived four review rounds.
+- **Branch/status:** `regen-prod` @ `eb4345a`, working tree clean, **0 ahead / 0 behind**.
+  `personal-koi-mcp` @ `409fe9d`, **2 ahead of origin, unpublished by design** (Next steps #1),
+  with one unrelated third-party edit in `src/koi-api-tools.ts` left uncommitted on purpose —
+  committing it would fire the repo's `post-commit` → `rebuild-dist.sh` hook and recompile `dist/`
+  underneath the live MCP processes.
+- **Tests:** 114 passed / 2 skipped in `tests/test_launchd_job_targets.py` (grew from 72 when the
+  existence check widened to every installed plist).
+- **Positive controls were RUN, not written.** Emptying `KNOWN_MISSING_TARGETS` fails
+  `phase7-autoflip` alone; emptying `KNOWN_UNPARSEABLE` fails both signal plists alone; a bogus
+  register entry fails the staleness assertion; appending a line to `scripts/enumerate-mcp-processes.sh`
+  fails its drift test. All restored.
+- **Live:** service healthy, embeddings available. **Nothing was restarted or deployed today.**
+- **⚠ `stat` is SHADOWED and is KILLED (exit 137, zero output) on BSD flags — use `/usr/bin/stat`.**
+  `/usr/bin/ps` does not exist; use `/bin/ps`. `timeout`/`gtimeout` are absent. `gh` **consumes
+  stdin in a loop** — batch PATCHes silently no-op at exit 0 without `</dev/null`; `dismissed_comment`
+  caps at 280 chars and GitHub **409s on amending an already-dismissed alert**.
+- **⚠ mtime vs ctime on the NUC.** `rsync -a` preserves the source **mtime**, so mtimes are
+  *authoring* dates and **ctime** is when the inode landed. Whole-second mtime = rsync-delivered.
+  Getting this backwards inverted a conclusion today; the nanosecond field from `stat -c %y` is
+  **nine** digits, not ten.
+- **⚠ Route presence does not prove module vintage** — compare `ps -o lstart` to the **mtime** of
+  the newest loaded source. Serving PID via `lsof -ti :8351 -sTCP:LISTEN`.
+- **⚠ Before deploying, check reachability:** `git merge-base --is-ancestor <sha> origin/<branch>`.
 
 ## Recent sessions
 
@@ -146,6 +159,7 @@ Ordered **by kind, not by number** — #1 is a decision, the rest are execution.
 | 2026-08-26 | Claude Code | b289ac1e (resumes) | 3rd conflict wave cleaned; built `com.personal-koi.vault-conflict-sweep`; fixed a real `ThrottleInterval < StartInterval` bug + added a mutation-tested anti-storm pin; fixed `test_koi_flow_integration.py`'s months-stale collection failure. |
 | 2026-08-26 | Claude Code | c1defaa8 | **Verification pass.** Found A7 unexecutable, a gating inconsistency, A3's live blast radius; caught the conflict cleanup incomplete at 101 files; named the iCloud root cause; canary-proved the sweep fires unattended. No code changes. |
 | 2026-09-01/02 | Claude Code | 72cf052b | **Phase 0/1 hardening.** Backup + verified restore; merge reversibility (`unmerge`, used on 57 merges); `entity_non_match` seeded (44) and enforcing at 6 tiers; credential + persona guards; `:8351` LAN hole closed and A/B-verified; type-mismatch void closed. 12 commits. |
+| 2026-09-04 | Claude Code | a0f88bbf | **MCP supply chain + the two-node written statement.** axios lockfile committed (30 advisories cleared, not yet live); 39 Dependabot alerts dismissed; `docs/operations/two-node-topology.md` written; launchd guard widened to every installed plist after a 4th subset-enumeration instance, exposing 3 malformed plists and a namespace (`com.darrenzal.*`) no glob ever matched. 6 commits published, 10 tasks filed. A 34-agent audit + the parallel session overturned **6 of my own claims**, two of them corrections I had just made. |
 | 2026-09-04 | Claude Code | 1e1f2abb | **Decisions 9315/9317 prepared; email guard completed; 116 cleared.** 20 agents over two workflows, every lens returned CORRECTED. Killed the 27.9× ratio (it is ~8×), the 176 population (166), the 142/57 reversibility split (0%, not 71%), the one-insert-path premise (two live writers), and "the NUC is unreachable" (it is reachable, and already holds the divergent vocabulary without failing). Corrected my own false report that 116 was blocked — I read the layout instead of asking the process. 2 koi-sensors commits, both positive-controlled. |
 | 2026-09-03 | Claude Code | e1dd0df8 | **Backup armed; retype made reversible.** The nightly backup plist had never been bootstrapped — newest dump was Aug 31, hand-run, ~3 days unbacked on 27 GB. `/entities/retype` captured no reversal and had already made **142 irreversible merges**. Launchd guard enumerated a subset (missed `com.darren.*`, found 2 real violations). `restart.sh` reported ERROR on restarts that succeeded (30s budget vs 40–73s startup). Retracted the false D4b claim before it shipped. 5 commits, all positive-controlled. |
 | 2026-09-03/04 | Claude Code | e1dd0df8 | **Vocabulary arc.** Backup had never been bootstrapped — now armed and proven unattended. `/entities/retype` made reversible after 142 irreversible merges. Launchd glob widened (2 violations). `restart.sh` false-ERROR fixed. E3 shipped, tripwire restored. 23 commits published; flood fix live after a second pull. **Five of my own claims overturned by measurement and corrected at every site.** |
