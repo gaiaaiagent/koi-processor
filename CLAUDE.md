@@ -131,6 +131,21 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > branch, a `deploy.sh` run, and — separately, by hand — any migration. RegenAI public production
 > needs an explicit cherry-pick + push to `stable`.
 >
+> **Full measured statement: [docs/operations/two-node-topology.md](docs/operations/two-node-topology.md)**
+> (2026-09-04). What flows, what does not, and why nothing would tell you. Highlights that are
+> not in this block: the NUC records migrations **111, 114, 115** (plus `personal:106`/`107`) as
+> APPLIED while their `.sql` files exist neither in its tree nor in the deploy source, and the
+> numbering space has **forked** — 106/107 hold *different* migrations there. The two
+> `koi_migrations` ledgers use incompatible id namespaces (`core:`/bare vs `personal:`), so they
+> cannot be diffed by raw id. `allowed_entity_types` is **32 vs 28** and `allowed_predicates`
+> **56 vs 48**, and those 12 laptop-only rows appear in **no migration file anywhere** — they
+> were `INSERT`ed directly, two of them on 2026-09-03. `allowed_facets` is empty on both sides
+> but **not inert**: `tr_entity_facets_registered` is ENABLED on both nodes, so every non-empty
+> facet write is rejected today. Both cross-host monitors are saturated: `dobby-drift-sweep` has
+> reported DRIFT on every reachable run since June (against a baseline last taken 2026-05-13)
+> straight into the Telegram morning brief, and `soak-check.sh` has cried DRIFT on 106 of 114
+> runs because it cannot measure its own local half.
+>
 > **EMBEDDING SELF-HEAL (2026-08-14).** `com.personal-koi.chunk-embedder` is **retired**
 > (plist kept as `.retired-20260814`). Its replacement is
 > **`com.personal-koi.embedding-repair`** → `scripts/run_embedding_repair.sh` →
