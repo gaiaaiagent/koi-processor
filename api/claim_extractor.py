@@ -173,12 +173,18 @@ async def _llm_complete(prompt: str, *, max_tokens: int = 4096) -> "str | None":
             return msg.content[0].text
         except Exception as e:
             logger.warning("claim_extractor: Anthropic transport failed (%s); trying OpenAI fallback", e)
-    openai_key = os.environ.get("OPENAI_API_KEY")
+    # Claim-stage-specific OpenAI-compatible endpoint (e.g. a TELUS-hosted Qwen) so an
+    # isolated node can keep claims extraction in-region without redirecting the
+    # process-wide OPENAI_BASE_URL (which the embeddings client also reads). Falls back
+    # to the historical OPENAI_* behaviour when the CLAIM_EXTRACTOR_OPENAI_* knobs are unset.
+    openai_key = (os.environ.get("CLAIM_EXTRACTOR_OPENAI_API_KEY")
+                  or os.environ.get("OPENAI_API_KEY"))
     if openai_key:
         try:
             import httpx
 
-            base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+            base = (os.getenv("CLAIM_EXTRACTOR_OPENAI_BASE_URL")
+                    or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
             model = os.getenv("CLAIM_EXTRACTOR_OPENAI_MODEL",
                               os.getenv("DOC_EXTRACTOR_OPENAI_MODEL", "gpt-4.1"))
             from api.provider_http import provider_async_client
