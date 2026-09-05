@@ -109,27 +109,51 @@ Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is neede
 > measurement read as a coverage gap by day, and as a clean 100% when grouped at the
 > migration timestamp — one produced a bug report for a bug that did not exist.
 >
-> ⚠ **CORRECTED 2026-09-04 — "commit to `regen-prod` → the NUC gets it" is FALSE.** Dobby's
-> `~/projects/dobby/scripts/deploy.sh` rsyncs **`~/projects/RegenAI/koi-processor/`, the shared DEV
-> checkout** — not `regen-prod`, and not `koi-processor-service`. The script says so itself at
-> `deploy.sh:105` ("The koi-processor rsync's SOURCE is the shared dev checkout"), and it runs from
-> the laptop with `.git` excluded, then `ssh dobby sudo systemctl restart dobby-koi-processor`.
-> Consequence: **what reaches the NUC is whatever branch a session last left the dev checkout on** —
-> the checkout this same file elsewhere says to "assume moves under you".
+> ⚠ **CORRECTED TWICE, 2026-09-04. Read the whole block before acting.** The first version said
+> "commit to `regen-prod` → the NUC gets it". The second (`dcda7f7`, mine) said the shared DEV
+> checkout's branch flows there instead. **Both describe a leg that has not run since
+> 2026-07-20 16:10:44.** The error class both times was the same: reading `deploy.sh` and
+> describing what it *would* do, without asking whether it executes.
 >
-> **The NUC does not apply migrations, and cannot.** `deploy.sh` contains **zero** `psql` /
-> `apply_migration` / `migrate` invocations (positive control: 3 `systemctl`). Its scheduler surface
-> was fully enumerated — 28 system timers, 4 user timers, no crontab for `dobby` or `root`, stock
-> `/etc/crontab` — and the only KOI timers are `koi-backup.timer` (nightly `pg_dump`) and
-> `dobby-drift-sweep.timer`, a **row-count-only** parity check, so a value rewrite would not alert.
-> Hard proof that application is manual and out-of-band: **111, 114 and 115 are recorded APPLIED in
-> the NUC's ledger while their `.sql` files do not exist in the NUC's serving tree.** Any NUC
-> migration leg needs the file hand-delivered; the rsync never puts it there.
+> **Nothing automated has put code on the NUC's koi-processor tree in six weeks.** The last
+> delivery was 2026-07-20 16:10:44 (`api/routers/admin_router.py`), identified by an inode-Birth
+> census and confirmed by the paired `dobby-koi-processor` → `dobby-gateway` restarts 1-2s later.
+> Everything the tree gained afterwards was **written directly on the NUC over ssh**: `rsync -a`
+> can only carry whole-second mtimes, and all 939 files dated 2025-09→2026-07 have `.0000000000`
+> fractions while all 14 dated 2026-08 have sub-second ones — zero exceptions either way, with a
+> positive control of 720 whole-second vs 3 sub-second among known-rsync landings.
+>
+> **Today an unguarded `bash scripts/deploy.sh` syncs and restarts NOTHING.** Commit `0977449`
+> (2026-08-25) moved the destructive-sync guard ahead of all three rsyncs, and the guard now
+> measures **158** deletions against `KOI_DELETE_LIMIT=5`, so the script exits 1 before any leg
+> runs. `~/.claude/plans/nuc-koi-reconciliation-runbook.md:142` makes `SKIP_KOI_SYNC=1` the
+> documented default; under it the dobby tree, `personal-koi-mcp` (+ a remote `npm install`) and
+> **both service restarts** still run — so the NUC's KOI service is bounced on every deploy even
+> though its code never changes.
+>
+> ⚠ **"The rsync never delivers migrations" was FALSE and is retracted.** It did: **124 of the
+> NUC's 128 `.sql` files were born in the 2026-06-24 15:13 deploy burst**, and every `.sql` there
+> carries a whole-second mtime. The true statement is time-bounded — **no migration has been
+> delivered since 2026-07-19**, which is exactly why the NUC tops out at `107` and never received
+> 111/114/115. Those three are recorded APPLIED in its ledger with no file present, so *those*
+> were applied out-of-band; do not generalise that to the whole mechanism.
+>
+> ⚠ **"The only KOI timers are backup and drift-sweep" was an INCOMPLETE enumeration.**
+> `grep -rl "RegenAI/koi-processor" /etc/systemd/system/` returns **three** units, and
+> **`dobby-rss-sensor.timer` is ACTIVE** (~6h cadence; last fired 2026-09-04 17:40:14), executing
+> `venv/bin/python scripts/rss_sensor.py --once` from inside that tree. Scheduled code **does**
+> run from the NUC's koi checkout. The earlier claim also omitted `--user`, so its command could
+> not have returned `koi-backup.timer` either.
+>
+> **What the NUC actually serves:** branch `nuc-runtime` @ `aa4be29`, clean tree, **no upstream,
+> never pushed**, last `pull` 2026-04-28 — though `origin` *is* reachable from it. Serving PID's
+> `cwd` matches that tree and its start postdates every source file in it.
 >
 > Translation: commit to `regen-prod` → the **local** backend needs `restart.sh` and the **local**
-> sensors need a `git pull` in the runtime clone. The **NUC** needs the dev checkout on the right
-> branch, a `deploy.sh` run, and — separately, by hand — any migration. RegenAI public production
-> needs an explicit cherry-pick + push to `stable`.
+> sensors need a `git pull` in the runtime clone. **The NUC is not on that path at all today** —
+> updating it means editing on the box or reviving the rsync leg, and either way a migration is a
+> separate hand-delivered step. RegenAI public production needs an explicit cherry-pick + push to
+> `stable`.
 >
 > **Full measured statement: [docs/operations/two-node-topology.md](docs/operations/two-node-topology.md)**
 > (2026-09-04). What flows, what does not, and why nothing would tell you. Highlights that are
