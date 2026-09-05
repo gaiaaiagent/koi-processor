@@ -74,6 +74,85 @@ PLIST_GLOBS = (
     "com.personal-koi.*.plist", "com.personal.koi*.plist", "com.darren.*.plist",
 )
 
+# FOURTH instance, 2026-09-04. `com.process-note-gate.phase7-autoflip` has pointed at a
+# script that does not exist since 2026-05-19 and sits at last_exit=2, and it matched NONE
+# of the three globs above. Widening them again would be the fourth patch of the same hole,
+# so the "does the target still exist?" question is now asked of EVERY installed plist
+# instead. The dev-checkout rule stays scoped above, because that one is genuinely about
+# this project's code; a vanished ProgramArgument is not.
+#
+# Two things measured while doing it, both of which had been invisible:
+#   * `com.darren.*` does NOT match `com.darrenzal.*` — 9 plists vs 24, ZERO overlap. A
+#     third of the installed jobs were outside every glob, including the whole
+#     signal-export fleet and the hourly task agent.
+#   * THREE installed plists are malformed XML that `plutil` tolerates and Python's
+#     `plistlib` refuses (an invalid token inside a comment block). A plistlib-based
+#     enumerator drops them silently — and one of the three is the broken job above. That
+#     is a subset-enumeration trap inside the guard written to catch subset enumeration,
+#     so an unreadable plist is now a FAILURE, never a skip.
+
+
+# Third-party agents. We neither own nor can repair these, and a permanently red
+# assertion about someone else's uninstalled updater is how a suite gets ignored -- which
+# is the failure this file is about. Excluded by NAMESPACE, not by name, so a new Adobe
+# job does not reintroduce the noise. Anything not listed here is treated as ours.
+VENDOR_NAMESPACES = ("com.adobe.", "org.virtualbox.", "com.google.", "com.microsoft.",
+                     "com.docker.", "com.oracle.")
+
+# Installed plists that no standard parser will read. launchd currently has both LOADED at
+# exit 0 -- from its own cache, since the on-disk file cannot be parsed -- so they work
+# today and will NOT survive a reload or reboot. Cause: an unescaped `&` (plutil: "unknown
+# ampersand-escape sequence at line 10"); `plutil -p`, `plutil -convert` and plistlib all
+# refuse them. Owned by darren-workflow; filed as a koi task rather than fixed here.
+KNOWN_UNPARSEABLE: dict[str, str] = {
+    "com.darrenzal.signal-export-fungi-flows-website-swag.plist":
+        "unescaped & at line 10; loaded from launchd cache, will not reload. Task "
+        "koi-malformed-signal-export-plists, 2026-09-04.",
+    "com.darrenzal.signal-export-purple-team-opsec.plist":
+        "unescaped & at line 10; loaded from launchd cache, will not reload. Task "
+        "koi-malformed-signal-export-plists, 2026-09-04.",
+}
+
+
+def all_installed_plists() -> list[Path]:
+    """Every installed agent we own, not just this project's. See the comment above."""
+    if not LAUNCH_AGENTS.is_dir():
+        return []
+    return sorted(p for p in LAUNCH_AGENTS.glob("*.plist")
+                  if p.suffix == ".plist"
+                  and not p.name.startswith(VENDOR_NAMESPACES)
+                  and p.name not in KNOWN_UNPARSEABLE)
+
+
+def _load_plist(path: Path) -> dict:
+    """plistlib, falling back to plutil. Never returns {} on a parse failure."""
+    try:
+        return plistlib.loads(path.read_bytes())
+    except Exception:
+        out = subprocess.run(["plutil", "-convert", "xml1", "-o", "-", str(path)],
+                             capture_output=True)
+        if out.returncode != 0:
+            raise AssertionError(
+                f"{path.name} is unreadable by BOTH plistlib and plutil. launchd may still "
+                f"have it loaded, so it cannot be skipped: an unenumerable job is exactly "
+                f"how com.personal-koi.calendar-export stayed dead for sixteen days."
+            )
+        return plistlib.loads(out.stdout)
+
+
+# Jobs whose ProgramArgument target is known-missing, with the task that owns the fix.
+# Same contract as KNOWN_DEV_CHECKOUT_EXCEPTIONS: keyed on the pair, so the entry dies the
+# moment the job points somewhere else, and asserted below to still be real.
+KNOWN_MISSING_TARGETS: dict[tuple[str, str], str] = {
+    ("com.process-note-gate.phase7-autoflip.plist",
+     "/Users/darrenzal/projects/darren-workflow/scripts/process-note-gate/phase7_auto_flip.py"): (
+        "Found 2026-09-04, filed as koi task 9413 by session 1e1f2abb. Dead since "
+        "2026-05-19, last_exit=2, script absent. It belongs to darren-workflow, not this "
+        "repo, so it is recorded here rather than fixed here — but it is enumerated, which "
+        "it was not before. Retire this entry when the job is repaired or unloaded."
+    ),
+}
+
 # Known, ACCEPTED dev-checkout dependencies: (plist name, marker) -> why, and what would
 # retire the entry. Deliberately keyed on the pair, so the exemption evaporates the moment
 # the job points somewhere else — an exemption that survives a change of target is just a
@@ -109,10 +188,10 @@ def program_paths(plist_path: Path) -> list[str]:
     Only absolute paths are returned. A bare `python3` or a flag like `--apply` is not a
     path and must not be asserted about; the point is to check the things that can vanish.
     """
-    try:
-        data = plistlib.loads(plist_path.read_bytes())
-    except Exception as exc:  # a plist launchd cannot parse is its own failure
-        pytest.fail(f"{plist_path.name}: unparseable plist ({exc})")
+    # _load_plist, not plistlib directly: three installed plists are XML that plutil
+    # accepts and plistlib rejects, and failing (or skipping) on those loses exactly the
+    # jobs least likely to be looked at by hand.
+    data = _load_plist(plist_path)
     args = list(data.get("ProgramArguments") or [])
     if isinstance(data.get("Program"), str):
         args.append(data["Program"])
@@ -154,7 +233,7 @@ def launched_script_bodies(plist_path: Path) -> list[tuple[str, str]]:
 
 
 @pytest.mark.skipif(not installed_plists(), reason="no personal-KOI LaunchAgents installed")
-@pytest.mark.parametrize("plist", installed_plists(), ids=lambda p: p.stem)
+@pytest.mark.parametrize("plist", all_installed_plists(), ids=lambda p: p.stem)
 def test_every_program_argument_exists(plist: Path) -> None:
     """A launchd job whose target file is gone exits nonzero forever and tells nobody.
 
@@ -162,7 +241,9 @@ def test_every_program_argument_exists(plist: Path) -> None:
     escalation — `launchctl list` shows the number to whoever thinks to look. Sixteen days
     is how long that took last time.
     """
-    missing = [p for p in program_paths(plist) if not Path(p).exists()]
+    missing = [p for p in program_paths(plist)
+               if not Path(p).exists()
+               and (plist.name, p) not in KNOWN_MISSING_TARGETS]
     assert not missing, (
         f"{plist.name} runs {missing}, which does not exist. "
         f"launchd will keep invoking it every interval and keep failing silently."
@@ -528,4 +609,67 @@ def test_the_runtime_check_is_checked_against_something() -> None:
         f"enumerated none. The cwd assertion would then pass vacuously — the same "
         f"subset-enumeration failure that let com.personal.koi-repo-doc-sensors run from "
         f"the shared dev checkout while this suite reported green."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Controls for the WIDE enumeration. The narrow one has its own above; this one
+# needs its own, because its entire purpose is that it covers more than the globs.
+# ---------------------------------------------------------------------------
+
+
+def test_the_wide_enumeration_is_not_empty_and_reaches_past_the_globs() -> None:
+    names = {p.name for p in all_installed_plists()}
+    assert names, (
+        "all_installed_plists() came back empty. Every existence assertion above then "
+        "passes vacuously, which is the failure this file exists to prevent."
+    )
+    narrow = {p.name for p in installed_plists()}
+    assert len(names) > len(narrow), (
+        f"the wide enumeration ({len(names)}) is no larger than the glob-scoped one "
+        f"({len(narrow)}), so widening bought nothing and something is wrong."
+    )
+    # A SPARSE positive control: com.darrenzal.* is a namespace the globs provably do not
+    # match (com.darren.* -> 9 plists, com.darrenzal.* -> 24, zero overlap, measured
+    # 2026-09-04). If this stops matching, the enumeration has narrowed again.
+    assert any(n.startswith("com.darrenzal.") for n in names), (
+        "no com.darrenzal.* plist enumerated. That namespace is invisible to every glob in "
+        "PLIST_GLOBS and was a third of the installed jobs when this was written."
+    )
+
+
+def test_every_known_missing_target_is_still_missing() -> None:
+    """An exemption that outlives its defect is a hole. Same contract as the dev-checkout one."""
+    stale = []
+    for (name, target) in KNOWN_MISSING_TARGETS:
+        plist = LAUNCH_AGENTS / name
+        if not plist.exists():
+            stale.append(f"{name}: no longer installed — delete this entry")
+        elif Path(target).exists():
+            stale.append(f"{name}: {target} exists again — delete this entry")
+        elif target not in program_paths(plist):
+            stale.append(f"{name}: no longer runs {target} — delete this entry")
+    assert not stale, (
+        "KNOWN_MISSING_TARGETS entries no longer describe reality:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_every_known_unparseable_plist_is_still_unparseable() -> None:
+    """Same contract as the other two registers: an exemption outliving its defect is a hole."""
+    stale = []
+    for name in KNOWN_UNPARSEABLE:
+        path = LAUNCH_AGENTS / name
+        if not path.exists():
+            stale.append(f"{name}: no longer installed — delete this entry")
+            continue
+        try:
+            plistlib.loads(path.read_bytes())
+        except Exception:
+            out = subprocess.run(["plutil", "-convert", "xml1", "-o", "-", str(path)],
+                                 capture_output=True)
+            if out.returncode != 0:
+                continue  # still genuinely unparseable
+        stale.append(f"{name}: parses again — delete this entry and let it be asserted")
+    assert not stale, (
+        "KNOWN_UNPARSEABLE entries no longer describe reality:\n  " + "\n  ".join(stale)
     )
