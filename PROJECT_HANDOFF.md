@@ -46,8 +46,60 @@ All five share a shape: a plausible probe answering a different question than th
 
 Ordered **by kind, not by number** — #1 is a decision, the rest are execution. Running them in numeric order front-loads the one item that cannot be done by working harder.
 
-1. **MCP supply chain (~1 hour, zero decisions).** `personal-koi-mcp` has Dependabot **disabled**, so its zero alerts are a constraint rather than safety. `axios 1.12.2` is installed, imported at `dist/index.js:17`, and executing in 11 live processes — inside all 26 advisory ranges, all patched by 1.18.0, which the declared `^1.7.7` already admits. **Lockfile-only**; the cost is restarting those processes. Task 9387. Also unmeasured: the RegenAI pm2 surface (`koi-query-api.ts` → express 5.1.0 → `body-parser` 2.2.0 / `qs` 6.14.0, a transitive edge invisible to an import grep). Nobody has SSH'd there.
-2. **The two-node problem.** `dcda7f7` corrected a false topology claim: `deploy.sh` rsyncs the **shared dev checkout**, so what reaches the NUC is whatever branch a session last left it on. Under that sit: migrations are manual and out-of-band (111/114/115 recorded APPLIED there while the `.sql` files don't exist in its serving tree), and `dobby-drift-sweep` is **row-count-only**, so any value rewrite is invisible to it. This is the cluster where "declared but unenforced" is currently *undetected*, not merely unfixed.
+1. **MCP supply chain — EXECUTED 2026-09-04 (session `a0f88bbf`); one operator step left.**
+   Lockfile committed as `4c5da81` on `personal-koi-mcp` main (unpushed): `npm update axios
+   --package-lock-only` → axios **1.20.0**, form-data 4.0.4→**4.0.6** (HIGH), follow-redirects
+   1.15.11→**1.16.0**. `package.json` untouched. Before/after `npm audit` set diff: **30
+   advisories resolved, 0 introduced, 11 → 8 vulnerable packages**; +6 lock entries, 0 removals.
+   **⛔ NOT LIVE** — `node_modules` still holds 1.12.2. Needs `npm install` + a restart of every
+   running `dist/index.js`. Enumerate with `~/.config/personal-koi/enumerate-mcp-processes.sh`;
+   the count is **volatile** (8→9→10→7→9 within an hour), so never carry a number.
+   **Four figures in the original text were wrong:** 11 processes (it varies, 7 at last count);
+   "26 advisory ranges" was the koi-processor *alert* count, a different population (npm audit
+   says 28 for axios); the poll-URL fetch carries **no credentials** (bare global axios, no
+   interceptors — `open(authUrl)` above it is the sharper hole); and **1.18.0 is not reachable
+   by any lockfile-only operation** — `npm install axios@1.18.0` rewrites `^1.7.7` → `^1.18.0`.
+   **It was never an axios problem:** 11 vulnerable packages, 5 high. The headline is
+   `@modelcontextprotocol/sdk@1.20.0` — GHSA-345p-7cg4-v4c7, **cross-client data leak via shared
+   transport reuse**, with instances live across two different agent harnesses. Task 9399.
+   **The pm2 surface is now measured** (task 9400): `/opt/projects/koi-processor` has no manifest
+   and no `node_modules`; bun resolves *up* to `/opt/projects/node_modules` (installed
+   2025-10-16) holding express 5.1.0, body-parser 2.2.0, qs 6.14.0 and **path-to-regexp 8.3.0
+   (HIGH)** — which nobody had named. axios is absent there. Dependabot can never see it: the
+   manifest is outside the repo. The old "resolved in the repo lockfile" derivation was **wrong**
+   (it read `~/node_modules`); prod matched by coincidence, which is what would have hidden it.
+   **All 39 Dependabot alerts dismissed** `not_used` (task 9323 done) — needed no
+   `security_events` scope, and batch PATCHes silently no-op unless `gh` gets `</dev/null`.
+   Also filed: 9401 (graph_tool URL allowlist), 9402 (soak-check false alarm).
+2. **The two-node problem — written statement DONE; the monitor is gated on you.**
+   `docs/operations/two-node-topology.md` (commit `1d7cf67`, unpushed) is the measured statement
+   of what flows to the NUC and what does not, linked from the `DEPLOY TOPOLOGY` block.
+   **New findings it carries:** the phantom ledger rows are **five, not three** —
+   `personal:106_ingest_idempotency` and `personal:107_entity_closure` have the same defect, and
+   the NUC holds *different* migrations at those numbers, so **the numbering space has forked**.
+   The two ledgers use **incompatible id namespaces** (`core:`/bare vs `personal:`) and cannot be
+   diffed by raw id; the NUC has three migration tables to the laptop's two. `checksum` is a
+   hand-typed label, not a content hash — what proves hand-application is the apply-time spread
+   between machines (**+11h32m, +14s, +47m27s** = three separate events). The 12 laptop-only
+   vocabulary rows exist in **no migration file anywhere**; 111 seeds exactly the NUC's 28, so
+   this is drift *after* migration. **`allowed_facets` is empty on both sides but NOT inert** —
+   `tr_entity_facets_registered` is ENABLED on both nodes, so every non-empty facet write is
+   rejected today, symmetrically; that is a hard precondition on 9315's facet option.
+   **Both cross-host monitors are saturated alarms:** `dobby-drift-sweep` has reported DRIFT on
+   every reachable run since late June (40.81/56.78/54.29/55.77%) against a baseline last taken
+   2026-05-13, straight into the **Telegram morning brief**, and was `WG_UNREACHABLE` for six
+   consecutive weeks; `soak-check.sh` has printed `DRIFT DETECTED` on **106 of 114 runs** because
+   it cannot measure its own local half (task 9402). Re-snapshotting `BASELINE_GAPS` is
+   deliberately **not** done — inbox task 2736 owns it, and it would mark a real 55% gap OK by fiat.
+   **⛔ STILL GATED — the parity monitor was designed, not built.** It installs a recurring
+   launchd job that SSHes to another host every 6h and writes tasks; design is in the approved
+   plan (`~/.claude/plans/start-in-projects-koi-processor-service-curried-flute.md`), including
+   a one-task-ever cap, an acknowledged-divergence baseline whose *staleness* is itself an alarm,
+   `UNREACHABLE` ≠ `DIVERGENT`, and landing the runtime-clone catch-up as its own canary-verified
+   step rather than as a side effect of shipping the monitor.
+   **Correctly bounded, not a hazard:** the runtime clone is 9 commits behind, but they touch two
+   non-doc files and `DEFAULT_SCHEMAS` is imported by no sensor entrypoint (6 verified across 72
+   plists), so it is inert for every scheduled job. Direct imports only were checked.
 3. **The vocabulary decision — needs the operator, rested, with a cold facilitator.** 9315 + 9317, gating migration 113. Both E1 blockers are now answered (federation mirrors verbatim, no normalisation anywhere on the apply path; NUC migration is separate and manual). ⚠ **Neither `e1dd0df8` nor `1e1f2abb` should facilitate this** — both authored the evidence pack (`~/.claude/plans/koi-vocabulary-decisions-9315-9317-2026-09-04.md`, also attached to the `context` of tasks 9315/9317 — that pack and those task contexts, not this file, carry the corrected numbers), and a session that framed the options cannot adversarially test its own framing. It wants a session reading the pack cold. Not urgent: due 2026-09-17 and the divergence grows at single digits/day.
 4. **Residue.** The 45-row retype (~22–29% precision; 3 need merges and `/retype` never calls `persona_merge_hazard`), and the `incident-enrich` / `walk.py` asymmetry — the bug is not unbounded growth, it is that **one producer has a clock and no allowlist while its sibling has neither**.
 

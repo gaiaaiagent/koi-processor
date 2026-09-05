@@ -14,7 +14,7 @@ follows is the positive statement that correction implied but did not write down
 
 `deploy.sh` moves **files from a checkout the laptop does not serve** to a NUC whose Postgres
 schema is mutated **entirely by hand**; the only automated cross-host check is a weekly 4-table
-row-count sweep that has been reporting DRIFT since June into a log nobody gates on, and it is
+row-count sweep whose last OK verdict was 2026-05-17 and which reports into a log nobody gates on, and it is
 structurally incapable of seeing either the 5 phantom migration-ledger rows or the 12 vocabulary
 rows that exist on the laptop and not on the NUC.
 
@@ -231,16 +231,23 @@ open entity-vocabulary question. Do not read "0 rows on both sides" as "nobody u
 Verification that "row-count-only" is literal: `grep -cniE "INSERT|UPDATE |DELETE|CREATE"` → 0,
 with `grep -c SELECT` → 2 as the control.
 
-**It has reported DRIFT on every reachable run since late June:**
+**It has reported DRIFT on every reachable run since 2026-05-24. The last `OK` was
+2026-05-17** — three and a half months ago. Full history from the NUC's `drift.log`:
 
-| run | max drift |
-|---|---|
-| 2026-06-28 | 40.81% |
-| 2026-08-16 | 56.78% |
-| 2026-08-23 | 54.29% |
-| 2026-08-30 | 55.77% |
+| run | status | max drift |
+|---|---|---|
+| 2026-05-17 | **OK** | 0.94% |
+| 2026-05-24 | DRIFT | 5.57% |
+| 2026-05-31 | DRIFT | 15.22% |
+| 2026-06-07 → 06-21 | WG_UNREACHABLE | — |
+| 2026-06-28 | DRIFT | 40.81% |
+| 2026-07-05 → 08-09 | WG_UNREACHABLE (**six consecutive weeks**) | — |
+| 2026-08-16 | DRIFT | 56.78% |
+| 2026-08-23 | DRIFT | 54.29% |
+| 2026-08-30 | DRIFT | 55.77% |
 
-and `WG_UNREACHABLE` for six consecutive weeks before that (07-05 through 08-09). `BASELINE_GAPS`
+So of the last 15 scheduled runs, **9 could not measure at all and 6 cried DRIFT**. Not one
+returned OK. `BASELINE_GAPS`
 was snapshotted at the 2026-05-13 reconciliation and has **never been re-taken** — the script's
 own comment asks for exactly that, and inbox task **2736** owns it.
 
