@@ -1091,6 +1091,21 @@ async def manifests_fetch(request: Request):
             resp = ManifestsPayloadResponse(manifests=[])
             return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), source_node, signed))
 
+    # Unicast scoping. Divergence 3 is an intentional fork: upstream buffers
+    # events per peer at WRITE time; we store one broadcast row and filter per
+    # peer at READ time. So `target_node` is this fork's representation of "in
+    # that peer's buffer", and serving a peer an event unicast to a different
+    # node is reading someone else's buffer. poll() has always enforced this;
+    # the fetch path never did.
+    #
+    # Fail-closed by construction, per the register's rule for anything on the
+    # read path: an unidentified caller is served nothing, rather than falling
+    # through to broadcast-only via SQL NULL semantics.
+    if not source_node:
+        logger.info("manifests/fetch: unidentified caller, serving nothing (unicast scoping)")
+        resp = ManifestsPayloadResponse(manifests=[])
+        return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), None, False))
+
     manifests = []
     async with _db_pool.acquire() as conn:
         for rid in rids:
@@ -1098,9 +1113,11 @@ async def manifests_fetch(request: Request):
                 """
                 SELECT manifest, contents FROM koi_net_events
                 WHERE rid = $1 AND manifest IS NOT NULL
+                  AND (target_node IS NULL OR target_node = $2)
                 ORDER BY queued_at DESC LIMIT 1
                 """,
                 rid,
+                source_node,
             )
             if row and row["manifest"]:
                 m = json.loads(row["manifest"]) if isinstance(row["manifest"], str) else row["manifest"]
@@ -1139,6 +1156,13 @@ async def bundles_fetch(request: Request):
             resp = BundlesPayloadResponse(bundles=[], not_found=[])
             return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), source_node, signed))
 
+    # Unicast scoping — see manifests_fetch for the divergence-3 rationale.
+    # Fail-closed by construction: unidentified caller is served nothing.
+    if not source_node:
+        logger.info("bundles/fetch: unidentified caller, serving nothing (unicast scoping)")
+        resp = BundlesPayloadResponse(bundles=[], not_found=list(rids))
+        return JSONResponse(content=_wrap_response(resp.model_dump(exclude_none=True), None, False))
+
     bundles = []
     not_found = []
 
@@ -1148,9 +1172,11 @@ async def bundles_fetch(request: Request):
                 """
                 SELECT manifest, contents FROM koi_net_events
                 WHERE rid = $1 AND contents IS NOT NULL
+                  AND (target_node IS NULL OR target_node = $2)
                 ORDER BY queued_at DESC LIMIT 1
                 """,
                 rid,
+                source_node,
             )
             if row:
                 m = json.loads(row["manifest"]) if isinstance(row["manifest"], str) else (row["manifest"] or {})
