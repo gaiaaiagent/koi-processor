@@ -1264,19 +1264,19 @@ async def koi_net_edges(request: Request, status: Optional[str] = None):
         if status == "all":
             query = (
                 "SELECT edge_rid, source_node, target_node, edge_type, status, "
-                "created_at, updated_at FROM koi_net_edges"
+                "rid_types, created_at, updated_at FROM koi_net_edges"
             )
             params = []
         else:
             query = (
                 "SELECT edge_rid, source_node, target_node, edge_type, status, "
-                "created_at, updated_at FROM koi_net_edges WHERE status = $1"
+                "rid_types, created_at, updated_at FROM koi_net_edges WHERE status = $1"
             )
             params = [status.upper()]
     else:
         # Unauthenticated: APPROVED only (backward compatible)
         query = (
-            "SELECT edge_rid, source_node, target_node, edge_type, status "
+            "SELECT edge_rid, source_node, target_node, edge_type, status, rid_types "
             "FROM koi_net_edges WHERE status = 'APPROVED'"
         )
         params = []
@@ -1287,6 +1287,8 @@ async def koi_net_edges(request: Request, status: Optional[str] = None):
     edges = []
     for r in rows:
         edge = dict(r)
+        # rid_types is text[]; NULL -> [] so the pair-scope contract is stable
+        edge["rid_types"] = list(edge.get("rid_types") or [])
         # Serialize datetime fields for JSON
         for field in ("created_at", "updated_at"):
             if field in edge and edge[field] is not None:
