@@ -1,213 +1,76 @@
-# ledger-anchoring-agent-context.md
+# Agent context — ledger anchoring and attestation
 
-**Scope.** What the Regen ledger actually accepts when `koi-processor` anchors or attests, and the
-checks to run before changing any of it. Split out of `regen-data-standards`'
-`standards-agent-context.md` on 2026-09-03 at the schema maintainer's request: that repository
-defines RDF schemas and vocabularies, and how the resulting data is used on-chain belongs here, with
-the code that does it.
+Revised 2026-09-08. These notes describe pinned source behavior and requirements for a proposed implementation. They do not establish the code running on a server or ratify an anchoring migration. The related [claim identity proposal](claim-identity-proposal.md) contains the pending fingerprint/profile decisions.
 
-**The rule that matters:** an unverified assumption about ledger behaviour is blocking, not something
-review will catch. If a claim about what the chain accepts is load-bearing for your change, open the
-cited file and confirm it. §2.10 is a live divergence that no reviewer and no CI check would have
-caught.
+## 1. Authoritative sources
 
-Citations are pinned. `regen-ledger` refs are at commit
-[`451c3a3f`](https://github.com/regen-network/regen-ledger/tree/451c3a3f4353fc0d5a82383f2616a284baffa96f);
-`koi-processor` refs are at `regen-prod`
-[`c08c0a7e`](https://github.com/gaiaaiagent/koi-processor/tree/c08c0a7e3fdde4b6ce5186e2f7d8d11069ff4b95).
-Line numbers drift — the symbol name is the durable anchor.
+Ledger references below are pinned to [regen-ledger 451c3a3f](https://github.com/regen-network/regen-ledger/tree/451c3a3f4353fc0d5a82383f2616a284baffa96f). KOI references are pinned to [koi-processor c08c0a7e](https://github.com/gaiaaiagent/koi-processor/tree/c08c0a7e3fdde4b6ce5186e2f7d8d11069ff4b95). Refresh a deployment claim from deployment evidence rather than from a branch name.
 
----
-
-## 1. Where the authoritative sources are
-
-**Ledger (source of truth for anchoring/attestation).** Repo: https://github.com/regen-network/regen-ledger (default branch `main`)
-| Path | What it settles |
+| Source | What it establishes |
 |---|---|
-| `proto/regen/data/v2/tx.proto` | `MsgAnchor` / `MsgAttest` wire types. **v2 is what production targets.** |
-| `proto/regen/data/v2/types.proto` | `ContentHash.Raw` / `.Graph`, digest + canonicalization enums, the "no longer validated on-chain" notes |
-| `proto/regen/data/v1/tx.proto`, `v1/types.proto` | v1 equivalents — historical; consult only to explain a rename |
-| `x/data/types.go` | What the chain **actually** validates (`validateHash`, `ContentHash_*.Validate`) |
-| `x/data/iri.go` | IRI construction + `ParseIRI`; the Raw/Graph prefix bytes and the `.rdf` rule |
-| `x/data/msg_attest.go`, `x/data/msg_anchor.go` | `ValidateBasic` for each message |
+| [v2 tx.proto](https://github.com/regen-network/regen-ledger/blob/451c3a3f4353fc0d5a82383f2616a284baffa96f/proto/regen/data/v2/tx.proto) | MsgAnchor and MsgAttest message fields. |
+| [v2 types.proto](https://github.com/regen-network/regen-ledger/blob/451c3a3f4353fc0d5a82383f2616a284baffa96f/proto/regen/data/v2/types.proto) | Raw/Graph formats and algorithm registries. |
+| [x/data/types.go](https://github.com/regen-network/regen-ledger/blob/451c3a3f4353fc0d5a82383f2616a284baffa96f/x/data/types.go) | Runtime structural validation. |
+| [x/data/iri.go](https://github.com/regen-network/regen-ledger/blob/451c3a3f4353fc0d5a82383f2616a284baffa96f/x/data/iri.go) | Raw/Graph prefix, IRI construction and parsing. |
+| [api/ledger_anchor.py](https://github.com/gaiaaiagent/koi-processor/blob/c08c0a7e3fdde4b6ce5186e2f7d8d11069ff4b95/api/ledger_anchor.py) | KOI hashing, IRI conversion and transaction paths at the inspected revision. |
+| [claims_router.py](https://github.com/gaiaaiagent/koi-processor/blob/c08c0a7e3fdde4b6ce5186e2f7d8d11069ff4b95/api/routers/claims_router.py) | Claim/attestation service call sites. |
 
-**KOI implementation (source of truth for what we anchor today).** Repo: https://github.com/gaiaaiagent/koi-processor (default branch `regen-prod` — this is the deployed branch)
-| Path | What it settles |
-|---|---|
-| `api/ledger_anchor.py` | The only anchor construction in the codebase: hashing, IRI derivation, `MsgAnchor`/`MsgAttest` broadcast |
-| `api/routers/claims_router.py` | Call sites for `generate_graph_iri` / `broadcast_attest` |
-| `tests/test_graph_iri.py` | Graph IRI expectations |
+RDF shapes and the standards review remain in [regen-data-standards #61](https://github.com/regen-network/regen-data-standards/pull/61) and [ADR #56](https://github.com/regen-network/regen-data-standards/pull/56). These are review surfaces, not claims that the proposed files already exist on main.
 
-**Schemas and ADRs.** RDF shapes, the LinkML sources and the ADRs live in
-[`regen-network/regen-data-standards`](https://github.com/regen-network/regen-data-standards); its
-`standards-agent-context.md` is the companion to this file.
+## 2. Ledger constraints
 
----
+### 2.1 MsgAttest takes Graph hashes
 
-## 2. Non-negotiable ledger constraints
+`MsgAttest.content_hashes` is `repeated ContentHash.Graph` in v2, as in v1. A Raw hash cannot be supplied as that Graph field.
 
-### 2.1 `MsgAttest` accepts **only** `ContentHash.Graph`
+Distinguish **attesting a claim’s graph** from **attesting a separate RDF statement about a Raw-anchored claim**. The latter can reference the Raw claim IRI. Creating a new Graph representation is also possible and creates a different IRI. Therefore “a Raw claim can never be attested” is too broad; the exact Raw hash cannot itself serve as the Graph attestation target.
 
-`repeated ContentHash.Graph content_hashes = 2;` — `proto/regen/data/v1/tx.proto:88-91` and
-`proto/regen/data/v2/tx.proto:93-96`. Both carry the comment: *"Only RDF graph data can be signed as its data
-model is intended to specifically convey semantic meaning."*
+### 2.2 Raw hashes require preserving exact bytes
 
-**Consequence:** anything you intend to **attest** must be anchored as RDF. There is no Raw path to
-attestation in either module version, and no flag relaxes it. A design that anchors Raw and plans to attest
-later is not a phased rollout — it is a dead end requiring re-anchoring under a new IRI (§2.7).
+The Raw format does not prescribe a canonical encoding. To verify a Raw hash, retain the exact bytes hashed. A producer may choose a deterministic serialization, but another serialization of equivalent information need not produce the same hash. Loss of the retained payload prevents checking that content against the commitment.
 
-### 2.2 `ContentHash.Raw` explicitly disclaims canonical encoding
+### 2.3 RDFC-1.0 and URDNA2015 share a registry value
 
-`proto/regen/data/v1/types.proto:8-15`, repeated at `proto/regen/data/v2/types.proto:12-17`: *"Raw specifies
-'raw' data which does not specify a deterministic, canonical encoding. Users of these hashes MUST maintain a
-copy of the hashed data which is preserved bit by bit."*
+The [v1 registry](https://github.com/regen-network/regen-ledger/blob/451c3a3f4353fc0d5a82383f2616a284baffa96f/proto/regen/data/v1/types.proto) names `URDNA2015 = 1`; v2 names `RDFC_1_0 = 1` and documents clarifications around escaping. The same numeric label does not establish which implementation/spec was executed or certify byte parity. Test candidate implementations on common vectors, including escaping and blank nodes.
 
-**Consequence:** a Raw anchor fingerprints **specific bytes you must keep forever**, not a canonical
-projection of meaning. Never argue a Raw anchor is stable across re-serialization, formatting, or key
-ordering. Lose the exact bytes and the anchor is unverifiable.
+### 2.4 Digest registry and hash validation are different checks
 
-### 2.3 Canonicalization algorithm: RDFC-1.0 (v2) — same wire value as URDNA2015 (v1)
+The inspected registry names BLAKE2b-256 with value 1. `validateHash` requires a digest length of 20–64 bytes and a nonzero digest-algorithm value. That structural check does not prove the digest uses the named algorithm or enforce BLAKE2b’s 32-byte output length for identifier 1. Clients must validate the chosen suite and length themselves.
 
-- v1: `GRAPH_CANONICALIZATION_ALGORITHM_URDNA2015 = 1` — `proto/regen/data/v1/types.proto:134`
-- v2: `GRAPH_CANONICALIZATION_ALGORITHM_RDFC_1_0 = 1` — `proto/regen/data/v2/types.proto:90`, commented
-  *"Essentially the same as URDNA2015 with some small clarifications around escaping of escape characters."*
+### 2.5 The inspected KOI path uses the v2 format
 
-**Consequence:** the rename is not cosmetic and the shared wire value `1` is a trap. Two implementations can
-stamp the identical algorithm byte and still produce different hashes for a graph containing escape
-characters. The wire value proves nothing about which spec was run.
+`derive_ledger_iri` constructs Raw with `file_extension: json`, a v2 field; v1 uses a media-type enum. The ledger’s generated `x/data` types also reference v2. Use v2 field definitions for this code path. This establishes format targeting, not a live deployment observation.
 
-### 2.4 Digest algorithm: BLAKE2b-256; hash must be 20–64 bytes
+### 2.6 Algorithm names are not proved by on-chain structural validation
 
-`DIGEST_ALGORITHM_BLAKE2B_256 = 1` — `proto/regen/data/v1/types.proto:60`,
-`proto/regen/data/v2/types.proto:76`. Length enforced in `validateHash`, `x/data/types.go:110-125`: `< 20`
-bytes rejected, `> 64` bytes rejected, `digest_algorithm == 0` rejected.
+In v2 the algorithm fields are uint32. `ContentHash_Graph.Validate` rejects canonicalization algorithm zero; `validateHash` rejects digest algorithm zero. Their paths do not validate membership of the named registries or recompute a supplied digest from content. Clients must enforce the intended supported values and verify their implementation. A nonzero but incorrect label must not be treated as conformance.
 
-**Consequence:** BLAKE2b-256 (32 bytes) is inside the window. Check any proposed digest lands in 20–64 bytes,
-and never assume the chain verifies that the digest you *named* is the digest you *ran* — see §2.6.
+### 2.7 Raw and Graph have different IRI type prefixes
 
-### 2.5 Production targets **`regen.data.v2`**
+`IriPrefixRaw = 0` and `IriPrefixGraph = 1` are encoded in the base58check payload. Graph also encodes canonicalization, Merkle-tree and digest values. Converting a Raw representation to Graph creates a different IRI, even if the digest bytes happen to match. Preserve existing identifiers/relationships through any explicitly approved migration.
 
-Two independent confirmations:
-1. `x/data/types.pb.go:2` — `// source: regen/data/v2/types.proto`. The live Go module is generated from v2.
-   `proto/regen/data/v2/types.proto:5` is the only one of the two that declares
-   `go_package = "github.com/regen-network/regen-ledger/x/data"`.
-2. `koi-processor` writes `"file_extension": "json"` (`api/ledger_anchor.py:320`). `file_extension` is a
-   **v2-only** field — v1 used a `RawMediaType media_type = 3` enum (`v1/types.proto:32`) and has no
-   `file_extension` at all.
+### 2.8 Decode the IRI; its suffix is not sufficient
 
-**Consequence:** when v1 and v2 differ, **v2 governs**. Quoting a v1 field name or the `RawMediaType` enum in
-a design doc is a correctness error, not a stylistic one.
+Graph IRIs must end `.rdf`. Raw extensions may contain 2–6 lowercase letters or digits, which **also permits `rdf`**. Consequently `.rdf` does not prove Graph type. Use `ParseIRI`, inspect the decoded variant, and apply the variant’s validation rules; parsing by itself is not a content or canonicalization check. A `.json` suffix rules out a valid Graph IRI but does not prove the rest of the IRI is valid.
 
-### 2.6 v2 does **not** validate algorithm identifiers on-chain
+### 2.9 The inspected code has separate claim and attestation paths
 
-In v2, `digest_algorithm`, `canonicalization_algorithm` and `merkle_tree` are plain `uint32`, not enum-typed
-(`proto/regen/data/v2/types.proto:32,54,58,62`). All three enum declarations carry: *"With v2, this enum is no
-longer validated on-chain. However, this enum SHOULD still be used and updated as a registry of known …
-algorithms and all implementations should coordinate on these values."*
-(`v2/types.proto:66-70, 79-83, 93-97`).
+- `compute_content_hash` hashes a claim projection with BLAKE2b-256 over sorted compact Python JSON; `derive_ledger_iri` constructs Raw with extension `json`.
+- `build_attestation_jsonld` / `generate_graph_iri` construct the separate graph representation used by `broadcast_attest`.
 
-Confirmed in code, not just comments:
-- `ContentHash_Graph.Validate` (`x/data/types.go:55-66`) rejects only `CanonicalizationAlgorithm == 0`. Any
-  other value passes, including values naming no known algorithm.
-- `validateHash` (`x/data/types.go:110-125`) rejects only `digestAlgorithm == 0`.
-- The strict membership checks `DigestAlgorithm.Validate` (`x/data/types.go:68-88`) and
-  `GraphCanonicalizationAlgorithm.Validate` (`:90-100`) have **zero non-test call sites** — verified with
-  `grep -rn "DigestAlgorithm.Validate" --include="*.go" x/data/ | grep -v _test.go` → empty. They are dead on
-  the validation path.
+The first is not RFC 8785 JCS. The existence of the second path does not mean the original Raw claim has a Graph identity, and inspecting these functions does not establish that either transaction was included on chain. Confirm inclusion using transaction/anchor receipts.
 
-**Consequence:** the chain is a registry-by-convention, not an enforcer. A wrong algorithm identifier is
-accepted silently and produces a permanently mislabeled anchor. **Client-side correctness is the only
-control.** Never write "the chain will reject that" about an algorithm value — it will not.
+### 2.10 The inspected graph canonicalizer names URDNA2015
 
-### 2.7 The IRI encodes the hash type; Raw and Graph of the same bytes are **different IRIs**
+`generate_graph_iri` invokes `pyld.jsonld.normalize` with `algorithm: URDNA2015` and emits algorithm value 1. The proposed new profile evaluates RDFC-1.0. Resolve spec/version parity using executed vectors before claiming equivalence or deploying a replacement. The pinned requirements.txt does not declare pyld; a future runtime change must establish its dependency provenance in the actual serving environment. This is a source-level observation, not proof that a running service lacks the package.
 
-`x/data/iri.go:26-31` defines `IriPrefixRaw = 0`, `IriPrefixGraph = 1`, written as the first byte of the
-base58check payload.
-- Raw: `regen:{base58check(concat(byte(0x0), byte(digest_algorithm), hash))}.{file_extension}` — `iri.go:33-49`
-- Graph: `regen:{base58check(concat(byte(0x1), byte(canonicalization_algorithm), byte(merkle_tree), byte(digest_algorithm), hash))}.rdf` — `iri.go:51-69`
+## 3. Before changing anchored data
 
-**Consequence:** migrating an anchor from Raw to Graph **mints a new IRI**. It is not a re-label of an
-existing one. Every stored `data_iri` reference downstream points at the Raw identifier and keeps pointing
-there. This is why ADR 0001 **D8** specifies *dual anchoring* rather than a re-mint — and why "we'll just
-re-attest the existing IRI later" is not an available option.
+- Identify the exact object being anchored or attested and whether the decoded type is Raw or Graph.
+- Name the content profile, canonicalization implementation/version, preimage, digest and IRI encoding. Check labels against actual behavior.
+- Preserve exact Raw payload bytes and existing identifiers until an explicit migration decision.
+- Treat local status and IRI generation separately from chain inclusion evidence.
+- Run the selected conformance, negative-input and resource-bound tests; compare canonical bytes before comparing hashes.
+- Use the standards review surface for schema changes, and the implementation proposal for service identity/migration. Neither is ratified merely by being documented.
 
-### 2.8 Graph IRIs must end `.rdf`; Raw extensions are 2–6 lowercase-or-numeric characters
-
-`ParseIRI` rejects a graph-prefixed IRI whose extension is not `rdf` (`x/data/iri.go:127-131`).
-`ContentHash_Raw.Validate` (`x/data/types.go:35-50`) requires the extension be 2–6 characters, lowercase or
-numeric.
-
-**Consequence:** the cheapest correctness check available, needing no chain access — **read the IRI suffix**.
-`regen:….rdf` is a graph hash and is attestable. `regen:….json` (or any other suffix) is Raw and is not.
-
-### 2.9 Current gap — claims anchor Raw and are therefore not attestable
-
-Precisely, on the deployed branch:
-- **Claims** → `compute_content_hash` (`api/ledger_anchor.py:94-101`) hashes
-  `json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(',',':'))` (`:58`) with BLAKE2b-256, then
-  `derive_ledger_iri` (`:304-322`) builds `{"raw": {…, "file_extension": "json"}}` and `broadcast_anchor`
-  (`:358`) sends `MsgAnchor`. **The resulting `regen:….json` IRI can never be passed to `MsgAttest`** (§2.1).
-- **Attestations** → `build_attestation_jsonld` (`:249`) → `generate_graph_iri` (`:226`) → `broadcast_attest`
-  (`:463`) does use a graph IRI. So attestation *records* are graph-anchored; the *claim* is not.
-
-Note that the deterministic `json.dumps` above is **not RFC 8785 (JCS)** — it is sorted-key compact dumps.
-Do not describe production as JCS-canonical.
-
-Tracked migration: **ADR 0001 D8** ([ADR 0001](https://github.com/regen-network/regen-data-standards/pull/56)),
-dual anchoring — existing Raw anchors stay, new claims additionally mint a `ContentHash.Graph` identity.
-
-### 2.10 Live divergence: deployed canonicalizer is URDNA2015 (pyld); ADR 0001 D2-a specifies RDFC-1.0
-
-`generate_graph_iri` calls `pyld.jsonld.normalize(doc, {"algorithm": "URDNA2015", "format": "application/n-quads"})`
-(`api/ledger_anchor.py:236-241`) and `_content_hash_graph_to_iri` stamps the constant `_GRAPH_CANON_URDNA2015 = 1`
-(`:158`, used at `:216-222`). ADR 0001 D2-a selects **RDFC-1.0**. Both write wire byte `1` (§2.3), and the chain
-does not check it (§2.6).
-
-**Consequence:** if RDFC-1.0's escape-character clarifications change the canonical N-Quads for any graph we
-anchor, we get a different hash carrying an identical algorithm identifier — a silent fork with no on-chain
-signal. Any PR that touches the canonicalization path must state which spec it runs and reconcile against this
-constant. Related, verified: `pyld` is imported lazily inside the function and is **absent from
-`koi-processor/requirements.txt`** (97 lines, no `pyld`/`rdflib`/`oxigraph`/`jsonld` entry), so the graph path
-carries an undeclared runtime dependency.
-
----
-
----
-
-## 3. Before you change anything that gets anchored
-
-**Ledger constraints**
-- [ ] Does this change anything that gets anchored or attested? If no, skip to *Standards compatibility*.
-- [ ] If it will be **attested**: is it anchored as `ContentHash.Graph`? (§2.1) Check the IRI suffix is `.rdf` (§2.8).
-- [ ] Named a canonicalization algorithm? State **which spec**, and confirm the code runs that spec — not just
-      that it stamps the right byte (§2.3, §2.6, §2.10).
-- [ ] Named a digest? BLAKE2b-256, 32 bytes, inside 20–64 (§2.4).
-- [ ] Cited a proto field? Confirm it exists in **v2**, not only v1 (§2.5).
-- [ ] Asserted the chain rejects something? Find the rejecting line in `x/data/`. If there isn't one, delete
-      the assertion (§2.6).
-- [ ] Changes an existing anchor's type? Say explicitly that the IRI changes and name the migration (§2.7).
-
-Then run the standards-side checklist in
-[`regen-data-standards/standards-agent-context.md`](https://github.com/regen-network/regen-data-standards/blob/main/standards-agent-context.md)
-§1 for anything touching schema shape.
-
----
-
-## 4. Worked example — the error this file exists to prevent
-
-ADR 0001 originally recommended **D2-b**: JCS over a typed JSON projection. It was reversed on 2026-07-31.
-
-The reasoning failed at three separate points, each of which is a checklist item above:
-
-1. It assumed a Raw JSON anchor could be attested later. **§2.1** — `MsgAttest` is typed
-   `repeated ContentHash.Graph`. One `grep content_hashes proto/regen/data/v2/tx.proto` refutes it.
-2. It read `ContentHash.Raw` as providing a canonical projection. **§2.2** — the field's own doc comment
-   disclaims exactly that.
-3. It described production as JCS-canonical. **§2.9** — production runs sorted-key `json.dumps`, not RFC 8785.
-
-All three were checkable in under five minutes against files named in §2, and all three would have been caught
-by the §3 boxes *"if it will be attested, is it anchored as Graph?"* and *"asserted the chain rejects
-something? find the rejecting line."* The cost of not checking was a full ADR rewrite plus a reviewer's time.
-
-§2.10 is the same error class, still open: the deployed canonicalizer and the ADR name different specs while
-stamping the same byte. Nothing downstream surfaces it. Someone has to look.
+The previous revision coupled a suffix check, a Raw-attestation overstatement and an unratified dual-anchor plan. Those conclusions are superseded by §§2.1, 2.7 and 2.8 above; historical discussion remains in PR history.
