@@ -110,6 +110,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# NOTE (unchanged, deliberately): the CORS policy immediately above pairs
+# allow_origins=["*"] with allow_credentials=True. That is a real defect and it
+# is tracked as a SEPARATE, enforcing change. It is not touched here.
+
+# Log-only authentication observability.
+#
+# Added LAST, so it is the OUTERMOST middleware and sees every request exactly
+# as it arrived. It evaluates the intended bearer-token policy and writes one
+# JSON line per request; it denies nothing. See api/auth_observability.py --
+# every exit from its __call__ is a delegation to the wrapped app, the module
+# constructs no Response and contains no raise, so "log-only" is a property of
+# the code rather than of KOI_AUTH_MODE.
+try:
+    from api.auth_observability import (
+        AuthObservationMiddleware,
+        current_mode as _koi_auth_mode,
+        log_sink_description as _koi_auth_sink,
+        warn_if_enforce_requested as _koi_auth_warn,
+    )
+
+    app.add_middleware(AuthObservationMiddleware)
+    _koi_auth_warn()
+    logger.info(
+        "Auth observability active (observe-only): mode=%s sink=%s",
+        _koi_auth_mode(), _koi_auth_sink(),
+    )
+except Exception as _auth_obs_exc:  # never let observability break startup
+    logger.warning("Auth observability NOT installed: %r", _auth_obs_exc)
+
 # Serve static files (demo portal)
 from fastapi.staticfiles import StaticFiles
 _static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
