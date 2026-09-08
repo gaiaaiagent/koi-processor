@@ -62,7 +62,7 @@ The first is not RFC 8785 JCS. The existence of the second path does not mean th
 
 ### 2.10 The inspected graph canonicalizer names URDNA2015
 
-`generate_graph_iri` invokes `pyld.jsonld.normalize` with `algorithm: URDNA2015` and emits algorithm value 1. The proposed new profile evaluates RDFC-1.0. Resolve spec/version parity using executed vectors before claiming equivalence or deploying a replacement. The pinned requirements.txt does not declare pyld; a future runtime change must establish its dependency provenance in the actual serving environment. This is a source-level observation, not proof that a running service lacks the package.
+`generate_graph_iri` invokes `pyld.jsonld.normalize` with `algorithm: URDNA2015` and emits algorithm value 1. The proposed new profile evaluates RDFC-1.0. Resolve spec/version parity using executed vectors before claiming equivalence or deploying a replacement. The pinned requirements.txt declares `pyld>=2.0.4` for Graph IRI generation. A future runtime change must still record the installed dependency version in the actual serving environment and test the selected canonicalization profile. A declared dependency is not proof of deployment or RDFC-1.0 conformance.
 
 ## 3. Before changing anchored data
 
