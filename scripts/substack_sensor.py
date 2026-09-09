@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +79,24 @@ from substack_config import load_publications  # noqa: E402
 
 def rid_for(feed_slug: str, post_slug: str) -> str:
     return f"substack-corpus:{feed_slug}:{post_slug}"
+
+
+def parse_post_date(raw: Optional[str]) -> Optional[datetime]:
+    """Substack's archive `post_date` (ISO-8601, e.g. 2026-09-09T13:28:38.796Z)
+    -> aware datetime for the koi_memories.published_at COLUMN.
+
+    Writing it only into metadata (as this sensor did until 2026-09-09) leaves
+    the column NULL, so anything that filters or orders substack docs by
+    publication date at the column level silently matches nothing. Returns None
+    on an unparseable value rather than failing the post's ingest.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        logger.warning("unparseable post_date %r", raw)
+        return None
 
 
 def html_to_text(body_html: Optional[str]) -> str:
@@ -152,16 +171,20 @@ async def upsert_post(pool: asyncpg.Pool, embedder: OpenAIEmbeddingProvider, chu
             await conn.execute(
                 """
                 INSERT INTO koi_memories
-                    (id, rid, event_type, source_sensor, content, metadata, is_private, access_source)
-                VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb, FALSE, $6)
+                    (id, rid, event_type, source_sensor, content, metadata, is_private, access_source,
+                     published_at, content_hash)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb, FALSE, $6, $7, $8)
                 ON CONFLICT (rid) DO UPDATE SET
                     event_type = EXCLUDED.event_type,
                     content = EXCLUDED.content,
                     metadata = EXCLUDED.metadata,
+                    published_at = COALESCE(EXCLUDED.published_at, koi_memories.published_at),
+                    content_hash = EXCLUDED.content_hash,
                     updated_at = NOW()
                 """,
                 rid, event_type, SOURCE_SENSOR,
                 json.dumps(doc_content), json.dumps(doc_meta), ACCESS_SOURCE,
+                parse_post_date(meta.get("post_date")), content_hash,
             )
             await conn.execute("DELETE FROM koi_memory_chunks WHERE document_rid=$1", rid)
             total = len(chunks)

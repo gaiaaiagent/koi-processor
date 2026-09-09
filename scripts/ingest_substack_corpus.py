@@ -36,6 +36,33 @@ import tiktoken
 
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
 
+
+def parse_corpus_date(raw: Optional[str]) -> Optional[datetime]:
+    """Corpus post `date` -> aware datetime for koi_memories.published_at.
+
+    Two shapes reach this script: ISO-8601 from the Gmail bridge
+    (`2025-12-24T10:34:52+00:00`) and the scraped-archive form (`OCT 23, 2024`).
+    Writing the value only into metadata (as this script did until 2026-09-09)
+    left the published_at COLUMN NULL, so date filters and ORDER BY at the
+    column level silently matched nothing. Unparseable -> None, never an abort.
+    """
+    if not raw:
+        return None
+    txt = str(raw).strip()
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%d %b %Y"):
+        try:
+            return datetime.strptime(txt.title(), fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    print(f"WARNING: unparseable post date {raw!r} — published_at left NULL", file=sys.stderr)
+    return None
+
+
 OPENAI_MODEL = "text-embedding-3-large"
 OPENAI_DIMENSIONS = 3072
 MAX_TOKENS_PER_CHUNK = 8000
@@ -266,11 +293,12 @@ async def main():
             async with conn.transaction():
                 await conn.execute(
                     """
-                    INSERT INTO koi_memories (rid, event_type, source_sensor, content, metadata)
-                    VALUES ($1::text, 'NEW', $2::text, $3::jsonb, $4::jsonb)
+                    INSERT INTO koi_memories (rid, event_type, source_sensor, content, metadata, published_at)
+                    VALUES ($1::text, 'NEW', $2::text, $3::jsonb, $4::jsonb, $5)
                     ON CONFLICT (rid) DO NOTHING
                     """,
                     document_rid, SOURCE_SENSOR, json.dumps(parent_content), json.dumps(parent_metadata),
+                    parse_corpus_date(date),
                 )
                 for chunk, emb in zip(chunks, embeddings):
                     chunk_rid = f"{document_rid}#chunk{chunk['index']}"
