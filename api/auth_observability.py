@@ -95,6 +95,20 @@ def warn_if_enforce_requested() -> None:
 # Scopes and tokens
 # --------------------------------------------------------------------------
 
+# Fixed cred_kind labels. cred_kind MUST always be one of these -- it is never
+# built from request content. See inspect_credential() for why.
+KIND_NONE = "none"
+KIND_BEARER = "bearer"
+KIND_X_API_KEY = "x-api-key"
+KIND_OTHER_SCHEME = "other_scheme"              # non-bearer scheme + a value
+KIND_MALFORMED_NO_SCHEME = "malformed_no_scheme"  # one opaque token, no scheme
+KIND_MALFORMED_EMPTY = "malformed_empty"          # header present but empty/whitespace
+CRED_KINDS = frozenset({
+    KIND_NONE, KIND_BEARER, KIND_X_API_KEY, KIND_OTHER_SCHEME,
+    KIND_MALFORMED_NO_SCHEME, KIND_MALFORMED_EMPTY,
+})
+
+
 SCOPE_ADMIN = "admin"
 SCOPE_CLAIMS = "claims"
 SCOPE_MCP = "mcp"
@@ -226,13 +240,31 @@ def inspect_credential(headers: Dict[str, str]) -> Dict[str, Any]:
     presented: Optional[str] = None
     kind = "none"
 
+    unmatched_fp_src: Optional[str] = None
+
     if auth:
         scheme, _, rest = auth.partition(" ")
         s = scheme.lower()
         if s == "bearer" and rest.strip():
             presented, kind = rest.strip(), "bearer"
         else:
-            kind = "non_bearer:" + (s or "malformed")
+            # SECURITY (fixed 2026-09-08): cred_kind is a FIXED LABEL, never
+            # derived from header content. The previous line was
+            #     kind = "non_bearer:" + (s or "malformed")
+            # For a bare `Authorization: <token>` with no scheme, partition()
+            # puts the WHOLE TOKEN in `scheme`, so this lowercased a live
+            # credential into the durable log. Lowercasing resembled
+            # sanitising; it was a mangled secret. Reported by the Codex lane;
+            # synthetic credentials only, no real exposure established.
+            if not scheme:
+                kind = KIND_MALFORMED_EMPTY
+            elif rest.strip():
+                kind = KIND_OTHER_SCHEME
+            else:
+                kind = KIND_MALFORMED_NO_SCHEME
+            # Distinct malformed callers stay distinguishable by fingerprint of
+            # the whole header -- a one-way digest, never the value.
+            unmatched_fp_src = auth.strip()
     elif headers.get("x-api-key"):
         presented, kind = headers["x-api-key"].strip(), "x-api-key"
 
@@ -246,13 +278,24 @@ def inspect_credential(headers: Dict[str, str]) -> Dict[str, Any]:
                 matched_scope = scope_name
                 granted = GRANTS[scope_name]
                 break
+    elif unmatched_fp_src:
+        # Malformed header: nothing was "presented" to match against a scope, so
+        # the fingerprint is of the header shape, not of a credential we were
+        # offered. This keeps distinct malformed callers distinguishable.
+        fp = _fingerprint(unmatched_fp_src)
 
     has_cookie = "koi_session=" in headers.get("cookie", "")
 
     return {
         "cred_kind": kind,
         "cred_scope": matched_scope,
-        "cred_fp": fp if (presented and not matched_scope) else "",
+        # Original guard, unchanged for presented credentials: a token we could
+        # match is never fingerprinted, and neither is one we could not match
+        # only because no tokens are configured. The malformed arm is additive --
+        # `presented` is None there, so this fingerprints header shape, never an
+        # offered secret. (Widening this to `not matched_scope` regressed
+        # test_known_token_is_not_fingerprinted; caught by that test.)
+        "cred_fp": fp if ((presented and not matched_scope) or unmatched_fp_src) else "",
         "granted": list(granted),
         "session_cookie": has_cookie,
         "tokens_configured": sorted(tokens.keys()),
