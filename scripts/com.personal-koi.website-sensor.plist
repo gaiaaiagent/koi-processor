@@ -14,13 +14,18 @@
     <key>WorkingDirectory</key>
     <string>/Users/darrenzal/projects/koi-processor-runtime</string>
 
-    <!-- Daily at 06:40 local, before the substack (07:15) and research-author (07:35)
-         sensors so the three do not contend for the extractor at once. Snapshots every
-         configured site into ~/Documents/koi-source-archive (git), then ingests only
-         new / changed documents. -->
+    <!-- WEEKLY, Sundays at 06:40 local. Operator's choice on 2026-09-12: weekly
+         rather than daily, to keep extractor load low while long-running extraction
+         experiments are in flight. 06:40 sits before the substack (07:15) and
+         research-author (07:35) sensors so the three never contend for the extractor.
+         Snapshots every configured site into ~/Documents/koi-source-archive (git),
+         then ingests ONLY new / changed documents -- unchanged pages are skipped via
+         the manifest diff, so a run over an unchanged site is nearly free. -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>
+            <key>Weekday</key>
+            <integer>0</integer>
             <key>Hour</key>
             <integer>6</integer>
             <key>Minute</key>
