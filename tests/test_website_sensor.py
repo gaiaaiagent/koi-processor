@@ -603,3 +603,29 @@ def test_unwrap_hard_wrapped_joins_prose_and_keeps_short_lines():
     # a document that is not hard-wrapped is returned untouched
     plain = "Short line one.\nShort line two.\n"
     assert ws.unwrap_hard_wrapped(plain) == plain
+
+
+def test_circuit_breaker_aborts_a_systemic_failure_instead_of_marching_through(tmp_path, monkeypatch):
+    site = _site(tmp_path, ingest_concurrency=1, abort_after_consecutive_failures=3)
+    _init_repo(site.archive_root)
+    docs = [_fetched(f"page:www.example.org/p{i}", f"P{i} " * 60 + "\n") for i in range(10)]
+    _stub_snapshot(monkeypatch, docs)
+    calls = []
+    # every ingest fails fast, as a rate limit would
+    monkeypatch.setattr(ws, "ingest_one",
+                        lambda s, k, e, d: calls.append(k) or {"ok": False, "error": "claude -p failed after 3 attempts: exit 1", "seconds": 12})
+    s = ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    assert "aborted" in s["ingest"], "a run of failures must trip the breaker"
+    # overshoot is bounded by threshold + (concurrency - 1); concurrency is 1 here
+    assert len(calls) == 3, f"should stop after 3 consecutive failures, attempted {len(calls)}"
+    assert len(s["ingest"]["not_attempted"]) == 7
+    # a success resets the counter — isolated failures must NOT abort a healthy run
+    calls.clear()
+    outcomes = iter([False, False, True, False, False, True] + [True] * 10)
+    monkeypatch.setattr(ws, "ingest_one", lambda s_, k, e, d: calls.append(k) or (
+        {"ok": True, "document_rid": "document:" + "a" * 64} if next(outcomes)
+        else {"ok": False, "error": "transient"}))
+    _stub_snapshot(monkeypatch, docs)
+    monkeypatch.setattr(ws, "db_unretire", lambda rid: None)
+    s2 = ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    assert "aborted" not in s2["ingest"], "interleaved failures must not trip the breaker"

@@ -42,6 +42,7 @@ import asyncio
 import csv
 import fcntl
 import fnmatch
+import threading
 import hashlib
 import html as html_lib
 import io
@@ -188,6 +189,7 @@ class SiteConfig:
                                             # multi-column designed PDFs; use it only for single-column print books.
     max_download_mb: int = 200              # per-response size cap (disk + git protection)
     max_ingest_attempts: int = 3            # stop retrying an unchanged document after this many failed runs
+    abort_after_consecutive_failures: int = 4   # circuit breaker: stop the run when the failure is systemic
 
     @property
     def host(self) -> str:
@@ -259,6 +261,7 @@ def load_config(path: Path) -> List[SiteConfig]:
             pdf_layout=bool(s.get("pdf_layout", False)),
             max_download_mb=int(s.get("max_download_mb", 200)),
             max_ingest_attempts=int(s.get("max_ingest_attempts", 3)),
+            abort_after_consecutive_failures=int(s.get("abort_after_consecutive_failures", 4)),
         ))
     return sites
 
@@ -1329,14 +1332,30 @@ def run_ingests(site: SiteConfig, manifest: Dict[str, Any], keys: List[str], pre
                        len(todo) - max_ingest, len(todo))
         todo = todo[:max_ingest]
     results: Dict[str, Dict[str, Any]] = {}
+    consecutive_failures = 0
+    aborted: Optional[str] = None
     logger.info("%s: ingesting %d documents (concurrency=%d)", site.site_id, len(todo), site.ingest_concurrency)
-    with ThreadPoolExecutor(max_workers=max(1, site.ingest_concurrency)) as pool:
-        futs = {pool.submit(ingest_one, site, k, entries[k], d): k for k, d in todo}
-        for fut in as_completed(futs):
-            k = futs[fut]
+
+    # SLIDING WINDOW, not submit-everything-up-front. Future.cancel() only stops work that has
+    # not started, so a pool handed every item can drain the queue before the breaker is even
+    # reached — the abort then depends on whether the consumer keeps up with the producer,
+    # which is a hope rather than a guarantee. Submitting at most `concurrency` at a time makes
+    # the overshoot structurally bounded: once the breaker trips, nothing further is submitted.
+    width = max(1, site.ingest_concurrency)
+    pending = list(todo)
+    with ThreadPoolExecutor(max_workers=width) as pool:
+        futs: Dict[Any, str] = {}
+        def submit_next():
+            while pending and len(futs) < width and not aborted:
+                k, d = pending.pop(0)
+                futs[pool.submit(ingest_one, site, k, entries[k], d)] = k
+        submit_next()
+        while futs:
+            done = next(as_completed(list(futs)))
+            k = futs.pop(done)
             try:
-                rec = fut.result()
-            except Exception as e:  # never let one document kill the run
+                rec = done.result()
+            except Exception as e:                       # never let one document kill the run
                 rec = {"ok": False, "error": f"exception: {e}"}
             prior = entries[k].get("ingest") or {}
             rec["attempts"] = (int(prior.get("attempts", 0)) if prior.get("for_sha256") == entries[k].get("sha256") else 0) + 1
@@ -1346,12 +1365,27 @@ def run_ingests(site: SiteConfig, manifest: Dict[str, Any], keys: List[str], pre
             status = "OK " if rec.get("ok") else "FAIL"
             logger.info("  [%s] %s → %s %s", status, k[:70], rec.get("document_rid", "-"),
                         "" if rec.get("ok") else rec.get("error", ""))
-            # Retire the previous version only after the new one is verified. previous_ingest is
-            # PERSISTED by write_snapshot, so a retry on a later run still retires it.
             retire_previous(site, manifest, k)
-            save_manifest(site, manifest)                   # a kill mid-run loses nothing
-    return {"attempted": len(todo), "ok": sum(1 for r in results.values() if r.get("ok")),
-            "failed": [k for k, r in results.items() if not r.get("ok")], "skipped": skipped}
+            save_manifest(site, manifest)                # a kill mid-run loses nothing
+            # Circuit breaker. A run of consecutive failures is a systemic condition — a rate
+            # limit, a dead provider, a missing gate — not N independent bad documents. Without
+            # it the run spends a full attempt on every remaining document to fail the same way
+            # and buries the cause. (Peer session 104add19 lost a 12-run overnight batch to
+            # exactly this on 2026-09-11: one real 453s failure, then eleven 11-13s rejections,
+            # every one logged rc=0.)
+            consecutive_failures = 0 if rec.get("ok") else consecutive_failures + 1
+            if not aborted and consecutive_failures >= site.abort_after_consecutive_failures:
+                aborted = (f"{consecutive_failures} consecutive ingest failures — aborting the run. "
+                           f"Last error: {rec.get('error', '?')}")
+                logger.error("  ABORT  %s", aborted)
+            if not aborted:
+                submit_next()
+    out = {"attempted": len(results), "ok": sum(1 for r in results.values() if r.get("ok")),
+           "failed": [k for k, r in results.items() if not r.get("ok")], "skipped": skipped}
+    if aborted:
+        out["aborted"] = aborted
+        out["not_attempted"] = [k for k, _ in todo if k not in results]
+    return out
 
 
 def retire_missing(site: SiteConfig, manifest: Dict[str, Any], discovery_healthy: bool) -> List[str]:
@@ -1586,7 +1620,8 @@ def main() -> int:
                     if lock:
                         lock.__exit__(None, None, None)
                 print(json.dumps(s, indent=2, default=str))
-                if s.get("ingest", {}).get("failed") or s.get("retire_errors") or s.get("discovery", {}).get("errors"):
+                if (s.get("ingest", {}).get("failed") or s.get("ingest", {}).get("aborted")
+                        or s.get("retire_errors") or s.get("discovery", {}).get("errors")):
                     rc = 1
             except Exception as e:
                 logger.error("%s: run failed: %s", site.site_id, e, exc_info=True)
