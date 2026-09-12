@@ -94,10 +94,16 @@ pg_restore -d personal_koi_restored -j 4 personal_koi.dump
 ### How long a restore actually takes
 
 Measured 2026-09-12 on this laptop, restoring the 12.5 GB `personal_koi` dump:
-data loads in roughly 20 minutes, and then **index construction dominates** --
-a single `hnsw` index on a 3072-dimension `vector` column ran over 27 minutes
-by itself, with the table data already in place. Budget hours, not the half
-hour the dump size suggests.
+data loads in roughly 20 minutes, and then **index construction dominates**.
+A single `hnsw` index on `knowledge_facts` (66k rows x 3072 dimensions) ran
+**57 minutes and had not finished**, with a second one on `session_chunks`
+(480k rows) running concurrently and the table data long since in place.
+Budget hours, not the half hour the dump size suggests.
+
+Note what this means for verifying a dump: **index build time is not part of
+the integrity question.** The data layer can be proven complete while the
+indexes are still building -- see below -- and an index failing at that point
+would be a pgvector or resource problem, not dump corruption.
 
 If you are recovering under time pressure and need the data queryable before it
 is fast, restore in two passes:
@@ -119,6 +125,28 @@ and proportional to the elapsed time. On 2026-09-12, eleven hours after the
 03:15 dump: `knowledge_facts` +41, `entity_registry` +33, `koi_memory_chunks`
 +122, `koi_net_events` +1,395. A delta that is negative, or large, or zero
 across the board, is the thing to look at.
+
+### What a verified restore looks like — the 2026-09-12 measurement
+
+Restoring today's dump, embeddings included, against live:
+
+| table | restored rows / embeddings | live rows / embeddings |
+|---|---|---|
+| `knowledge_facts` | 66,184 / 66,184 | 66,225 / 66,225 |
+| `koi_memory_chunks` | 173,594 / 173,594 | 173,719 / 173,719 |
+| `session_chunks` | 480,753 / 480,753 | 480,950 / 480,950 |
+
+Two things make that a pass rather than a shrug. **Embedding coverage is 100%
+on both sides** — the restore introduced no nulls, which is the failure mode
+that would matter most and would be invisible to a row count. And the vectors
+are *usable*, not merely present: `fact_embedding_3072 <=> fact_embedding_3072`
+returns exactly `0.000000`, with a negative control (`<=> '[1,2,3]'::vector`)
+correctly erroring on dimension mismatch. A stored-but-corrupt vector passes a
+count and fails that operator.
+
+Column names are `fact_embedding_3072` on `knowledge_facts` and
+`embedding_3072` on `koi_memory_chunks` / `session_chunks` — not `embedding`,
+which also exists on some tables at a different dimension.
 
 **The off-host copy is checksum-verified, not restore-verified.** gaia has
 `sha256sum` but no `pg_restore`, so the nightly job proves the bytes arrived
