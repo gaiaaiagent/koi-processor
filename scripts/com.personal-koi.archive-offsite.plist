@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-koi.archive-offsite</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/darrenzal/projects/koi-processor-service/scripts/koi_archive_offsite.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/darrenzal/projects/koi-processor-service</string>
+
+    <!-- Daily at 08:30. DAILY rather than weekly even though the website sensor
+         that feeds the archive runs weekly (Sundays 06:40): the script skips
+         immediately when the archive HEAD already matches what was last verified
+         off-host, so six days in seven cost one `git rev-parse` and nothing else.
+         Daily also catches commits from any other source, not just that sensor.
+
+         08:30 is after the sensor's Sunday run has finished committing, so the
+         week's new snapshots go off-host the same day rather than waiting until
+         the next cycle. It is also clear of the nightly database backup (03:15,
+         roughly two hours plus an 18-minute off-host copy). -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/darrenzal</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/darrenzal/koi-backups/archive-offsite.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/darrenzal/koi-backups/archive-offsite.error.log</string>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
