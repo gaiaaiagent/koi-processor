@@ -1,0 +1,40 @@
+# website_sources.example.yaml — TEMPLATE (safe to commit / fork).
+#
+# WHICH websites to watch is personal config. Copy this to `website_sources.yaml`
+# (gitignored) and adapt. Read by scripts/website_sensor.py; scheduled by
+# ~/Library/LaunchAgents/com.personal-koi.website-sensor.plist (daily).
+#
+# Every run snapshots each site into a LOCAL-ONLY git repo (archive_root) and commits
+# BEFORE touching the database, so any earlier version of any page/document is
+# `git log -- <path>` away. Then new + changed documents go through
+# scripts/ingest_document.py (rag | standard | thorough) and a changed document's
+# previous version is superseded (row kept, RAG chunks dropped, facts/claims kept).
+
+archive_root: ~/koi-source-archive          # git repo; created by hand once (`git init`)
+
+sites:
+  - site_id: example-org                    # lowercase slug; becomes web/<site_id>/ in the archive
+    root_url: https://www.example.org
+    discovery: both                         # sitemap | crawl | both
+    # sitemap_url: https://www.example.org/sitemap.xml   # default: <root_url>/sitemap.xml
+    max_pages: 200
+    include: []                             # regexes on the URL path; empty = every same-host page
+    exclude: ["^/tag/", "^/search"]
+    asset_hosts: [cdn.prod.website-files.com]   # off-host CDNs whose linked PDFs are archived too
+    follow_google: true                     # export PUBLIC Google Docs/Sheets/Drive PDFs the site links to
+    group_id: your-field                    # primary learning field (knowledge_facts.group_id)
+    default_fields: [another-field]         # additional document_field_membership rows
+    default_tier: standard                  # rag | standard | thorough
+    min_words: 40                           # shorter extractions are archived but not ingested ("thin")
+    on_removed: retire                      # retire | keep  (retire = supersede row + drop chunks; never hard-delete)
+    retire_after_missing_runs: 2            # a page must be missing this many consecutive runs first
+    ingest_concurrency: 2
+    ingest_timeout: 3600                    # seconds per document
+    keep_history: true                      # false = overwrite in place, no git, old versions deleted outright
+    routing:                                # first matching rule wins; routing_overrides.json in the archive wins over rules
+      - match: "asset:*"                    # linked PDFs are usually the substantive documents
+        tier: thorough
+      - match: "page:*/blog/*"
+        fields: [another-field, third-field]
+      - match: "page:*/careers"
+        skip: true

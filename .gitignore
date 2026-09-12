@@ -143,3 +143,4 @@ deep_extract.env
 # Local staging root for document ingest (DEFAULT_ALLOWED_ROOTS in
 # scripts/ingest_document.py) and the isolation smoke test's fixture.
 tmp/incoming/
+config/website_sources.yaml

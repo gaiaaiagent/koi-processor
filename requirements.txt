@@ -98,7 +98,7 @@ pyld>=2.0.4
 # =============================================================================
 # TerminusDB Graph Storage (Phase 1) — removed, unused and blocks Python 3.13+
 beautifulsoup4==4.13.5
-# trafilatura>=2.0.0
+trafilatura>=2.0.0   # website_sensor.py main-content extraction
 scrapling>=0.4
 
 # =============================================================================

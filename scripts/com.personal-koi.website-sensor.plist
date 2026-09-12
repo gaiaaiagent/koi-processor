@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-koi.website-sensor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/darrenzal/projects/koi-processor-runtime/scripts/run_website_sensor.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/darrenzal/projects/koi-processor-runtime</string>
+
+    <!-- Daily at 06:40 local, before the substack (07:15) and research-author (07:35)
+         sensors so the three do not contend for the extractor at once. Snapshots every
+         configured site into ~/Documents/koi-source-archive (git), then ingests only
+         new / changed documents. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>6</integer>
+            <key>Minute</key>
+            <integer>40</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/darrenzal</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/darrenzal/projects/koi-processor-runtime/logs/website-sensor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/darrenzal/projects/koi-processor-runtime/logs/website-sensor.error.log</string>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
