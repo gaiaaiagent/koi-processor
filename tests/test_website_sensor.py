@@ -532,3 +532,20 @@ def test_gives_up_after_max_attempts_until_content_changes(tmp_path, monkeypatch
     _stub_snapshot(monkeypatch, [_fetched("page:www.example.org/a", "B " * 50 + "\n")])   # content changed → retry
     ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
     assert len(calls) == 3
+
+
+def test_extractor_version_change_is_reported_not_silent(tmp_path, monkeypatch, caplog):
+    site = _site(tmp_path, ingest_concurrency=1)
+    _init_repo(site.archive_root)
+    _stub_snapshot(monkeypatch, [_fetched("page:www.example.org/a", "A " * 50 + "\n")])
+    monkeypatch.setattr(ws, "ingest_one", lambda s, k, e, d: {"ok": True, "document_rid": "document:" + "1" * 64})
+    s1 = ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    assert s1["extractor_version"] == ws.EXTRACTOR_VERSION and "extractor_changed" not in s1
+    monkeypatch.setattr(ws, "EXTRACTOR_VERSION", "9999.9")
+    _stub_snapshot(monkeypatch, [_fetched("page:www.example.org/a", "A EXTRACTED DIFFERENTLY " * 20 + "\n")])
+    monkeypatch.setattr(ws, "db_retire", lambda old, new, keep=True: {"old_found": True, "chunks_deleted": 1})
+    monkeypatch.setattr(ws, "ingest_one", lambda s, k, e, d: {"ok": True, "document_rid": "document:" + "2" * 64})
+    with caplog.at_level("WARNING"):
+        s2 = ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    assert s2["extractor_changed"] == {"from": ws.EXTRACTOR_VERSION if False else "2026-09-11.2", "to": "9999.9", "changed": 1}
+    assert "EXTRACTOR CHANGED" in caplog.text

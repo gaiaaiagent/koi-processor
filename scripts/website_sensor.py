@@ -93,6 +93,11 @@ UA = os.getenv(
 DOC_EXTS = (".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".md")
 PDF_EXTS = (".pdf",)
 VALID_TIERS = ("rag", "standard", "thorough")
+# Content identity is sha256(extracted markdown), so a change to ANY extractor re-classifies
+# every unchanged page as "changed" and re-ingests the whole site. Bump this whenever the
+# extraction of existing content changes; the run then says so out loud instead of the diff
+# silently reading as "the site changed overnight".
+EXTRACTOR_VERSION = "2026-09-11.2"   # walk-preferred HTML, reading-order PDF, xlsx sheets
 FETCH_TIMEOUT = 60.0
 POLITE_DELAY = 0.5
 
@@ -969,6 +974,7 @@ def write_snapshot(site: SiteConfig, manifest: Dict[str, Any], fetched: List[Fet
         e["last_missing_run"] = run_id
     manifest["runs"] = int(manifest.get("runs", 0)) + 1
     manifest["last_run"] = run_id
+    manifest["extractor_version"] = EXTRACTOR_VERSION
     return previous
 
 
@@ -1362,7 +1368,15 @@ def run_site(site: SiteConfig, mode: str, max_docs: Optional[int], max_ingest: O
     finally:
         fetcher.close()
     manifest = load_manifest(site)
+    prior_ev = manifest.get("extractor_version")
     diff = classify(site, manifest, fetched)
+    if prior_ev and prior_ev != EXTRACTOR_VERSION and diff["changed"]:
+        logger.warning("%s: EXTRACTOR CHANGED %s → %s — %d of the %d 'changed' documents may be "
+                       "re-extraction churn, not site edits; each re-ingests and retires its previous version",
+                       site.site_id, prior_ev, EXTRACTOR_VERSION, len(diff["changed"]),
+                       len(diff["changed"]) + len(diff["unchanged"]))
+        summary["extractor_changed"] = {"from": prior_ev, "to": EXTRACTOR_VERSION, "changed": len(diff["changed"])}
+    summary["extractor_version"] = EXTRACTOR_VERSION
     summary["discovery"] = report
     summary["counts"] = {k: len(v) for k, v in diff.items()}
     logger.info("%s: new=%d changed=%d unchanged=%d unavailable=%d missing=%d", site.site_id,
