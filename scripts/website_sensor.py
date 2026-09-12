@@ -97,7 +97,7 @@ VALID_TIERS = ("rag", "standard", "thorough")
 # every unchanged page as "changed" and re-ingests the whole site. Bump this whenever the
 # extraction of existing content changes; the run then says so out loud instead of the diff
 # silently reading as "the site changed overnight".
-EXTRACTOR_VERSION = "2026-09-11.2"   # walk-preferred HTML, reading-order PDF, xlsx sheets
+EXTRACTOR_VERSION = "2026-09-11.4"   # walk-preferred HTML, reading-order PDF, xlsx sheets
 FETCH_TIMEOUT = 60.0
 POLITE_DELAY = 0.5
 
@@ -589,6 +589,84 @@ def xlsx_to_markdown(data: bytes, title: str = "") -> Tuple[str, str]:
     return md, derived
 
 
+PRINTABLE_TEXT_RATIO = 0.95
+
+
+def decode_mostly_text(data: bytes) -> Optional[str]:
+    """Return readable text for a payload that is text wearing a binary costume, else None.
+
+    biofi.earth links David Haenke's "Wild Civilization" as a Drive file that is neither a
+    PDF nor UTF-8: it is a legacy EPSON FX *printer control stream* — 21,570 bytes of which
+    99.8% are printable, the essay's 3,301 words interleaved with a handful of escape codes.
+    The old rule keyed on file extension and content-type and filed it `binary-unsupported`,
+    discarding a complete essay because of its wrapper. A payload that decodes to >=95%
+    printable characters IS text; decode it and strip the control bytes rather than
+    declaring it unreadable.
+    """
+    if not data or data[:4] in (b"\x89PNG", b"%PDF", b"PK\x03\x04", b"\xff\xd8\xff\xe0", b"GIF8"):
+        return None
+    for enc in ("utf-8", "cp437", "latin-1"):
+        try:
+            text = data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        printable = sum(1 for ch in text if ch.isprintable() or ch in "\t\n\r")
+        if printable / max(len(text), 1) < PRINTABLE_TEXT_RATIO:
+            continue
+        text = re.sub(r"^\x1d\}U[A-Z]+\}\x1d", "", text)          # printer init banner
+        text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)      # control bytes, keep \t \n
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = "\n".join(ln for ln in text.split("\n")
+                         if re.sub(r"[!^~\s]", "", ln) or not ln.strip())  # drop emphasis-code-only lines
+        text = unwrap_hard_wrapped(text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text + "\n" if len(text.split()) >= 20 else None
+    return None
+
+
+def unwrap_hard_wrapped(text: str, min_len: int = 55) -> str:
+    """Rejoin lines broken by fixed-width wrapping, leaving deliberate short lines alone.
+
+    A 1991 print file wraps every sentence at ~66 columns, so the naive text carries a
+    newline mid-clause roughly every twelve words. That damages chunk embeddings and gives
+    the extractor fragments instead of sentences. A line is a continuation only if it is
+    near the wrap width (>= min_len); genuinely short lines — headings, the author's
+    address block, list items — keep their break.
+    """
+    lines = text.split("\n")
+    if sum(1 for ln in lines if len(ln.rstrip()) >= min_len) < 5:
+        return text                                   # not a wrapped document; leave it alone
+    out: List[str] = []
+    buf = ""
+    for ln in lines:
+        stripped = ln.rstrip()
+        if not stripped.strip():                      # blank line ends a paragraph
+            if buf:
+                out.append(buf.strip()); buf = ""
+            out.append("")
+            continue
+        # A line ending in a hyphen is a split word by definition, whatever its length.
+        if buf and (len(buf) >= min_len or buf.rstrip().endswith("-")):
+            prev = buf.rstrip()
+            # A wrap can split a hyphenated word ("fanta-\nsies", "non-\nhuman"). Close the
+            # gap but KEEP the hyphen. Deciding whether to also drop it needs a dictionary:
+            # /usr/share/dict/words is the 1934 Webster list with no inflections, so it
+            # rejects "fantasies" and "corporations" while happily joining "non-human" into
+            # "nonhuman" — i.e. it corrupts the author's text in exactly the cases it is
+            # confident about. Tested: 10/12 correct, and the 2 failures are silent. Keeping
+            # the hyphen is wrong for no word and mildly ugly for a few.
+            buf = prev + stripped.lstrip() if prev.endswith("-") else prev + " " + stripped.lstrip()
+        else:
+            if buf:
+                out.append(buf.strip())
+            buf = stripped
+        if len(stripped) < min_len and not stripped.endswith("-"):   # short line ends the paragraph
+            out.append(buf.strip()); buf = ""
+    if buf:
+        out.append(buf.strip())
+    return "\n".join(out)
+
+
 def word_count(text: str) -> int:
     return len(re.findall(r"\w+", text))
 
@@ -821,6 +899,13 @@ def fetch_document(site: SiteConfig, fetcher: Fetcher, kind: str, ident: str, tm
         if ext == ".csv":
             text = data.decode("utf-8", errors="replace")
             return Fetched(key, kind, canonical, key, csv_to_markdown(text), data, ext, 200)
+        text = decode_mostly_text(data)
+        if text is not None:
+            title = (link_text if len(link_text.split()) >= 2 else
+                     next((ln.strip() for ln in text.splitlines() if len(ln.strip()) > 3), key))[:200]
+            md = text if text.lstrip().startswith("#") else f"# {title}\n\n{text}"
+            note = "thin" if word_count(md) < site.min_words else ""
+            return Fetched(key, kind, canonical, title, md, data, ".txt", 200, note=note)
         return Fetched(key, kind, canonical, "", "", data, ext if ext != ".bin" else ".bin", 200,
                        note="binary-unsupported")
     tmp_dir.mkdir(parents=True, exist_ok=True)

@@ -535,6 +535,7 @@ def test_gives_up_after_max_attempts_until_content_changes(tmp_path, monkeypatch
 
 
 def test_extractor_version_change_is_reported_not_silent(tmp_path, monkeypatch, caplog):
+    BASE_EV = ws.EXTRACTOR_VERSION            # read it, never hard-code it
     site = _site(tmp_path, ingest_concurrency=1)
     _init_repo(site.archive_root)
     _stub_snapshot(monkeypatch, [_fetched("page:www.example.org/a", "A " * 50 + "\n")])
@@ -547,5 +548,58 @@ def test_extractor_version_change_is_reported_not_silent(tmp_path, monkeypatch, 
     monkeypatch.setattr(ws, "ingest_one", lambda s, k, e, d: {"ok": True, "document_rid": "document:" + "2" * 64})
     with caplog.at_level("WARNING"):
         s2 = ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
-    assert s2["extractor_changed"] == {"from": ws.EXTRACTOR_VERSION if False else "2026-09-11.2", "to": "9999.9", "changed": 1}
+    assert s2["extractor_changed"] == {"from": BASE_EV, "to": "9999.9", "changed": 1}
     assert "EXTRACTOR CHANGED" in caplog.text
+
+
+def test_decode_mostly_text_recovers_printer_stream_and_rejects_real_binaries():
+    # A legacy EPSON FX print stream: printable text wearing a binary costume.
+    payload = (b"\x1d}UEPSONFXV}\x1d\r\n\x1d\r\n\x09\x10\x10!\r\n\x1dWILD CIVILIZATION:\r\n\r\n"
+               + b"In March of 1990 I spent six days in a Mayan Indian Village on the edge of "
+                 b"what is left of the Lacandon Rainforest in Southern Mexico.\r\n" * 3)
+    text = ws.decode_mostly_text(payload)
+    assert text is not None
+    assert "WILD CIVILIZATION:" in text and "Lacandon Rainforest" in text
+    assert "\x1d" not in text and "\x10" not in text and "\r" not in text
+    # real binaries must stay rejected
+    for blob in (b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4,
+                 b"%PDF-1.4" + bytes(range(256)) * 4,
+                 b"PK\x03\x04" + bytes(range(256)) * 4,
+                 bytes(range(256)) * 20):
+        assert ws.decode_mostly_text(blob) is None
+    # too short to be a document
+    assert ws.decode_mostly_text(b"hello world") is None
+
+
+def test_unwrap_hard_wrapped_joins_prose_and_keeps_short_lines():
+    # The fixture must contain >= 5 wrap-width lines or unwrap_hard_wrapped correctly
+    # declines to treat it as a wrapped document and returns it untouched.
+    doc = ("WILD CIVILIZATION:\n"
+           "\n"
+           "In March of 1990 I spent six days in a Mayan Indian Village on the \n"
+           "edge of what is left of the Lacandon Rainforest in Southern Mexico, \n"
+           "the State of Chiapas. It is the northernmost such forest remaining.\n"
+           "\n"
+           "About fifty Lacandon Mayan families live in the village of Lacanja, \n"
+           "and I stayed at the home of K'in Bor with his wife and their many \n"
+           "children for the duration of that visit in the early spring season.\n"
+           "\n"
+           "A shortened version appeared in the jour-\n"
+           "nal Conscious Choice, and the non-\n"
+           "human neighbours remained interesting throughout the whole season.\n"
+           "\n"
+           "David Haenke\n"
+           "Rt.1, Box 20\n"
+           "Newburg, MO 65550\n")
+    out = ws.unwrap_hard_wrapped(doc)
+    # prose paragraphs are rejoined into single lines
+    assert "Mayan Indian Village on the edge of what is left" in out
+    # a wrap inside a hyphenated word closes up but KEEPS the hyphen (never invents a word)
+    assert "jour-nal" in out and "jour- nal" not in out
+    assert "non-human" in out and "nonhuman" not in out
+    # deliberate short lines survive as their own lines
+    for line in ("David Haenke", "Rt.1, Box 20", "Newburg, MO 65550"):
+        assert line in out.split("\n")
+    # a document that is not hard-wrapped is returned untouched
+    plain = "Short line one.\nShort line two.\n"
+    assert ws.unwrap_hard_wrapped(plain) == plain
