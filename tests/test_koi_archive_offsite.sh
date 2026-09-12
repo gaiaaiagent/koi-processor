@@ -87,16 +87,27 @@ echo "== G0: the encryption guard must REFUSE a cleartext bundle named *.gpg =="
 # The guard's whole purpose is to catch the case where encryption silently did
 # not happen. Prove it can: hand the running script a gpg that is `cp`.
 STUB="$W/stub"; mkdir -p "$STUB"
-cat > "$STUB/gpg" <<'STUBEOF'
+# Resolve the REAL gpg once, here, and bake it into the stub. The first
+# version ended `exec /usr/bin/gpg "$@"`, but gpg on this machine is Homebrew's
+# at /opt/homebrew/bin/gpg -- /usr/bin/gpg does not exist. So the stub's
+# passthrough failed, the script's EARLIER key-existence guard fired, and G0
+# exited 1 for a reason that had nothing to do with the guard under test. The
+# assertions "exit 1" and "nothing cleartext reached the remote" both passed
+# while testing the wrong thing.
+REAL_GPG="$(command -v gpg)"
+[ -x "$REAL_GPG" ] || { echo "  SKIP G0: no gpg on PATH"; REAL_GPG=""; }
+cat > "$STUB/gpg" <<STUBEOF
 #!/bin/bash
-# passthrough "encryption": copy the input to --output, exit 0
-args=("$@"); out=""; inp=""
-for ((i=0; i<${#args[@]}; i++)); do
-  [ "${args[$i]}" = "--output" ] && out="${args[$((i+1))]}"
-  [ "${args[$i]}" = "--encrypt" ] && inp="${args[$((i+1))]}"
+# Passthrough "encryption": copy the input to --output and exit 0, so the
+# script believes encryption succeeded when it did not. Everything else
+# (--list-keys, --list-packets) goes to the real gpg unchanged.
+args=("\$@"); out=""; inp=""
+for ((i=0; i<\${#args[@]}; i++)); do
+  [ "\${args[\$i]}" = "--output" ] && out="\${args[\$((i+1))]}"
+  [ "\${args[\$i]}" = "--encrypt" ] && inp="\${args[\$((i+1))]}"
 done
-if [ -n "$out" ] && [ -n "$inp" ]; then cp "$inp" "$out"; exit 0; fi
-exec /usr/bin/gpg "$@"     # let --list-keys etc. behave normally
+if [ -n "\$out" ] && [ -n "\$inp" ]; then cp "\$inp" "\$out"; exit 0; fi
+exec ${REAL_GPG} "\$@"
 STUBEOF
 chmod +x "$STUB/gpg"
 out=$(PATH="$STUB:$PATH" KOI_ARCHIVE_MARKER="$W/.m0" bash "$S" 2>&1); rc=$?

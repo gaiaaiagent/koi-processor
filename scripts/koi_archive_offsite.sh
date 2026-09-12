@@ -45,9 +45,17 @@ fail() { log "FAIL: $*"; exit 1; }
 # the next launchd invocation finds it still sitting there.
 #
 # Not hypothetical. On 2026-09-12 `git rev-parse HEAD` -- which reads a 41-byte
-# file -- hung for over two minutes on an I/O-starved machine (15-minute load
-# average 33.75, StorageManagementService pinning two cores); plain `cat` on the
-# same file hung too. A bound turns that into a loud failure instead of silence.
+# file -- timed out repeatedly for ~20 minutes against this repo while sibling
+# paths on the same volume answered instantly; it cleared on its own.
+#
+# The CAUSE was never established, and the error text above deliberately does
+# not guess at one. An earlier version said "(is the disk starved?)", inferred
+# from a high load average and from `stat` failing on the path. That inference
+# was wrong twice over: `stat` on this machine resolves to a third-party
+# /usr/local/bin/stat that is SIGKILLed on EVERY path, /etc/hosts included, so
+# its failure said nothing about this directory -- and a wrong cause baked into
+# an error message becomes the explanation the next reader reaches for. Report
+# the observation (it timed out), not a theory about why.
 #
 # perl is always present on macOS, and unlike a background-and-kill helper this
 # works inside $( ) command substitution, which is where most of these calls
@@ -57,7 +65,7 @@ bounded() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 [ -d "$REPO/.git" ] || fail "no git repo at $REPO"
 gpg --list-keys "$RECIPIENT" >/dev/null 2>&1 || fail "no gpg key $RECIPIENT -- cannot encrypt, refusing to send cleartext"
 
-HEAD_SHA="$(bounded 120 git -C "$REPO" rev-parse HEAD)" || fail "git rev-parse timed out or failed (is the disk starved?)"
+HEAD_SHA="$(bounded 120 git -C "$REPO" rev-parse HEAD)" || fail "git rev-parse on ${REPO} timed out (>120s) or failed"
 COMMITS="$(bounded 120 git -C "$REPO" rev-list --count --all)" || fail "git rev-list timed out or failed"
 
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
