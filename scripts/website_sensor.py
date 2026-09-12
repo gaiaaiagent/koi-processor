@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import fcntl
 import fnmatch
 import hashlib
 import html as html_lib
@@ -49,9 +50,13 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
+import ipaddress
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -93,10 +98,11 @@ POLITE_DELAY = 0.5
 
 # Google Docs / Drive link shapes. Only PUBLIC exports are fetched (no auth is ever sent);
 # a 401/403 is recorded as `private` and never retried with credentials.
-GOOGLE_DOC_RE = re.compile(r"https?://docs\.google\.com/document/d/([\w-]+)")
-GOOGLE_SHEET_RE = re.compile(r"https?://docs\.google\.com/spreadsheets/d/([\w-]+)")
-GOOGLE_SLIDES_RE = re.compile(r"https?://docs\.google\.com/presentation/d/([\w-]+)")
-GOOGLE_DRIVE_RE = re.compile(r"https?://drive\.google\.com/(?:file/d/([\w-]+)|open\?id=([\w-]+))")
+GOOGLE_DOC_RE = re.compile(r"https?://docs\.google\.com/document/d/(?!e/)([\w-]{20,})")
+GOOGLE_SHEET_RE = re.compile(r"https?://docs\.google\.com/spreadsheets/d/(?!e/)([\w-]{20,})")
+GOOGLE_SLIDES_RE = re.compile(r"https?://docs\.google\.com/presentation/d/(?!e/)([\w-]{20,})")
+GOOGLE_DRIVE_RE = re.compile(r"https?://drive\.google\.com/(?:file/d/([\w-]{20,})|open\?id=([\w-]{20,}))")
+GOOGLE_HOST_RE = re.compile(r"(^|\.)(google\.com|googleusercontent\.com)$")
 
 
 def utcnow() -> str:
@@ -173,6 +179,10 @@ class SiteConfig:
     render: str = "http"                    # http only in v1 (Playwright rendering not implemented)
     keep_history: bool = True               # True: git-versioned archive + supersede old versions in the DB.
                                             # False: overwrite in place (no git) + delete old versions outright.
+    pdf_layout: bool = False                # pdftotext reading-order (default) vs -layout. -layout interleaves
+                                            # multi-column designed PDFs; use it only for single-column print books.
+    max_download_mb: int = 200              # per-response size cap (disk + git protection)
+    max_ingest_attempts: int = 3            # stop retrying an unchanged document after this many failed runs
 
     @property
     def host(self) -> str:
@@ -190,9 +200,19 @@ def load_config(path: Path) -> List[SiteConfig]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     archive_default = Path(raw.get("archive_root", DEFAULT_ARCHIVE_ROOT)).expanduser()
     sites: List[SiteConfig] = []
+    known = {f.name for f in SiteConfig.__dataclass_fields__.values()}
+    list_keys = ("include", "exclude", "asset_hosts", "default_fields", "routing")
     for s in raw.get("sites", []):
         if not s.get("site_id") or not s.get("root_url"):
             raise ValueError("every site needs site_id + root_url")
+        unknown = set(s) - known
+        if unknown:
+            raise ValueError(f"{s['site_id']}: unknown config keys {sorted(unknown)}")
+        for lk in list_keys:
+            if lk in s and s[lk] is not None and not isinstance(s[lk], list):
+                raise ValueError(f"{s['site_id']}: {lk} must be a list")
+        for rx in list(s.get("include") or []) + list(s.get("exclude") or []):
+            re.compile(rx)                                    # raise here, not mid-run
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", s["site_id"]):
             raise ValueError(f"site_id must be a lowercase slug: {s['site_id']!r}")
         tier = s.get("default_tier", "standard")
@@ -231,36 +251,77 @@ def load_config(path: Path) -> List[SiteConfig]:
             ingest_timeout=int(s.get("ingest_timeout", 3600)),
             render=s.get("render", "http"),
             keep_history=bool(s.get("keep_history", True)),
+            pdf_layout=bool(s.get("pdf_layout", False)),
+            max_download_mb=int(s.get("max_download_mb", 200)),
+            max_ingest_attempts=int(s.get("max_ingest_attempts", 3)),
         ))
     return sites
 
 
 # ── Fetching ───────────────────────────────────────────────────────────────────
 
+def is_public_host(host: str) -> bool:
+    """Refuse loopback / private / link-local targets and bare hostnames: the sensor follows
+    links from untrusted pages and must never be turned into a probe of localhost:8351."""
+    host = (host or "").strip("[]").lower()
+    if not host or host == "localhost" or ("." not in host and ":" not in host):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_global
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return True                       # unresolvable → let the fetch fail on its own
+    return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+
+
+class TooLarge(RuntimeError):
+    pass
+
+
 class Fetcher:
-    def __init__(self, timeout: float = FETCH_TIMEOUT):
+    def __init__(self, timeout: float = FETCH_TIMEOUT, max_bytes: int = 200 * 1024 * 1024):
         self.client = httpx.Client(
             headers={"User-Agent": UA, "Accept": "*/*"},
             follow_redirects=True, timeout=timeout,
         )
+        self.max_bytes = max_bytes
         self._last = 0.0
 
     def close(self):
         self.client.close()
 
     def get(self, url: str, retries: int = 2) -> httpx.Response:
+        if not is_public_host(urlparse(url).hostname or ""):
+            raise RuntimeError(f"refusing non-public host: {url}")
         wait = time.monotonic() - self._last
         if wait < POLITE_DELAY:
             time.sleep(POLITE_DELAY - wait)
         last_exc: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
-                resp = self.client.get(url)
-                self._last = time.monotonic()
-                if resp.status_code >= 500 and attempt < retries:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                return resp
+                with self.client.stream("GET", url) as resp:
+                    self._last = time.monotonic()
+                    if not is_public_host(resp.url.host or ""):
+                        raise RuntimeError(f"redirected to non-public host: {url} → {resp.url}")
+                    if resp.status_code >= 500 and attempt < retries:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    declared = int(resp.headers.get("content-length") or 0)
+                    if declared > self.max_bytes:
+                        raise TooLarge(f"{url}: content-length {declared} > cap {self.max_bytes}")
+                    buf = bytearray()
+                    for chunk in resp.iter_bytes():
+                        buf += chunk
+                        if len(buf) > self.max_bytes:
+                            raise TooLarge(f"{url}: body exceeded cap {self.max_bytes}")
+                    resp._content = bytes(buf)          # materialize so .text/.content work after close
+                    return resp
+            except TooLarge:
+                raise
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 last_exc = e
                 time.sleep(2 * (attempt + 1))
@@ -316,7 +377,8 @@ def discover_pages(site: SiteConfig, fetcher: Fetcher) -> Tuple[List[str], Dict[
                 locs = parse_sitemap(resp.text, u)
                 for loc in locs:
                     if loc.lower().endswith(".xml"):
-                        queue.append(loc)
+                        if urlparse(loc).netloc.lower() == site.host:
+                            queue.append(loc)
                     else:
                         add(loc)
                         report["sitemap_urls"] += 1
@@ -366,7 +428,8 @@ def html_title(html: str) -> str:
 BLOCK_TAGS = {"p", "div", "section", "article", "main", "aside", "li", "ul", "ol", "h1", "h2", "h3", "h4",
               "h5", "h6", "blockquote", "td", "th", "tr", "table", "figcaption", "dt", "dd", "pre", "details",
               "summary", "label"}
-CHROME_TAGS = ["script", "style", "noscript", "svg", "iframe", "nav", "footer", "header", "form", "template"]
+CHROME_TAGS = ["script", "style", "noscript", "svg", "iframe", "nav", "footer", "header", "template",
+               "input", "select", "textarea", "button", "option"]   # NOT <form>: Webflow wraps content lists in one
 
 
 def _bs4_to_markdown(html: str) -> str:
@@ -442,7 +505,9 @@ def html_to_markdown(html: str, url: str) -> str:
         except Exception as e:  # pragma: no cover
             logger.warning("trafilatura failed for %s: %s", url, e)
     walk = _bs4_to_markdown(html)
-    md = traf if word_count(traf) >= 0.85 * word_count(walk) else walk
+    # The walk keeps headings (trafilatura's markdown dropped every heading on biofi.earth);
+    # prefer it unless trafilatura recovered materially more text.
+    md = walk if word_count(walk) >= 0.9 * word_count(traf) else traf
     title = html_title(html)
     md = md.strip() + "\n"
     if title and not md.lstrip().startswith("#"):
@@ -450,22 +515,24 @@ def html_to_markdown(html: str, url: str) -> str:
     return md
 
 
-def pdf_to_markdown(pdf_path: Path) -> Tuple[str, int]:
-    """pdftotext -layout (never pymupdf4llm — see the ingest-source skill: ligature
-    corruption). Returns (markdown, page_count)."""
+def pdf_to_markdown(pdf_path: Path, layout: bool = False) -> Tuple[str, int]:
+    """pdftotext (never pymupdf4llm — see the ingest-source skill: ligature corruption).
+    Reading-order mode by default: `-layout` interleaves the columns of designed multi-column
+    PDFs (the BioFi DAF guide came out as three columns spliced line-by-line). Use
+    layout=True only for single-column print books. Returns (markdown, page_count) where
+    page_count counts ALL pages, so an image-only deck reports its true size."""
     if not shutil.which("pdftotext"):
         raise RuntimeError("pdftotext not on PATH (brew install poppler)")
-    out = subprocess.run(
-        ["pdftotext", "-layout", "-enc", "UTF-8", str(pdf_path), "-"],
-        capture_output=True, text=True, timeout=600,
-    )
+    cmd = ["pdftotext"] + (["-layout"] if layout else []) + ["-enc", "UTF-8", str(pdf_path), "-"]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if out.returncode != 0:
         raise RuntimeError(f"pdftotext failed: {out.stderr.strip()[:200]}")
     pages = out.stdout.split("\f")
+    page_count = max(len(pages) - 1, 1) if out.stdout else 0
     text = "\n\n".join(p.rstrip() for p in pages if p.strip())
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{4,}", "\n\n\n", text)
-    return text.strip() + "\n", len([p for p in pages if p.strip()])
+    return text.strip() + "\n", page_count
 
 
 def csv_to_markdown(csv_text: str, title: str = "") -> str:
@@ -485,6 +552,36 @@ def csv_to_markdown(csv_text: str, title: str = "") -> str:
         if i == 0:
             lines.append("|" + "---|" * len(cells))
     return "\n".join(lines) + "\n"
+
+
+def xlsx_to_markdown(data: bytes, title: str = "") -> Tuple[str, str]:
+    """Every worksheet of an .xlsx as one markdown document (a `## Tab:` section + table per
+    sheet). Google's CSV export returns only the FIRST tab — the Self-Assessment rubric on
+    biofi.earth kept 2,885 of its 3,600 words on tab 2. Returns (markdown, derived_title)."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    sections: List[str] = []
+    derived = ""
+    for ws in wb.worksheets:
+        rows = [[re.sub(r"\s+", " ", str(c)).strip() if c is not None else "" for c in r]
+                for r in ws.iter_rows(values_only=True)]
+        rows = [r for r in rows if any(r)]
+        if not rows:
+            continue
+        if not derived:
+            derived = next((c for r in rows for c in r if c), "")[:200]
+        width = max(len(r) for r in rows)
+        keep = [i for i in range(width) if any(i < len(r) and r[i] for r in rows)]
+        rows = [[(r[i] if i < len(r) else "") for i in keep] for r in rows]
+        lines = [f"## Tab: {ws.title.strip()}", ""]
+        for i, r in enumerate(rows):
+            cells = [c.replace("|", "\\|") for c in r]
+            lines.append("| " + " | ".join(cells) + " |")
+            if i == 0:
+                lines.append("|" + "---|" * len(cells))
+        sections.append("\n".join(lines))
+    md = (f"# {title or derived}\n\n" if (title or derived) else "") + "\n\n".join(sections) + "\n"
+    return md, derived
 
 
 def word_count(text: str) -> int:
@@ -537,7 +634,7 @@ def discover_documents(html: str, page_url: str, site: SiteConfig) -> List[Tuple
 def google_export_url(kind: str, gid: str) -> str:
     return {
         "gdoc": f"https://docs.google.com/document/d/{gid}/export?format=txt",
-        "gsheet": f"https://docs.google.com/spreadsheets/d/{gid}/export?format=csv",
+        "gsheet": f"https://docs.google.com/spreadsheets/d/{gid}/export?format=xlsx",   # ALL tabs (csv = first tab only)
         "gslides": f"https://docs.google.com/presentation/d/{gid}/export/pdf",
         "gdrive": f"https://drive.google.com/uc?export=download&id={gid}",
     }[kind]
@@ -561,7 +658,10 @@ def drive_confirm_url(html: str) -> Optional[str]:
     params = {i["name"]: i.get("value", "") for i in form.find_all("input", attrs={"name": True})}
     params.setdefault("confirm", "t")
     from urllib.parse import urlencode
-    return form["action"] + "?" + urlencode(params)
+    action = urljoin("https://drive.google.com/", form["action"])
+    if not GOOGLE_HOST_RE.search(urlparse(action).netloc.lower()):
+        return None                                     # never follow a form off Google
+    return action + "?" + urlencode(params)
 
 
 # ── Manifest ───────────────────────────────────────────────────────────────────
@@ -686,13 +786,19 @@ def fetch_document(site: SiteConfig, fetcher: Fetcher, kind: str, ident: str, tm
             return Fetched(key, kind, canonical, "", "", b"", "", resp.status_code, note="drive-confirm-failed")
 
     if kind == "gdoc":
-        text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
+        text = data.decode("utf-8", errors="replace").lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
         title = next((ln.strip() for ln in text.splitlines() if ln.strip()), f"Google Doc {ident}")[:200]
         md = f"# {title}\n\n{text.strip()}\n" if not text.lstrip().startswith("#") else text
         note = "thin" if word_count(md) < site.min_words else ""
         return Fetched(key, kind, canonical, title, md, data, ".txt", 200, note=note)
     if kind == "gsheet":
-        text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
+        if data[:2] == b"PK":                       # xlsx (zip) — every tab
+            md, derived = xlsx_to_markdown(data, "")
+            title = (link_text if len(link_text.split()) >= 2 else derived) or f"Google Sheet {ident}"
+            md, _ = xlsx_to_markdown(data, title[:200])
+            note = "thin" if word_count(md) < site.min_words else ""
+            return Fetched(key, kind, canonical, title[:200], md, data, ".xlsx", 200, note=note)
+        text = data.decode("utf-8", errors="replace").lstrip("\ufeff")   # csv fallback (first tab)
         rows = [r for r in csv.reader(io.StringIO(text))]
         title = next((c.strip() for r in rows for c in r if c.strip()), f"Google Sheet {ident}")[:200]
         md = csv_to_markdown(text, title)
@@ -716,7 +822,7 @@ def fetch_document(site: SiteConfig, fetcher: Fetcher, kind: str, ident: str, tm
     tmp_pdf = tmp_dir / (short_hash(key) + ".pdf")
     tmp_pdf.write_bytes(data)
     try:
-        md, pages = pdf_to_markdown(tmp_pdf)
+        md, pages = pdf_to_markdown(tmp_pdf, layout=site.pdf_layout)
     finally:
         tmp_pdf.unlink(missing_ok=True)
     if len(link_text.split()) >= 2:
@@ -737,7 +843,7 @@ def entry_paths(site: SiteConfig, f: Fetched) -> Tuple[str, str]:
     h = short_hash(f.key)
     if f.kind == "page":
         path = urlparse(f.source_url).path.strip("/") or "index"
-        name = slugify(path.replace("/", "-"))
+        name = f"{slugify(path.replace('/', '-'))[:60]}-{h[:6]}"
         return f"pages/{name}.html", f"pages/{name}.md"
     if f.kind == "asset":
         base = slugify(re.sub(r"^[0-9a-f]{20,}_", "", Path(urlparse(f.source_url).path).stem))
@@ -758,7 +864,7 @@ def snapshot_site(site: SiteConfig, fetcher: Fetcher, tmp_dir: Path, max_docs: O
             f = fetch_page(site, fetcher, url)
         except Exception as e:
             report["errors"].append(f"page {url}: {e}")
-            continue
+            f = Fetched("page:" + url.split("://", 1)[1], "page", url, "", "", b"", ".html", 0, note=f"error: {str(e)[:120]}")
         fetched.append(f)
         if f.http_status == 200:
             for kind, ident, link_text in discover_documents(f.raw.decode("utf-8", errors="replace"), url, site):
@@ -766,15 +872,21 @@ def snapshot_site(site: SiteConfig, fetcher: Fetcher, tmp_dir: Path, max_docs: O
                     docs[(kind, ident)] = link_text
     logger.info("%s: %d linked documents discovered", site.site_id, len(docs))
     for i, ((kind, ident), link_text) in enumerate(docs.items()):
+        key = ("asset:" + ident.split("://", 1)[1]) if kind == "asset" else f"{kind}:{ident}"
+        canonical = ident if kind == "asset" else google_canonical_url(kind, ident)
         if max_docs is not None and i >= max_docs:
-            report["errors"].append(f"max_docs={max_docs}: {len(docs) - max_docs} documents NOT fetched")
-            break
+            # deferred, NOT missing — a smoke-test cap must never start the retire clock
+            fetched.append(Fetched(key, kind, canonical, "", "", b"", "", 0, note="deferred: max_docs"))
+            continue
         try:
             f = fetch_document(site, fetcher, kind, ident, tmp_dir, link_text=link_text)
-            fetched.append(f)
             logger.info("  %s %s → %s%s", kind, ident[:60], f.title[:60] or "-", f" [{f.note}]" if f.note else "")
         except Exception as e:
             report["errors"].append(f"{kind} {ident}: {e}")
+            f = Fetched(key, kind, canonical, "", "", b"", "", 0, note=f"error: {str(e)[:120]}")
+        fetched.append(f)
+    if max_docs is not None and len(docs) > max_docs:
+        report["errors"].append(f"max_docs={max_docs}: {len(docs) - max_docs} documents deferred")
     return fetched, report
 
 
@@ -796,7 +908,9 @@ def classify(site: SiteConfig, manifest: Dict[str, Any], fetched: List[Fetched])
             changed.append(f.key)
         else:
             unchanged.append(f.key)
-    missing = [k for k, e in entries.items() if k not in now_keys and e.get("status") != "removed"]
+    gone = {f.key for f in fetched if not f.markdown and f.http_status in (404, 410)}
+    missing = [k for k, e in entries.items()
+               if (k not in now_keys or k in gone) and e.get("status") != "removed" and e.get("sha256")]
     return {"new": new, "changed": changed, "unchanged": unchanged, "unavailable": unavailable, "missing": missing}
 
 
@@ -812,10 +926,12 @@ def write_snapshot(site: SiteConfig, manifest: Dict[str, Any], fetched: List[Fet
         prev = entries.get(f.key) or {}
         if not f.markdown:
             e = dict(prev)
-            e.update({"kind": f.kind, "source_url": f.source_url, "last_seen": now,
-                      "http_status": f.http_status, "note": f.note,
-                      "status": prev.get("status", "unavailable") if prev.get("sha256") else "unavailable",
-                      "missing_runs": 0})
+            e.update({"kind": f.kind, "source_url": f.source_url, "last_attempt": now,
+                      "last_http_status": f.http_status, "last_error": f.note})
+            if not prev.get("sha256"):                      # never archived: unavailable is its whole state
+                e.update({"status": "unavailable", "note": f.note, "http_status": f.http_status, "missing_runs": 0})
+            elif f.key not in diff["missing"]:               # archived earlier; transient error → leave it alone
+                e["missing_runs"] = 0
             e.setdefault("first_seen", now)
             entries[f.key] = e
             continue
@@ -902,17 +1018,36 @@ async def _db_measure(document_rid: str) -> Dict[str, Any]:
         await conn.close()
 
 
+OWNER_PREFIX = "website-sensor:"
+
+
+async def _db_unretire(rid: str) -> None:
+    """Content that reverts to an earlier version re-ingests onto a row that was superseded;
+    clear the stamp so the live version is not hidden."""
+    import asyncpg
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        await conn.execute("UPDATE koi_memories SET superseded_at = NULL, updated_at = NOW() WHERE rid = $1 AND superseded_at IS NOT NULL", rid)
+    finally:
+        await conn.close()
+
+
 async def _db_retire(old_rid: str, new_rid: Optional[str], keep_history: bool = True) -> Dict[str, Any]:
     """keep_history: supersede old_rid (row kept + facts/claims/links; RAG chunks dropped).
     history off: delete the old document row + chunks. Facts/claims/entity links are left in
-    both cases — their disposition is a processor-side policy (see stream-A design)."""
+    both cases — their disposition is a processor-side policy (see stream-A design).
+    Refuses to touch a row this sensor did not write (metadata.retrieval_method prefix):
+    document_rid is a content hash, so the same bytes ingested by another path share it."""
     import asyncpg
     conn = await asyncpg.connect(POSTGRES_URL)
     try:
         async with conn.transaction():
-            old = await conn.fetchrow("SELECT id, version FROM koi_memories WHERE rid = $1", old_rid)
+            old = await conn.fetchrow(
+                "SELECT id, version, metadata->>'retrieval_method' AS rm FROM koi_memories WHERE rid = $1", old_rid)
             if old is None:
                 return {"old_found": False}
+            if not (old["rm"] or "").startswith(OWNER_PREFIX):
+                return {"old_found": True, "refused": f"not sensor-owned (retrieval_method={old['rm']!r})"}
             if not keep_history:
                 deleted = await conn.execute("DELETE FROM koi_memory_chunks WHERE document_rid = $1", old_rid)
                 await conn.execute("DELETE FROM koi_memories WHERE rid = $1", old_rid)
@@ -942,6 +1077,33 @@ def db_retire(old_rid: str, new_rid: Optional[str], keep_history: bool = True) -
     return asyncio.run(_db_retire(old_rid, new_rid, keep_history))
 
 
+def db_unretire(rid: str) -> None:
+    asyncio.run(_db_unretire(rid))
+
+
+def db_ping() -> None:
+    async def _p():
+        import asyncpg
+        conn = await asyncpg.connect(POSTGRES_URL)
+        try:
+            await conn.fetchval("SELECT 1")
+        finally:
+            await conn.close()
+    asyncio.run(_p())
+
+
+def rid_shared_by_other_entries(manifest: Dict[str, Any], key: str, rid: str) -> List[str]:
+    """Other manifest entries whose live or previous version is this rid (identical content
+    under two URLs). Retiring it for one key would silently retire it for the others."""
+    out = []
+    for k, e in manifest["entries"].items():
+        if k == key or e.get("status") == "removed":
+            continue
+        if (e.get("ingest") or {}).get("document_rid") == rid or (e.get("previous_ingest") or {}).get("document_rid") == rid:
+            out.append(k)
+    return out
+
+
 # ── Ingest ─────────────────────────────────────────────────────────────────────
 
 RID_RE = re.compile(r"document_rid:\s+(document:[0-9a-f]{64})")
@@ -953,28 +1115,37 @@ def ingest_one(site: SiteConfig, key: str, entry: Dict[str, Any], decision: Dict
     gate_dir.mkdir(exist_ok=True)
     slug = f"{site.site_id}--{Path(entry['md_path']).stem}"
     evidence = gate_dir / f"{Path(entry['md_path']).stem}.json"
+    fields = [f for f in decision["fields"] if f and "," not in f]
     cmd = [
         sys.executable, str(REPO_ROOT / "scripts" / "ingest_document.py"),
-        "--source-path", str(md_path), "--tier", decision["tier"],
-        "--group-id", decision["group_id"], "--source-url", entry["source_url"],
-        "--name", decision.get("title") or entry.get("title") or slug, "--slug", slug,
-        "--retrieval-method", f"website-sensor:{site.site_id}",
-        "--gate-evidence-out", str(evidence),
+        f"--source-path={md_path}", f"--tier={decision['tier']}",
+        f"--group-id={decision['group_id']}", f"--source-url={entry['source_url']}",
+        f"--name={decision.get('title') or entry.get('title') or slug}", f"--slug={slug}",
+        f"--retrieval-method={OWNER_PREFIX}{site.site_id}",
+        f"--gate-evidence-out={evidence}",
     ]
-    if decision["fields"]:
-        cmd += ["--fields", ",".join(decision["fields"])]
+    if fields:
+        cmd.append(f"--fields={','.join(fields)}")
     env = dict(os.environ)
     env["INGEST_SOURCE_ROOT"] = str(site.archive_root)        # path-safety allowlist → the archive
     env.setdefault("DOC_EPISODE_TIMEOUT", "900")
     started = time.monotonic()
     rec: Dict[str, Any] = {"tier": decision["tier"], "group_id": decision["group_id"],
                            "fields": decision["fields"], "started_at": utcnow(), "cmd": " ".join(cmd[1:])}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                            cwd=str(REPO_ROOT), start_new_session=True)   # own process group → kill extractor children too
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=site.ingest_timeout,
-                              cwd=str(REPO_ROOT))
+        stdout, stderr = proc.communicate(timeout=site.ingest_timeout)
     except subprocess.TimeoutExpired:
-        rec.update({"ok": False, "error": f"timeout after {site.ingest_timeout}s"})
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+        m = RID_RE.search(stdout or "")
+        rec.update({"ok": False, "error": f"timeout after {site.ingest_timeout}s", "document_rid": m.group(1) if m else None})
         return rec
+    proc.stdout, proc.stderr = stdout, stderr
     rec["exit_code"] = proc.returncode
     rec["seconds"] = round(time.monotonic() - started, 1)
     m = RID_RE.search(proc.stdout)
@@ -1008,8 +1179,37 @@ def ingest_one(site: SiteConfig, key: str, entry: Dict[str, Any], decision: Dict
     rec["ok"] = bool(measured_ok and gate_ok)
     if not rec["ok"]:
         rec["error"] = f"verification failed (gate_exit={rec['gate']['exit_code']}, db={db})"
+    else:
+        try:
+            db_unretire(rec["document_rid"])            # content reverted to an earlier version?
+        except Exception as e:
+            rec["unretire_error"] = str(e)
     rec["finished_at"] = utcnow()
     return rec
+
+
+def retire_previous(site: SiteConfig, manifest: Dict[str, Any], key: str) -> None:
+    """Retire the persisted previous version of `key` once its current version is verified.
+    Leaves previous_ingest in place on any failure so the next run retries."""
+    entries = manifest["entries"]
+    e = entries[key]
+    old_rid = (e.get("previous_ingest") or {}).get("document_rid")
+    new_rid = (e.get("ingest") or {}).get("document_rid")
+    if not old_rid or not (e.get("ingest") or {}).get("ok") or old_rid == new_rid:
+        if old_rid and old_rid == new_rid:
+            e.pop("previous_ingest", None)
+        return
+    shared = rid_shared_by_other_entries(manifest, key, old_rid)
+    if shared:
+        e["retired_previous"] = {"document_rid": old_rid, "skipped": f"rid shared by {shared}"}
+        e.pop("previous_ingest", None)
+        return
+    try:
+        res = db_retire(old_rid, new_rid, site.keep_history)
+        e["retired_previous"] = {"document_rid": old_rid, "at": utcnow(), **res}
+        e.pop("previous_ingest", None)
+    except Exception as ex:
+        e["retired_previous"] = {"document_rid": old_rid, "error": str(ex), "at": utcnow()}
 
 
 def run_ingests(site: SiteConfig, manifest: Dict[str, Any], keys: List[str], previous: Dict[str, Any],
@@ -1026,6 +1226,12 @@ def run_ingests(site: SiteConfig, manifest: Dict[str, Any], keys: List[str], pre
         if d["skip"]:
             skipped.append(f"{k} (routing skip)")
             continue
+        prior = e.get("ingest") or {}
+        if prior and not prior.get("ok") and int(prior.get("attempts", 1)) >= site.max_ingest_attempts \
+                and prior.get("for_sha256") == e.get("sha256"):
+            skipped.append(f"{k} (gave up after {prior.get('attempts')} failed attempts: {prior.get('error', '')[:80]})")
+            logger.error("  GAVE UP  %s after %s attempts — %s", k[:70], prior.get("attempts"), prior.get("error", "")[:120])
+            continue
         todo.append((k, d))
     if max_ingest is not None and len(todo) > max_ingest:
         logger.warning("max_ingest=%d: %d of %d documents deferred to the next run", max_ingest,
@@ -1041,24 +1247,18 @@ def run_ingests(site: SiteConfig, manifest: Dict[str, Any], keys: List[str], pre
                 rec = fut.result()
             except Exception as e:  # never let one document kill the run
                 rec = {"ok": False, "error": f"exception: {e}"}
+            prior = entries[k].get("ingest") or {}
+            rec["attempts"] = (int(prior.get("attempts", 0)) if prior.get("for_sha256") == entries[k].get("sha256") else 0) + 1
+            rec["for_sha256"] = entries[k].get("sha256")
             results[k] = rec
             entries[k]["ingest"] = rec
             status = "OK " if rec.get("ok") else "FAIL"
             logger.info("  [%s] %s → %s %s", status, k[:70], rec.get("document_rid", "-"),
                         "" if rec.get("ok") else rec.get("error", ""))
-            # Retire the previous version only after the new one is verified. The previous
-            # ingest record is PERSISTED on the entry by write_snapshot (previous_ingest), so a
-            # retry on a later run — when the content is "unchanged" vs the archive — still
-            # retires the version that the failed run left behind.
-            prev_ing = (entries[k].get("previous_ingest") or {})
-            old_rid = prev_ing.get("document_rid")
-            if rec.get("ok") and old_rid and old_rid != rec["document_rid"]:
-                try:
-                    entries[k]["retired_previous"] = {"document_rid": old_rid, "at": utcnow(),
-                                                      **db_retire(old_rid, rec["document_rid"], site.keep_history)}
-                    entries[k].pop("previous_ingest", None)
-                except Exception as e:
-                    entries[k]["retired_previous"] = {"document_rid": old_rid, "error": str(e)}
+            # Retire the previous version only after the new one is verified. previous_ingest is
+            # PERSISTED by write_snapshot, so a retry on a later run still retires it.
+            retire_previous(site, manifest, k)
+            save_manifest(site, manifest)                   # a kill mid-run loses nothing
     return {"attempted": len(todo), "ok": sum(1 for r in results.values() if r.get("ok")),
             "failed": [k for k, r in results.items() if not r.get("ok")], "skipped": skipped}
 
@@ -1069,31 +1269,94 @@ def retire_missing(site: SiteConfig, manifest: Dict[str, Any], discovery_healthy
     if site.on_removed != "retire" or not discovery_healthy:
         return []
     removed: List[str] = []
+    errors: List[str] = []
     head = git(site.archive_root, "rev-parse", "--short", "HEAD").stdout.strip() if site.keep_history else None
     for k, e in manifest["entries"].items():
         if e.get("status") == "removed" or int(e.get("missing_runs", 0)) < site.retire_after_missing_runs:
+            continue
+        rids = [r for r in {(e.get("ingest") or {}).get("document_rid"),
+                            (e.get("previous_ingest") or {}).get("document_rid")} if r]
+        retired: List[Dict[str, Any]] = []
+        failed = False
+        for rid in rids:
+            shared = rid_shared_by_other_entries(manifest, k, rid)
+            if shared:
+                retired.append({"document_rid": rid, "skipped": f"rid shared by {shared}"})
+                continue
+            try:
+                retired.append({"document_rid": rid, **db_retire(rid, None, site.keep_history)})
+            except Exception as ex:
+                retired.append({"document_rid": rid, "error": str(ex)})
+                failed = True
+        e["retired"] = retired
+        if failed:                                        # stay active; retry next run; files kept
+            e["retire_error_at"] = utcnow()
+            errors.append(k)
             continue
         for rel in (e.get("raw_path"), e.get("md_path")):
             if rel:
                 (site.site_dir / rel).unlink(missing_ok=True)
         e.update({"status": "removed", "removed_at": utcnow(), "last_commit_with_file": head})
-        rid = (e.get("ingest") or {}).get("document_rid")
-        if rid:
-            try:
-                e["retired"] = {"document_rid": rid, **db_retire(rid, None, site.keep_history)}
-            except Exception as ex:
-                e["retired"] = {"document_rid": rid, "error": str(ex)}
+        e.pop("previous_ingest", None)
         removed.append(k)
+    if errors:
+        logger.error("%s: DB retirement failed for %d entr%s — left active for retry: %s", site.site_id,
+                     len(errors), "y" if len(errors) == 1 else "ies", errors)
+    manifest["retire_errors"] = errors
     return removed
 
 
 # ── Orchestration ──────────────────────────────────────────────────────────────
 
+def preflight(site: SiteConfig, mode: str) -> None:
+    """Discover misconfiguration BEFORE fetching anything or touching the DB."""
+    problems = []
+    if not shutil.which("pdftotext"):
+        problems.append("pdftotext not on PATH (brew install poppler)")
+    if mode != "dry-run":
+        if site.keep_history and not (site.archive_root / ".git").exists():
+            problems.append(f"{site.archive_root} is not a git repo (keep_history=true requires one)")
+        if mode == "ingest":
+            if not DEFAULT_GATE.exists():
+                problems.append(f"document-ingest gate not found at {DEFAULT_GATE} (set DOC_INGEST_GATE)")
+            if not (REPO_ROOT / "scripts" / "ingest_document.py").exists():
+                problems.append("scripts/ingest_document.py missing")
+            try:
+                db_ping()
+            except Exception as e:
+                problems.append(f"database unreachable ({POSTGRES_URL.split('@')[-1]}): {e}")
+    if problems:
+        raise RuntimeError(f"{site.site_id}: preflight failed: " + "; ".join(problems))
+
+
+class RunLock:
+    """One sensor run per archive root at a time (launchd + a manual run must not race)."""
+    def __init__(self, archive_root: Path):
+        archive_root.mkdir(parents=True, exist_ok=True)
+        self.path = archive_root / ".website-sensor.lock"
+        self.fh = None
+
+    def __enter__(self):
+        self.fh = open(self.path, "w")
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(f"another website-sensor run holds {self.path}")
+        self.fh.write(f"{os.getpid()} {utcnow()}\n")
+        self.fh.flush()
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
 def run_site(site: SiteConfig, mode: str, max_docs: Optional[int], max_ingest: Optional[int],
              tmp_dir: Path) -> Dict[str, Any]:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     summary: Dict[str, Any] = {"site_id": site.site_id, "run_id": run_id, "mode": mode, "started_at": utcnow()}
-    fetcher = Fetcher()
+    preflight(site, mode)
+    fetcher = Fetcher(max_bytes=site.max_download_mb * 1024 * 1024)
     try:
         fetched, report = snapshot_site(site, fetcher, tmp_dir, max_docs=max_docs)
     finally:
@@ -1141,15 +1404,22 @@ def run_site(site: SiteConfig, mode: str, max_docs: Optional[int], max_ingest: O
         return summary
 
     overrides = load_overrides(site)
-    # Re-attempt earlier failures too: an entry with no successful ingest record is still due.
+    # Due = fetched OK this run and not yet verified-ingested (new, changed, or an earlier
+    # failure). Entries that were unavailable or missing this run are never ingested from
+    # the archive: the site did not serve them, so nothing new is asserted about them.
     due = [k for k in diff["new"] + diff["changed"]]
-    for k, e in manifest["entries"].items():
-        if e.get("status") == "active" and e.get("sha256") and not (e.get("ingest") or {}).get("ok") and k not in due:
+    for k in diff["unchanged"]:
+        if not (manifest["entries"][k].get("ingest") or {}).get("ok"):
             due.append(k)
     summary["ingest"] = run_ingests(site, manifest, due, previous, overrides, max_ingest)
+    # Retry any previous-version retirement that failed on an earlier run.
+    for k, e in manifest["entries"].items():
+        if e.get("previous_ingest") and (e.get("ingest") or {}).get("ok") and k not in due:
+            retire_previous(site, manifest, k)
     discovery_healthy = bool(report["sitemap_urls"] or report["crawl_urls"]) and not any(
         e.startswith("sitemap") for e in report["errors"])
     summary["removed"] = retire_missing(site, manifest, discovery_healthy)
+    summary["retire_errors"] = manifest.get("retire_errors", [])
     save_manifest(site, manifest)
     summary["finished_at"] = utcnow()
     _append_run(site, summary)
@@ -1204,17 +1474,24 @@ def main() -> int:
         print_status(sites)
         return 0
     mode = "dry-run" if args.dry_run else ("archive-only" if args.archive_only else "ingest")
-    tmp_dir = Path(os.getenv("TMPDIR", "/tmp")) / "koi-website-sensor"
     rc = 0
-    for site in sites:
-        try:
-            s = run_site(site, mode, args.max_docs, args.max_ingest, tmp_dir)
-            print(json.dumps(s, indent=2, default=str))
-            if s.get("ingest", {}).get("failed"):
+    with tempfile.TemporaryDirectory(prefix="koi-website-sensor-") as td:
+        for site in sites:
+            try:
+                lock = RunLock(site.archive_root) if mode != "dry-run" else None
+                if lock:
+                    lock.__enter__()
+                try:
+                    s = run_site(site, mode, args.max_docs, args.max_ingest, Path(td))
+                finally:
+                    if lock:
+                        lock.__exit__(None, None, None)
+                print(json.dumps(s, indent=2, default=str))
+                if s.get("ingest", {}).get("failed") or s.get("retire_errors") or s.get("discovery", {}).get("errors"):
+                    rc = 1
+            except Exception as e:
+                logger.error("%s: run failed: %s", site.site_id, e, exc_info=True)
                 rc = 1
-        except Exception as e:
-            logger.error("%s: run failed: %s", site.site_id, e, exc_info=True)
-            rc = 1
     return rc
 
 

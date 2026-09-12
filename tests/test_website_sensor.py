@@ -76,28 +76,31 @@ def test_discover_documents_filters_hosts_and_parses_google(tmp_path):
     <a href="https://cdn.allowed.com/x/report.PDF">r</a>
     <a href="https://cdn.other.com/x/evil.pdf">e</a>
     <a href="/local/paper.pdf">l</a>
-    <a href="https://docs.google.com/document/d/DOC_1/edit?usp=x">d</a>
-    <a href="https://docs.google.com/spreadsheets/d/SHEET_1/copy">s</a>
-    <a href="https://drive.google.com/file/d/DRIVE_1/view">f</a>
-    <a href="https://drive.google.com/open?id=DRIVE_2">f2</a>
-    <a href="https://docs.google.com/document/d/DOC_1/edit">dup</a>
+    <a href="https://docs.google.com/document/d/1DOC_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/edit?usp=x">d</a>
+    <a href="https://docs.google.com/spreadsheets/d/1SHEET_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/copy">s</a>
+    <a href="https://drive.google.com/file/d/1DRIVE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/view">f</a>
+    <a href="https://drive.google.com/open?id=1DRIVE_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb">f2</a>
+    <a href="https://docs.google.com/document/d/1DOC_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/edit">dup</a>
     """
     found = ws.discover_documents(html, "https://www.example.org/p", site)
     assert all(len(t) == 3 for t in found)                     # (kind, ident, link_text)
-    assert ("gdoc", "DOC_1", "d") in found
+    assert ("gdoc", "1DOC_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "d") in found
     found = [(k, v) for k, v, _ in found]
     kinds = set(found)
     assert ("asset", "https://cdn.allowed.com/x/report.PDF") in kinds
     assert ("asset", "https://www.example.org/local/paper.pdf") in kinds
     assert not any(v.startswith("https://cdn.other.com") for _, v in found)
-    assert ("gdoc", "DOC_1") in kinds and ("gsheet", "SHEET_1") in kinds
-    assert ("gdrive", "DRIVE_1") in kinds and ("gdrive", "DRIVE_2") in kinds
-    assert len([1 for k, v in found if v == "DOC_1"]) == 1
+    assert ("gdoc", "1DOC_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") in kinds and ("gsheet", "1SHEET_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") in kinds
+    assert ("gdrive", "1DRIVE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") in kinds and ("gdrive", "1DRIVE_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") in kinds
+    assert len([1 for k, v in found if v == "1DOC_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]) == 1
+    # published-to-web docs (/d/e/…) and short ids are not document ids
+    assert ws.discover_documents('<a href="https://docs.google.com/document/d/e/2PACX-1vQabcdefghijklmnopqrstu/pub">p</a>'
+                                 '<a href="https://docs.google.com/document/d/short/edit">s</a>', "https://www.example.org/p", site) == []
 
 
 def test_discover_documents_respects_follow_google_off(tmp_path):
     site = _site(tmp_path, follow_google=False)
-    html = '<a href="https://docs.google.com/document/d/DOC_1/edit">d</a>'
+    html = '<a href="https://docs.google.com/document/d/1DOC_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/edit">d</a>'
     assert ws.discover_documents(html, "https://www.example.org/p", site) == []
 
 
@@ -244,6 +247,8 @@ def test_write_snapshot_returns_previous_only_for_changed(tmp_path):
 # ── dry-run writes nothing; archive commits before ingest ──────────────────────
 
 def _stub_snapshot(monkeypatch, fetched):
+    monkeypatch.setattr(ws, "preflight", lambda site, mode: None)      # hermetic: no gate script / DB needed
+    monkeypatch.setattr(ws, "db_unretire", lambda rid: None)
     monkeypatch.setattr(ws, "snapshot_site", lambda site, fetcher, tmp, max_docs=None: (fetched, {"sitemap_urls": 1, "crawl_urls": 0, "errors": []}))
     monkeypatch.setattr(ws, "Fetcher", lambda *a, **k: type("F", (), {"close": lambda self: None})())
 
@@ -382,3 +387,148 @@ def test_keep_history_true_commits_and_soft_retires(tmp_path, monkeypatch):
     assert calls == [True]
     assert (site.archive_root / ".gitignore").read_text().strip().endswith("current/")
     assert "ingest" in ws.git(site.archive_root, "log", "-1", "--pretty=%s").stdout
+
+
+def test_xlsx_to_markdown_emits_every_tab(tmp_path):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws1 = wb.active; ws1.title = "Start Here"; ws1.append(["Intro", ""]); ws1.append(["one two three", ""])
+    ws2 = wb.create_sheet("Rubric"); ws2.append(["Criterion", "Score"]); ws2.append(["Trust", "3"]); ws2.append(["Money | flows", "2"])
+    p = tmp_path / "t.xlsx"; wb.save(p)
+    md, derived = ws.xlsx_to_markdown(p.read_bytes(), "Framework")
+    assert md.startswith("# Framework") and "## Tab: Start Here" in md and "## Tab: Rubric" in md
+    assert "| Trust | 3 |" in md and "Money \\| flows" in md and derived == "Intro"
+
+
+def test_public_host_guard_and_drive_form_host():
+    assert ws.is_public_host("www.biofi.earth")
+    for bad in ("localhost", "127.0.0.1", "10.0.0.5", "192.168.1.1", "169.254.169.254", "koi", "::1", "[::1]"):
+        assert not ws.is_public_host(bad), bad
+    html = '<form id="download-form" action="http://localhost:8351/claims/extract"><input name="id" value="X"></form>'
+    assert ws.drive_confirm_url(html) is None
+    html = '<form id="download-form" action="https://drive.usercontent.google.com/download"><input name="id" value="X"></form>'
+    assert ws.drive_confirm_url(html).startswith("https://drive.usercontent.google.com/download?")
+
+
+def test_fetcher_refuses_private_hosts():
+    f = ws.Fetcher()
+    try:
+        with pytest.raises(RuntimeError, match="non-public"):
+            f.get("http://127.0.0.1:8351/health")
+    finally:
+        f.close()
+
+
+def test_fetch_failure_is_unavailable_not_missing(tmp_path, monkeypatch):
+    site = _site(tmp_path, discovery="sitemap")
+    monkeypatch.setattr(ws, "discover_pages", lambda s, f: (["https://www.example.org/a", "https://www.example.org/b"], {"sitemap_urls": 2, "crawl_urls": 0, "errors": []}))
+    def fp(site_, fetcher, url):
+        if url.endswith("/b"):
+            raise RuntimeError("boom")
+        return _fetched("page:www.example.org/a", "A " * 50 + "\n")
+    monkeypatch.setattr(ws, "fetch_page", fp)
+    fetched, report = ws.snapshot_site(site, object(), tmp_path)
+    keys = {f.key: f for f in fetched}
+    assert keys["page:www.example.org/b"].note.startswith("error:") and keys["page:www.example.org/b"].markdown == ""
+    manifest = {"entries": {"page:www.example.org/b": {"sha256": "x", "status": "active", "md_path": "pages/b.md"}}}
+    d = ws.classify(site, manifest, fetched)
+    assert d["missing"] == [] and d["unavailable"] == ["page:www.example.org/b"]
+
+
+def test_gone_counts_toward_retire_and_deferred_does_not(tmp_path):
+    site = _site(tmp_path)
+    manifest = {"entries": {
+        "page:www.example.org/gone": {"sha256": "x", "status": "active"},
+        "gdrive:1DRIVE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {"sha256": "y", "status": "active"},
+    }}
+    fetched = [ws.Fetched("page:www.example.org/gone", "page", "https://www.example.org/gone", "", "", b"", ".html", 404, note="http-404"),
+               ws.Fetched("gdrive:1DRIVE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "gdrive", "https://drive.google.com/file/d/1DRIVE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/view", "", "", b"", "", 0, note="deferred: max_docs")]
+    d = ws.classify(site, manifest, fetched)
+    assert d["missing"] == ["page:www.example.org/gone"]
+    _init_repo(site.archive_root)
+    ws.write_snapshot(site, manifest, fetched, d, "r1")
+    assert manifest["entries"]["page:www.example.org/gone"]["missing_runs"] == 1
+    assert manifest["entries"]["gdrive:1DRIVE_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]["missing_runs"] == 0
+
+
+def test_unavailable_fetch_keeps_prior_note_and_is_not_ingested(tmp_path, monkeypatch):
+    site = _site(tmp_path, ingest_concurrency=1)
+    _init_repo(site.archive_root)
+    thin = _fetched("page:www.example.org/t", "tiny words\n"); thin.note = "thin"
+    _stub_snapshot(monkeypatch, [thin])
+    monkeypatch.setattr(ws, "ingest_one", lambda *a: pytest.fail("thin must not ingest"))
+    ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    err = ws.Fetched("page:www.example.org/t", "page", "https://www.example.org/t", "", "", b"", ".html", 500, note="http-500")
+    _stub_snapshot(monkeypatch, [err])
+    ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    e = json.loads((site.site_dir / "manifest.json").read_text())["entries"]["page:www.example.org/t"]
+    assert e["note"] == "thin" and e["status"] == "active" and e["last_error"] == "http-500"
+
+
+def test_retire_guards_shared_rid_and_failed_retire_keeps_entry(tmp_path, monkeypatch):
+    site = _site(tmp_path, retire_after_missing_runs=1)
+    _init_repo(site.archive_root)
+    rid = "document:" + "7" * 64
+    manifest = {"entries": {
+        "page:www.example.org/a": {"status": "active", "missing_runs": 1, "md_path": "pages/a.md", "sha256": "x", "ingest": {"ok": True, "document_rid": rid}},
+        "page:www.example.org/b": {"status": "active", "missing_runs": 0, "md_path": "pages/b.md", "sha256": "x", "ingest": {"ok": True, "document_rid": rid}},
+        "page:www.example.org/c": {"status": "active", "missing_runs": 1, "md_path": "pages/c.md", "sha256": "y", "ingest": {"ok": True, "document_rid": "document:" + "8" * 64}},
+    }}
+    (site.site_dir / "pages").mkdir(parents=True); (site.site_dir / "pages" / "c.md").write_text("c")
+    calls = []
+    def retire(old, new, keep=True):
+        calls.append(old)
+        raise RuntimeError("db down")
+    monkeypatch.setattr(ws, "db_retire", retire)
+    removed = ws.retire_missing(site, manifest, discovery_healthy=True)
+    # a: rid shared with b → skipped (no DB call) but still removed from the tree
+    assert "page:www.example.org/a" in removed and calls == ["document:" + "8" * 64]
+    assert manifest["entries"]["page:www.example.org/a"]["retired"][0]["skipped"].startswith("rid shared")
+    # c: DB retire failed → stays active, file kept, listed for retry
+    assert manifest["entries"]["page:www.example.org/c"]["status"] == "active"
+    assert (site.site_dir / "pages" / "c.md").exists() and manifest["retire_errors"] == ["page:www.example.org/c"]
+
+
+def test_run_lock_blocks_overlap(tmp_path):
+    root = tmp_path / "archive"
+    with ws.RunLock(root):
+        with pytest.raises(RuntimeError, match="another website-sensor run"):
+            with ws.RunLock(root):
+                pass
+
+
+def test_config_rejects_unknown_keys_and_scalar_lists(tmp_path):
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("sites:\n  - site_id: ok\n    root_url: https://x\n    tierr: standard\n")
+    with pytest.raises(ValueError, match="unknown config keys"):
+        ws.load_config(cfg)
+    cfg.write_text("sites:\n  - site_id: ok\n    root_url: https://x\n    default_fields: bkc\n")
+    with pytest.raises(ValueError, match="must be a list"):
+        ws.load_config(cfg)
+
+
+def test_preflight_fails_loudly_on_missing_gate(tmp_path, monkeypatch):
+    site = _site(tmp_path)
+    _init_repo(site.archive_root)
+    monkeypatch.setattr(ws, "DEFAULT_GATE", tmp_path / "no-such-gate.py")
+    monkeypatch.setattr(ws, "db_ping", lambda: None)
+    with pytest.raises(RuntimeError, match="gate not found"):
+        ws.preflight(site, "ingest")
+    ws.preflight(site, "dry-run")            # dry-run needs no gate / DB
+
+
+def test_gives_up_after_max_attempts_until_content_changes(tmp_path, monkeypatch):
+    site = _site(tmp_path, ingest_concurrency=1, max_ingest_attempts=2)
+    _init_repo(site.archive_root)
+    doc = _fetched("page:www.example.org/a", "A " * 50 + "\n")
+    calls = []
+    monkeypatch.setattr(ws, "ingest_one", lambda s, k, e, d: calls.append(k) or {"ok": False, "error": "gate floor"})
+    for _ in range(3):
+        _stub_snapshot(monkeypatch, [doc])
+        ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    assert len(calls) == 2                                    # third run skipped
+    e = json.loads((site.site_dir / "manifest.json").read_text())["entries"]["page:www.example.org/a"]
+    assert e["ingest"]["attempts"] == 2
+    _stub_snapshot(monkeypatch, [_fetched("page:www.example.org/a", "B " * 50 + "\n")])   # content changed → retry
+    ws.run_site(site, "ingest", None, None, tmp_path / "tmp")
+    assert len(calls) == 3
