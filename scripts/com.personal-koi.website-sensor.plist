@@ -19,7 +19,7 @@
          experiments are in flight. 06:40 sits before the substack (07:15) and
          research-author (07:35) sensors so the three never contend for the extractor.
          Snapshots every configured site into ~/Documents/koi-source-archive (git),
-         then ingests ONLY new / changed documents -- unchanged pages are skipped via
+         then ingests ONLY new / changed documents; unchanged pages are skipped via
          the manifest diff, so a run over an unchanged site is nearly free. -->
     <key>StartCalendarInterval</key>
     <array>
