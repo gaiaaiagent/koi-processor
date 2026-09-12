@@ -91,6 +91,35 @@ createdb personal_koi_restored
 pg_restore -d personal_koi_restored -j 4 personal_koi.dump
 ```
 
+### How long a restore actually takes
+
+Measured 2026-09-12 on this laptop, restoring the 12.5 GB `personal_koi` dump:
+data loads in roughly 20 minutes, and then **index construction dominates** --
+a single `hnsw` index on a 3072-dimension `vector` column ran over 27 minutes
+by itself, with the table data already in place. Budget hours, not the half
+hour the dump size suggests.
+
+If you are recovering under time pressure and need the data queryable before it
+is fast, restore in two passes:
+
+```
+pg_restore -d <db> -j 4 --section=pre-data --section=data dump   # usable
+pg_restore -d <db> -j 4 --section=post-data dump                 # indexes
+```
+
+The first pass gives you correct data with sequential scans; the second buys
+back the index performance and can run while you work.
+
+### Comparing a restore against live will always differ
+
+The dump is a snapshot. If the source database is still running, its counts
+keep moving, so restored-vs-live is not a pass/fail test -- it is a
+plausibility check. What a good restore looks like: every delta small, positive
+and proportional to the elapsed time. On 2026-09-12, eleven hours after the
+03:15 dump: `knowledge_facts` +41, `entity_registry` +33, `koi_memory_chunks`
++122, `koi_net_events` +1,395. A delta that is negative, or large, or zero
+across the board, is the thing to look at.
+
 **The off-host copy is checksum-verified, not restore-verified.** gaia has
 `sha256sum` but no `pg_restore`, so the nightly job proves the bytes arrived
 intact and cannot prove the dump restores. The local integrity check

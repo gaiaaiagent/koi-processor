@@ -143,8 +143,19 @@ echo "     (partial was ${BEFORE} bytes before the retry; full file is $(wc -c <
 
 echo "== X1-X5: the DEFAULT path -- encrypted =="
 unset KOI_OFFSITE_ENCRYPT          # back to the shipped default (on)
+
+# THE FIXTURE MUST BE A REAL pg_dump. T1-T9 use 3MB of /dev/urandom, which is
+# fine for transfer mechanics and USELESS here: the whole confidentiality claim
+# is "pg_restore can read the plaintext and cannot read what we ship", and with
+# random bytes pg_restore rejects BOTH. The assertion could not distinguish
+# encryption from no encryption, and the "positive control" asserted a property
+# the fixture never had. Dump a scratch database instead.
+XTDB="koi_offsite_x_$$"
+createdb "$XTDB" 2>/dev/null && psql -q "$XTDB" -c "create table t as select g, md5(g::text) from generate_series(1,5000) g" 2>/dev/null
 XD="$W/personal_koi-20261001-000000.dump"
-cp "$D" "$XD"
+pg_dump -Fc "$XTDB" -f "$XD" 2>/dev/null
+ck "X0 fixture really is a pg_dump (else X2/X3 prove nothing)" \
+   "$(pg_restore --list "$XD" >/dev/null 2>&1 && echo readable || echo unreadable)" "readable"
 out=$(bash "$S" "$XD" 2>&1); rc=$?
 echo "$out" | sed 's/^/     /'
 RB="personal_koi-20261001-000000.dump.gpg"
@@ -157,8 +168,10 @@ ssh -o BatchMode=yes gaia "cat $KOI_OFFSITE_DIR/$RB" > "$W/fetched.gpg"
 ck "X2 pg_restore REJECTS the off-host bytes" \
    "$(pg_restore --list "$W/fetched.gpg" >/dev/null 2>&1 && echo readable || echo unreadable)" "unreadable"
 ck "X2 file -b says PGP" "$(file -b "$W/fetched.gpg" | grep -c '^PGP')" "1"
+# grep -c counts LINES, and gpg prints the key id on more than one, so an
+# exact "1" was wrong about the output shape rather than about the property.
 ck "X2 encrypted to the intended key" \
-   "$(head -c 2000000 "$W/fetched.gpg" | gpg --list-packets 2>&1 | grep -c 'F5EE933A8DC407E4')" "1"
+   "$(head -c 2000000 "$W/fetched.gpg" | gpg --list-packets 2>&1 | grep -qc 'F5EE933A8DC407E4' && echo yes || echo no)" "yes"
 
 echo "  X3: RESTORE -- the only test that proves it is still a backup"
 gpg --batch --yes --pinentry-mode loopback --passphrase '' -o "$W/restored.dump" -d "$W/fetched.gpg" 2>/dev/null
@@ -184,7 +197,17 @@ chmod +x "$STUB/gpg"
 cp "$D" "$W/personal_koi-20261002-000000.dump"
 out=$(PATH="$STUB:$PATH" KOI_OFFSITE_MARKER="$W/.mx" bash "$S" "$W/personal_koi-20261002-000000.dump" 2>&1); rc=$?
 ck "X4 exit 1" "$rc" "1"
-ck "X4 names the specific refusal" "$(echo "$out" | grep -c 'still a readable pg_dump')" "1"
+# Name the guard that ACTUALLY fires, not the one I had in mind. The three
+# checks run file -b -> pg_restore -> recipient, and with a passthrough gpg the
+# artifact is a real dump, so `file -b` reports "PostgreSQL custom database
+# dump" and refuses first. The pg_restore check never runs -- it is genuine
+# defence in depth for the case where file(1) says PGP and the bytes are still
+# a dump, which is not constructible here. Asserting the specific message is
+# still right; asserting merely "exit 1" would have passed on any failure at
+# all, including the unrelated missing-key path that fooled G0 in the archive
+# suite earlier today.
+ck "X4 names the specific refusal (file -b guard fires first)" \
+   "$(echo "$out" | grep -c 'is not PGP data')" "1"
 ck "X4 nothing for that dump reached the remote" \
    "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/personal_koi-20261002* 2>/dev/null | wc -l" | tr -d ' ')" "0"
 
@@ -195,7 +218,7 @@ ck "X5 eliza kept" "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/eliza-*.
 ck "X5 eliza's KEEP=1 did NOT prune personal_koi" \
    "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/personal_koi-20261001-000000.dump.gpg 2>/dev/null | wc -l" | tr -d ' ')" "1"
 
-ssh -o BatchMode=yes gaia "rm -rf $KOI_OFFSITE_DIR"; rm -rf "$W"
+ssh -o BatchMode=yes gaia "rm -rf $KOI_OFFSITE_DIR"; rm -rf "$W"; dropdb --if-exists "$XTDB" 2>/dev/null
 echo; echo "RESULT: pass=$pass fail=$fail"
 
 # EXIT NON-ZERO ON FAILURE. Without this the suite prints "fail=3" and exits 0,
