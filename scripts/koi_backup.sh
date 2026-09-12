@@ -60,7 +60,22 @@ if [ "${KOI_BACKUP_SELFTEST:-0}" = "1" ]; then
     exit 3
   fi
   SELFTEST=1
-  log "SELFTEST: scratch DB ${DB} -> ${DEST} (size floor will be lowered)"
+  # Scope the off-host destination the way the size floor is scoped. The dump
+  # FILENAME is hardcoded to `personal_koi-` regardless of $DB, so a scratch run
+  # produces a file named exactly like a production dump -- and without this it
+  # went to the production `gaia:koi-offsite/`, passed its checksum (it is a
+  # faithful copy of a scratch dump), was promoted to the production name, and
+  # then COUNTED toward remote retention, where a ~400KB impostor can evict a
+  # real 12.5GB backup. Defaulting these means a self-test cannot touch
+  # production state even when the caller forgets to redirect it.
+  : "${KOI_OFFSITE_DIR:=koi-offsite-selftest}"
+  : "${KOI_OFFSITE_MARKER:=${DEST}/.last-offhost-sync}"
+  export KOI_OFFSITE_DIR KOI_OFFSITE_MARKER
+  if [ "$DEST" = "${HOME}/koi-backups" ]; then
+    log "ABORT: KOI_BACKUP_SELFTEST=1 refuses the production backup directory ${DEST}; set KOI_BACKUP_DEST"
+    exit 3
+  fi
+  log "SELFTEST: scratch DB ${DB} -> ${DEST}, off-host dir ${KOI_OFFSITE_DIR} (size floor will be lowered)"
 fi
 
 
@@ -71,7 +86,30 @@ fi
 # directory, and that the guards below never got a chance to reject because
 # the script died before reaching them. A partial is worse than no file:
 # nothing downstream distinguishes it from a real dump until a restore fails.
-trap 'rc=$?; if [ -f "$OUT" ]; then rm -f "$OUT"; log "ABORTED (rc=${rc}): removed partial ${OUT}"; fi; exit $rc' INT TERM HUP
+# The exit status must reflect THE SIGNAL, not `$?`.
+#
+# This was `rc=$?; ...; exit $rc`. `$?` is the status of the last COMPLETED
+# command, which is 0 whenever the signal lands just after something succeeded
+# -- so the trap deleted the in-progress dump and then exited 0, and launchd's
+# LastExitStatus, an `&&` chain, or `if koi_backup.sh; then` all recorded
+# SUCCESS for a night that produced no backup. That is this project's own
+# standard ("a command exiting 0 is not evidence the work happened") being
+# violated by the first trap in the nightly job. The rc=0 path fired in
+# production on 2026-09-12 (backup.log). Re-raising the signal gives the caller
+# the conventional 128+N and cannot be mistaken for success.
+_abort() {
+  sig="$1"
+  if [ -f "$OUT" ]; then
+    rm -f "$OUT"; log "ABORTED (SIG${sig}): removed partial ${OUT}"
+  else
+    log "ABORTED (SIG${sig}): no partial to remove"
+  fi
+  trap - "$sig"
+  kill -s "$sig" $$
+}
+trap '_abort INT' INT
+trap '_abort TERM' TERM
+trap '_abort HUP' HUP
 
 # Guard: need room for roughly the DB size (dump is smaller, but be safe).
 AVAIL_MB=$(df -Pm "$DEST" | awk 'NR==2{print $4}')

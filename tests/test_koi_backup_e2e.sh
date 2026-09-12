@@ -14,7 +14,7 @@ set -uo pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 S=~/projects/koi-processor-service/scripts/koi_backup.sh
 W=$(mktemp -d); TDB=koi_backup_selftest_$$
-export KOI_BACKUP_DB="$TDB" KOI_BACKUP_DEST="$W" KOI_BACKUP_SELFTEST=1 KOI_OFFSITE_DIR=koi-offsite-e2e
+export KOI_BACKUP_DB="$TDB" KOI_BACKUP_DEST="$W" KOI_BACKUP_SELFTEST=1 KOI_OFFSITE_DIR="koi-offsite-e2e-$$"
 pass=0; fail=0
 ck(){ if [ "$2" = "$3" ]; then echo "  PASS $1"; pass=$((pass+1)); else echo "  FAIL $1 (got '$2' want '$3')"; fail=$((fail+1)); fi; }
 cleanup(){ dropdb --if-exists "$TDB" 2>/dev/null; ssh -o BatchMode=yes gaia "rm -rf $KOI_OFFSITE_DIR" 2>/dev/null; rm -rf "$W"; }
@@ -56,4 +56,56 @@ out=$(KOI_OFFSITE=0 bash "$S" 2>&1); rc=$?
 ck "exit 0" "$rc" "0"
 ck "skipped, not silently done" "$(echo "$out"|grep -c 'OFFSITE: skipped')" "1"
 
+echo "== E5: an INTERRUPTED run must not report success =="
+# There was no interrupt coverage at all, which is why the trap could delete the
+# dump and still `exit 0` through the very session that hardened its disarm. The
+# property: a signalled run exits non-zero AND leaves no partial behind.
+# The scratch table must be big enough that pg_dump is still running when the
+# signal lands, and the kill must be triggered by EVIDENCE (the dump file has
+# grown) rather than by a sleep. An earlier version used `sleep 0.5` after
+# pg_dump appeared: it reported exit 143 while the machine was loaded and
+# therefore slow, then reported exit 0 once the machine was idle, because the
+# whole script finished before the kill arrived. It was green by accident.
+psql -q "$TDB" -c "insert into t select g, md5(g::text)||md5((g*7)::text)||md5((g*13)::text) from generate_series(30000,900000) g" >/dev/null 2>&1
+before=$(ls "$W"/personal_koi-*.dump 2>/dev/null | wc -l | tr -d ' ')
+KOI_OFFSITE=0 bash "$S" >/dev/null 2>&1 &
+BPID=$!
+# Wait for the dump file to actually be accumulating bytes, then signal.
+killed=no
+for _ in $(seq 1 200); do
+  newest=$(ls -t "$W"/personal_koi-*.dump 2>/dev/null | head -1)
+  if [ -n "$newest" ] && [ "$(wc -c < "$newest" | tr -d ' ')" -gt 2000000 ]; then
+    kill -TERM "$BPID" 2>/dev/null; killed=yes; break
+  fi
+  kill -0 "$BPID" 2>/dev/null || break     # script exited before we could signal
+  sleep 0.1
+done
+ck "the signal was actually delivered mid-dump" "$killed" "yes"
+wait "$BPID" 2>/dev/null; rc=$?
+ck "exit is NON-zero after SIGTERM" "$([ "$rc" -ne 0 ] && echo nonzero || echo "zero($rc)")" "nonzero"
+ck "conventional 128+15 for SIGTERM" "$rc" "143"
+after=$(ls "$W"/personal_koi-*.dump 2>/dev/null | wc -l | tr -d ' ')
+ck "no partial dump left behind" "$after" "$before"
+# `grep -c` exits 1 on zero matches, so `... || echo 0` appends a SECOND line
+# and the comparison sees "0\n0" -- which is a plumbing artifact, not a result.
+# grep -c already prints 0; suppress its exit status instead of adding output.
+ck "the log says it aborted" "$(grep -c 'ABORTED (SIGTERM)' "$W/backup.log" 2>/dev/null; true)" "1"
+
+echo "== E6: selftest refuses the PRODUCTION backup directory =="
+# Without this, a scratch dump named exactly like a production dump reached
+# gaia:koi-offsite/ and counted toward remote retention.
+out=$(KOI_BACKUP_DEST="$HOME/koi-backups" bash "$S" 2>&1); rc=$?
+ck "exit 3" "$rc" "3"
+ck "names the refusal" "$(echo "$out"|grep -c 'refuses the production backup directory')" "1"
+ck "off-host dir defaulted away from production" \
+   "$(KOI_BACKUP_DEST="$W" bash -c 'set -a; KOI_BACKUP_SELFTEST=1; KOI_BACKUP_DB='"$TDB"'; set +a; grep -c "KOI_OFFSITE_DIR:=koi-offsite-selftest" '"$S"'')" "1"
+
 echo; echo "RESULT: pass=$pass fail=$fail"
+
+# EXIT NON-ZERO ON FAILURE. Without this the suite prints "fail=3" and exits 0,
+# so it reports success to every automated consumer and only a human reading the
+# RESULT line by eye would notice. That is not theoretical: a run of this file
+# was killed mid-suite and exited 0 with no RESULT line at all, which is
+# indistinguishable from a clean pass unless you are looking for the line that
+# is missing. A suite that cannot fail its caller is not a gate.
+[ "$fail" -eq 0 ] || exit 1
