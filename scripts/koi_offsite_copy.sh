@@ -31,11 +31,43 @@ set -euo pipefail
 DUMP="${1:?usage: koi_offsite_copy.sh <dump-path>}"
 [ -f "$DUMP" ] || { echo "FAIL: no such dump: $DUMP" >&2; exit 2; }
 
+# ENCRYPT BEFORE IT LEAVES. Added 2026-09-12 at the operator's direction.
+#
+# The archive script carried 25 lines arguing that copyrighted material must
+# never rest readable on another host, and this script shipped the DATABASE --
+# email bodies, Signal and Telegram messages, meeting transcripts, People notes
+# -- as plaintext pg_dump to a rented VPS that has a second user account and
+# PermitRootLogin yes. Mode 0600 protects it from that account, not from root,
+# the hoster, a snapshot or a seizure. The threat model that justified building
+# a key was never applied to the more sensitive asset, because the two were
+# written in separate passes.
+KOI_OFFSITE_ENCRYPT="${KOI_OFFSITE_ENCRYPT:-1}"
+RECIPIENT="${KOI_OFFSITE_GPG_KEY:-F5EE933A8DC407E4}"
+
 HOST="${KOI_OFFSITE_HOST:-gaia}"
 DIR="${KOI_OFFSITE_DIR:-koi-offsite}"
 KEEP="${KOI_OFFSITE_KEEP:-7}"
-MARKER="${KOI_OFFSITE_MARKER:-$(dirname "$DUMP")/.last-offhost-sync}"
+MARKER="${KOI_OFFSITE_MARKER:-}"   # per-database default set below, once PREFIX is known
 BASE="$(basename "$DUMP")"
+
+# RETENTION MUST BE SCOPED TO THIS DATABASE. The globs were the literal
+# `personal_koi-*.dump`, which was fine while one database was backed up and
+# becomes a data-loss bug the moment a second is: eliza's nightly run would
+# count -- and prune -- personal_koi's dumps. Derive the prefix from the dump
+# being sent (`personal_koi-20260912-031505.dump` -> `personal_koi`) and add
+# .gpg when encrypting, so each database retains its own and only its own.
+PREFIX="${BASE%-*-*.dump}"
+[ "$PREFIX" = "$BASE" ] && fail "cannot derive a retention prefix from '${BASE}' (expected <db>-<date>-<time>.dump)"
+SUFFIX=".dump"
+[ "${KOI_OFFSITE_ENCRYPT:-1}" = "1" ] && SUFFIX=".dump.gpg"
+GLOB="${PREFIX}-*${SUFFIX}"
+
+# One marker PER DATABASE. A single shared .last-offhost-sync would be
+# overwritten by whichever database ran last, so "when did a dump last leave
+# this machine" would answer only for that one and silently say nothing about
+# the others -- the staleness check would then be blind to exactly the database
+# that stopped being copied.
+: "${MARKER:=$(dirname "$DUMP")/.last-offhost-sync-${PREFIX}}"
 
 log() { echo "[$(date '+%F %T')] OFFSITE: $*"; }
 fail() { log "FAIL: $*"; log "the local dump at ${DUMP} is intact; only the off-host copy failed"; exit 1; }
@@ -75,7 +107,7 @@ bounded 60 ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p ${DIR}" || fail "cannot reach 
 # Running it here means a run cleans up after its predecessors even if it is
 # itself about to fail.
 STALE="$(ssh "${SSH_OPTS[@]}" "$HOST" \
-  "find ${DIR} -maxdepth 1 -name 'personal_koi-*.dump.inprogress' -mtime +2 -print -delete 2>/dev/null | wc -l" || echo 0)"
+  "find ${DIR} -maxdepth 1 -name '${PREFIX}-*.inprogress' -mtime +2 -print -delete 2>/dev/null | wc -l" || echo 0)"
 [ "${STALE:-0}" -gt 0 ] && log "swept ${STALE} abandoned .inprogress file(s) older than 2 days"
 
 # TRANSFER UNDER A TEMPORARY NAME, and only rename after the checksum passes.
@@ -93,6 +125,63 @@ STALE="$(ssh "${SSH_OPTS[@]}" "$HOST" \
 # Under .inprogress a partial is structurally ineligible: retention never
 # matches it, nothing counts it as a backup, and --partial --inplace means the
 # next attempt RESUMES it rather than restarting from zero.
+# --- encryption stage ---------------------------------------------------
+# Produces $XFER, which is what actually goes over the wire. When encryption is
+# off (KOI_OFFSITE_ENCRYPT=0) that is the dump itself.
+XFER="$DUMP"
+if [ "$KOI_OFFSITE_ENCRYPT" = "1" ]; then
+  gpg --list-keys "$RECIPIENT" >/dev/null 2>&1 \
+    || fail "no gpg key ${RECIPIENT}; refusing to send the database in cleartext"
+
+  # Work dir at a KNOWN path so an orphaned ciphertext is findable and swept,
+  # rather than left in mktemp's /var/folders for the temp reaper. Same reason
+  # as koi_archive_offsite.sh: a trap cannot run after SIGKILL.
+  WORKROOT="${KOI_OFFSITE_WORKROOT:-$(dirname "$DUMP")}"
+  for d in "$WORKROOT"/.offsite-work.*; do
+    [ -d "$d" ] || continue
+    opid="${d##*.}"
+    case "$opid" in (*[!0-9]*|"") continue ;; esac
+    kill -0 "$opid" 2>/dev/null || { log "sweeping orphaned work dir $(basename "$d")"; rm -rf "$d"; }
+  done
+  WORK="${WORKROOT}/.offsite-work.$$"
+  rm -rf "$WORK"; mkdir -p "$WORK"; chmod 700 "$WORK"
+  trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+
+  # Need room for a second copy. The ciphertext of a -Fc dump is ~the same size.
+  NEED_MB=$(( $(wc -c < "$DUMP") / 1048576 + 512 ))
+  FREE_MB=$(df -Pm "$WORKROOT" | awk 'NR==2{print $4}')
+  [ "$FREE_MB" -ge "$NEED_MB" ] || fail "need ${NEED_MB}MB for the ciphertext, only ${FREE_MB}MB free in ${WORKROOT}"
+
+  XFER="${WORK}/${BASE}.gpg"
+  # -z 0 because pg_dump -Fc is ALREADY compressed: gpg's compression pass is
+  # pure waste on it. Measured on a real dump: 30s/GB with compression, 8s/GB
+  # without -- 4x, i.e. ~100s instead of ~400s for 12.5GB.
+  log "encrypting to ${RECIPIENT} ($(du -h "$DUMP" | cut -f1))"
+  gpg --batch --yes --trust-model always -z 0 --recipient "$RECIPIENT" \
+      --output "$XFER" --encrypt "$DUMP" || fail "gpg encrypt failed"
+
+  # Three checks, each able to fail on its own. The first version of this guard
+  # elsewhere was `file "$f" | grep -qi gpg`, which matched the FILENAME and
+  # could never refuse anything -- see koi_archive_offsite.sh.
+  FT="$(file -b "$XFER")"
+  case "$FT" in PGP*) : ;; *) fail "ciphertext is not PGP data (file says: ${FT}); refusing to transfer" ;; esac
+  # pg_restore must REJECT it. A readable dump here means encryption did not
+  # happen, and unlike file(1) this does not depend on a magic database.
+  if pg_restore --list "$XFER" >/dev/null 2>&1; then
+    fail "the 'ciphertext' is still a readable pg_dump; refusing to transfer"
+  fi
+  # And it must be encrypted to the INTENDED key -- the only check that would
+  # notice encryption to somebody else's.
+  PKT="$(head -c 2000000 "$XFER" | gpg --list-packets 2>&1 | head -5 || true)"
+  case "$PKT" in
+    *"$RECIPIENT"*) : ;;
+    *) fail "ciphertext is not encrypted to ${RECIPIENT}; refusing to transfer" ;;
+  esac
+
+  BASE="${BASE}.gpg"
+  log "encrypted OK ($(du -h "$XFER" | cut -f1)), verified PGP / not-a-dump / recipient ${RECIPIENT}"
+fi
+
 REMOTE_TMP="${BASE}.inprogress"
 
 # Retry, because the failure that exposed this was transient. Each attempt
@@ -100,7 +189,7 @@ REMOTE_TMP="${BASE}.inprogress"
 ATTEMPTS="${KOI_OFFSITE_ATTEMPTS:-3}"
 n=1
 while : ; do
-  if rsync -a --partial --inplace -e "ssh ${SSH_OPTS[*]}" "$DUMP" "${HOST}:${DIR}/${REMOTE_TMP}"; then
+  if rsync -a --partial --inplace -e "ssh ${SSH_OPTS[*]}" "$XFER" "${HOST}:${DIR}/${REMOTE_TMP}"; then
     break
   fi
   if [ "$n" -ge "$ATTEMPTS" ]; then
@@ -111,7 +200,8 @@ while : ; do
   n=$((n+1))
 done
 
-LOCAL_SHA="$(shasum -a 256 "$DUMP" | awk '{print $1}')"
+# Checksum of WHAT WAS SENT (the ciphertext), which is what the remote holds.
+LOCAL_SHA="$(shasum -a 256 "$XFER" | awk '{print $1}')"
 REMOTE_SHA="$(bounded 1800 ssh "${SSH_OPTS[@]}" "$HOST" "sha256sum ${DIR}/${REMOTE_TMP} 2>/dev/null | awk '{print \$1}'" || true)"
 
 [ -n "$REMOTE_SHA" ] || fail "no checksum from ${HOST} (file absent after a successful-looking transfer)"
@@ -133,7 +223,7 @@ printf '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$BASE" "$LOCAL_SHA" > "$
 
 # Remote retention: keep the newest N. Filename stamps sort chronologically.
 PRUNED="$(ssh "${SSH_OPTS[@]}" "$HOST" \
-  "cd ${DIR} && ls -1 personal_koi-*.dump 2>/dev/null | sort | head -n -${KEEP} | xargs -r -n1 sh -c 'rm -f \"\$0\" && echo \"\$0\"' | wc -l" || echo 0)"
-KEPT="$(ssh "${SSH_OPTS[@]}" "$HOST" "ls -1 ${DIR}/personal_koi-*.dump 2>/dev/null | wc -l" || echo '?')"
+  "cd ${DIR} && ls -1 ${GLOB} 2>/dev/null | sort | head -n -${KEEP} | xargs -r -n1 sh -c 'rm -f \"\$0\" && echo \"\$0\"' | wc -l" || echo 0)"
+KEPT="$(ssh "${SSH_OPTS[@]}" "$HOST" "ls -1 ${DIR}/${GLOB} 2>/dev/null | wc -l" || echo '?')"
 FREE="$(ssh "${SSH_OPTS[@]}" "$HOST" "df -Ph ${DIR} | awk 'NR==2{print \$4}'" || echo '?')"
 log "DONE pruned=${PRUNED} kept=${KEPT} free=${FREE} on ${HOST}"

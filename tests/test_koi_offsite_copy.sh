@@ -25,6 +25,13 @@ S=~/projects/koi-processor-service/scripts/koi_offsite_copy.sh
 # which is the worst kind, because it sends you looking in the wrong place.
 W=$(mktemp -d); export KOI_OFFSITE_DIR="koi-offsite-selftest-$$"
 export KOI_OFFSITE_MARKER="$W/.marker"
+# T1-T9 test TRANSFER MECHANICS -- staging under .inprogress, atomic promotion,
+# retention, resume, checksum rejection. Those are orthogonal to encryption, so
+# they run with it OFF and compare remote bytes to the local dump directly,
+# which keeps the assertions readable. The DEFAULT path (encryption on) gets its
+# own end-to-end section, X1-X5, at the bottom -- including the round trip that
+# is the only thing proving the ciphertext is still a usable backup.
+export KOI_OFFSITE_ENCRYPT=0
 D="$W/personal_koi-20260912-000000.dump"
 head -c 3000000 /dev/urandom > "$D"     # 3 MB stand-in for the 12.5 GB dump
 pass=0; fail=0
@@ -133,6 +140,60 @@ ck "now present under the real name" "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OF
 ck "remote bytes match local" "$(ssh -o BatchMode=yes gaia "sha256sum $KOI_OFFSITE_DIR/personal_koi-20260930-000000.dump | awk '{print \$1}'")" "$(shasum -a 256 "$BIG"|awk '{print $1}')"
 ck "the .inprogress name is gone (renamed, not copied)" "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/personal_koi-20260930-000000.dump.inprogress 2>/dev/null | wc -l" | tr -d ' ')" "0"
 echo "     (partial was ${BEFORE} bytes before the retry; full file is $(wc -c < "$BIG"))"
+
+echo "== X1-X5: the DEFAULT path -- encrypted =="
+unset KOI_OFFSITE_ENCRYPT          # back to the shipped default (on)
+XD="$W/personal_koi-20261001-000000.dump"
+cp "$D" "$XD"
+out=$(bash "$S" "$XD" 2>&1); rc=$?
+echo "$out" | sed 's/^/     /'
+RB="personal_koi-20261001-000000.dump.gpg"
+ck "X1 exit 0" "$rc" "0"
+ck "X1 remote artifact carries .gpg" "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/$RB 2>/dev/null | wc -l" | tr -d ' ')" "1"
+ck "X1 the PLAINTEXT name is absent off-host" "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/personal_koi-20261001-000000.dump 2>/dev/null | wc -l" | tr -d ' ')" "0"
+
+echo "  X2: what rests off-host must not be a readable dump"
+ssh -o BatchMode=yes gaia "cat $KOI_OFFSITE_DIR/$RB" > "$W/fetched.gpg"
+ck "X2 pg_restore REJECTS the off-host bytes" \
+   "$(pg_restore --list "$W/fetched.gpg" >/dev/null 2>&1 && echo readable || echo unreadable)" "unreadable"
+ck "X2 file -b says PGP" "$(file -b "$W/fetched.gpg" | grep -c '^PGP')" "1"
+ck "X2 encrypted to the intended key" \
+   "$(head -c 2000000 "$W/fetched.gpg" | gpg --list-packets 2>&1 | grep -c 'F5EE933A8DC407E4')" "1"
+
+echo "  X3: RESTORE -- the only test that proves it is still a backup"
+gpg --batch --yes --pinentry-mode loopback --passphrase '' -o "$W/restored.dump" -d "$W/fetched.gpg" 2>/dev/null
+ck "X3 decrypts to the ORIGINAL dump, byte for byte" \
+   "$(shasum -a 256 "$W/restored.dump" 2>/dev/null | awk '{print $1}')" "$(shasum -a 256 "$XD" | awk '{print $1}')"
+ck "X3 positive control: the decrypted dump IS readable by pg_restore" \
+   "$(pg_restore --list "$W/restored.dump" >/dev/null 2>&1 && echo readable || echo unreadable)" "readable"
+
+echo "  X4: refuses to send cleartext when encryption silently does not happen"
+STUB="$W/xstub"; mkdir -p "$STUB"
+REAL_GPG="$(command -v gpg)"
+cat > "$STUB/gpg" <<STUBEOF
+#!/bin/bash
+args=("\$@"); out=""; inp=""
+for ((i=0; i<\${#args[@]}; i++)); do
+  [ "\${args[\$i]}" = "--output" ] && out="\${args[\$((i+1))]}"
+  [ "\${args[\$i]}" = "--encrypt" ] && inp="\${args[\$((i+1))]}"
+done
+if [ -n "\$out" ] && [ -n "\$inp" ]; then cp "\$inp" "\$out"; exit 0; fi
+exec ${REAL_GPG} "\$@"
+STUBEOF
+chmod +x "$STUB/gpg"
+cp "$D" "$W/personal_koi-20261002-000000.dump"
+out=$(PATH="$STUB:$PATH" KOI_OFFSITE_MARKER="$W/.mx" bash "$S" "$W/personal_koi-20261002-000000.dump" 2>&1); rc=$?
+ck "X4 exit 1" "$rc" "1"
+ck "X4 names the specific refusal" "$(echo "$out" | grep -c 'still a readable pg_dump')" "1"
+ck "X4 nothing for that dump reached the remote" \
+   "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/personal_koi-20261002* 2>/dev/null | wc -l" | tr -d ' ')" "0"
+
+echo "  X5: retention is scoped to ONE database"
+cp "$D" "$W/eliza-20261001-000000.dump"
+KOI_OFFSITE_KEEP=1 KOI_OFFSITE_MARKER="$W/.me" bash "$S" "$W/eliza-20261001-000000.dump" >/dev/null 2>&1
+ck "X5 eliza kept" "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/eliza-*.dump.gpg 2>/dev/null | wc -l" | tr -d ' ')" "1"
+ck "X5 eliza's KEEP=1 did NOT prune personal_koi" \
+   "$(ssh -o BatchMode=yes gaia "ls -1 $KOI_OFFSITE_DIR/personal_koi-20261001-000000.dump.gpg 2>/dev/null | wc -l" | tr -d ' ')" "1"
 
 ssh -o BatchMode=yes gaia "rm -rf $KOI_OFFSITE_DIR"; rm -rf "$W"
 echo; echo "RESULT: pass=$pass fail=$fail"

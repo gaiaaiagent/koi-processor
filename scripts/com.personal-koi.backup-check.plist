@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-koi.backup-check</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/darrenzal/projects/koi-processor-service/scripts/koi_backup_check.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/darrenzal/projects/koi-processor-service</string>
+    <!-- Midday, deliberately: the nightly backup finishes around 05:30 and the
+         archive job at 08:30, so by noon every job that should have run has had
+         its chance. Checking at 03:00 would only ever describe yesterday.
+         Reads markers and backup.log; writes nothing; exits 1 when something is
+         stale so the failure is visible in `launchctl list`. -->
+    <key>StartCalendarInterval</key>
+    <array><dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict></array>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key><string>/Users/darrenzal</string>
+    </dict>
+    <key>StandardOutPath</key><string>/Users/darrenzal/koi-backups/backup-check.log</string>
+    <key>StandardErrorPath</key><string>/Users/darrenzal/koi-backups/backup-check.error.log</string>
+</dict>
+</plist>

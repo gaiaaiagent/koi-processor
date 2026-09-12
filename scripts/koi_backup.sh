@@ -28,13 +28,28 @@ LOG="${DEST}/backup.log"
 # taken", say which event you mean.
 STAMP="$(date +%Y%m%d-%H%M%S)"
 DOW="$(date +%u)"          # 7 = Sunday
-OUT="${DEST}/personal_koi-${STAMP}.dump"
+# Name the dump after the database it came from. It was hardcoded to the literal
+# `personal_koi-` regardless of $DB, which meant a scratch-database run produced
+# a file indistinguishable from a production dump -- and could be promoted into
+# the production retention set. Deriving it from $DB closes that and lets this
+# one engine back up more than one database.
+OUT="${DEST}/${DB}-${STAMP}.dump"
 
 # Homebrew Postgres binaries aren't on launchd's default PATH.
 export PATH="/opt/homebrew/bin:${PATH}"
 
 mkdir -p "$DEST"
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+
+# Refuse the production directory BEFORE announcing a START. A refused
+# self-test used to log "START backup ..." into the PRODUCTION backup.log and
+# then bail, leaving a START with no matching OK/FAIL -- which is exactly the
+# signature koi_backup_check.sh treats as "a run died without reaching a guard".
+# Test runs were manufacturing false staleness alarms in the real log.
+if [ "${KOI_BACKUP_SELFTEST:-0}" = "1" ] && [ "$DEST" = "${HOME}/koi-backups" ]; then
+  log "ABORT: KOI_BACKUP_SELFTEST=1 refuses the production backup directory ${DEST}; set KOI_BACKUP_DEST"
+  exit 3
+fi
 
 log "START backup ${DB} -> ${OUT}"
 
@@ -71,10 +86,6 @@ if [ "${KOI_BACKUP_SELFTEST:-0}" = "1" ]; then
   : "${KOI_OFFSITE_DIR:=koi-offsite-selftest}"
   : "${KOI_OFFSITE_MARKER:=${DEST}/.last-offhost-sync}"
   export KOI_OFFSITE_DIR KOI_OFFSITE_MARKER
-  if [ "$DEST" = "${HOME}/koi-backups" ]; then
-    log "ABORT: KOI_BACKUP_SELFTEST=1 refuses the production backup directory ${DEST}; set KOI_BACKUP_DEST"
-    exit 3
-  fi
   log "SELFTEST: scratch DB ${DB} -> ${DEST}, off-host dir ${KOI_OFFSITE_DIR} (size floor will be lowered)"
 fi
 
@@ -154,7 +165,11 @@ fi
 # reads an empty string, the [ ] comparison errors, and under `set -e` a
 # perfectly good dump reports as a failed run having never checked a size --
 # i.e. the guard is inert while looking present. `wc -c` needs no such luck.
-ABS_FLOOR=$((4 * 1024 * 1024 * 1024))       # 4 GB; < half the smallest real dump
+# Absolute floor, per database. 4GB is correct for personal_koi (< half the
+# smallest real dump) and nonsense for a 62MB one, so the caller sets it. The
+# 70%-of-previous rule below does the real work once a history exists; this is
+# the cold-start backstop.
+ABS_FLOOR="${KOI_BACKUP_FLOOR:-$((4 * 1024 * 1024 * 1024))}"
 [ "$SELFTEST" = "1" ] && ABS_FLOOR=1024   # scratch DBs are kilobytes, not gigabytes
 
 ACTUAL_BYTES=$(wc -c < "$OUT" | tr -d '[:space:]')
@@ -163,7 +178,7 @@ ACTUAL_BYTES=$(wc -c < "$OUT" | tr -d '[:space:]')
 # `|| true` is load-bearing: on the first run $OUT is the ONLY match, grep
 # filters it out, exits 1, and `set -euo pipefail` would abort the script
 # immediately after a perfectly good dump. Verified by test.
-PREV_FILE=$(ls -t "$DEST"/personal_koi-*.dump 2>/dev/null | grep -vxF "$OUT" | head -1 || true)
+PREV_FILE=$(ls -t "$DEST"/"${DB}"-*.dump 2>/dev/null | grep -vxF "$OUT" | head -1 || true)
 PREV=""
 if [ -n "$PREV_FILE" ] && [ -f "$PREV_FILE" ]; then
   PREV=$(wc -c < "$PREV_FILE" | tr -d '[:space:]')
@@ -216,9 +231,9 @@ while IFS= read -r -d '' f; do
       rm -f "$f"; log "pruned (daily>7d): $(basename "$f")"; PRUNED=$((PRUNED+1))
     fi
   fi
-done < <(find "$DEST" -maxdepth 1 -name 'personal_koi-*.dump' -print0)
+done < <(find "$DEST" -maxdepth 1 -name "${DB}-*.dump" -print0)
 
-KEPT=$(find "$DEST" -maxdepth 1 -name 'personal_koi-*.dump' | wc -l | tr -d ' ')
+KEPT=$(find "$DEST" -maxdepth 1 -name "${DB}-*.dump" | wc -l | tr -d ' ')
 log "DONE: pruned=${PRUNED} kept=${KEPT} free=$(df -Ph "$DEST" | awk 'NR==2{print $4}')"
 
 # --- OFF-HOST COPY -----------------------------------------------------------
