@@ -1,8 +1,8 @@
 # Project handoff
 
-**Updated:** 2026-09-05 01:15 PDT
-**Session:** Claude Code · a0f88bbf · MCP supply chain + the two-node written statement (with `1e1f2abb` in parallel)
-**Status:** `regen-prod` @ `eb4345a`, **published, 0 ahead / 0 behind**, tree clean, 114 passed / 2 skipped in the launchd suite. **Nothing is half-applied here.** One thing is deliberately unpublished and is the single open action: `personal-koi-mcp` @ `409fe9d` (axios lockfile) is 2 ahead of its origin — see Next steps #1.
+**Updated:** 2026-09-12 22:40 PDT
+**Session:** Claude Code · 045186e8 · Stream A — history-preserving website sensor: plan + migration 123 applied
+**Status:** `regen-prod` @ `60d7414`, **2 ahead of origin, unpushed**; **migration 123 is APPLIED and live** (`claims=513, snapshot rows=511`, one-shot — do not re-run); steps 0–3 of the Stream A plan done, steps 4–5 (ingest edits + history router) **not started**; tree clean except two other sessions' debris files.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -29,134 +29,104 @@
 
 ## Completed this session
 
-**Session `a0f88bbf`, 2026-09-04.** Scope was `PROJECT_HANDOFF` Next steps #1 and #2, cut to
-"Part 1 in full + the written statement" before starting. Six commits, all published.
+**Session `045186e8`, 2026-09-11→12.** Designed and began executing
+`~/.claude/plans/history-preserving-website-sensor.md` (Stream A). ~130 agents across seven
+workflows (understand · design bakeoff · spec · two gates · merge · resolve), three Codex review
+rounds, and a 29-agent peer review of the migration before it was applied.
 
-- **MCP supply chain.** `409fe9d` on `personal-koi-mcp` (lockfile only): axios 1.12.2→**1.20.0**,
-  form-data→**4.0.6** (HIGH), follow-redirects→**1.16.0**, plus the two undisclosed movers a later
-  audit caught — **`proxy-from-env` 1.1.0→2.1.0 (semver major)** and hasown. Before/after `npm
-  audit` set diff: **30 advisories resolved, 0 introduced, 11→8 vulnerable packages**. All **39
-  Dependabot alerts dismissed**; task 9323 done.
-- **The written statement.** `docs/operations/two-node-topology.md`, linked from `CLAUDE.md`.
-- **The launchd guard now asks "does the target still exist?" of EVERY installed job** (`eb4345a`),
-  after a fourth subset-enumeration instance. Two things it exposed: `com.darren.*` never matched
-  `com.darrenzal.*` (9 vs 24 plists, **zero overlap**), and **three installed plists are malformed
-  XML no parser will read** — two of them loaded at exit 0 from launchd's cache, so they work today
-  and **will not survive a reload**. Three registers, each with a staleness assertion; all controls
-  run and restored.
-- **Ten koi tasks** filed or updated, all dated.
+- **Migration 123 applied** (`da408e0`, 22:19 PDT): `document_source_claim` (ownership + sticky
+  `history_policy`, PK site+URL), `document_supersession` (append-only version chain + crash-recovery
+  journal, no FK), one view, one nullable column on `session_discourse_moves`. Backfilled every
+  document row into claims with **zero lost**; assertion demonstrated *failing* on an injected defect
+  before apply (delete one claim → exit 3, caught three ways). Leg D adopted the two real legacy
+  supersessions as `reason='legacy'` edges — observed, not performed. All nine indexes confirmed via
+  `pg_indexes`, the instrument the file's own `to_regclass` checks cannot substitute for.
+- **Down file made real.** Its export lines were inside comments; a reviewer ran it and destroyed
+  511 rows at exit 0. Now runs, placed **below** `ON_ERROR_STOP` (measured: above it a failed export
+  exits 0 and continues to the DROPs; below it exits 3 first), with literal paths because `\copy`
+  does not interpolate `:'var'` in a filename (my first repair was broken by exactly that; my own
+  test caught it).
+- **`koi-dump-ok`** — full-read dump validator. Exists because `pg_restore --list` exits 0 with 1198
+  entries on a 4.25 GB truncated dump. Controls demonstrated: partial → exit 1 in 29 s; good → exit 0.
+- **`koi-history`** dispatcher — seven verbs, each tagged with the step that lands it; an unbuilt verb
+  exits 2, never 0.
+- **Postgres instruments on** (`log_lock_waits`, `log_min_duration_statement=10s`, `log_checkpoints`,
+  `log_autovacuum_min_duration=1s`) — the 6.5 h `pg_dump` of 09-11 was undiagnosable because all four
+  were off. Its kill was a human-confirmed restart at 09:44; its slowness stays undetermined.
+- **Backup guard restored**: the partial dump was the newest by mtime and had halved `koi_backup.sh`'s
+  size floor; renamed out of the glob (kept as `koi-dump-ok`'s negative-control fixture).
+- **Three plan-level corrections that changed the work**, all from peers and all verified before
+  acting: the d8 "shared sha256" evidence was `sha256("\n")` from empty extractions; `claims` has no
+  `document_rid` so claims are adjudicated document-scoped (P-22); extraction composition is
+  asymmetric on byte-identical input (n=5: 0.391/0.192/0.037/0.048/0.050), so per-version fact
+  provenance is a parked item with a stated cost, not a blind spot.
 
 ### What this session got wrong, and how it was caught
 
-Kept because it is the session's most reusable output. A 34-agent adversarial workflow raised 29
-findings, 22 survived refutation, and the parallel session `1e1f2abb` caught two more.
-
-| my claim | truth | the defective probe |
-|---|---|---|
-| "every NUC migration is hand-delivered" | files **did** flow by rsync — 124 of 128 landed 2026-06-24, last 4 on 2026-07-19 | compared the nanosecond field against **ten** zeros when `stat -c %y` emits **nine**, so all 128 "failed" and the answer inverted. **Came within one command of publishing a refutation of a correct claim.** |
-| "soak-check never printed OK" | it printed **592 OKs over six months**; the durable log **jumped checkouts** 2026-08-25 | read `/tmp/soak-cron.log`, which only covers the post-jump window — a subset stated as a universal |
-| "six LaunchAgent entrypoints" | **nine** — three reach the clone through wrappers | enumerated `ProgramArguments` only |
-| "`allowed_facets` is the obvious hole" | **0 rows on both sides** — but *not inert*: `tr_entity_facets_registered` is ENABLED on both, so every non-empty facet write is rejected today | — |
-| commit msg listed 3 version changes | **six**, one a semver major | — |
-| "dismissed all 39 alerts" | this session dismissed **29**; 10 predated it | — |
-
-## Corrections made to this project's own record
-
-| Claim | The probe that produced it | Truth |
-|---|---|---|
-| retype gap "never exercised" | `merged_by ILIKE '%retype%'` → 6 | `rewired ? 'retype'` → **142** |
-| the fix is live | route present in `/openapi.json` | process predated the module by 85s |
-| "nothing normalises today" | `predicate_raw` 0 rows differ | **satisfiable by construction** — one INSERT binds both columns to the same expression |
-| "exactly one insert path" | literal grep → 1 hit | f-string hides a **72% majority writer** |
-| "pull deploys the flood fix" | 40-behind count | the commit was unpublished; the 40-vs-53 gap *was* the answer |
-
-All five share a shape: a plausible probe answering a different question than the one asked.
+- **Two negative controls that could not fail**, one of them the day the principle went into the
+  plan twice. Rule kept: *break by deletion, not by mutation* — a mutation can land somewhere inert.
+- **Two stalls in my own machine gate** within an hour: `pages free` (macOS keeps it near zero) and
+  `pgrep zoom.us` (resident for over a day). Replaced with swap growth and `aomhost`. *A process
+  being resident is not a claim about the resource.*
+- **Two relayed numbers asserted in my own voice**: load "21" (was 174 — a live Zoom call) and a
+  "28 GB" dump (12.5 GB; `ls` was one command away). And once, a phrase I had written six hours
+  earlier, denied from memory. The tell is the asymmetry: the claim I doubted got verified, its
+  neighbour did not.
+- **Exit codes swallowed by pipes four times**, twice inside checks whose subject was exit-code honesty.
 
 ## Next steps
 
-Ordered **by kind, not by number**. #1 is the only thing this session left undone; #2 and #4 are
-parked with reasons; #3 is unchanged and still wants a cold facilitator.
-
-1. **⛔ THE ONE OPEN ACTION — make the axios fix live.** `409fe9d` is committed on
-   `personal-koi-mcp` main but **unpublished**, and `node_modules` still holds **1.12.2**, so the
-   fix is *not live*. Two blockers, one of which is a decision:
-   - **Publishing also publishes `d659abb`**, another session's commit already in that branch's
-     history. Separating them needs a rebase. Operator call.
-   - **`npm install` + restarting the MCP processes.** Enumerate at the moment you restart with
-     `~/.config/personal-koi/enumerate-mcp-processes.sh` (committed at
-     `scripts/enumerate-mcp-processes.sh`, drift-asserted) — **never carry a count**, it was 8, 9,
-     10, then 7 within an hour. Note the install also lands ~25 pre-existing `@esbuild` platform
-     packages unrelated to this change.
-   Verification is already done and does not need repeating: scratch tree at 1.20.0, `npm ci` +
-   `tsc` + 5 GET-only MCP tools against live `:8351`, 5/5 pass, **zero row delta** across five
-   tables; control run — unreachable backend gives 0/5 and exit 1. ⚠ **Do not verify with
-   `evals/claims_smoke.ts`**: zero teardown, mints a claim per run, and calls `anchor_claim`,
-   which on this stack targets **mainnet**.
-
-2. **The two-node monitor — designed, approved, deliberately NOT built.** Task
-   `koi-nuc-parity-monitor-rescope`. Both sessions on 2026-09-04 independently concluded the
-   approved design guards the wrong thing: vocabulary drift is slow and bounded and hurt nobody,
-   while **unvalidated prose about system state** was wrong six times in one day and was
-   mechanically checkable throughout. A checker that verifies *the document's own claims* would
-   have caught 4 of the dozen. Also: adding a third monitor beside two saturated ones is how the
-   third gets ignored. **Fresh-eyes design question — should not be picked up by `a0f88bbf` or
-   `1e1f2abb`.** Full approved design is preserved in
-   `~/.claude/plans/start-in-projects-koi-processor-service-curried-flute.md` (Deliverable B).
-
-3. **The vocabulary decision — needs the operator, rested, with a cold facilitator.** 9315 + 9317, gating migration 113. Both E1 blockers are now answered (federation mirrors verbatim, no normalisation anywhere on the apply path; NUC migration is separate and manual). ⚠ **Neither `e1dd0df8` nor `1e1f2abb` should facilitate this** — nor `a0f88bbf`. (Note 2026-09-04: cold facilitation is the right instinct but authorship was **refuted as the variable** — three different authors made the same class of error on the topology paragraph the same day. It is a staffing convention that depends on someone remembering; the mechanical companion is task `koi-reproduce-command-rule-for-state-claims`. Keep both.) Both sessions authored the evidence pack (`~/.claude/plans/koi-vocabulary-decisions-9315-9317-2026-09-04.md`, also attached to the `context` of tasks 9315/9317 — that pack and those task contexts, not this file, carry the corrected numbers), and a session that framed the options cannot adversarially test its own framing. It wants a session reading the pack cold. Not urgent: due 2026-09-17 and the divergence grows at single digits/day.
-4. **Parked for the 09-06 repair cycle, all dated and owned elsewhere.**
-   `koi-reproduce-command-rule-for-state-claims` (the proposed rule + today's full evidence; held
-   because `~/.claude/CLAUDE.md:125` forbids same-session self-modification — *recording* it now is
-   deliberate, since the evidence decays), `koi-malformed-signal-export-plists` (⚠ **do not "fix"
-   casually — both jobs currently work from launchd's cache; a bootout/bootstrap is how you find
-   out**), 9413 (darren-workflow's), and `koi-vault-sync-disabled-on-serving-checkout-only`
-   (**answer this BEFORE the soak-check honesty fix**, or that fix encodes the wrong assumption
-   about what normal is).
-
-5. **Residue.** The 45-row retype (~22–29% precision; 3 need merges and `/retype` never calls `persona_merge_hazard`), and the `incident-enrich` / `walk.py` asymmetry — the bug is not unbounded growth, it is that **one producer has a clock and no allowlist while its sibling has neither**.
+1. **Step 4 — `scripts/ingest_document.py`** (fresh session). Canonical spec:
+   `~/.claude/plans/history-preserving-website-sensor-artifacts/q1_fixed_pair.md` (**supersedes**
+   `ingest_side_pair.md`). Four edits: the `superseded_at` CASE in the `ON CONFLICT` arm (staged
+   re-ingest of an already-hidden row keeps its stamp; everything else reveals); `--staged` on the
+   INSERT path only; the flat `history_*` source_meta keys; the ingest-side pair (journal
+   `successor_rid` PATCH with **four** conjuncts incl. the claim triple, + claim cutover) inside
+   `_write_document`'s existing transaction; the symmetric flag guard. Fixtures on a **scratch DB**.
+2. **Step 5 — `api/routers/history_router.py`** + the apply transaction (`apply_transaction.md`,
+   `endpoint_contracts.md`, `state_machine.md`). Degraded mode is **503 `SCHEMA_ABSENT`** on
+   mutating routes, never a 200 a client can mistake for success. `POST /history/read-filter` is its
+   own route. Then **CHECKPOINT** — task `koi-2026-09-13-045186e8-step5-checkpoint`, due 09-14.
+   Contract: demonstrate the store's behaviour when the storage write **succeeds but the bytes are
+   wrong** (a8751c7e's T2 corrupt-remote-preserving-size-and-mtime is the specimen).
+3. Push `da408e0`+`60d7414` (2 ahead). Verify with `git ls-remote`, not `git log`.
+4. Settled *during* steps 4–5, named so none is lost: `intended_tier` on `/history/intent` (blocks
+   AC21 only); the six `koi-history` subcommands, each with its step; the soak baseline's persistent
+   home (step 17); `/history/resolve`'s contract amendment.
 
 ## Open questions
 
-- **Are `Protocol`/`Project` TYPES or FACETS?** Gates migration 113's shape. Task 9315. `allowed_facets` exists with an FK and a shape CHECK — zero rows, and **zero *application* readers but ONE live database reader**: `entity_facets_registered_guard` is bound to the **enabled** trigger `tr_entity_facets_registered` on `entity_registry`'s hot write path, and with the table empty it rejects every non-empty facet write today. "Zero users" was refuted 2026-09-04; seeding is step one of any facet answer.
-- **What IS the predicate vocabulary?** Task 9317. Only **36 of 4,938** case-folded predicates are in the 56-row table, so a casing rewrite touches ~465 collision rows and leaves ~4,900 unlisted predicates exactly where they are. Casing is a small slice of the question, not the question.
-- **The 4 fold-collisions are two relations, not two spellings** — they split by *producer*: uppercase is LLM prose extraction (Apr–Aug), lowercase is `walk.py`/`adjudicate.py` at confidence 1.0 (last 36h). Recommended: rename the structural side (`contains_file`, `invokes_script`). ⚠ Do **not** rely on `predicate_raw IS NULL` to un-fold them later — it separates these 465 perfectly today only by coincidence of producer timing; 2,222 uppercase rows elsewhere carry it.
-- **Migration 113 was never written and its gate has been open ~10 days.** Two blockers beyond the decision: a committed architecture doc argues enforcement should *not* be a hard constraint (overridable — its own number is wrong — but explicitly), and `personal_koi_test.allowed_entity_types` has **0 rows** with migration 111 missing there, so an FK would refuse every entity insert in the suite.
-- **9313's title says `DECIDED` while its context says "this is an operator call."** One of them is stale; other sessions read both.
-- **The unattended-git guard has now false-positived five times** on the word appearing in prose (it refused a read-only `ls .git/hooks`, a heredoc running no git command, and an `echo` label). Deliberately **not** patched this session — the ≥48h soak rule forbids same-session self-modification from a lesson learned in that session; it belongs in the 09-06 repair cycle as a Pattern card.
-- Carried unchanged from 2026-09-02: the Organization→Person natural experiment does not work; 17 do-not-merge rows remain unseedable; `KOI_CLAIMS_SERVICE_TOKEN` is populated.
+- **Nothing blocks steps 4–5.** The operator authorised the build directly ("Yes, but hold step 3
+  longer", then "Yes — apply migration 123"); both are on record in this session and in
+  `a8751c7e`'s independent relay.
+- `history_policy='drop'` stays **disabled in v1** (decision D-D) until its fixture and archive-commit
+  step exist. Not a question — recorded so nobody enables it.
+- Two documents superseded at the identical instant under one triple could produce a malformed chain
+  (a reviewer's unverified concern; unreachable in tonight's data). Parking-lot territory.
 
 ## Verification and working tree
 
-- **Branch/status:** `regen-prod` @ `eb4345a`, working tree clean, **0 ahead / 0 behind**.
-  `personal-koi-mcp` @ `409fe9d`, **2 ahead of origin, unpublished by design** (Next steps #1),
-  with one unrelated third-party edit in `src/koi-api-tools.ts` left uncommitted on purpose —
-  committing it would fire the repo's `post-commit` → `rebuild-dist.sh` hook and recompile `dist/`
-  underneath the live MCP processes.
-- **Tests:** 114 passed / 2 skipped in `tests/test_launchd_job_targets.py` (grew from 72 when the
-  existence check widened to every installed plist).
-- **Positive controls were RUN, not written.** Emptying `KNOWN_MISSING_TARGETS` fails
-  `phase7-autoflip` alone; emptying `KNOWN_UNPARSEABLE` fails both signal plists alone; a bogus
-  register entry fails the staleness assertion; appending a line to `scripts/enumerate-mcp-processes.sh`
-  fails its drift test. All restored.
-- **Live:** service healthy, embeddings available. **Nothing was restarted or deployed today.**
-- **⚠ `stat` is SHADOWED and is KILLED (exit 137, zero output) on BSD flags — use `/usr/bin/stat`.**
-  `/usr/bin/ps` does not exist; use `/bin/ps`. `timeout`/`gtimeout` are absent. `gh` **consumes
-  stdin in a loop** — batch PATCHes silently no-op at exit 0 without `</dev/null`; `dismissed_comment`
-  caps at 280 chars and GitHub **409s on amending an already-dismissed alert**.
-- **⚠ mtime vs ctime on the NUC.** `rsync -a` preserves the source **mtime**, so mtimes are
-  *authoring* dates and **ctime** is when the inode landed. Whole-second mtime = rsync-delivered.
-  Getting this backwards inverted a conclusion today; the nanosecond field from `stat -c %y` is
-  **nine** digits, not ten.
-- **⚠ Route presence does not prove module vintage** — compare `ps -o lstart` to the **mtime** of
-  the newest loaded source. Serving PID via `lsof -ti :8351 -sTCP:LISTEN`.
-- **⚠ Before deploying, check reachability:** `git merge-base --is-ancestor <sha> origin/<branch>`.
+- Branch/status: `regen-prod` @ `60d7414`, 2 ahead of `origin/regen-prod`, **unpushed**. Tree clean
+  of my files; `p.txt` ("hi") and an empty `:` are other sessions' debris, left alone.
+- `git diff --check`: clean. No canon validator in this repo (not applicable).
+- Migration 123: live. Post-apply checks that can actually fail: unclaimed live rows = 0 of 509;
+  live rows without a live claim = 0; nine indexes present in `pg_indexes`. Three fixtures intact
+  (`656d1923` live/8 chunks, `c3b0ebcd` superseded/0, `58fe10e0` superseded/0) — protected by koi
+  task `koi-2026-09-12-protected-versioning-fixtures`, **DO NOT MODIFY**.
+- Fresh dump `~/koi-backups/personal_koi-step3-20260912-201553.dump` (12,562,904,620 B), full-read
+  verified 175 s. Rollback: `migrations/123_document_history_down.sql` (export runs first).
+- **Machine gate for heavy work** (in the plan's Rollback section): `pgrep -x aomhost` absent · 1m
+  load below 15m · swap flat over 20 s · no competing `pg_dump` · zero active backends. **Never**
+  `pgrep zoom.us` or `pages free` — both are unsatisfiable stalls. Re-measure at the moment of the
+  run; trust no figure in any message.
+- `stat` on this machine is a shadowed `/usr/local/bin` binary that SIGKILLs (rc 137) on every path
+  — use `/usr/bin/stat`. Memory: `reference_stat_binary_shadowed_and_broken.md`.
 
 ## Recent sessions
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
 | 2026-09-07 | Claude Code | `217282eb` (cross-stream, started in darren-workflow) | **This repo owns upcoming work but was NOT modified.** New plan `~/.claude/plans/koi-web-ingest-integrity.md` targets it: `POST /web/preview` returns **zero bytes after 60s for `https://example.com`** (service otherwise healthy — `/health` 200, peers polling), and `/web/ingest` returns `"status": "ingested"` for calls that persist nothing (0 log rows, 0 chunks, vs a positive control of 1,619 rows). Plan defines an `ingested`/`not_persisted`/`skipped` enum enforced server-side here, plus a `web_ingest_jobs` async table. Laptop-first migration order. Nothing executed. |
-| 2026-08-24/25 | Claude Code | b289ac1e | Executed the full prior plan: 9 sweep fixes, Meeting-notes repair (270 notes), migration 112 complete (421→0). Established `koi-sensors-runtime` + hardened the launchd guard. |
 | 2026-08-26 | Claude Code | b289ac1e (resumes) | 3rd conflict wave cleaned; built `com.personal-koi.vault-conflict-sweep`; fixed a real `ThrottleInterval < StartInterval` bug + added a mutation-tested anti-storm pin; fixed `test_koi_flow_integration.py`'s months-stale collection failure. |
 | 2026-08-26 | Claude Code | c1defaa8 | **Verification pass.** Found A7 unexecutable, a gating inconsistency, A3's live blast radius; caught the conflict cleanup incomplete at 101 files; named the iCloud root cause; canary-proved the sweep fires unattended. No code changes. |
 | 2026-09-01/02 | Claude Code | 72cf052b | **Phase 0/1 hardening.** Backup + verified restore; merge reversibility (`unmerge`, used on 57 merges); `entity_non_match` seeded (44) and enforcing at 6 tiers; credential + persona guards; `:8351` LAN hole closed and A/B-verified; type-mismatch void closed. 12 commits. |

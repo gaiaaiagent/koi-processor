@@ -7,17 +7,17 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-05 01:15 PDT
+**Updated:** 2026-09-12 22:40 PDT
 
-**Current status:** `regen-prod` @ `10a19ad`, published, 0 ahead / 0 behind, tree clean, 115 passed / 2 skipped. Nothing half-applied here; one fix is committed but NOT live.
+**Current status:** `regen-prod` @ `60d7414`, 2 ahead (unpushed). **Migration 123 is APPLIED and live** (`claims=513, snapshot rows=511`; one-shot, do not re-run). Stream A plan steps 0–3 done; steps 4–5 (ingest edits + history router) not started.
 
-**Next:** 1) Make the axios fix live — `personal-koi-mcp` @ `409fe9d` is unpublished and `node_modules` still holds 1.12.2; publishing it also publishes another session's commit (a decision), then `npm install` + restart via `scripts/enumerate-mcp-processes.sh` (never carry a process count). 2) Re-scope the NUC parity monitor BEFORE building it — task `koi-nuc-parity-monitor-rescope`, fresh eyes. 3) Vocabulary decision 9315/9317 — operator, cold facilitator.
+**Next:** 1. Step 4 — `scripts/ingest_document.py` per `…-artifacts/q1_fixed_pair.md` (canonical), fixtures on a scratch DB. 2. Step 5 — `api/routers/history_router.py` + apply txn (degraded = 503, never a mistakable 200), then the checkpoint (task `koi-2026-09-13-045186e8-step5-checkpoint`): show behaviour when the write succeeds but the bytes are wrong. 3. Push; verify with `git ls-remote`.
 
-**Watch:** The NUC topology paragraph was rewritten SIX times on 2026-09-04 — re-run the reproduce commands in `docs/operations/two-node-topology.md`, never edit from memory. `deploy.sh`'s koi-processor leg is BLOCKED (158 deletions vs limit 5). `stat` is shadowed and KILLED (exit 137) on BSD flags; `/usr/bin/ps` does not exist; `gh` eats stdin in loops.
+**Watch:** Nothing blocks. Fixtures `656d1923`/`c3b0ebcd`/`58fe10e0` are DO-NOT-MODIFY. `drop` policy stays disabled in v1. Gate heavy work on `aomhost` absent + swap flat, never `pgrep zoom.us`/`pages free`. Use `/usr/bin/stat`.
 
-**Verification:** 115 passed / 2 skipped. Every exemption register carries a staleness assertion; all controls run and restored. No canon validator here.
+**Verification:** `git diff --check` clean; post-apply anti-joins 0/509 and 0; nine indexes present; fresh dump full-read verified. `p.txt`/`:` are other sessions' debris.
 
-Full source of truth: `PROJECT_HANDOFF.md`.
+Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
 
 # Project Context for Claude
