@@ -1,8 +1,8 @@
 # Project handoff
 
-**Updated:** 2026-09-12 22:40 PDT
-**Session:** Claude Code · 045186e8 · Stream A — history-preserving website sensor: plan + migration 123 applied
-**Status:** `regen-prod` @ `60d7414`, **2 ahead of origin, unpushed**; **migration 123 is APPLIED and live** (`claims=513, snapshot rows=511`, one-shot — do not re-run); steps 0–3 of the Stream A plan done, steps 4–5 (ingest edits + history router) **not started**; tree clean except two other sessions' debris files.
+**Updated:** 2026-09-12 22:55 PDT
+**Session:** Claude Code · a8751c7e · Stream B wrap: biofi ingest, off-host encrypted backups, command centre, migration 123 reviewed + applied
+**Status:** `regen-prod` @ `e1cfac8`, **pushed, in sync with origin** (`git ls-remote` verified); migration 123 **APPLIED and live** (`claims=513, snapshot rows=511`, one-shot); every database and the source archive now have **checksum-verified, encrypted off-host copies on gaia** with recovery proven on the NUC; Stream A steps 0–3 done, 4–5 not started; tree clean except two other sessions' debris files.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -29,7 +29,52 @@
 
 ## Completed this session
 
-**Session `045186e8`, 2026-09-11→12.** Designed and began executing
+**Session `a8751c7e`, 2026-09-11→12 (Stream B).** Began as "ingest biofi.earth"; became the
+backup/recovery arc when the archive built for it exposed that every backup lived on the disk it
+was protecting. Three peer sessions coordinated by mailbox all day; ~100 agents across four
+adversarial workflows.
+
+- **biofi.earth ingested** via a new git-versioned website sensor (`koi-processor-runtime`, branch
+  `website-sensor-2026-09-12`): 83 discovered → 69 ingested; live 65 docs / 226 chunks / 1,189 facts /
+  705 entities / 169 discourse moves / 84 claims, 0 null embeds. Sensor now scheduled **weekly**
+  (Sundays 06:40) — it had never been scheduled at all.
+- **Every database off-host, encrypted.** `scripts/koi_offsite_copy.sh` (gpg `-z 0`, three guards
+  that can each fail: `file -b` PGP, `pg_restore` REJECTS it, recipient key named) →
+  `gaia:koi-offsite/`; `koi_backup_all.sh` drives `koi_backup.sh` per database (personal_koi + the
+  four that had **no backup of any kind**); `koi_backup_check.sh` (launchd 12:00) reads the markers
+  nothing read before and flags a START with no OK/FAIL — the 2026-09-11 signature. Measured
+  transfer ~7 MB/s sustained (a 300 MB probe said 11); a restore is **index-bound** (one hnsw index
+  on 66k×3072 ran 57 min; data layer proven complete first, 100% embedding coverage). Runbook:
+  `docs/backup-and-recovery.md`.
+- **Source archive** (`~/Documents/koi-source-archive`, README says *never pushed* — a content rule,
+  not a durability one): `koi_archive_offsite.sh` ships an encrypted `git bundle` (launchd 08:30,
+  skips when the REMOTE still holds HEAD). Key `F5EE933A8DC407E4` on laptop + NUC + login Keychain
+  (`security -w` returns **hex**; `xxd -r -p`). **Recovery drilled on the NUC with the laptop assumed
+  gone** — tree `f3fb091d…` byte-identical, with a virgin-keyring negative control. That drill found
+  the arrangement was unrecoverable: gaia authorised only the laptop's SSH key; NUC's key added.
+- **Migration 123 reviewed** (29 agents, 21 raised / 14 refuted / 0 above low) and cleared; three
+  vacuous closing assertions and the rollback file's commented-out export found, all fixed by
+  `045186e8` before apply. `koinet` federation checked: zero `document:` RIDs and zero doclinks have
+  ever left this node, so supersession creates no FORGET obligation today.
+- **Command centre** at `http://127.0.0.1:5051/#dash` (darren-workflow `0d8e37e`): KOI network graph
+  (6 nodes/10 edges, hand-drawn SVG — topology is hub-and-spoke), system health, tasks + incidents.
+  Immediately found 7 launchd jobs failing quietly and a peer (`octo-salish-sea`) sharing documents
+  with no koi-net edge.
+- `koi-processor-service` `regen-prod`: 7 commits (`3f2c3c3`…`680432d` + this wrap), all pushed.
+
+### What this session got wrong, and how it was caught
+
+~14 defects where **the instrument's name implied a property it did not measure**: `file` matching
+the *filename*, `plutil -lint` accepting malformed XML, `pkill -f` matching the test harness, `pages
+free` on macOS, a shadowed `stat`, suites printing `fail=3` and exiting 0, `grep -c || echo 0`
+emitting two lines, a NUL byte git stored as binary, `sysctl` absent from the launchd PATH, a stale
+load figure relayed as current, a process *named* after a file taken as evidence of who owned it.
+Memory: `feedback_instrument_name_implies_property_it_does_not_measure.md`. Rule kept: **break by
+deletion, not mutation** — every vacuous control mutated something that landed somewhere inert.
+Also: added a `nuc` remote to a repo whose README said never-pushed (caught by `045186e8`, reversed
+before any ref landed); relayed an operator delegation as authorisation (correctly refused).
+
+### Also this cycle — **Session `045186e8`, 2026-09-11→12.** Designed and began executing
 `~/.claude/plans/history-preserving-website-sensor.md` (Stream A). ~130 agents across seven
 workflows (understand · design bakeoff · spec · two gates · merge · resolve), three Codex review
 rounds, and a 29-agent peer review of the migration before it was applied.
@@ -89,7 +134,8 @@ rounds, and a 29-agent peer review of the migration before it was applied.
    own route. Then **CHECKPOINT** — task `koi-2026-09-13-045186e8-step5-checkpoint`, due 09-14.
    Contract: demonstrate the store's behaviour when the storage write **succeeds but the bytes are
    wrong** (a8751c7e's T2 corrupt-remote-preserving-size-and-mtime is the specimen).
-3. Push `da408e0`+`60d7414` (2 ahead). Verify with `git ls-remote`, not `git log`.
+3. ~~Push~~ **Done** — `e1cfac8` in sync with origin, `git ls-remote` verified 22:52.
+3b. **Stream B follow-ups** are koi tasks with due dates (all in the Upcoming view at :5051): review the 8 failing launchd jobs (09-15); `/repair` the 46 incident stubs (09-16); `104add19` close-out — score endpoint E, NC1, regression cohort (09-16); bring `koi-processor-runtime` forward, 20 behind, cp-only per plan step 14 (09-19).
 4. Settled *during* steps 4–5, named so none is lost: `intended_tier` on `/history/intent` (blocks
    AC21 only); the six `koi-history` subcommands, each with its step; the soak baseline's persistent
    home (step 17); `/history/resolve`'s contract amendment.
@@ -106,8 +152,11 @@ rounds, and a 29-agent peer review of the migration before it was applied.
 
 ## Verification and working tree
 
-- Branch/status: `regen-prod` @ `60d7414`, 2 ahead of `origin/regen-prod`, **unpushed**. Tree clean
-  of my files; `p.txt` ("hi") and an empty `:` are other sessions' debris, left alone.
+- Branch/status: `regen-prod` @ `e1cfac8`, **in sync with `origin/regen-prod`** (pushed 22:52, verified by
+  `git ls-remote`). Tree clean; `p.txt` ("hi") and an empty `:` are other sessions' debris, left alone.
+- Backups: `koi_backup_check.sh` → **all fresh** (5 databases + archive off-host, encrypted, on gaia).
+  Off-host is checksum-verified, **not restore-verified** — gaia has no `pg_restore`; a real restore
+  of the 09-12 dump was done locally (data layer complete, embeddings 100%).
 - `git diff --check`: clean. No canon validator in this repo (not applicable).
 - Migration 123: live. Post-apply checks that can actually fail: unclaimed live rows = 0 of 509;
   live rows without a live claim = 0; nine indexes present in `pg_indexes`. Three fixtures intact
@@ -126,6 +175,7 @@ rounds, and a 29-agent peer review of the migration before it was applied.
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
+| 2026-09-11/12 | Claude Code | `a8751c7e` (stream B) | **biofi.earth ingested + the backup arc.** New git-versioned website sensor (runtime branch `website-sensor-2026-09-12`, scheduled weekly). Every database and the source archive now **encrypted off-host on gaia**, checksum-verified, with recovery **drilled on the NUC** — which found the arrangement unrecoverable (gaia authorised one SSH key) and fixed it. Restore measured index-bound (57 min for one hnsw index; data proven complete first). `koi_backup_check.sh` now reads the markers nothing read. Migration 123 adversarially reviewed (29 agents) and cleared; federation checked (zero `document:` RIDs ever left this node). Command centre at :5051 `#dash`. ~14 instrument-name defects in my own work, all found by running things; memory written. 7 commits here, all pushed; `e1cfac8` in sync. |
 | 2026-09-07 | Claude Code | `217282eb` (cross-stream, started in darren-workflow) | **This repo owns upcoming work but was NOT modified.** New plan `~/.claude/plans/koi-web-ingest-integrity.md` targets it: `POST /web/preview` returns **zero bytes after 60s for `https://example.com`** (service otherwise healthy — `/health` 200, peers polling), and `/web/ingest` returns `"status": "ingested"` for calls that persist nothing (0 log rows, 0 chunks, vs a positive control of 1,619 rows). Plan defines an `ingested`/`not_persisted`/`skipped` enum enforced server-side here, plus a `web_ingest_jobs` async table. Laptop-first migration order. Nothing executed. |
 | 2026-08-26 | Claude Code | b289ac1e (resumes) | 3rd conflict wave cleaned; built `com.personal-koi.vault-conflict-sweep`; fixed a real `ThrottleInterval < StartInterval` bug + added a mutation-tested anti-storm pin; fixed `test_koi_flow_integration.py`'s months-stale collection failure. |
 | 2026-08-26 | Claude Code | c1defaa8 | **Verification pass.** Found A7 unexecutable, a gating inconsistency, A3's live blast radius; caught the conflict cleanup incomplete at 101 files; named the iCloud root cause; canary-proved the sweep fires unattended. No code changes. |
