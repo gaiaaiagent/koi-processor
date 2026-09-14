@@ -432,15 +432,28 @@ async def preflight_endpoints(
             # normalization are drift-created and invisible to Tier-1 today.
             distinct_stored = {r["normalized_text"] for r in live_exact}
             state = STATE_GLOBAL_DUPLICATE if len(distinct_stored) > 1 else STATE_AMBIGUOUS
-        elif tombstoned:
-            # A same-type exact row that has been merged away is still matchable by
-            # name, and the episode writer's Tier-1 can select it. Even though the
-            # writer follows merged_into, binding through a tombstone means the
-            # payload's identity depends on a merge chain that can change under it.
-            state = STATE_TOMBSTONE_RISK
         elif len(live_uris) == 1:
+            # A sibling tombstone is NOT a blocker when exactly one live row also
+            # matches. It was treated as one in the first version of this module,
+            # and running the real Buehler payload against the real repaired graph
+            # showed why that is wrong: the single blocker over 115 endpoints was
+            # `GPT-4` — issue #61's own repaired entity, whose legacy row is
+            # tombstoned *because the repair worked*. Blocking there would make a
+            # correctly-merged graph permanently un-ingestable, punishing the repair.
+            #
+            # The risk it was named for is real only on the UNPINNED path, where the
+            # writer's Tier-1 could select the tombstone by name. This payload is
+            # pinned to the live URI, and `_bind_pinned_uri` refuses a merged-away
+            # URI outright, so the tombstone cannot be reached. Recorded as evidence,
+            # not as a block.
             state = STATE_LIVE_EXACT
             matched_via = seen_uris[live_uris[0]][0]
+        elif tombstoned:
+            # No live row, but a same-type exact row that has been merged away. Here
+            # the tombstone IS the only thing the label matches, so the payload's
+            # identity would depend on following a merge chain that can change under
+            # it. That blocks.
+            state = STATE_TOMBSTONE_RISK
         elif alias_uris:
             decided = alias_decisions.get(ep.name)
             if decided and decided in alias_uris:

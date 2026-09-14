@@ -283,7 +283,9 @@ class TestPreflight:
         with pytest.raises(ident.IdentityError):
             ident.require_no_blockers(report)
 
-    async def test_a_same_type_tombstone_blocks(self, conn):
+    async def test_a_tombstone_with_no_live_row_blocks(self, conn):
+        """The label matches ONLY a merged-away row: identity would depend on
+        following a merge chain that can change under the payload."""
         t = _tag()
         name = f"Merged Away {t}"
         survivor = f"orn:personal-koi.entity:concept-live-{t}"
@@ -292,6 +294,32 @@ class TestPreflight:
                            text=name, etype="Concept", merged_into=survivor)
         _eps, report = await _preflight(conn, [(name, "Concept")])
         assert report.findings[0].state == ident.STATE_TOMBSTONE_RISK
+
+    async def test_a_tombstone_ALONGSIDE_a_live_row_does_not_block(self, conn):
+        """REGRESSION, found by running the real payload against the real graph.
+
+        The single blocker over Buehler's 115 endpoints was `GPT-4` — issue #61's
+        own repaired entity, whose legacy row is tombstoned *because the repair
+        worked*. Blocking there makes a correctly-merged graph permanently
+        un-ingestable, i.e. punishes the repair.
+
+        The tombstone is unreachable on the pinned path anyway: the binding names
+        the live URI, and `_bind_pinned_uri` refuses a merged-away one outright.
+        """
+        t = _tag()
+        name = f"Repaired Label {t}"
+        live = f"orn:personal-koi.entity:concept-live-{t}"
+        await _seed_entity(conn, uri=live, text=name, etype="Concept")
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:concept-legacy-{t}",
+                           text=name, etype="Concept",
+                           normalized=name.replace(" ", "-").lower(),
+                           merged_into=live)
+        _eps, report = await _preflight(conn, [(name, "Concept")])
+        f = report.findings[0]
+        assert f.state == ident.STATE_LIVE_EXACT, f.as_evidence()
+        assert f.live_uris == [live]
+        assert f.tombstoned_uris, "the tombstone must still be recorded as evidence"
+        ident.require_no_blockers(report)  # must not raise
 
     async def test_alias_only_blocks_but_an_audited_decision_clears_it(self, conn):
         """#62 requirement 6 — the ONLY sanctioned override, and it is recorded."""
@@ -795,7 +823,11 @@ class TestSemanticQuality:
             return next(d.value for d in rep.dimensions if d.name == name)
 
         assert val(padded, "citation_support") < val(honest, "citation_support")
-        assert val(padded, "fact_diversity") < val(honest, "fact_diversity")
+        # Concentration RISES when one predicate is repeated for volume (higher is
+        # worse for this dimension), and chunk_coverage does not move at all,
+        # because the invented facts all cite a chunk that was already covered.
+        assert val(padded, "predicate_concentration") > val(honest, "predicate_concentration")
+        assert val(padded, "chunk_coverage") <= val(honest, "chunk_coverage")
         assert len(padded_facts) > len(real), "the padded run has MORE facts"
 
     def test_a_well_covered_extraction_passes(self):
@@ -913,3 +945,42 @@ class TestProducerProvenance:
             asyncio.run(edd._call_openai("prompt", _Client()))
         assert exc.value.reason == "extract_http_error"
         assert exc.value.reason in edd.TRANSPORT_FALLBACK_REASONS
+
+    def test_a_thorough_extraction_is_not_penalised_for_being_thorough(self):
+        """REGRESSION. The first version of this layer scored the real fixtures
+        BACKWARDS: the thin 25-fact Buehler run PASSED and the curated 213-fact
+        re-run went to REVIEW.
+
+        The cause was a "distinct predicates / facts" dimension. Any
+        distinct-over-total ratio FALLS as an extraction legitimately adds facts,
+        so it penalised exactly the behaviour it was meant to reward — an inert
+        threshold pointing the wrong way, which is the failure #64 requirement 5
+        names from the other direction.
+
+        This asserts the shape that broke: same document, same coverage, one
+        extraction simply more thorough than the other. The thorough one must not
+        score worse on any dimension.
+        """
+        chunks, windows = _doc(6)
+        sparse = [{"subject": f"alpha{i}", "object": f"beta{i}", "predicate": "P",
+                   "fact_text": "t", "chunk_range": [i, i]} for i in range(6)]
+        # Same 6 chunks, but each one yields several distinct, supported relations.
+        thorough = []
+        for i in range(6):
+            for pred in ("P", "Q", "R", "S"):
+                thorough.append({"subject": f"alpha{i}", "object": f"beta{i}",
+                                 "predicate": pred, "fact_text": "t",
+                                 "chunk_range": [i, i]})
+
+        rs = assess_extraction(merged={"facts": sparse}, chunks_by_index=chunks,
+                               windows=windows, tier="standard")
+        rt = assess_extraction(merged={"facts": thorough}, chunks_by_index=chunks,
+                               windows=windows, tier="standard")
+
+        rank = {"pass": 3, "review": 2, "fail": 1, "not_evaluated": 0}
+        by_name = {d.name: d for d in rs.dimensions}
+        for d in rt.dimensions:
+            assert rank[d.status] >= rank[by_name[d.name].status], (
+                f"the thorough extraction scored WORSE on {d.name}: "
+                f"{by_name[d.name].status} -> {d.status}")
+        assert len(thorough) > len(sparse)

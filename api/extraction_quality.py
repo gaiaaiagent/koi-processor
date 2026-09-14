@@ -112,23 +112,35 @@ class QualityReport:
 DEFAULT_THRESHOLDS = {
     "standard": {
         "window_coverage":   {"fail_below": 0.50, "review_below": 0.80},
+        "chunk_coverage":    {"fail_below": 0.40, "review_below": 0.75},
         "citation_support":  {"fail_below": 0.60, "review_below": 0.85},
         "citation_in_range": {"fail_below": 0.95, "review_below": 1.00},
         "endpoint_integrity": {"fail_below": 1.00, "review_below": 1.00},
-        "fact_diversity":    {"fail_below": 0.10, "review_below": 0.25},
+        "predicate_concentration": {"higher_is_better": False,
+                                    "fail_above": 0.75, "review_above": 0.60},
     },
     "thorough": {
         "window_coverage":   {"fail_below": 0.60, "review_below": 0.85},
+        "chunk_coverage":    {"fail_below": 0.40, "review_below": 0.75},
         "citation_support":  {"fail_below": 0.60, "review_below": 0.85},
         "citation_in_range": {"fail_below": 0.95, "review_below": 1.00},
         "endpoint_integrity": {"fail_below": 1.00, "review_below": 1.00},
-        "fact_diversity":    {"fail_below": 0.10, "review_below": 0.25},
+        "predicate_concentration": {"higher_is_better": False,
+                                    "fail_above": 0.75, "review_above": 0.60},
         "discourse_variety": {"fail_below": 0.02, "review_below": 0.05},
     },
 }
 
 
 def _verdict(value: Optional[float], th: Optional[dict]) -> str:
+    """Verdict for a dimension. `th["higher_is_better"]` defaults True.
+
+    The direction has to be explicit. `predicate_concentration` is the one
+    dimension where a HIGH number is the bad news, and an earlier version of this
+    module applied the higher-is-better comparison to a concentration-shaped
+    measure — which is how it ended up scoring a 213-fact extraction WORSE than a
+    25-fact one on the real fixture.
+    """
     if th is None:
         return STATUS_NOT_EVALUATED
     if value is None:
@@ -137,9 +149,15 @@ def _verdict(value: Optional[float], th: Optional[dict]) -> str:
         # and collapsing them is how an unmeasured thing starts reading as a good
         # one.
         return STATUS_REVIEW
-    if value < th["fail_below"]:
+    if th.get("higher_is_better", True):
+        if value < th["fail_below"]:
+            return STATUS_FAIL
+        if value < th["review_below"]:
+            return STATUS_REVIEW
+        return STATUS_PASS
+    if value > th["fail_above"]:
         return STATUS_FAIL
-    if value < th["review_below"]:
+    if value > th["review_above"]:
         return STATUS_REVIEW
     return STATUS_PASS
 
@@ -200,6 +218,39 @@ def assess_extraction(
         evidence={"windows_total": n_windows, "windows_with_facts": len(covered),
                   "uncovered_windows": sorted(
                       {getattr(w, "index", i) for i, w in enumerate(windows)} - covered)[:20]},
+    ))
+
+    # ── 1b. Chunk coverage ─────────────────────────────────────────────────
+    # What fraction of the document's CHUNKS is cited by at least one fact? This is
+    # the depth metric, and on the real fixtures it is the one that actually
+    # separates a thin extraction from a thorough one: the original Buehler run
+    # scores 0.21 and the curated re-run 0.93.
+    #
+    # window_coverage alone could not tell them apart — both scored 1.0, because the
+    # thin run touched all six windows, just shallowly. "Read every section" and
+    # "read every section properly" are different claims and need different
+    # measurements.
+    #
+    # Padding cannot inflate this: twenty invented facts all citing chunk 0 add one
+    # chunk to the numerator, the same as one fact would, while the denominator is
+    # the document and does not move.
+    cited_chunks: set = set()
+    for f in facts:
+        cr = f.get("chunk_range") or []
+        if not cr:
+            continue
+        lo_c, hi_c = cr[0], cr[-1]
+        for ci in range(lo_c, hi_c + 1):
+            if ci in chunks_by_index:
+                cited_chunks.add(ci)
+    chunk_cov = (len(cited_chunks) / len(chunks_by_index)) if chunks_by_index else None
+    dims.append(Dimension(
+        name="chunk_coverage", status=_verdict(chunk_cov, th.get("chunk_coverage")),
+        value=round(chunk_cov, 4) if chunk_cov is not None else None,
+        threshold=(th.get("chunk_coverage") or {}).get("fail_below"),
+        detail=f"{len(cited_chunks)} of {len(chunks_by_index)} source chunks are cited "
+               f"by at least one fact",
+        evidence={"uncited_chunks": sorted(set(chunks_by_index) - cited_chunks)[:25]},
     ))
 
     # ── 2. Citation in-range ────────────────────────────────────────────────
@@ -295,20 +346,37 @@ def assess_extraction(
         evidence={"identity_mode": (identity_evidence or {}).get("mode")},
     ))
 
-    # ── 5. Fact diversity ───────────────────────────────────────────────────
-    # distinct predicates / facts. A run that emits the same relation over and over
-    # has high volume and low information; this is the cheap detector for it.
+    # ── 5. Predicate concentration ──────────────────────────────────────────
+    # The share of facts carried by the single most common predicate. HIGH is the
+    # bad news: one relation repeated for volume.
+    #
+    # This replaces a "distinct predicates / facts" ratio, which was wrong by
+    # construction and not merely mis-thresholded. Any distinct-over-total ratio
+    # FALLS as a thorough extraction legitimately adds facts, so it penalised
+    # exactly the behaviour it was meant to reward. Measured on the real Buehler
+    # fixtures it scored the thin 25-fact run 0.48 and the curated 213-fact run
+    # 0.108 — backwards. Concentration is scale-free: the thin run is 0.40 and the
+    # curated run 0.49, both far from a degenerate single-predicate dump.
     if facts:
-        diversity = len({f.get("predicate") for f in facts}) / len(facts)
+        pred_counts: dict = {}
+        for f in facts:
+            k = f.get("predicate")
+            pred_counts[k] = pred_counts.get(k, 0) + 1
+        concentration = max(pred_counts.values()) / len(facts)
+        top_pred = max(pred_counts, key=lambda k: pred_counts[k])
     else:
-        diversity = None
+        concentration, top_pred, pred_counts = None, None, {}
     dims.append(Dimension(
-        name="fact_diversity", status=_verdict(diversity, th.get("fact_diversity")),
-        value=round(diversity, 4) if diversity is not None else None,
-        threshold=(th.get("fact_diversity") or {}).get("fail_below"),
-        detail=f"{len({f.get('predicate') for f in facts})} distinct predicates over "
-               f"{len(facts)} facts",
-        evidence={},
+        name="predicate_concentration",
+        status=_verdict(concentration, th.get("predicate_concentration")),
+        value=round(concentration, 4) if concentration is not None else None,
+        threshold=(th.get("predicate_concentration") or {}).get("fail_above"),
+        detail=f"most common predicate {top_pred!r} holds "
+               f"{pred_counts.get(top_pred, 0)} of {len(facts)} facts "
+               f"({len(pred_counts)} distinct predicates)",
+        evidence={"distinct_predicates": len(pred_counts),
+                  "top_predicate": top_pred,
+                  "higher_is_worse": True},
     ))
 
     # ── 6. Discourse variety (thorough only) ────────────────────────────────

@@ -223,12 +223,48 @@ denominator is a property of the source document, and the two load-bearing ones 
 
 | dimension | what it divides by | catches |
 |---|---|---|
-| `window_coverage` | the document's own windows | read-the-intro-only runs |
+| `window_coverage` | the document's own windows | no fact at all from a whole section |
+| **`chunk_coverage`** | the document's own chunks | a shallow read — **the load-bearing one** |
 | `citation_in_range` | facts | fabricated chunk citations |
 | `citation_support` | facts | endpoint language absent from the cited span |
 | `endpoint_integrity` | — (carried from #62) | wrong-entity bindings |
-| `fact_diversity` | facts | one relation repeated for volume |
+| `predicate_concentration` | facts (**higher is worse**) | one relation repeated for volume |
 | `discourse_variety` | moves (thorough) | a single move type |
+
+### A design error this layer had, found by running it on the real fixture
+
+The first version of this module **scored the two real Buehler runs backwards**: the
+thin 25-fact original **passed** and the curated 213-fact re-run went to **review** —
+the exact inversion of the criterion it exists to enforce. Its unit tests were green,
+because I had written fixtures that matched my assumptions.
+
+Two causes, both design rather than threshold:
+
+1. **`fact_diversity` was "distinct predicates / facts".** Any distinct-over-total
+   ratio *falls* as a thorough extraction legitimately adds facts, so it penalised
+   precisely the behaviour it was meant to reward: 0.48 for the thin run, 0.108 for
+   the curated one. It is replaced by **`predicate_concentration`** — the share held
+   by the single most common predicate, where high is the bad news. Scale-free: thin
+   0.40, curated 0.49, both far from a degenerate dump.
+2. **`window_coverage` could not see depth.** Both runs scored 1.0, because the thin
+   run touched all six windows — just shallowly. "Read every section" and "read every
+   section properly" are different claims. **`chunk_coverage`** is the second one, and
+   it separates cleanly: **0.2131 (13/61 chunks) vs 0.9344 (57/61)**.
+
+Padding still cannot buy `chunk_coverage`: twenty invented facts all citing chunk 0
+add one chunk to the numerator, exactly as one fact would, and the denominator is the
+document.
+
+Thresholds are calibrated on these two runs and stated as such (`chunk_coverage`
+fails below 0.40, reviews below 0.75). `test_a_thorough_extraction_is_not_penalised_
+for_being_thorough` is the regression that encodes the inversion.
+
+**Verified end-to-end against the live repaired graph:**
+
+| | facts | `chunk_coverage` | verdict |
+|---|---:|---:|---|
+| original stored windows | 25 | 0.2131 | **FAIL** |
+| curated repaired payload | 213 | 0.9344 | **PASS** |
 
 Thresholds are **starting values**, chosen against the two Buehler runs and stated as
 such. #64 requirement 6 asks for a labelled audit set and shadow evaluation before
