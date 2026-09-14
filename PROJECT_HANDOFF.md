@@ -1,5 +1,46 @@
 # Project handoff
 
+> ## ⚠ LIVE CHANGES MADE 2026-09-13/14 — session `7e3da78a`, worktree `koi-document-ingest-integrity-20260913`
+>
+> Read this before touching the entity registry, the extractor, or the substack job.
+>
+> **Applied to `personal_koi` (live):**
+> - **migration 124** `entity_normalization_compat` — `koi_normalize_entity_text()`, two
+>   expression indexes, view `entity_current_norm_duplicates`. Additive; reverses cleanly.
+>   *Read-side only* — it deliberately does NOT convert `normalized_text` to a GENERATED
+>   column (that would collapse 125 currently-distinct live groups; see the file's header).
+> - **migration 125** `extraction_provenance_and_quality` — `provider`/`model`/`transport`/
+>   `producer` on `document_window_extractions`, new table `document_extraction_runs`.
+>   Its down file DESTROYS data that lives nowhere else; it exports first, below
+>   `ON_ERROR_STOP`.
+>
+> **`com.personal-koi.substack-deep-extract` was RE-ENABLED** (it had been disabled
+> 2026-09-13 21:31:18, 13 min after its batch was bounded to 3/run). Backlog at re-enable:
+> **359** documents, all one feed (`michaelgarfield`) ingested that night.
+>
+> ⚠ **The job runs UN-HARDENED code.** It executes from `koi-processor-runtime` @ `c11a4c3`
+> (`regen-prod`), which does not carry the #62 identity contract — that work is in **draft PR
+> #66**, unmerged. Bringing the runtime clone forward after the merge is what puts the
+> backlog on the hardened path (there is already a dated koi task for the 09-19 refresh).
+>
+> **New audit surface, queryable now:** `SELECT * FROM entity_current_norm_duplicates;` —
+> **169 live duplicate sets, 125 of them drift-created, 347 rows.** These are issue #61 AC6's
+> "existing same-label/same-type duplicate sets". Remediation is an operator merge pass.
+>
+> **Known blocker for the next paper ingest:** `knowledge graph` has two live Concept
+> identities — `…eb35e43aff96` (2026-04-16, 112 facts) and `…eddffd781f1d` (2026-06-02,
+> 0 facts, minted by document-ingest itself). The identity gate blocks any payload
+> referencing that bare label until they are merged.
+>
+> **Run the gates before ingesting anything:**
+> `venv/bin/python scripts/check_document_integrity.py --document-rid <rid> [--payload <curated.json>]`
+> (read-only; 0 = both pass, 1 = identity blocked or semantic fail, 3 = misconfigured).
+>
+> **Do NOT add the new floors to `darren-workflow`'s gate catalog yet** —
+> `com.personal-koi.website-sensor` is loaded and runs `verify_doc_ingest.py --mode strict`
+> weekly with `gate_ok` gating retirement, from the runtime clone. Adding floors before that
+> clone carries this branch makes every weekly run exit 2 on `key ABSENT from evidence`.
+
 **Updated:** 2026-09-12 22:55 PDT
 **Session:** Claude Code · a8751c7e · Stream B wrap: biofi ingest, off-host encrypted backups, command centre, migration 123 reviewed + applied
 **Status:** `regen-prod` @ `e1cfac8`, **pushed, in sync with origin** (`git ls-remote` verified); migration 123 **APPLIED and live** (`claims=513, snapshot rows=511`, one-shot); every database and the source archive now have **checksum-verified, encrypted off-host copies on gaia** with recovery proven on the NUC; Stream A steps 0–3 done, 4–5 not started; tree clean except two other sessions' debris files.
