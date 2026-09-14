@@ -82,12 +82,24 @@ STATE_AMBIGUOUS = "ambiguous"              # >1 live same-type identity for one 
 STATE_TOMBSTONE_RISK = "tombstone_risk"    # a same-type exact row is merged away
 STATE_ALIAS_ONLY = "alias_only"            # reachable only via an alias
 STATE_GLOBAL_DUPLICATE = "graph_global_duplicate"  # #61: the graph already holds a dup set
+# The label exists live under a DIFFERENT type. Treated as advisory in the first
+# version of this module, which was wrong in a way that only showed up against real
+# data: `DWeb Berlin` was declared Organization by the extractor while the graph
+# held it as a Project, the endpoint classified as MISSING, and preregistration
+# would then have minted a SECOND `DWeb Berlin` — an Organization — alongside the
+# Project. The contract exists to stop one payload endpoint becoming two identities;
+# silently creating the cross-type twin is that same failure wearing a different hat.
+#
+# It blocks, and only an explicit audited TYPE decision clears it. The operator has
+# to say which type the thing actually is, because nothing in the payload can.
+STATE_CROSS_TYPE_CONFLICT = "cross_type_conflict"
 
 BLOCKING_STATES = (
     STATE_AMBIGUOUS,
     STATE_TOMBSTONE_RISK,
     STATE_ALIAS_ONLY,
     STATE_GLOBAL_DUPLICATE,
+    STATE_CROSS_TYPE_CONFLICT,
 )
 
 _ENTITY_URI_PREFIX = "orn:personal-koi.entity:"
@@ -207,8 +219,20 @@ def collect_endpoints(
             # Keep the first spelling seen so the pinned label is stable across
             # runs; ordering of `entities[]` is deterministic from the merge.
 
-    for ent in entities:
-        _add(ent.get("name"), "entity")
+    # ENDPOINTS COME FROM FACTS ONLY. `entities[]` supplies the TYPE for an
+    # endpoint and nothing else.
+    #
+    # The first version unioned entities[] in as endpoints too, and running the
+    # gate over three freshly-ingested substack posts showed what that costs:
+    # the extractor declares far more entities than its facts reference — 26
+    # declared vs 14 used on one document, 26 vs a similar count on another — so
+    # pre-registering the union would mint a dozen registry rows per document that
+    # no fact ever points at. That is registry inflation the unpinned path did not
+    # cause, introduced by the thing meant to make identity safer.
+    #
+    # A declared-but-unreferenced entity is not an identity the payload asserts;
+    # it is a candidate the extractor mentioned. Nothing needs to be bound for it,
+    # because nothing will be written about it.
     for fact in facts:
         _add(fact.get("subject"), "subject")
         _add(fact.get("object"), "object")
@@ -361,6 +385,7 @@ async def preflight_endpoints(
     normalize: Callable[[str], str],
     normalize_alias_fn: Callable[[Any], str],
     alias_decisions: Optional[dict] = None,
+    type_decisions: Optional[dict] = None,
 ) -> PreflightReport:
     """Classify every endpoint against the live registry. Read-only.
 
@@ -371,6 +396,10 @@ async def preflight_endpoints(
     receipt. Nothing else can clear a block.
     """
     alias_decisions = alias_decisions or {}
+    # {payload label -> entity_type}: an audited statement of what the thing IS,
+    # required to clear a cross-type conflict. Distinct from alias_decisions, which
+    # says which URI a label means; this says which TYPE it is.
+    type_decisions = type_decisions or {}
     if not endpoints:
         return PreflightReport(findings=[])
 
@@ -425,6 +454,33 @@ async def preflight_endpoints(
         alias_uris = sorted({r["fuseki_uri"] for r in alias_rows} - set(live_uris))
         matched_via = None
 
+        # An AUDITED ALIAS DECISION is checked first, ahead of every heuristic
+        # branch below. The operator has named the exact URI this label means, so
+        # there is nothing left for the classifier to decide — and in particular a
+        # sibling tombstone stops being a risk, because the binding no longer
+        # depends on following a merge chain.
+        #
+        # Ordering matters and got this wrong at first: `DWeb Berlin` has a
+        # same-label tombstone (from its own retype) and reached TOMBSTONE_RISK
+        # before the alias branch, so a decision that named the survivor could not
+        # clear it. A decision that cannot be acted on is not an escape hatch.
+        decided_uri = alias_decisions.get(ep.name)
+        if decided_uri:
+            live_by_uri = {r["fuseki_uri"] for r in _live(rows)}
+            if decided_uri in live_by_uri:
+                findings.append(EndpointFinding(
+                    endpoint=ep, state=STATE_LIVE_EXACT, live_uris=[decided_uri],
+                    tombstoned_uris=sorted({r["fuseki_uri"] for r in tombstoned}),
+                    alias_uris=alias_uris,
+                    cross_type_uris=sorted({r["fuseki_uri"] for r in cross_type}),
+                    matched_via="audited_alias_decision"))
+                continue
+            # A decision naming a dead or unknown URI is worse than none: it reads
+            # as resolved while binding nothing. Fall through so it blocks.
+            logger.warning(
+                "audited alias decision for %r names %s, which is not a live "
+                "candidate — ignoring the decision", ep.name, decided_uri)
+
         if len(live_uris) > 1:
             # Issue #61 AC5 / #62 requirement 3. Distinguish the two shapes: rows
             # that already share a stored normalized_text are a pre-existing
@@ -462,6 +518,12 @@ async def preflight_endpoints(
                 live_uris = [decided]
             else:
                 state = STATE_ALIAS_ONLY
+        elif cross_type:
+            # Live under another type. Creating the declared-type twin here is the
+            # thing the contract exists to prevent, so it blocks unless an audited
+            # type decision names the type explicitly.
+            decided_type = type_decisions.get(ep.name)
+            state = STATE_MISSING if decided_type == ep.entity_type else STATE_CROSS_TYPE_CONFLICT
         else:
             state = STATE_MISSING
 
@@ -520,6 +582,18 @@ async def preregister_missing(
     receipts: list = []
     for finding in report.missing:
         ep = finding.endpoint
+        # Belt to the preflight's braces. require_no_blockers() should already have
+        # stopped a cross-type conflict, but this function can be called directly
+        # and minting the cross-type twin is irreversible once its type is hashed
+        # into a URI. Refuse rather than trust the caller ran the gate.
+        if finding.cross_type_uris:
+            raise IdentityError(
+                f"refusing to preregister {ep.name!r} as {ep.entity_type}: the label is "
+                f"already live under another type ({finding.cross_type_uris[:3]}). Supply an "
+                f"audited type decision, or merge/retype the existing identity first.",
+                blockers=[{"state": STATE_CROSS_TYPE_CONFLICT, "name": ep.name,
+                           "requested_type": ep.entity_type,
+                           "existing": finding.cross_type_uris}])
         body = {
             "entity_type": ep.entity_type,
             "name": ep.name,

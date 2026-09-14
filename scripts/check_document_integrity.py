@@ -174,6 +174,12 @@ async def main() -> int:
                 normalize_alias_fn=normalize_alias, alias_decisions=alias_decisions)
             identity_evidence["preflight"] = pre.as_evidence()
             ident.require_no_blockers(pre)
+            # An endpoint the preflight classified MISSING is not unbindable — a real
+            # ingest pre-registers it before freezing. Reporting it as a BLOCK made
+            # this read-only audit say "blocked" for documents whose only issue was
+            # entities that do not exist yet, which is every first ingest.
+            would_create = sorted(f.endpoint.name for f in pre.missing)
+            report.setdefault("identity", {})
             frozen = await ident.freeze_endpoint_map(
                 conn, eps, normalize=normalize_entity_text,
                 alias_decisions=alias_decisions)
@@ -194,8 +200,17 @@ async def main() -> int:
                                         if f.tombstoned_uris],
             }
         except ident.IdentityError as e:
-            report["identity"] = {"status": "blocked", "reason": str(e)[:800],
-                                  "blockers": e.blockers[:10]}
+            blockers = e.blockers[:10]
+            # Separate "does not exist yet" from "cannot be bound". Only the latter
+            # is a gate failure; the former is what preregistration is for.
+            pending = [b for b in blockers if b.get("state") == ident.STATE_MISSING]
+            real = [b for b in blockers if b.get("state") != ident.STATE_MISSING]
+            report["identity"] = {
+                "status": "blocked" if real else "pass_after_preregistration",
+                "reason": str(e)[:800],
+                "blockers": real,
+                "would_preregister": [b.get("name") for b in pending],
+            }
 
         # ── GATE 2 — semantic quality ───────────────────────────────────────
         q = assess_extraction(

@@ -116,13 +116,12 @@ def _payload(facts, entities=None, type_map=None):
 
 class TestCollectEndpoints:
 
-    def test_unions_entities_and_fact_endpoints(self):
+    def test_collects_fact_endpoints_including_those_absent_from_entities(self):
         """A fact endpoint absent from entities[] must still be collected.
 
         Those are exactly the endpoints that get minted with a DEFAULTED type
         (the reason EpisodeCreateResponse.entities_typed_by_default exists), so
-        collecting from entities[] alone would leave the weakest endpoints
-        unpinned.
+        collecting from facts alone would leave the weakest endpoints unpinned.
         """
         eps = ident.collect_endpoints(
             _payload(
@@ -352,15 +351,22 @@ class TestPreflight:
             alias_decisions={alias: f"orn:personal-koi.entity:concept-unrelated-{t}"})
         assert report.findings[0].state == ident.STATE_ALIAS_ONLY
 
-    async def test_same_label_different_type_is_advisory_not_blocking(self, conn):
+    async def test_same_label_different_type_BLOCKS(self, conn):
+        """SUPERSEDES an earlier test that asserted this was merely advisory.
+
+        That assertion was wrong, and only real data showed it: an advisory
+        cross-type match leaves the endpoint MISSING, and preregistration then
+        mints the cross-type twin. See TestCrossTypeConflictBlocks for the
+        DWeb Berlin case that forced the change.
+        """
         t = _tag()
         name = f"Polysemous {t}"
         await _seed_entity(conn, uri=f"orn:personal-koi.entity:org-{t}",
                            text=name, etype="Organization")
         _eps, report = await _preflight(conn, [(name, "Concept")])
         f = report.findings[0]
-        assert f.state == ident.STATE_MISSING
-        assert f.cross_type_uris, "the cross-type row should be surfaced as advisory"
+        assert f.state == ident.STATE_CROSS_TYPE_CONFLICT
+        assert f.cross_type_uris, "the cross-type row must be surfaced as evidence"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -984,3 +990,100 @@ class TestProducerProvenance:
                 f"the thorough extraction scored WORSE on {d.name}: "
                 f"{by_name[d.name].status} -> {d.status}")
         assert len(thorough) > len(sparse)
+
+
+class TestDeclaredButUnusedEntities:
+
+    def test_a_declared_entity_no_fact_references_is_not_an_endpoint(self):
+        """REGRESSION, found by running the gate on three freshly-ingested posts.
+
+        The extractor declares many more entities than its facts reference — 26
+        declared vs 14 used on one real document. Treating the union as endpoints
+        would pre-register a dozen rows per document that no fact points at:
+        registry inflation introduced by the very thing meant to make identity
+        safer, and something the unpinned path never did.
+
+        A declared-but-unreferenced entity is a candidate the extractor mentioned,
+        not an identity the payload asserts.
+        """
+        eps = ident.collect_endpoints(
+            _payload(
+                facts=[{"subject": "Used", "object": None, "object_literal": "x",
+                        "predicate": "P", "fact_text": "t"}],
+                entities=[{"name": "Used", "type": "Concept"},
+                          {"name": "Declared But Unused", "type": "Person"},
+                          {"name": "Also Unused", "type": "Organization"}],
+            ),
+            normalize=normalize_entity_text,
+        )
+        assert {e.name for e in eps} == {"Used"}
+
+    def test_entities_still_supply_the_type_for_a_fact_endpoint(self):
+        """entities[] keeps its one job: saying what type an endpoint is."""
+        eps = ident.collect_endpoints(
+            _payload(
+                facts=[{"subject": "Ada Lovelace", "object": None,
+                        "object_literal": "x", "predicate": "P", "fact_text": "t"}],
+                entities=[{"name": "Ada Lovelace", "type": "Person"}],
+            ),
+            normalize=normalize_entity_text,
+        )
+        assert len(eps) == 1
+        assert eps[0].entity_type == "Person"
+        assert eps[0].type_defaulted is False
+
+
+@pytest.mark.anyio
+class TestCrossTypeConflictBlocks:
+    """REGRESSION for the DWeb Berlin shape (operator decision, 2026-09-14).
+
+    The extractor declared `DWeb Berlin` an Organization while the graph held it
+    as a Project. The first version classified that MISSING with a cross-type
+    ADVISORY, so `preregister_missing` would have minted a SECOND `DWeb Berlin` —
+    an Organization beside the Project. The contract exists to stop one payload
+    endpoint becoming two identities; creating the cross-type twin is that same
+    failure wearing a different hat.
+    """
+
+    async def test_a_cross_type_label_blocks_instead_of_minting_a_twin(self, conn):
+        t = _tag()
+        name = f"Cross Typed {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        _eps, report = await _preflight(conn, [(name, "Organization")])
+        f = report.findings[0]
+        assert f.state == ident.STATE_CROSS_TYPE_CONFLICT, f.as_evidence()
+        assert f.cross_type_uris
+        with pytest.raises(ident.IdentityError):
+            ident.require_no_blockers(report)
+
+    async def test_an_audited_type_decision_clears_it(self, conn):
+        t = _tag()
+        name = f"Cross Typed {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        _eps, report = await _preflight(conn, [(name, "Organization")],
+                                        type_decisions={name: "Organization"})
+        assert report.findings[0].state == ident.STATE_MISSING
+        ident.require_no_blockers(report)
+
+    async def test_preregistration_refuses_the_twin_even_if_the_gate_was_skipped(self, conn):
+        """preregister_missing is callable directly, and minting is irreversible
+        once the type is hashed into a URI. It refuses rather than trusting the
+        caller ran the gate."""
+        t = _tag()
+        name = f"Cross Typed {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        _eps, report = await _preflight(conn, [(name, "Organization")],
+                                        type_decisions={name: "Organization"})
+        assert report.findings[0].state == ident.STATE_MISSING   # gate cleared...
+        report.findings[0].state = ident.STATE_MISSING           # ...and still blocked below
+
+        class _NeverCalled:
+            async def post(self, *a, **k):
+                raise AssertionError("preregistration must refuse BEFORE any HTTP call")
+
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.preregister_missing(_NeverCalled(), report)
+        assert exc.value.blockers[0]["state"] == ident.STATE_CROSS_TYPE_CONFLICT
