@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,6 +52,11 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.provider_http import provider_async_client  # noqa: E402
+from api import ingest_identity as ident  # noqa: E402
+from api.extraction_quality import assess_extraction  # noqa: E402
+from api.resolution_primitives import (  # noqa: E402
+    normalize_entity_text, normalize_alias,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -217,6 +223,20 @@ async def _call_anthropic(prompt: str, http: httpx.AsyncClient, *, model: str,
             if not text.strip():
                 raise ExtractionError("empty_completion", f"no text content: {str(data)[:400]}")
             return text
+        except httpx.HTTPStatusError as e:
+            # A non-retryable provider status (400/401/403/404/413/422) reaches here
+            # from raise_for_status(). It is NOT an ExtractionError, so before this
+            # arm existed it escaped EVERY layer above: no transport fallback
+            # (_extract_window catches only ExtractionError), no repair loop, and —
+            # the expensive one — no per-window dead-lettering, so a single bad key
+            # or oversized window aborted the WHOLE document. That defeats the
+            # per-window isolation this file's own #40 comment promises.
+            # Re-raised as extract_http_error, which IS in TRANSPORT_FALLBACK_REASONS,
+            # so a transport-specific rejection can still try the next transport.
+            raise ExtractionError(
+                "extract_http_error",
+                f"anthropic api returned HTTP {e.response.status_code}: "
+                f"{e.response.text[:400]}") from e
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError) as e:
             last = f"{type(e).__name__}: {e}"
             await asyncio.sleep(2 ** attempt)
@@ -334,6 +354,12 @@ async def _call_openai(prompt: str, http: httpx.AsyncClient, *,
             if not text.strip():
                 raise ExtractionError("empty_completion", f"no content: {str(data)[:400]}")
             return text
+        except httpx.HTTPStatusError as e:
+            # Same escape as the anthropic transport above — see that comment.
+            raise ExtractionError(
+                "extract_http_error",
+                f"openai-compatible endpoint returned HTTP {e.response.status_code}: "
+                f"{e.response.text[:400]}") from e
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError) as e:
             last = f"{type(e).__name__}: {e}"
             await asyncio.sleep(2 ** attempt)
@@ -368,6 +394,37 @@ TRANSPORT_FALLBACK_REASONS = {
 }
 
 
+# Producer identity per transport (issue #64). The model a transport ACTUALLY uses is
+# not always the one the caller passed: `_call_openai` ignores its `model` argument and
+# sends OPENAI_MODEL. Deriving the receipt from the same constants the call bodies read
+# is what keeps the recorded producer honest — a hand-maintained mapping would drift
+# from the call sites the first time one of them changed.
+TRANSPORT_PRODUCERS = {
+    "openai": {"provider": "openai_compatible", "model": lambda m: OPENAI_MODEL},
+    "api": {"provider": "anthropic", "model": lambda m: m},
+    "claude_p": {"provider": "claude_subscription", "model": lambda m: m},
+}
+
+
+def _producer_for(transport: str, model: str) -> dict:
+    spec = TRANSPORT_PRODUCERS.get(transport, TRANSPORT_PRODUCERS["claude_p"])
+    out = {
+        "transport": transport,
+        "provider": spec["provider"],
+        "model": spec["model"](model),
+        "route": {"api": "anthropic_api", "openai": "openai_compat"}.get(transport, "claude_p_cli"),
+    }
+    if transport == "openai":
+        # The HOST only. The key is never recorded, and the full URL can carry one in
+        # a query string on some gateways.
+        try:
+            from urllib.parse import urlsplit
+            out["endpoint_host"] = urlsplit(OPENAI_BASE_URL).netloc
+        except Exception:  # noqa: BLE001 — provenance must never break extraction
+            out["endpoint_host"] = None
+    return out
+
+
 async def _dispatch_transport(name: str, prompt: str, http: httpx.AsyncClient, *,
                               model: str, temperature: float) -> str:
     if name == "openai":
@@ -378,15 +435,34 @@ async def _dispatch_transport(name: str, prompt: str, http: httpx.AsyncClient, *
 
 
 async def _extract_window(prompt: str, http: httpx.AsyncClient, *, model: str,
-                          temperature: float = 0.0) -> str:
-    """Dispatch a window extraction, degrading through the configured fallback chain."""
+                          temperature: float = 0.0) -> Tuple[str, dict]:
+    """Dispatch a window extraction, degrading through the configured fallback chain.
+
+    Returns (completion_text, producer_receipt). Returning the receipt is the whole
+    point of the change (issue #64): this function is the ONLY place that knows which
+    transport actually served the window, and it used to throw that away. `ROUTE_USED`
+    — the module constant the caller persisted instead — is derived from the
+    CONFIGURED transport, so with DOC_EXTRACTOR_TRANSPORT_FALLBACK set, a window
+    served by the fallback was recorded as having used the primary. That is a wrong
+    value, not a missing one, and nothing downstream could tell.
+    """
     chain = [DOC_EXTRACTOR_TRANSPORT] + [t for t in DOC_EXTRACTOR_TRANSPORT_FALLBACK
                                          if t != DOC_EXTRACTOR_TRANSPORT]
     last_err: Optional[ExtractionError] = None
+    started = time.monotonic()
     for i, name in enumerate(chain):
         try:
-            return await _dispatch_transport(name, prompt, http, model=model,
+            text = await _dispatch_transport(name, prompt, http, model=model,
                                              temperature=temperature)
+            receipt = _producer_for(name, model)
+            receipt.update({
+                "configured_transport": DOC_EXTRACTOR_TRANSPORT,
+                "fell_back_from": chain[:i] or None,
+                "transport_attempts": i + 1,
+                "temperature": temperature,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            })
+            return text, receipt
         except ExtractionError as e:
             last_err = e
             if i + 1 >= len(chain) or e.reason not in TRANSPORT_FALLBACK_REASONS:
@@ -406,7 +482,7 @@ DOC_EXTRACTOR_REPAIR_PASSES = int(os.getenv("DOC_EXTRACTOR_REPAIR_PASSES", "2"))
 
 
 async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema: dict,
-                                   *, model: str) -> dict:
+                                   *, model: str) -> Tuple[dict, dict]:
     """Extract one window and parse+validate it, with a repair loop on EVERY transport.
 
     On a parse/schema failure, re-ask the model with the broken output and the exact
@@ -415,9 +491,10 @@ async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema:
 
     If repair is still exhausted, the caller dead-letters this WINDOW and continues over
     the rest of the document (#40) — a bad window no longer costs the whole book."""
-    raw = await _extract_window(prompt, http, model=model)
+    raw, receipt = await _extract_window(prompt, http, model=model)
+    receipt["repair_passes"] = 0
     try:
-        return parse_and_validate(raw, schema)
+        return parse_and_validate(raw, schema), receipt
     except ExtractionError as first_err:
         repairable = first_err.reason in ("extract_parse_error", "empty_completion")
         # #40: the repair loop used to be gated to the 'openai' transport, on the reasoning
@@ -450,9 +527,15 @@ async def extract_window_validated(prompt: str, http: httpx.AsyncClient, schema:
                 # gpt-4o-mini on api.openai.com, billed to the embeddings key, then recorded
                 # with the original route_used — so the logs attributed OpenAI output to
                 # Claude. Route through the same dispatcher as the first attempt.
-                raw = await _extract_window(repair_prompt, http, model=model,
-                                            temperature=temp)
-                return parse_and_validate(raw, schema)
+                raw, receipt = await _extract_window(repair_prompt, http, model=model,
+                                                     temperature=temp)
+                # The receipt is REPLACED, not merged: a repair pass may have been
+                # served by a different transport than the first attempt, and the
+                # producer of the ACCEPTED output is the one that matters. The
+                # earlier misattribution here (repair hardcoded to _call_openai
+                # while route_used said claude_p) is exactly this confusion.
+                receipt["repair_passes"] = i + 1
+                return parse_and_validate(raw, schema), receipt
             except ExtractionError as e:
                 last_err = e
                 if e.reason not in ("extract_parse_error", "empty_completion"):
@@ -715,23 +798,67 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
 
 
 def facts_to_episode_payload(merged: dict, *, name: str, summary: str, source_document: str,
-                             group_id: str) -> dict:
+                             group_id: str, frozen=None) -> dict:
+    """Build the /knowledge/episodes request.
+
+    When `frozen` (an api.ingest_identity.FrozenMap) is supplied, every entity-valued
+    endpoint carries its PINNED URI and `create_entities` is False. Those two go
+    together and neither is optional:
+
+    - The pinned URI is what makes the binding order-independent; without it the
+      server resolves by name and an entity created earlier in the same request is a
+      candidate for a later, different endpoint.
+    - `create_entities: False` is the belt to that braces. Every endpoint was
+      pre-registered during the freeze, so nothing legitimate remains to create. If
+      the server finds itself wanting to create an entity anyway, something is
+      referenced that the freeze did not cover, and the right outcome is a refusal
+      rather than a quietly-minted row the frozen map does not know about.
+
+    Passing an incomplete map is treated as a programming error, not a partial
+    improvement: a payload where some endpoints are pinned and others are resolved
+    is exactly as order-dependent as one where none are, but it LOOKS hardened.
+    """
     type_map = merged["type_map"]
     fact_inputs = []
     for f in merged["facts"]:
         subj_t = type_map.get(_norm(f["subject"]))
         obj_t = type_map.get(_norm(f["object"])) if f.get("object") else None
-        fact_inputs.append({
+        item = {
             "subject": f["subject"], "subject_type": subj_t,
             "predicate": f["predicate"],
             "object": f.get("object"), "object_type": obj_t,
             "object_literal": f.get("object_literal"),
             "fact_text": f["fact_text"],
-        })
+        }
+        if f.get("confidence"):
+            item["confidence"] = f["confidence"]
+        if frozen is not None:
+            subj_uri = frozen.uri_for(f["subject"])
+            if subj_uri is None:
+                raise ExtractionError(
+                    "identity_map_incomplete",
+                    f"frozen endpoint map has no binding for subject {f['subject']!r}; "
+                    f"refusing to write a partially-pinned payload")
+            item["subject_uri"] = subj_uri
+            # subject_type must agree with the pinned entity's type or the server
+            # 422s. The freeze bound on (label, type), so send the type it bound.
+            item["subject_type"] = frozen.type_for(f["subject"]) or subj_t
+            if f.get("object"):
+                obj_uri = frozen.uri_for(f["object"])
+                if obj_uri is None:
+                    raise ExtractionError(
+                        "identity_map_incomplete",
+                        f"frozen endpoint map has no binding for object {f['object']!r}; "
+                        f"refusing to write a partially-pinned payload")
+                item["object_uri"] = obj_uri
+                item["object_type"] = frozen.type_for(f["object"]) or obj_t
+        fact_inputs.append(item)
     return {
         "name": name, "content": summary[:2000] if summary else None,
         "source_description": "document", "source_document": source_document,
-        "group_id": group_id, "create_entities": True, "facts": fact_inputs,
+        "group_id": group_id,
+        "create_entities": frozen is None,
+        "facts": fact_inputs,
     }
 
 
@@ -783,6 +910,45 @@ async def post_episode(http: httpx.AsyncClient, payload: dict) -> dict:
 # payload.
 DOC_EPISODE_BATCH_SIZE = int(os.getenv("DOC_EPISODE_BATCH_SIZE", "100"))
 
+# ── Identity contract mode (issue #62) ────────────────────────────────────────
+# strict (DEFAULT): an unbindable endpoint blocks BEFORE any fact is written, and a
+#   persisted endpoint outside the frozen map blocks before finalization.
+# warn: report the blockers and proceed UNPINNED. Honest about what it is — the run
+#   is order-dependent, exactly as before this shipped — and it is here for one real
+#   case: a bounded backlog where a pre-existing graph-wide duplicate set would
+#   otherwise block every document over a defect that has nothing to do with the
+#   document. It is NOT a soak default. `warn_proceeded_unpinned` lands in the
+#   evidence so a warn-mode graph can be found again.
+# off: skip the contract entirely (pre-#62 behaviour).
+#
+# The default is strict because the alternative was measured: the audited Buehler
+# import passed the structural gate with 11 fact endpoints pointing at the wrong
+# entity, and nothing surfaced it for weeks.
+DOC_IDENTITY_MODE = os.getenv("DOC_IDENTITY_MODE", "strict").strip().lower()
+if DOC_IDENTITY_MODE not in ("strict", "warn", "off"):
+    raise SystemExit(
+        f"DOC_IDENTITY_MODE must be strict|warn|off, got {DOC_IDENTITY_MODE!r}. "
+        f"Refusing to start: an unrecognised value must not silently mean 'off'.")
+
+# Audited alias decisions (issue #62 requirement 6): {payload label -> canonical URI}.
+# The ONLY thing that can clear an alias-only block, and the only sanctioned way two
+# distinct payload labels may share one URI. Recorded in the run's evidence.
+def _load_alias_decisions() -> Dict[str, str]:
+    path = os.getenv("DOC_IDENTITY_ALIAS_DECISIONS")
+    if not path:
+        return {}
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise SystemExit(f"DOC_IDENTITY_ALIAS_DECISIONS points at a missing file: {p}")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+        raise SystemExit(f"{p}: alias decisions must be a flat object of label -> URI")
+    return data
+
+
+alias_decisions: Dict[str, str] = _load_alias_decisions()
+
 
 async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
     """POST an episode, splitting oversized fact lists into sequential same-episode calls.
@@ -801,7 +967,7 @@ async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
                 len(facts), n, len(chunks))
 
     agg = {"facts_created": 0, "facts_skipped": 0, "facts_null_embed": 0,
-           "entities_created": 0, "entities_resolved": 0}
+           "entities_created": 0, "entities_resolved": 0, "endpoints_pinned": 0}
     mismatches: List[dict] = []
     episode_id = None
     for i, batch in enumerate(chunks):
@@ -1123,6 +1289,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             # Plan windows (idempotent); load cached extractions for resume.
             per_window: List[Optional[dict]] = [None] * len(windows)
             cached_windows = 0
+            _cached_window_indices: set = set()
             for w in windows:
                 await conn.execute(
                     """INSERT INTO document_window_extractions
@@ -1136,6 +1303,9 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 if cached and cached["status"] in ("extracted", "imported") and cached["raw_json"] and not force:
                     per_window[w.index] = json.loads(cached["raw_json"])
                     cached_windows += 1
+                    # Tracked so the producer-coverage check does not demand a
+                    # receipt for a window THIS run never produced.
+                    _cached_window_indices.add(w.index)
 
             # Extract any window not already cached.
             #
@@ -1153,33 +1323,62 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             # is retried rather than marked complete. Failed windows stay status='failed'
             # with their error, so a later run retries only those.
             windows_failed: List[int] = []
+            # window_index -> producer receipt for the ACCEPTED output (#64). Only
+            # windows extracted in THIS run appear here; cache-resumed windows keep
+            # the producer recorded when they were first extracted, which is the
+            # correct attribution — re-stamping them with this run's transport would
+            # claim this run produced output it merely read back.
+            window_receipts: Dict[int, dict] = {}
             for w in windows:
                 if per_window[w.index] is not None:
                     logger.info("window %d/%d cached — skip", w.index + 1, len(windows))
                     continue
-                logger.info("window %d/%d: extracting (%d chunks, %d chars) via %s",
-                            w.index + 1, len(windows), len(w.chunk_indices), len(w.text), ANTHROPIC_MODEL)
+                # Log the model the SELECTED transport will actually use, not the
+                # Anthropic variable. An `openai` run reads OPENAI_MODEL inside
+                # _call_openai and ignores this argument entirely, so logging
+                # ANTHROPIC_MODEL here printed a model that did no work (#64).
+                _intended = _producer_for(DOC_EXTRACTOR_TRANSPORT, ANTHROPIC_MODEL)
+                logger.info("window %d/%d: extracting (%d chunks, %d chars) via %s/%s",
+                            w.index + 1, len(windows), len(w.chunk_indices), len(w.text),
+                            _intended["provider"], _intended["model"])
                 prompt = build_prompt(template, w, len(windows))
                 try:
-                    data = await extract_window_validated(prompt, http, schema, model=ANTHROPIC_MODEL)
+                    data, receipt = await extract_window_validated(
+                        prompt, http, schema, model=ANTHROPIC_MODEL)
                 except ExtractionError as e:
                     windows_failed.append(w.index)
                     logger.error("window %d/%d FAILED (%s) — dead-lettering the WINDOW and "
                                  "continuing; the document is not lost: %s",
                                  w.index + 1, len(windows), e.reason, str(e)[:400])
+                    # A FAILED window has no accepted producer, so the configured
+                    # route is all there is to record — and it is labelled as
+                    # intended, not actual, so a reader cannot mistake it.
                     await conn.execute(
                         """UPDATE document_window_extractions
-                           SET status='failed', last_error=$3, route_used=$4, updated_at=NOW()
+                           SET status='failed', last_error=$3, route_used=$4,
+                               producer=$5::jsonb, updated_at=NOW()
                            WHERE document_rid=$1 AND window_index=$2""",
-                        document_rid, w.index, str(e)[:2000], ROUTE_USED)
+                        document_rid, w.index, str(e)[:2000], ROUTE_USED,
+                        json.dumps({**_intended, "outcome": "failed",
+                                    "intended_only": True, "reason": e.reason}))
                     continue
                 per_window[w.index] = data
+                window_receipts[w.index] = receipt
+                if receipt["route"] != ROUTE_USED:
+                    logger.warning(
+                        "window %d: served by %s (%s/%s), NOT the configured %s — recording "
+                        "the actual producer",
+                        w.index, receipt["transport"], receipt["provider"],
+                        receipt["model"], DOC_EXTRACTOR_TRANSPORT)
                 await conn.execute(
                     """UPDATE document_window_extractions
                        SET status='extracted', route_used=$4, raw_json=$3::jsonb,
+                           provider=$5, model=$6, transport=$7, producer=$8::jsonb,
                            last_error=NULL, updated_at=NOW()
                        WHERE document_rid=$1 AND window_index=$2""",
-                    document_rid, w.index, json.dumps(data), ROUTE_USED)
+                    document_rid, w.index, json.dumps(data),
+                    receipt["route"], receipt["provider"], receipt["model"],
+                    receipt["transport"], json.dumps(receipt))
 
             # Only a TOTAL loss is fatal — there is nothing to merge, and silently writing an
             # empty episode would look like success.
@@ -1213,11 +1412,118 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                     f"results. Re-run with --force to re-extract "
                     f"(document_rid={document_rid})")
             summary = next((d["document"].get("summary") for d in per_window if d and d.get("document")), "")
+
+            # ── Identity contract (issue #62) ────────────────────────────────
+            # THIS is the seam. `merged` is the complete payload: every window has
+            # been extracted, nothing has been written yet, and the whole typed
+            # endpoint set is known. Everything below happens before the first fact
+            # POST, because after the first POST the graph has already changed under
+            # the very resolution the rest of the payload depends on.
+            frozen = None
+            identity_evidence: Dict[str, Any] = {"mode": DOC_IDENTITY_MODE}
+            if DOC_IDENTITY_MODE != "off":
+                endpoints = ident.collect_endpoints(merged, normalize=normalize_entity_text)
+                preflight = await ident.preflight_endpoints(
+                    conn, endpoints,
+                    normalize=normalize_entity_text,
+                    normalize_alias_fn=normalize_alias,
+                    alias_decisions=alias_decisions)
+                identity_evidence["preflight"] = preflight.as_evidence()
+                logger.info("identity preflight: %d endpoints %s (drift-recovered=%d)",
+                            len(endpoints), preflight.counts(),
+                            identity_evidence["preflight"]["drift_recovered"])
+
+                if preflight.blockers:
+                    msg = (f"identity preflight found {len(preflight.blockers)} unbindable "
+                           f"endpoint(s): {sorted({f.state for f in preflight.blockers})}")
+                    if DOC_IDENTITY_MODE == "strict":
+                        ident.require_no_blockers(preflight)   # raises
+                    logger.warning("%s — MODE=warn, proceeding UNPINNED. The facts written "
+                                   "by this run are order-dependent.", msg)
+                    identity_evidence["warn_proceeded_unpinned"] = True
+                else:
+                    # Exact-only pre-registration of the truly missing identities,
+                    # then freeze. The freeze RE-READS rather than trusting the
+                    # registration responses, and asserts the bijection.
+                    prereg = await ident.preregister_missing(http, preflight)
+                    identity_evidence["preregistration"] = {
+                        "registered": len(prereg["uri_map"]),
+                        "receipts": prereg["receipts"],
+                    }
+                    frozen = await ident.freeze_endpoint_map(
+                        conn, endpoints,
+                        normalize=normalize_entity_text,
+                        expected_uris=prereg["uri_map"],
+                        alias_decisions=alias_decisions)
+                    identity_evidence["frozen_map"] = frozen.as_evidence()
+                    logger.info("identity frozen: %d endpoints → %d distinct URIs "
+                                "(%d pre-registered)",
+                                len(frozen.by_name), frozen.distinct_uris,
+                                len(prereg["uri_map"]))
+
             payload = facts_to_episode_payload(merged, name=doc_title, summary=summary,
-                                               source_document=source_document, group_id=group_id)
-            logger.info("merged: %d entities, %d facts → POST /knowledge/episodes (group=%s)",
-                        len(merged["entities"]), len(merged["facts"]), group_id)
+                                               source_document=source_document,
+                                               group_id=group_id, frozen=frozen)
+            logger.info("merged: %d entities, %d facts → POST /knowledge/episodes "
+                        "(group=%s, pinned=%s)",
+                        len(merged["entities"]), len(merged["facts"]), group_id,
+                        frozen is not None)
             ep = await post_episode_batched(http, payload)
+
+            # ── Verify the persisted graph against the frozen map (issue #62) ──
+            # BEFORE relational/discourse finalization, deliberately. A document that
+            # fails here must not receive document_entity_links, discourse moves, or
+            # a deep_extracted_at stamp — otherwise it reads as a finished document
+            # that points at the wrong entities, which is exactly what the audited
+            # Buehler import was.
+            if frozen is not None:
+                pinned = int(ep.get("endpoints_pinned") or 0)
+                verify = await ident.verify_persisted_graph(conn, ep.get("episode_id"), frozen)
+                identity_evidence["verification"] = {
+                    **verify.as_evidence(), "endpoints_pinned_reported": pinned}
+                if not verify.ok:
+                    # Rollback receipt: name what is wrong, where, and what state the
+                    # document is being left in, before raising. `deep_extracted_at`
+                    # is already NULL at this point (it is only stamped at the end),
+                    # so the document is retried rather than reported done — but say
+                    # so explicitly rather than leaving it to be inferred.
+                    receipt = {
+                        "document_rid": document_rid,
+                        "episode_id": str(ep.get("episode_id")),
+                        "run_id": run_id,
+                        "reason": "frozen_map_violation",
+                        "offending_facts": verify.offending,
+                        "left_state": "facts written; NOT finalized "
+                                      "(no entity links, no discourse, deep_extracted_at NULL) "
+                                      "— re-run to retry",
+                        "identity": identity_evidence,
+                    }
+                    logger.error("IDENTITY VERIFICATION FAILED — %s", json.dumps(receipt)[:2000])
+                    await conn.execute(
+                        """UPDATE document_ingestion_log
+                           SET deep_extracted_at = NULL,
+                               deep_extraction_last_error = $2
+                           WHERE document_rid = $1""",
+                        document_rid,
+                        f"identity_verification_failed:{len(verify.offending)} endpoint(s) "
+                        f"outside the frozen map")
+                    ident.require_binding_verified(verify)  # raises
+                # A write that reported fewer pinned endpoints than the payload
+                # carried means some endpoint went through the resolver after all.
+                # The verification above would usually catch the consequence, but not
+                # always — a resolver that happens to land on the right URI passes the
+                # check while proving nothing about determinism.
+                expected_pins = sum(
+                    1 + (1 if f.get("object") else 0) for f in merged["facts"])
+                if pinned != expected_pins:
+                    raise ExtractionError(
+                        "identity_pins_incomplete",
+                        f"the server bound {pinned} endpoint(s) from pinned URIs but the "
+                        f"payload carried {expected_pins}; {expected_pins - pinned} went "
+                        f"through name resolution and are order-dependent")
+                logger.info("identity verified: %d facts, %d/%d endpoints pinned, "
+                            "every persisted endpoint in the frozen map",
+                            verify.checked_facts, pinned, expected_pins)
 
             # Type-mismatches → dead-letter + cleanup task.
             mismatches = ep.get("type_mismatches") or []
@@ -1325,6 +1631,69 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 logger.info("discourse: merged %d move(s) → wrote %d (source_type=document)",
                             len(merged_moves), discourse_created)
 
+            # ── Semantic quality (#64), assessed and recorded SEPARATELY ──────
+            # Deliberately does NOT gate the write. Structural completion and
+            # semantic quality are different questions with different remedies: a
+            # structurally broken import must not be finalized, while a thin-but-
+            # sound one is a promotion decision for an operator. Collapsing them
+            # would mean either blocking on a judgement call or, worse, letting a
+            # green structural result keep standing in for a quality one — which is
+            # the state #64 was filed about.
+            quality = None
+            try:
+                quality = assess_extraction(
+                    merged=merged,
+                    chunks_by_index={idx: txt for idx, txt in chunks},
+                    windows=windows,
+                    tier=tier,
+                    discourse_moves=(merged_moves if want_discourse else None),
+                    identity_evidence=identity_evidence,
+                )
+                logger.info("semantic quality: %s (%s)", quality.status,
+                            ", ".join(f"{d.name}={d.value}" for d in quality.dimensions))
+            except Exception as e:  # noqa: BLE001
+                # A measurement failure must not destroy a sound extraction, but it
+                # must not read as a pass either — semantic_status stays
+                # 'not_evaluated' and the reason is recorded.
+                logger.warning("semantic quality assessment failed (recorded as "
+                               "not_evaluated, NOT as a pass): %s", e)
+
+            # Per-run provenance + both verdicts (migration 125). One row per
+            # (document, run): re-extracting with another model creates a NEW row, so
+            # runs stay separately attributable instead of overwriting each other.
+            await conn.execute(
+                """INSERT INTO document_extraction_runs
+                     (document_rid, run_id, tier, ended_at, providers, models, transports,
+                      extraction_params, structural_status, semantic_status, semantic_report,
+                      identity_contract, identity_evidence)
+                   VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12::jsonb)
+                   ON CONFLICT (document_rid, run_id) DO UPDATE SET
+                     ended_at=NOW(), providers=EXCLUDED.providers, models=EXCLUDED.models,
+                     transports=EXCLUDED.transports, extraction_params=EXCLUDED.extraction_params,
+                     structural_status=EXCLUDED.structural_status,
+                     semantic_status=EXCLUDED.semantic_status,
+                     semantic_report=EXCLUDED.semantic_report,
+                     identity_contract=EXCLUDED.identity_contract,
+                     identity_evidence=EXCLUDED.identity_evidence""",
+                document_rid, run_id, tier,
+                sorted({r["provider"] for r in window_receipts.values()}),
+                sorted({r["model"] for r in window_receipts.values()}),
+                sorted({r["transport"] for r in window_receipts.values()}),
+                json.dumps({
+                    "window_chars": WINDOW_CHARS,
+                    "max_windows": MAX_WINDOWS,
+                    "episode_batch_size": DOC_EPISODE_BATCH_SIZE,
+                    "repair_passes_allowed": DOC_EXTRACTOR_REPAIR_PASSES,
+                    "configured_transport": DOC_EXTRACTOR_TRANSPORT,
+                    "schema_file": str(schema_path.name),
+                }),
+                "fail" if (budget_exhausted or windows_failed) else "pass",
+                quality.status if quality else "not_evaluated",
+                json.dumps(quality.as_dict()) if quality else None,
+                ident.IDENTITY_CONTRACT_VERSION if frozen else None,
+                json.dumps(identity_evidence, default=str),
+            )
+
             # Only promote windows that actually extracted. A dead-lettered window must KEEP
             # status='failed' (with its last_error) so a later run retries just that window.
             for w in windows:
@@ -1363,6 +1732,35 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,
                 "windows_failed": len(windows_failed), "windows_failed_idx": windows_failed,
                 "episode_id": ep.get("episode_id"),
+                # ── Identity contract (#62) ──────────────────────────────────
+                "identity_mode": DOC_IDENTITY_MODE,
+                "identity_endpoints": len(frozen.by_name) if frozen else 0,
+                "identity_distinct_uris": frozen.distinct_uris if frozen else 0,
+                "endpoints_pinned": int(ep.get("endpoints_pinned") or 0),
+                # 1 only when a map was frozen AND every persisted endpoint was
+                # verified against it. warn/off runs report 0 — they did not verify,
+                # and "did not verify" must not read the same as "verified clean".
+                "identity_verified": 1 if (
+                    frozen is not None
+                    and identity_evidence.get("verification", {}).get("binding_verified")
+                ) else 0,
+                "identity_evidence": identity_evidence,
+                "quality": quality.as_dict() if quality else {"status": "not_evaluated"},
+                # ── Producer provenance (#64) ────────────────────────────────
+                "providers": sorted({r["provider"] for r in window_receipts.values()}),
+                "models": sorted({r["model"] for r in window_receipts.values()}),
+                "transports": sorted({r["transport"] for r in window_receipts.values()}),
+                # 1 when every window that ran in THIS run recorded a producer.
+                # Cache-resumed windows are excluded from the denominator on
+                # purpose: their producer was recorded when they were extracted,
+                # and claiming this run produced them would be the misattribution
+                # #64 is about.
+                "producers_recorded": 1 if all(
+                    w.index in window_receipts
+                    for w in windows
+                    if w.index not in windows_failed and per_window[w.index] is not None
+                    and w.index not in _cached_window_indices
+                ) else 0,
             }
         finally:
             if heartbeat_task is not None:

@@ -193,6 +193,30 @@ class FactInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     subject: str = Field(..., description="Entity name for the subject")
+    # ── Pinned endpoints (issue #62) ────────────────────────────────────────
+    # When supplied, the entity is NOT resolved: this URI is used verbatim after a
+    # liveness + type check. It is the difference between "the resolver will
+    # probably pick the right row" and "no resolver runs at all".
+    #
+    # A bulk importer knows its complete typed endpoint set before it writes any
+    # fact, so it can pin every endpoint up front. Without pinning, an entity
+    # CREATED while writing fact 45 becomes a fuzzy candidate for a DIFFERENT
+    # endpoint at fact 47, and members of one payload collapse into each other in
+    # a way that depends on fact order. Measured on the audited Buehler (2024)
+    # import: 6 wrong self-collapses, 11 fact endpoints left pointing at the wrong
+    # entity, with the write reporting success.
+    #
+    # An unresolvable pin is a 422, never a fallback to name resolution — falling
+    # back would reintroduce exactly the nondeterminism the pin exists to remove,
+    # and would do it silently.
+    subject_uri: Optional[str] = Field(
+        None,
+        description="Pre-resolved canonical URI for the subject. When set, skips entity "
+                    "resolution entirely and binds this URI directly. Must name a live "
+                    "(not merged, not revoked) entity whose type matches subject_type when "
+                    "that is also supplied. A missing/tombstoned/type-mismatched URI is a "
+                    "422 for the whole request — never a silent fallback to name resolution."
+    )
     subject_type: Optional[str] = Field(
         None,
         description="Optional type hint for the subject (Person, Organization, Place, "
@@ -205,6 +229,12 @@ class FactInput(BaseModel):
     )
     predicate: str = Field(..., description="Relationship type. Stored exactly as sent (no case-folding as of 2026-08-31).")
     object: Optional[str] = Field(None, description="Entity name for the object (if entity)")
+    object_uri: Optional[str] = Field(
+        None,
+        description="Pre-resolved canonical URI for the object — parallels subject_uri. "
+                    "Ignored when `object` is absent (a literal-object fact has no object "
+                    "entity to pin)."
+    )
     object_type: Optional[str] = Field(
         None,
         description="Optional type hint for the object (parallels subject_type — see above)."
@@ -326,6 +356,12 @@ class EpisodeCreateResponse(BaseModel):
     # in place, so a sustained non-zero here means the extractor is emitting facts
     # whose subject/object are absent from its own entities[] list.
     entities_typed_by_default: int = 0
+    # Issue #62: fact endpoints bound from a caller-supplied `subject_uri`/`object_uri`
+    # instead of being resolved by name. A bulk importer that froze its endpoint map
+    # should see this equal the number of entity-valued endpoints in the request; any
+    # shortfall is endpoints that still went through the order-dependent resolver, and
+    # is the difference between "we pinned the payload" and "we meant to".
+    endpoints_pinned: int = 0
     # Type-hint divergence list — empty unless caller provided subject_type
     # or object_type that conflicted with an existing entity. See TypeMismatch.
     type_mismatches: List[TypeMismatch] = Field(default_factory=list)
@@ -935,12 +971,24 @@ def create_router(
                 # Collect type mismatches across all facts in this request
                 type_mismatches: List[TypeMismatch] = []
 
+                # Issue #62: how many endpoints in this request were bound from a
+                # caller-pinned URI rather than resolved. A bulk import that means to
+                # be order-independent should see this equal its endpoint count; any
+                # shortfall names endpoints that still went through the resolver.
+                endpoints_pinned = 0
+
                 for fact in body.facts:
-                    # Resolve subject
-                    subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
-                        conn, fact.subject, body.create_entities,
-                        embed_fn, seen_uris,
-                        type_hint=fact.subject_type)
+                    # Resolve subject — or bind it verbatim when the caller pinned it.
+                    if fact.subject_uri:
+                        subject_uri, is_new, subj_resolved_type = await _bind_pinned_uri(
+                            conn, fact.subject_uri, fact.subject, "subject",
+                            fact.subject_type)
+                        endpoints_pinned += 1
+                    else:
+                        subject_uri, is_new, subj_resolved_type = await _resolve_or_create(
+                            conn, fact.subject, body.create_entities,
+                            embed_fn, seen_uris,
+                            type_hint=fact.subject_type)
                     if not subject_uri:
                         logger.warning(f"Could not resolve subject: {fact.subject}")
                         continue
@@ -963,10 +1011,16 @@ def create_router(
                     # Resolve object (if entity name provided)
                     object_uri = None
                     if fact.object:
-                        object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
-                            conn, fact.object, body.create_entities,
-                            embed_fn, seen_uris,
-                            type_hint=fact.object_type)
+                        if fact.object_uri:
+                            object_uri, obj_new, obj_resolved_type = await _bind_pinned_uri(
+                                conn, fact.object_uri, fact.object, "object",
+                                fact.object_type)
+                            endpoints_pinned += 1
+                        else:
+                            object_uri, obj_new, obj_resolved_type = await _resolve_or_create(
+                                conn, fact.object, body.create_entities,
+                                embed_fn, seen_uris,
+                                type_hint=fact.object_type)
                         if object_uri:
                             entities_resolved += 1
                             if obj_new:
@@ -1137,6 +1191,7 @@ def create_router(
                     entities_created=entities_created,
                     facts_null_embed=facts_null_embed,
                     entities_typed_by_default=entities_typed_by_default,
+                    endpoints_pinned=endpoints_pinned,
                     type_mismatches=type_mismatches,
                 )
 
@@ -1167,6 +1222,71 @@ def create_router(
         )
 
         return response
+
+    async def _bind_pinned_uri(
+        conn, uri: str, name: str, role: str, type_hint: Optional[str],
+    ) -> tuple[str, bool, Optional[str]]:
+        """Bind a caller-supplied canonical URI verbatim. No resolution runs.
+
+        Issue #62. The contract is deliberately unforgiving in both directions:
+
+        - It NEVER falls back to name resolution. A pin that cannot be honoured is
+          a 422 for the whole request. Falling back would mean the caller asked for
+          a determinate binding, silently got a probabilistic one, and got a 201
+          saying it worked — which is the precise failure shape the pin removes.
+        - It does NOT follow `merged_into`. Tombstone-following is right for a
+          NAME (a name matching a merged row is evidence the name belongs to the
+          survivor), but a caller that pinned a URI is asserting an identity, not
+          offering a hint. If that identity has been merged away since the caller
+          froze its map, the map is stale and the caller must re-freeze — silently
+          redirecting would make the persisted graph disagree with the map the
+          caller is about to verify against, and the verification would then fail
+          with a confusing error far from its cause.
+
+        Returns the same (uri, is_new, resolved_type) shape as _resolve_or_create
+        so the caller's bookkeeping is unchanged.
+        """
+        from api.entity_schema import canonicalize_entity_type
+
+        row = await conn.fetchrow(
+            "SELECT fuseki_uri, entity_type, entity_text, merged_into, revoked_at "
+            "FROM entity_registry WHERE fuseki_uri = $1",
+            uri,
+        )
+        if row is None:
+            raise HTTPException(status_code=422, detail={
+                "error": "pinned_entity_not_found",
+                "role": role, "name": name, "pinned_uri": uri,
+                "hint": "The pinned URI does not exist in entity_registry. Pre-register the "
+                        "endpoint before writing facts that reference it.",
+            })
+        if row["merged_into"] is not None:
+            raise HTTPException(status_code=422, detail={
+                "error": "pinned_entity_merged_away",
+                "role": role, "name": name, "pinned_uri": uri,
+                "merged_into": row["merged_into"],
+                "hint": "The pinned identity was merged after the caller froze its endpoint "
+                        "map. Re-run the preflight and freeze against the current graph; this "
+                        "endpoint is NOT silently redirected to the survivor.",
+            })
+        if row["revoked_at"] is not None:
+            raise HTTPException(status_code=422, detail={
+                "error": "pinned_entity_revoked",
+                "role": role, "name": name, "pinned_uri": uri,
+                "revoked_at": row["revoked_at"].isoformat(),
+            })
+        if type_hint:
+            want = canonicalize_entity_type(type_hint)
+            if want and row["entity_type"] != want:
+                raise HTTPException(status_code=422, detail={
+                    "error": "pinned_entity_type_mismatch",
+                    "role": role, "name": name, "pinned_uri": uri,
+                    "requested_type": want, "actual_type": row["entity_type"],
+                    "hint": "A pinned URI whose type disagrees with the declared type is a "
+                            "contradiction in the caller's own map, not a preference to "
+                            "reconcile.",
+                })
+        return uri, False, row["entity_type"]
 
     async def _resolve_or_create(
         conn, name: str, create_if_missing: bool,
