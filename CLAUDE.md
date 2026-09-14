@@ -9,7 +9,7 @@ This snapshot was refreshed by the end skill. Use it before planning or recommen
 
 **Updated:** 2026-09-14 12:47 PDT
 
-**Current status:** `fix/document-ingest-integrity` @ `3bbe405`, clean and pushed. **Draft PR #66** (0 checks — do NOT merge) now closes #62 and **#68**. #68 landed **in the branch only**: `api/document_extraction_contract.py` is the single source, all four prompt/schema surfaces derive from it, `Document`/`Event` admitted. Migrations 124/125 live; **126 written and NOT applied** (verified no-op). `substack-deep-extract` still **disabled and unloaded** (backlog 356).
+**Current status:** `fix/document-ingest-integrity`, clean and pushed; the #68 code is `3bbe405` and the branch tip is the wrap commit above it. **Draft PR #66** (0 checks — do NOT merge) now closes #62 and **#68**. #68 landed **in the branch only**: `api/document_extraction_contract.py` is the single source, all four prompt/schema surfaces derive from it, `Document`/`Event` admitted. Migrations 124/125 live; **126 written and NOT applied** (verified no-op). `substack-deep-extract` still **disabled and unloaded** (backlog 356).
 
 **Next:** 1) **#67** — `retract_fact` emits no federation event; peer application unproven 0/4. 2) **#69** — transactional rollback/replay; stale entity links are why "retracted" ≠ "repaired". 3) Then the pinned replay (task `koi-2026-09-14-michaelgarfield-pinned-replay`, due 09-21) — curated payloads ready, no `--force`. Do NOT deploy #66 or re-enable the job before these.
 

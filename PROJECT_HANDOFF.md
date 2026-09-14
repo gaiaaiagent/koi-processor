@@ -19,8 +19,8 @@
 > | claim | verified |
 > |---|---|
 > | `com.personal-koi.substack-deep-extract` disabled AND unloaded | ✅ absent from `launchctl list`, present in `print-disabled`. **Keep it that way.** Backlog 356. |
-> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD = origin = `3bbe405` |
-> | PR #66 | ✅ OPEN, **draft**, **0 status checks**, head `3bbe405`; body updated, now `Closes #62 and #68`. **Do not merge.** |
+> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD == origin. #68 code = `3bbe405`; the tip is the docs wrap on top of it. |
+> | PR #66 | ✅ OPEN, **draft**, **0 status checks**; body updated, now `Closes #62 and #68`. **Do not merge.** |
 > | tests | ✅ 50 `test_ingest_identity.py` + 29 `test_document_extraction_type_contract.py` + 28 `..._fixtures.py` = **107**; **214** across every suite touching the extractor or identity. Full suite vs a clean worktree at the merge-base: **67 failures/errors, identical sets — zero regressions**, +53 passing. |
 > | facts retracted | ✅ exactly 5; ID set matches the target set; all other facts preserved |
 > | federation | ✅ 3 `knowledge_episode` UPDATEs delivered to the same 4 peers as the originals; **peer application proven 0/4** — only NUC confirmed *receipt*, and `EventQueue.confirm()` is documented as receipt, not application |
@@ -122,7 +122,7 @@
 
 **Updated:** 2026-09-14 12:47 PDT
 **Session:** Claude Code · `bb26783d` · Issue #68 — one authoritative document-extraction type contract, with Document and Event
-**Status:** Branch `fix/document-ingest-integrity` @ `3bbe405`, clean and pushed; **draft PR #66** (0 checks, do not merge) now closes #62 and #68; **#68 is resolved in the branch, not deployed**; migrations 124/125 live, **126 written and NOT applied** (verified no-op); `com.personal-koi.substack-deep-extract` still **disabled and unloaded** (backlog 356); three michaelgarfield documents still **half-repaired**; **#67 and #69 still gate the replay**.
+**Status:** Branch `fix/document-ingest-integrity`, clean and pushed (#68 code `3bbe405`); **draft PR #66** (0 checks, do not merge) now closes #62 and #68; **#68 is resolved in the branch, not deployed**; migrations 124/125 live, **126 written and NOT applied** (verified no-op); `com.personal-koi.substack-deep-extract` still **disabled and unloaded** (backlog 356); three michaelgarfield documents still **half-repaired**; **#67 and #69 still gate the replay**.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -227,7 +227,7 @@ deep-document extraction type contract with `Document` and `Event`. Commit
 
 ## Verification and working tree
 
-- Branch `fix/document-ingest-integrity` @ `3bbe405`; `git status --porcelain` empty;
+- Branch `fix/document-ingest-integrity`; `git status --porcelain` empty;
   `git diff --check` clean; HEAD == `origin/fix/document-ingest-integrity`.
 - **107** tests across the three directly-affected files (50 identity + 29 contract +
   28 fixtures); **214** across every suite touching the extractor or the identity
