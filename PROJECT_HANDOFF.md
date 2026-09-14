@@ -1,39 +1,38 @@
 # Project handoff
 
-> ## ⚠ LIVE CHANGES MADE 2026-09-13/14 — session `7e3da78a`, worktree `koi-document-ingest-integrity-20260913`
+> ## ⚠ LIVE CHANGES MADE 2026-09-13/14 — sessions `7e3da78a` + `bb26783d`, worktree `koi-document-ingest-integrity-20260913`
 >
 > Read this before touching the entity registry, the extractor, or the substack job.
 > Every figure below was re-derived at wrap time, not carried forward from a message.
 >
-> ### 🚫 HARD PRE-RESUME BLOCKER — issue #68
+> ### ✅ #68 CLEARED IN THE BRANCH — 2026-09-14, session `bb26783d`, commit `3bbe405`
 >
-> **Do not deploy PR #66 or replay any document until #68 lands.** Verified in this
-> worktree: `scripts/schemas/deep_extraction_doc_v1.schema.json` and `…_v2…` both
-> restrict `entities[].type` to the SAME 7-value enum — `Person, Organization,
-> Project, Concept, Location, Protocol, CaseStudy` — and `TYPE_PRIORITY`
-> (`scripts/extract_deep_documents.py:167`) covers exactly those 7. **`Document` and
-> `Event` are absent from all three.**
+> This block used to read "🚫 HARD PRE-RESUME BLOCKER — do not deploy PR #66 or replay
+> any document until #68 lands". #68 has landed **in the branch**, on no deployed
+> surface. Detail in *Completed this session* below.
 >
-> Why that is a blocker specifically *because of* #66: the extractor cannot emit
-> `Document`, so an essay title can only come out as `Project`; it cannot emit
-> `Event`, so `DWeb Camp 2026: Root Systems` cannot be re-declared correctly. Pinning
-> makes the resulting type **permanent** — entity_type is hashed into the URI and
-> cannot be corrected in place. Today's unpinned path writes the wrong type
-> *correctably*; #66 would write it *irreversibly*. Pinning a wrong contract is worse
-> than not pinning.
+> **Still true: do NOT deploy #66 and do NOT replay.** #67 and #69 are untouched and
+> the re-enable preconditions below are unchanged.
 >
 > ### State, verified
 >
 > | claim | verified |
 > |---|---|
 > | `com.personal-koi.substack-deep-extract` disabled AND unloaded | ✅ absent from `launchctl list`, present in `print-disabled`. **Keep it that way.** Backlog 356. |
-> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD = origin = `1d7f708` |
-> | PR #66 | ✅ OPEN, **draft**, **0 status checks**, head `1d7f708`. **Do not merge.** |
-> | tests | ✅ 48 passed (`tests/test_ingest_identity.py`) |
+> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD = origin = `3bbe405` |
+> | PR #66 | ✅ OPEN, **draft**, **0 status checks**, head `3bbe405`; body updated, now `Closes #62 and #68`. **Do not merge.** |
+> | tests | ✅ 50 `test_ingest_identity.py` + 29 `test_document_extraction_type_contract.py` + 28 `..._fixtures.py` = **107**; **214** across every suite touching the extractor or identity. Full suite vs a clean worktree at the merge-base: **67 failures/errors, identical sets — zero regressions**, +53 passing. |
 > | facts retracted | ✅ exactly 5; ID set matches the target set; all other facts preserved |
 > | federation | ✅ 3 `knowledge_episode` UPDATEs delivered to the same 4 peers as the originals; **peer application proven 0/4** — only NUC confirmed *receipt*, and `EventQueue.confirm()` is documented as receipt, not application |
-> | issues filed | ✅ #67 federated fact retractions + peer application proof · #68 type contract (blocker above) · #69 transactional rollback/replay reconciliation |
+> | issues filed | ✅ #67 federated fact retractions + peer application proof (OPEN) · ~~#68 type contract~~ **implemented `3bbe405`, AC comment posted** · #69 transactional rollback/replay reconciliation (OPEN) |
 > | replay task | ✅ `koi-2026-09-14-michaelgarfield-pinned-replay`, open, due **2026-09-21**, now vault-backed |
+>
+> **Migration 126** (`document_extraction_type_registry`) is written and **NOT
+> applied** — deliberately. Verified read-only that it is a **no-op on this laptop**:
+> `allowed_entity_types` already holds `Document` and `Event` with
+> `extractable = true`, 9 extractable in total. It exists so a database rebuilt from
+> `migrations/` does not reproduce migration 111's "extractable = true for exactly
+> the 7". Its down file clears the flag and deliberately does NOT delete the rows.
 >
 > **Applied to `personal_koi` (live):** migration **124** `entity_normalization_compat`
 > (read-side only — deliberately NOT a GENERATED column; that would collapse 125
@@ -49,10 +48,19 @@
 > (16/15/14) and `session_discourse_moves` (7/8/6) are **stale**. Local fact
 > retraction is NOT complete repair — that is #69.
 >
-> Gate now, with the audited alias decisions: scenius `pass_after_preregistration`,
-> rip-wendell-berry `pass_after_preregistration`, advertising `pass`. The two
-> `pass_after_preregistration` results are exactly where #68 bites — the endpoints
-> they would create are essay titles that the current schema can only type `Project`.
+> Gate now, re-derived 2026-09-14 after #68: **all three exit 0 with zero real
+> blockers** — scenius and rip-wendell-berry `pass_after_preregistration`, advertising
+> `pass` (13 → 13 distinct URIs, bijective). The two pending endpoints are the named
+> essays, and they now resolve as **`Document`**, not `Project`.
+>
+> That needed an audited type override on the CACHED payload, applied WITHOUT a
+> replay by the new `scripts/curate_cached_payload.py`; the curated files sit beside
+> the rest of the evidence as `{scenius,rip-wendell-berry}-curated.json`.
+>
+> ⚠ **Scope boundary.** Only endpoints with NO live row were retyped.
+> `Whole Earth Catalog`, `Standing by Words` and `Manifesto: The Mad Farmer Liberation
+> Front` are live `Project` rows — retyping those in a payload would correctly raise a
+> `cross_type_conflict`. They need an operator `/entities/retype`, not curation.
 >
 > Replay inputs + before/after evidence:
 > `~/Documents/sources/michaelgarfield-substack-repair-20260914/`. Do NOT use `--force`
@@ -87,13 +95,22 @@
 > **not** sufficient — facts are written by the API, so the *service* checkout plus a
 > restart are what move the write path.
 >
-> **Re-enable preconditions (operator):** #68 landed · #66 deployed to BOTH
+> **Re-enable preconditions (operator):** ~~#68 landed~~ ✅ (branch only, `3bbe405`) ·
+> #66 deployed to BOTH
 > `koi-processor-runtime` AND `koi-processor-service` · API restarted · OpenAPI
 > exposing `subject_uri`/`object_uri` · canary proving `endpoints_pinned`.
 >
-> **Run the gates before ingesting anything:**
-> `venv/bin/python scripts/check_document_integrity.py --document-rid <rid> [--payload <curated.json>] [--alias-decisions <file>]`
-> (read-only; 0 = both pass, 1 = identity blocked or semantic fail, 3 = misconfigured).
+> **Run the gates before ingesting anything** (read-only):
+>
+> ```
+> venv/bin/python scripts/check_document_integrity.py --document-rid <rid> \
+>     [--payload <curated.json>] [--alias-decisions <f>] [--type-decisions <f>]
+> ```
+>
+> 0 = both pass (now INCLUDING `pass_after_preregistration`, which was crashing with
+> `KeyError` and exiting 1 — corrected 2026-09-14), 1 = identity blocked or semantic
+> fail, 2 = `--strict-review` / `--strict-preregistration` tripped, 3 = misconfigured.
+> `--type-decisions` is new and is the ONLY thing that clears a `cross_type_conflict`.
 >
 > **Do NOT add the new floors to `darren-workflow`'s gate catalog yet** —
 > `com.personal-koi.website-sensor` is loaded and runs `verify_doc_ingest.py --mode strict`
@@ -103,9 +120,9 @@
 > **New audit surface:** `SELECT * FROM entity_current_norm_duplicates;` — 169 live
 > duplicate sets, 125 drift-created, 347 rows (#61 AC6).
 
-**Updated:** 2026-09-14 11:38 PDT
-**Session:** Claude Code · `7e3da78a` · Document-ingest identity hardening (#62/#61/#64), and the live repair it forced
-**Status:** Branch `fix/document-ingest-integrity` @ `1d7f708`, clean and pushed; **draft PR #66** (0 checks, do not merge); migrations **124** and **125** applied live; `com.personal-koi.substack-deep-extract` **disabled and unloaded** (backlog 356); three michaelgarfield documents **half-repaired**; **issue #68 is a hard pre-resume blocker**.
+**Updated:** 2026-09-14 12:47 PDT
+**Session:** Claude Code · `bb26783d` · Issue #68 — one authoritative document-extraction type contract, with Document and Event
+**Status:** Branch `fix/document-ingest-integrity` @ `3bbe405`, clean and pushed; **draft PR #66** (0 checks, do not merge) now closes #62 and #68; **#68 is resolved in the branch, not deployed**; migrations 124/125 live, **126 written and NOT applied** (verified no-op); `com.personal-koi.substack-deep-extract` still **disabled and unloaded** (backlog 356); three michaelgarfield documents still **half-repaired**; **#67 and #69 still gate the replay**.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -132,88 +149,114 @@
 
 ## Completed this session
 
-**Session `7e3da78a`, 2026-09-13→14 (koi-infra).** Began as "harden high-integrity
-document ingestion before importing another important paper" (#62, coordinated with
-#61/#53, then #64). Became a repair arc when the one bounded substack batch this
-session authorised demonstrated the defect live.
+**Session `bb26783d`, 2026-09-14 (koi-infra).** Bounded to issue **#68**: align the
+deep-document extraction type contract with `Document` and `Event`. Commit
+**`3bbe405`**, pushed; draft PR #66 body rewritten (now `Closes #62 and #68`).
 
-- **Draft PR #66** (`1d7f708`, 0 GitHub checks): payload-endpoint identity contract
-  (`api/ingest_identity.py`) — collect → preflight → exact-only preregister → freeze
-  with a bijection assertion → write pinned → verify persisted, seated between
-  `merge_extractions()` and the first fact POST. `FactInput` gains
-  `subject_uri`/`object_uri`; an unhonourable pin is a 422, never a silent fallback.
-  Migrations **124** (normalizer compatibility READ, not a GENERATED column) and
-  **125** (producer receipts + a semantic verdict kept structurally separate from
-  structural completion), both applied live. 48 tests.
-- **Measured, not assumed:** all four #62 collapses reproduce today (JW matching the
-  issue to 4 decimals); the 100-fact batch boundary is **not** the mechanism (3 of 4
-  pairs are in the same batch); `route_used` is **wrong**, not thin, and was solved
-  once on `origin/fix/extractor-fallback-reasons` and lost; `GPT-4o`/`GPT-4.1`/
-  `gpt-5.4` are three unrepaired live instances of #61.
-- **Found while fixing:** `facts_to_episode_payload` never forwarded `confidence`
-  (30,474 document facts, 213 with a value — all from the Buehler repair);
-  `httpx.HTTPStatusError` escaped the transport fallback, repair loop AND per-window
-  dead-letter, so one provider 4xx aborted a whole document. Both fixed.
-- **One bounded substack batch ran and proved the point:** 3 documents, 5 wrong
-  bindings — two fuzzy title collapses (JW 0.8518 against a 0.85 threshold; 0.9064),
-  one cross-type, and two bound by EXACT match to an abstract Concept. Job then
-  disabled by the operator.
-- **Bounded repair, operator-directed:** 5 facts soft-retracted via the sanctioned
-  endpoint; 3 `knowledge_episode` UPDATEs federated to the original 4-peer sets.
-  Entity decisions applied — merge **325**, retype **326** + merge **327**, and a
-  `Freedom (internet-blocking software)` Project distinct from the abstract Concept.
-- **Three of my own design errors, each caught by real data, not by re-reading the
-  diff:** the quality layer scored the real fixtures *backwards* (a
-  distinct-over-total ratio punished thoroughness — replaced by `chunk_coverage` +
-  `predicate_concentration`); `tombstone_risk` blocked a correctly-*repaired* graph;
-  and a cross-type advisory would have minted the DWeb Berlin twin. Plus two the
-  tests caught: an advisory that could never fire, and dict last-write-wins.
+- **The root cause was the inverse of the issue title.** Re-derived read-only:
+  `allowed_entity_types` designates **9** types extractable — the seven plus
+  `Document` and `Event`. Three code surfaces said seven. The registry was already
+  right; nothing compared them. So the fix is a single source plus a drift check,
+  not two enum edits.
+- **One source, every surface derived.** `api/document_extraction_contract.py` is
+  now the only place the vocabulary is written.
+  `scripts/render_extraction_contract.py` derives both schemas and, in both prompts,
+  the typing rules, the appendix enum, HARD OUTPUT RULE 2 **and** the lead-in
+  sentence — which turned out to be a seventh hand-maintained copy nobody had
+  counted. `--check` fails on any hand edit; a missing marker or an ambiguous enum
+  line raises rather than skipping the surface.
+- **Priorities chosen on the observed failure, not taste.**
+  `Person 9 > Event 8 > Organization 7 > Document 6 > Project 5 > Location 4 >
+  Protocol 3 > CaseStudy 2 > Concept 1`. The legacy seven keep their exact relative
+  order (asserted). Before this, `.get(etype, 0)` ranked both new types **below
+  `Concept`**, the floor, silently.
+- **Cross-window coercion is no longer silent.** `merge_extractions` still keys on
+  the normalized name (so one entity typed two ways stays one entity), but every
+  coercion and every off-contract type is now reported in the payload, the run
+  receipt and the gate. Counted per entity record, not per comparison.
+- **The audited-type-decision escape hatch was dead end-to-end, and is now live.**
+  `preflight_endpoints` had accepted `type_decisions` since #66 and **no caller ever
+  passed them**; worse, `preregister_missing` refused the mint even when a decision
+  had cleared the gate, so the blocker's own advertised remedy did nothing. Wired
+  through `DOC_IDENTITY_TYPE_DECISIONS` and `--type-decisions`, carried on the
+  finding, honoured at registration, logged loudly, recorded in the receipt. One
+  existing test's asserted behaviour was changed deliberately, with the reasoning in
+  its docstring.
+- **Drift detection at startup, not only in tests.** `assert_contract_surfaces()`
+  checks the **loaded** prompt and schema and fails terminally. This is the half that
+  covers the real deployment gap: the launchd job runs from `koi-processor-runtime`
+  and every path is env-overridable, so a test over this repo proves nothing about
+  what an unattended run sent to a model. The prompt half matters most — a current
+  schema with a stale prompt yields seven-type output that validates perfectly.
+- **Two defects found while implementing, neither in the issue.**
+  `check_document_integrity.py` crashed with `KeyError: 'endpoints'` on
+  `pass_after_preregistration` — the state of exactly the two documents #68 is about
+  — and exited `1` for it despite its own code documenting it as a pass. Both fixed.
+- **`scripts/curate_cached_payload.py`** applies audited type overrides to a cached
+  extraction without replaying, and refuses an override that matched nothing or was
+  already true.
 
 ## Next steps
 
-1. **#68 — align the deep-extraction type contract with `Document` and `Event`.**
-   HARD BLOCKER; see the top block. Nothing else proceeds first.
-2. **#67 — federated fact retractions + peer-application proof.** `retract_fact`
-   emits no federation event at all; peer application is unverifiable from here.
-3. **#69 — transactional document rollback / replay reconciliation.** Stale
+1. **#67 — federated fact retractions + peer-application proof.** `retract_fact`
+   emits no federation event at all; peer application is unverifiable from here
+   (delivery 4/4, application 0/4).
+2. **#69 — transactional document rollback / replay reconciliation.** Stale
    `document_entity_links` and discourse moves are why "retracted" ≠ "repaired".
-4. **Then** the pinned replay — task `koi-2026-09-14-michaelgarfield-pinned-replay`,
-   due **2026-09-21**. Not before #68, and not with `--force`.
-5. Only after all of the above: deploy #66 to BOTH checkouts, restart the API,
+3. **Then** the pinned replay — task `koi-2026-09-14-michaelgarfield-pinned-replay`,
+   due **2026-09-21**. Curated payloads are ready (above). Not before #67/#69, and
+   not with `--force`.
+4. Only after all of the above: deploy #66 to BOTH checkouts, restart the API,
    verify OpenAPI, canary `endpoints_pinned`, then consider re-enabling the job.
+   Migration 126 applies at that point (a no-op here, needed on a rebuilt database).
 
 ## Open questions
 
-- **Peer application of the 3 retraction UPDATEs is unproven (0/4)** and may not be
-  provable without DB/SSH access to a peer. #67 should decide what proof looks like.
-- **`Knowledge Graphs` (plural, vault-backed, 11 facts)** is a separate live identity
-  from the merged `knowledge graph`. Merge 325 was correct but is not final
-  canonicalization — broader #61 work.
-- **169 live duplicate sets (125 drift-created, 347 rows)** need an operator merge
-  pass. Not attempted here.
-- Whether the darren-workflow gate catalog gains the new floors is gated on the
-  runtime clone carrying this branch — adding them earlier breaks the weekly
-  website-sensor.
+- **Does `Event` outranking `Organization` hold up?** Chosen on one observed collapse
+  (`DWeb Berlin` captured as an Organization) with no counter-example. The test that
+  pins it names the rationale, so a change is a decision rather than a drift — but a
+  second corpus could overturn it.
+- **`Whole Earth Catalog`, `Standing by Words`, `Manifesto: The Mad Farmer Liberation
+  Front`** are live `Project` rows that are arguably `Document`s. Payload curation
+  cannot fix that; it needs an operator `/entities/retype` on the graph.
+- Unchanged from last session and still open: peer application of the 3 retraction
+  UPDATEs is unproven (0/4, may not be provable from here → #67); `Knowledge Graphs`
+  (plural, vault-backed, 11 facts) is still a separate live identity from the merged
+  `knowledge graph` (#61); 169 live duplicate sets need an operator merge pass; the
+  gate-catalog floors stay parked until the runtime clone carries this branch.
 
 ## Verification and working tree
 
-- Branch `fix/document-ingest-integrity` @ `1d7f708`; `git status --porcelain` empty;
+- Branch `fix/document-ingest-integrity` @ `3bbe405`; `git status --porcelain` empty;
   `git diff --check` clean; HEAD == `origin/fix/document-ingest-integrity`.
-- 48/48 `tests/test_ingest_identity.py`; 18/18 across the adjacent suites touched.
-  **3 pre-existing unrelated failures** in `tests/test_knowledge_router_facts_gate.py`,
-  verified identical on a clean tree (stash control).
-- Both migrations dry-run inside a rolled-back transaction AND given negative controls
-  that break them **by deletion** (exit 3 each). Two earlier control attempts died on
-  syntax errors rather than the assertion, proving nothing, and were redone.
+- **107** tests across the three directly-affected files (50 identity + 29 contract +
+  28 fixtures); **214** across every suite touching the extractor or the identity
+  contract.
+- **Zero regressions, measured rather than assumed.** Full suite in this tree vs a
+  throwaway `git worktree` at the merge-base: **67 failures/errors, byte-identical
+  sets**; +53 passing. ⚠ 67 is larger than the "3 pre-existing" recorded here before —
+  that figure covered only the suites the previous session ran. Most of the other 64
+  are per-test schema fixtures missing `entity_merge_log.reversal`, which the
+  production schema has. None is ours; none is fixed by this branch.
+- Every drift check has a **positive control** proving it can fail (hand-edited schema,
+  hand-edited prompt rule, missing marker, ambiguous enum line, stale schema, stale
+  prompt, schema with no enum). The fixtures also assert the OLD seven-type enum
+  **rejects** them, so a fixture that stopped exercising the fix would say so.
+- The live-registry drift test runs against the real `allowed_entity_types` and does
+  **not** skip.
+- `python scripts/render_extraction_contract.py --check` → `all 4 contract surfaces
+  match doc-entity-types-v2-2026-09-14`.
+- **No live graph writes this session** — every database statement was a `SELECT`.
+  `substack-deep-extract` re-verified absent from `launchctl list` and present in
+  `print-disabled`; `koi-processor-runtime` and `koi-processor-service` both still on
+  `regen-prod`. No replay, no re-ingest, no `--force`.
 - Canon validator: **not applicable** (`scripts/validate_spec_dag.py` absent).
-- Gates re-derived at wrap time: Buehler curated 115→115 bijective PASS/PASS; the
-  stored thin run FAIL (`chunk_coverage` 0.2131); the three repaired documents
-  `pass_after_preregistration` ×2 and `pass` ×1.
 
 ## Recent sessions
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
+| 2026-09-14 | Claude Code | `bb26783d` (koi-infra) | **Issue #68 — one authoritative document-extraction type contract.** Commit `3bbe405`, pushed; PR #66 body rewritten (`Closes #62 and #68`). Root cause was the inverse of the title: the registry already marked **9** types extractable while three code surfaces said seven, and nothing compared them. `api/document_extraction_contract.py` is now the single source and all four surfaces are DERIVED (`render_extraction_contract.py --check`); `assert_contract_surfaces()` re-checks the LOADED prompt+schema at run start, because the job runs from a different checkout. Found two things not in the issue: the audited-type-decision escape hatch was **dead end-to-end** (no caller passed `type_decisions`, and preregistration refused even a decided conflict), and the operator gate **crashed with KeyError** on exactly the two documents #68 is about. 57 new tests, each drift check with a positive control; full suite vs a clean worktree = **67 failures, identical sets, zero regressions**. All three michaelgarfield payloads now exit 0 with the essays typed `Document`. No live writes; migration 126 written and NOT applied (verified no-op). |
 | 2026-09-14 | Claude Code | `7e3da78a` (koi-infra) | **Document-ingest identity hardening (#62/#61/#64) + a live repair it forced.** Draft PR #66 @ `1d7f708`, 48 tests, migrations 124+125 applied live. Proved all four #62 collapses still reproduce and that the batch boundary is NOT the mechanism. One bounded substack batch wrote **5 wrong bindings across 3 docs**; job disabled by the operator. Bounded repair: 5 facts retracted + 3 federated UPDATEs (delivery 4/4, **application 0/4**); merges 325/327, retype 326. Filed #67/#68/#69. **#68 is a hard pre-resume blocker** — the extraction schemas cannot emit `Document` or `Event`, and pinning would make those wrong types permanent. Three of my own design errors caught by real data, not by re-reading the diff. |
 | 2026-09-11/12 | Claude Code | `a8751c7e` (stream B) | **biofi.earth ingested + the backup arc.** New git-versioned website sensor (runtime branch `website-sensor-2026-09-12`, scheduled weekly). Every database and the source archive now **encrypted off-host on gaia**, checksum-verified, with recovery **drilled on the NUC** — which found the arrangement unrecoverable (gaia authorised one SSH key) and fixed it. Restore measured index-bound (57 min for one hnsw index; data proven complete first). `koi_backup_check.sh` now reads the markers nothing read. Migration 123 adversarially reviewed (29 agents) and cleared; federation checked (zero `document:` RIDs ever left this node). Command centre at :5051 `#dash`. ~14 instrument-name defects in my own work, all found by running things; memory written. 7 commits here, all pushed; `e1cfac8` in sync. |
 | 2026-09-07 | Claude Code | `217282eb` (cross-stream, started in darren-workflow) | **This repo owns upcoming work but was NOT modified.** New plan `~/.claude/plans/koi-web-ingest-integrity.md` targets it: `POST /web/preview` returns **zero bytes after 60s for `https://example.com`** (service otherwise healthy — `/health` 200, peers polling), and `/web/ingest` returns `"status": "ingested"` for calls that persist nothing (0 log rows, 0 chunks, vs a positive control of 1,619 rows). Plan defines an `ingested`/`not_persisted`/`skipped` enum enforced server-side here, plus a `web_ingest_jobs` async table. Laptop-first migration order. Nothing executed. |
@@ -223,6 +266,3 @@ session authorised demonstrated the defect live.
 | 2026-09-04 | Claude Code | a0f88bbf | **MCP supply chain + the two-node written statement.** axios lockfile committed (30 advisories cleared, not yet live); 39 Dependabot alerts dismissed; `docs/operations/two-node-topology.md` written; launchd guard widened to every installed plist after a 4th subset-enumeration instance, exposing 3 malformed plists and a namespace (`com.darrenzal.*`) no glob ever matched. 6 commits published, 10 tasks filed. A 34-agent audit + the parallel session overturned **6 of my own claims**, two of them corrections I had just made. |
 | 2026-09-04 | Claude Code | 1e1f2abb | **Decisions 9315/9317 prepared; email guard completed; 116 cleared.** 20 agents over two workflows, every lens returned CORRECTED. Killed the 27.9× ratio (it is ~8×), the 176 population (166), the 142/57 reversibility split (0%, not 71%), the one-insert-path premise (two live writers), and "the NUC is unreachable" (it is reachable, and already holds the divergent vocabulary without failing). Corrected my own false report that 116 was blocked — I read the layout instead of asking the process. 2 koi-sensors commits, both positive-controlled. |
 | 2026-09-03 | Claude Code | e1dd0df8 | **Backup armed; retype made reversible.** The nightly backup plist had never been bootstrapped — newest dump was Aug 31, hand-run, ~3 days unbacked on 27 GB. `/entities/retype` captured no reversal and had already made **142 irreversible merges**. Launchd guard enumerated a subset (missed `com.darren.*`, found 2 real violations). `restart.sh` reported ERROR on restarts that succeeded (30s budget vs 40–73s startup). Retracted the false D4b claim before it shipped. 5 commits, all positive-controlled. |
-| 2026-09-03/04 | Claude Code | e1dd0df8 | **Vocabulary arc.** Backup had never been bootstrapped — now armed and proven unattended. `/entities/retype` made reversible after 142 irreversible merges. Launchd glob widened (2 violations). `restart.sh` false-ERROR fixed. E3 shipped, tripwire restored. 23 commits published; flood fix live after a second pull. **Five of my own claims overturned by measurement and corrected at every site.** |
-| 2026-09-12 | Claude Code | `045186e8` (stream A: history-preserving website sensor) | **Steps 0–3 of `~/.claude/plans/history-preserving-website-sensor.md` DONE; steps 4–5 NOT STARTED.** Committed `da408e0`: migration 123 **APPLIED** (`assertion PASSED (claims=513, snapshot rows=511)`, one-shot — do not re-run, it exits 3 with an alarming-but-correct message once any document is ingested), its down file (export now runs, verified exit 3 on failure, placed below `ON_ERROR_STOP` deliberately), `koi-history` dispatcher (7 verbs, none built yet; unbuilt → exit 2), `koi-dump-ok` (full-read validator, both controls demonstrated). Fresh dump `personal_koi-step3-20260912-201553.dump` full-read verified. Postgres instruments on (`log_lock_waits`, `log_min_duration_statement=10s`, `log_checkpoints`, `log_autovacuum_min_duration=1s`). **Nothing in `scripts/ingest_document.py` or `api/routers/` is modified — a peer saw another session's `ingest_document.py` process and inferred step 4 was in flight; it was not.** Untracked `p.txt`/`:` are not mine. **NEXT (fresh session):** step 4 = `ingest_document.py` (see `~/.claude/plans/history-preserving-website-sensor-artifacts/q1_fixed_pair.md` — CANONICAL over `ingest_side_pair.md`); step 5 = `api/routers/history_router.py` + apply txn (`apply_transaction.md`, `endpoint_contracts.md`, `state_machine.md`). **Checkpoint after step 5, contract:** demonstrate the store's behaviour when the storage write SUCCEEDS but the bytes are WRONG, not only when it fails (a8751c7e's ask; their T2 corrupt-remote-preserving-size-and-mtime test is the specimen). Three protected fixtures: `document:656d1923…` live/8 chunks, `document:c3b0ebcd…` superseded/0, `document:58fe10e0…` superseded/0 — koi task `koi-2026-09-12-protected-versioning-fixtures`, DO NOT MODIFY. Task `koi-2026-09-13-045186e8-step5-checkpoint` due 2026-09-14. Plan is lint-green at ~740 lines with 22 parking-lot items; the machine gate for heavy work is in its Rollback section (gate on `aomhost` + swap growth, never `pgrep zoom.us` or `pages free` — both were unsatisfiable stalls). |
-| 2026-09-11 | Claude Code | `919b51a0` (cross-stream, started in rage-research) | `restart.sh` cycled the service cleanly but did not clear the embedding-repair backoff, because `/health` reads the repair job's persisted state file (`EMBED_REPAIR_STATE`), not process memory; the fix is the repair job's own `--ignore-backoff`. Record in the rage-research handoff. |

@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-14 11:38 PDT
+**Updated:** 2026-09-14 12:47 PDT
 
-**Current status:** `fix/document-ingest-integrity` @ `1d7f708`, clean and pushed. **Draft PR #66** (0 checks — do NOT merge) implements #62 identity pinning, #61 normalizer compat, #64 provenance + semantic quality; 48 tests. Migrations **124/125** applied live. `substack-deep-extract` **disabled and unloaded** (backlog 356) — keep it so.
+**Current status:** `fix/document-ingest-integrity` @ `3bbe405`, clean and pushed. **Draft PR #66** (0 checks — do NOT merge) now closes #62 and **#68**. #68 landed **in the branch only**: `api/document_extraction_contract.py` is the single source, all four prompt/schema surfaces derive from it, `Document`/`Event` admitted. Migrations 124/125 live; **126 written and NOT applied** (verified no-op). `substack-deep-extract` still **disabled and unloaded** (backlog 356).
 
-**Next:** 1) **#68 — HARD BLOCKER**: both extraction schemas and `TYPE_PRIORITY` omit `Document` and `Event`, and pinning makes entity_type permanent (hashed into the URI), so #66 would make today's correctable wrong types irreversible. 2) **#67** — `retract_fact` emits no federation event; peer application unproven 0/4. 3) **#69** — transactional rollback/replay. Then the pinned replay (task `koi-2026-09-14-michaelgarfield-pinned-replay`, due 09-21). Do NOT deploy #66, replay, or re-enable the job before these.
+**Next:** 1) **#67** — `retract_fact` emits no federation event; peer application unproven 0/4. 2) **#69** — transactional rollback/replay; stale entity links are why "retracted" ≠ "repaired". 3) Then the pinned replay (task `koi-2026-09-14-michaelgarfield-pinned-replay`, due 09-21) — curated payloads ready, no `--force`. Do NOT deploy #66 or re-enable the job before these.
 
-**Watch:** 3 michaelgarfield docs are HALF-repaired — 5 facts retracted, but `deep_extracted_at` still set (deliberate) and entity links/discourse moves stale. Refreshing `koi-processor-runtime` alone is NOT enough: facts are written by the API, so `koi-processor-service` + restart move the write path. Do not add the new gate-catalog floors yet.
+**Watch:** 3 michaelgarfield docs still HALF-repaired (facts retracted; entity links + discourse moves stale). All three now pass the gate with the essays typed `Document`. Three live `Project` rows that are arguably `Document`s need an operator `/entities/retype`, not payload curation — see the handoff. Do not add the gate-catalog floors yet.
 
-**Verification:** `git status --porcelain` empty; `git diff --check` clean; 48/48 identity tests; 3 pre-existing unrelated failures in `test_knowledge_router_facts_gate.py` (identical on a clean tree). No canon validator in this repo. Read-only gate: `scripts/check_document_integrity.py`.
+**Verification:** tree clean, `git diff --check` clean; 107 tests across the affected files, 214 across every suite touching the extractor/identity. Full suite vs a clean worktree at the merge-base: **67 failures/errors, identical sets — zero regressions** (the earlier "3 pre-existing" undercounted). No canon validator here. Read-only gate: `scripts/check_document_integrity.py` (now also `--type-decisions`).
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
