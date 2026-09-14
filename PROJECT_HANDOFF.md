@@ -3,80 +3,109 @@
 > ## ⚠ LIVE CHANGES MADE 2026-09-13/14 — session `7e3da78a`, worktree `koi-document-ingest-integrity-20260913`
 >
 > Read this before touching the entity registry, the extractor, or the substack job.
+> Every figure below was re-derived at wrap time, not carried forward from a message.
 >
-> **Applied to `personal_koi` (live):**
-> - **migration 124** `entity_normalization_compat` — `koi_normalize_entity_text()`, two
->   expression indexes, view `entity_current_norm_duplicates`. Additive; reverses cleanly.
->   *Read-side only* — it deliberately does NOT convert `normalized_text` to a GENERATED
->   column (that would collapse 125 currently-distinct live groups; see the file's header).
-> - **migration 125** `extraction_provenance_and_quality` — `provider`/`model`/`transport`/
->   `producer` on `document_window_extractions`, new table `document_extraction_runs`.
->   Its down file DESTROYS data that lives nowhere else; it exports first, below
->   `ON_ERROR_STOP`.
+> ### 🚫 HARD PRE-RESUME BLOCKER — issue #68
 >
-> **`com.personal-koi.substack-deep-extract`: re-enabled, ran ONE bounded batch (3 docs),
-> then DISABLED AGAIN BY THE OPERATOR 2026-09-14.** No 07:45 run is scheduled. Do not
-> re-enable until the deployment preconditions below are met. Backlog: **356**.
+> **Do not deploy PR #66 or replay any document until #68 lands.** Verified in this
+> worktree: `scripts/schemas/deep_extraction_doc_v1.schema.json` and `…_v2…` both
+> restrict `entities[].type` to the SAME 7-value enum — `Person, Organization,
+> Project, Concept, Location, Protocol, CaseStudy` — and `TYPE_PRIORITY`
+> (`scripts/extract_deep_documents.py:167`) covers exactly those 7. **`Document` and
+> `Event` are absent from all three.**
 >
-> That one batch is why: the gate found it wrote **5 wrong bindings across 3 documents** —
-> two fuzzy title collapses ('The End of Hoop Jumping'→'The End of the Universal Map'
-> JW 0.8518 against a 0.85 threshold; 'How To Think About Science'→'How to Think About
-> the Future' JW 0.9064), one cross-type binding, and two Freedom facts bound by EXACT
-> match to the abstract Concept.
+> Why that is a blocker specifically *because of* #66: the extractor cannot emit
+> `Document`, so an essay title can only come out as `Project`; it cannot emit
+> `Event`, so `DWeb Camp 2026: Root Systems` cannot be re-declared correctly. Pinning
+> makes the resulting type **permanent** — entity_type is hashed into the URI and
+> cannot be corrected in place. Today's unpinned path writes the wrong type
+> *correctably*; #66 would write it *irreversibly*. Pinning a wrong contract is worse
+> than not pinning.
 >
-> **Re-enable preconditions (operator, 2026-09-14):** deploy the hardened code to BOTH
-> `koi-processor-runtime` AND `koi-processor-service`, restart the API, verify OpenAPI
-> exposes `subject_uri`/`object_uri`, and run a canary proving `endpoints_pinned`.
-> Updating only the runtime clone leaves the live API on the unpinned write path.
+> ### State, verified
 >
-> ⚠ **Both code paths are UN-HARDENED today.** The job executes from
-> `koi-processor-runtime` @ `c11a4c3` and the live API is a process started **2026-09-11**,
-> neither of which carries the #62 identity contract — that work is in **draft PR #66**,
-> unmerged. (An earlier version of this line said refreshing the runtime clone was
-> sufficient. It is not: facts are written by the API, so the *service* checkout and a
-> restart are what move the write path. Corrected by the operator 2026-09-14; the full
-> precondition list is above.) **Do not merge PR #66 yet** — it has no GitHub checks and
-> its worktree has carried uncommitted fixes absent from the PR.
+> | claim | verified |
+> |---|---|
+> | `com.personal-koi.substack-deep-extract` disabled AND unloaded | ✅ absent from `launchctl list`, present in `print-disabled`. **Keep it that way.** Backlog 356. |
+> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD = origin = `1d7f708` |
+> | PR #66 | ✅ OPEN, **draft**, **0 status checks**, head `1d7f708`. **Do not merge.** |
+> | tests | ✅ 48 passed (`tests/test_ingest_identity.py`) |
+> | facts retracted | ✅ exactly 5; ID set matches the target set; all other facts preserved |
+> | federation | ✅ 3 `knowledge_episode` UPDATEs delivered to the same 4 peers as the originals; **peer application proven 0/4** — only NUC confirmed *receipt*, and `EventQueue.confirm()` is documented as receipt, not application |
+> | issues filed | ✅ #67 federated fact retractions + peer application proof · #68 type contract (blocker above) · #69 transactional rollback/replay reconciliation |
+> | replay task | ✅ `koi-2026-09-14-michaelgarfield-pinned-replay`, open, due **2026-09-21**, now vault-backed |
 >
-> **New audit surface, queryable now:** `SELECT * FROM entity_current_norm_duplicates;` —
-> **169 live duplicate sets, 125 of them drift-created, 347 rows.** These are issue #61 AC6's
-> "existing same-label/same-type duplicate sets". Remediation is an operator merge pass.
+> **Applied to `personal_koi` (live):** migration **124** `entity_normalization_compat`
+> (read-side only — deliberately NOT a GENERATED column; that would collapse 125
+> currently-distinct live groups) and migration **125**
+> `extraction_provenance_and_quality`. 125's down file destroys data that lives
+> nowhere else; it exports first, below `ON_ERROR_STOP`.
 >
-> **RESOLVED 2026-09-14 (operator decisions):** `knowledge graph` duplicate merged
-> (log **325**). `DWeb Berlin` retyped Project→Event and merged into
-> `DWeb Camp 2026: Root Systems` (logs **326**, **327**), alias `dweb berlin` retained,
-> no Organization minted. `Freedom (internet-blocking software)` created as a Project
-> distinct from the abstract `freedom` Concept.
+> ### The three Michael documents are HALF-REPAIRED
 >
-> ⚠ **3 documents from the 2026-09-14 00:00 run are HALF-REPAIRED.** Five facts were
-> soft-retracted and federated as `knowledge_episode` UPDATEs, but
-> `document_entity_links` (16/15/14) and `session_discourse_moves` (7/8/6) are **still
-> stale**. Local fact retraction is NOT complete repair. `deep_extracted_at` is left in
-> place deliberately so the unattended backlog cannot select them. Manual pinned replay
-> required after PR #66 deploys — koi task `koi-2026-09-14-michaelgarfield-pinned-replay`
-> (due 09-21), alias decisions and before/after evidence in
+> `substack-corpus:michaelgarfield:{scenius,rip-wendell-berry,advertising}`.
+> Five facts retracted and federated, **but**: `deep_extracted_at` is deliberately
+> still set (so the unattended backlog cannot select them), `document_entity_links`
+> (16/15/14) and `session_discourse_moves` (7/8/6) are **stale**. Local fact
+> retraction is NOT complete repair — that is #69.
+>
+> Gate now, with the audited alias decisions: scenius `pass_after_preregistration`,
+> rip-wendell-berry `pass_after_preregistration`, advertising `pass`. The two
+> `pass_after_preregistration` results are exactly where #68 bites — the endpoints
+> they would create are essay titles that the current schema can only type `Project`.
+>
+> Replay inputs + before/after evidence:
 > `~/Documents/sources/michaelgarfield-substack-repair-20260914/`. Do NOT use `--force`
-> or a generic re-ingest: the current path deletes neither stale links nor stale moves.
+> or a generic re-ingest.
 >
-> ⚠ **`retract_fact` emits NO federation event.** Every fact ever retracted on this node
-> is still live on peers. The 3 UPDATEs above were emitted by hand. Worth its own issue.
+> ### Entity decisions applied (operator, 2026-09-14)
 >
-> ⚠ **Peer APPLICATION is unverified.** `EventQueue.confirm()` is receipt, not
-> application; the peer read API hides retracted facts; no SSH/DB access to any peer.
-> Delivery to 4 peers is established; application on none is.
+> - `knowledge graph` duplicate merged — **merge log 325**, survivor keeps 112 facts.
+>   ⚠ **Valid but NOT final canonicalization:** `concept-knowledge-graphs-170dfbfe3308`
+>   ("Knowledge Graphs", plural, **vault-backed**, 11 active facts) is still separate —
+>   it normalizes to `knowledge graphs`, so the current normalizer does not see it as
+>   the same identity. Belongs to the broader #61 work.
+> - `DWeb Berlin` retyped Project→Event (**326**) and merged into
+>   `DWeb Camp 2026: Root Systems` (**327**); alias `dweb berlin` retained; 8 facts
+>   carried; **no Organization minted**.
+> - `Freedom (internet-blocking software)` created as a Project distinct from the
+>   abstract `freedom` Concept, which kept its 1 unrelated fact.
+> - Cached Scenius extraction corrected `Organization`→`Event` (one-line diff verified).
+>
+> ### Two systemic findings
+>
+> - ⚠ **`retract_fact` emits NO federation event.** Every fact ever retracted on this
+>   node is still live on peers. The 3 UPDATEs above were emitted by hand. → #67
+> - ⚠ **Peer application is unverifiable from here.** `confirm()` is receipt-only, the
+>   peer read API hides retracted rows (proved with a local control), and there is no
+>   SSH/DB access to any peer. Delivery: 4/4. Application: 0/4. → #67
+>
+> ### Both code paths are UN-HARDENED today
+>
+> The job runs from `koi-processor-runtime` @ `c11a4c3`; the live API is a process
+> started **2026-09-11**. Neither carries #66. Refreshing the runtime clone alone is
+> **not** sufficient — facts are written by the API, so the *service* checkout plus a
+> restart are what move the write path.
+>
+> **Re-enable preconditions (operator):** #68 landed · #66 deployed to BOTH
+> `koi-processor-runtime` AND `koi-processor-service` · API restarted · OpenAPI
+> exposing `subject_uri`/`object_uri` · canary proving `endpoints_pinned`.
 >
 > **Run the gates before ingesting anything:**
-> `venv/bin/python scripts/check_document_integrity.py --document-rid <rid> [--payload <curated.json>]`
+> `venv/bin/python scripts/check_document_integrity.py --document-rid <rid> [--payload <curated.json>] [--alias-decisions <file>]`
 > (read-only; 0 = both pass, 1 = identity blocked or semantic fail, 3 = misconfigured).
 >
 > **Do NOT add the new floors to `darren-workflow`'s gate catalog yet** —
 > `com.personal-koi.website-sensor` is loaded and runs `verify_doc_ingest.py --mode strict`
-> weekly with `gate_ok` gating retirement, from the runtime clone. Adding floors before that
-> clone carries this branch makes every weekly run exit 2 on `key ABSENT from evidence`.
+> weekly with `gate_ok` gating retirement, from the runtime clone. Adding floors before
+> that clone carries this branch makes every weekly run exit 2 on `key ABSENT from evidence`.
+>
+> **New audit surface:** `SELECT * FROM entity_current_norm_duplicates;` — 169 live
+> duplicate sets, 125 drift-created, 347 rows (#61 AC6).
 
-**Updated:** 2026-09-12 22:55 PDT
-**Session:** Claude Code · a8751c7e · Stream B wrap: biofi ingest, off-host encrypted backups, command centre, migration 123 reviewed + applied
-**Status:** `regen-prod` @ `e1cfac8`, **pushed, in sync with origin** (`git ls-remote` verified); migration 123 **APPLIED and live** (`claims=513, snapshot rows=511`, one-shot); every database and the source archive now have **checksum-verified, encrypted off-host copies on gaia** with recovery proven on the NUC; Stream A steps 0–3 done, 4–5 not started; tree clean except two other sessions' debris files.
+**Updated:** 2026-09-14 11:38 PDT
+**Session:** Claude Code · `7e3da78a` · Document-ingest identity hardening (#62/#61/#64), and the live repair it forced
+**Status:** Branch `fix/document-ingest-integrity` @ `1d7f708`, clean and pushed; **draft PR #66** (0 checks, do not merge); migrations **124** and **125** applied live; `com.personal-koi.substack-deep-extract` **disabled and unloaded** (backlog 356); three michaelgarfield documents **half-repaired**; **issue #68 is a hard pre-resume blocker**.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -103,152 +132,89 @@
 
 ## Completed this session
 
-**Session `a8751c7e`, 2026-09-11→12 (Stream B).** Began as "ingest biofi.earth"; became the
-backup/recovery arc when the archive built for it exposed that every backup lived on the disk it
-was protecting. Three peer sessions coordinated by mailbox all day; ~100 agents across four
-adversarial workflows.
+**Session `7e3da78a`, 2026-09-13→14 (koi-infra).** Began as "harden high-integrity
+document ingestion before importing another important paper" (#62, coordinated with
+#61/#53, then #64). Became a repair arc when the one bounded substack batch this
+session authorised demonstrated the defect live.
 
-- **biofi.earth ingested** via a new git-versioned website sensor (`koi-processor-runtime`, branch
-  `website-sensor-2026-09-12`): 83 discovered → 69 ingested; live 65 docs / 226 chunks / 1,189 facts /
-  705 entities / 169 discourse moves / 84 claims, 0 null embeds. Sensor now scheduled **weekly**
-  (Sundays 06:40) — it had never been scheduled at all.
-- **Every database off-host, encrypted.** `scripts/koi_offsite_copy.sh` (gpg `-z 0`, three guards
-  that can each fail: `file -b` PGP, `pg_restore` REJECTS it, recipient key named) →
-  `gaia:koi-offsite/`; `koi_backup_all.sh` drives `koi_backup.sh` per database (personal_koi + the
-  four that had **no backup of any kind**); `koi_backup_check.sh` (launchd 12:00) reads the markers
-  nothing read before and flags a START with no OK/FAIL — the 2026-09-11 signature. Measured
-  transfer ~7 MB/s sustained (a 300 MB probe said 11); a restore is **index-bound** (one hnsw index
-  on 66k×3072 ran 57 min; data layer proven complete first, 100% embedding coverage). Runbook:
-  `docs/backup-and-recovery.md`.
-- **Source archive** (`~/Documents/koi-source-archive`, README says *never pushed* — a content rule,
-  not a durability one): `koi_archive_offsite.sh` ships an encrypted `git bundle` (launchd 08:30,
-  skips when the REMOTE still holds HEAD). Key `F5EE933A8DC407E4` on laptop + NUC + login Keychain
-  (`security -w` returns **hex**; `xxd -r -p`). **Recovery drilled on the NUC with the laptop assumed
-  gone** — tree `f3fb091d…` byte-identical, with a virgin-keyring negative control. That drill found
-  the arrangement was unrecoverable: gaia authorised only the laptop's SSH key; NUC's key added.
-- **Migration 123 reviewed** (29 agents, 21 raised / 14 refuted / 0 above low) and cleared; three
-  vacuous closing assertions and the rollback file's commented-out export found, all fixed by
-  `045186e8` before apply. `koinet` federation checked: zero `document:` RIDs and zero doclinks have
-  ever left this node, so supersession creates no FORGET obligation today.
-- **Command centre** at `http://127.0.0.1:5051/#dash` (darren-workflow `0d8e37e`): KOI network graph
-  (6 nodes/10 edges, hand-drawn SVG — topology is hub-and-spoke), system health, tasks + incidents.
-  Immediately found 7 launchd jobs failing quietly and a peer (`octo-salish-sea`) sharing documents
-  with no koi-net edge.
-- `koi-processor-service` `regen-prod`: 7 commits (`3f2c3c3`…`680432d` + this wrap), all pushed.
-
-### What this session got wrong, and how it was caught
-
-~14 defects where **the instrument's name implied a property it did not measure**: `file` matching
-the *filename*, `plutil -lint` accepting malformed XML, `pkill -f` matching the test harness, `pages
-free` on macOS, a shadowed `stat`, suites printing `fail=3` and exiting 0, `grep -c || echo 0`
-emitting two lines, a NUL byte git stored as binary, `sysctl` absent from the launchd PATH, a stale
-load figure relayed as current, a process *named* after a file taken as evidence of who owned it.
-Memory: `feedback_instrument_name_implies_property_it_does_not_measure.md`. Rule kept: **break by
-deletion, not mutation** — every vacuous control mutated something that landed somewhere inert.
-Also: added a `nuc` remote to a repo whose README said never-pushed (caught by `045186e8`, reversed
-before any ref landed); relayed an operator delegation as authorisation (correctly refused).
-
-### Also this cycle — **Session `045186e8`, 2026-09-11→12.** Designed and began executing
-`~/.claude/plans/history-preserving-website-sensor.md` (Stream A). ~130 agents across seven
-workflows (understand · design bakeoff · spec · two gates · merge · resolve), three Codex review
-rounds, and a 29-agent peer review of the migration before it was applied.
-
-- **Migration 123 applied** (`da408e0`, 22:19 PDT): `document_source_claim` (ownership + sticky
-  `history_policy`, PK site+URL), `document_supersession` (append-only version chain + crash-recovery
-  journal, no FK), one view, one nullable column on `session_discourse_moves`. Backfilled every
-  document row into claims with **zero lost**; assertion demonstrated *failing* on an injected defect
-  before apply (delete one claim → exit 3, caught three ways). Leg D adopted the two real legacy
-  supersessions as `reason='legacy'` edges — observed, not performed. All nine indexes confirmed via
-  `pg_indexes`, the instrument the file's own `to_regclass` checks cannot substitute for.
-- **Down file made real.** Its export lines were inside comments; a reviewer ran it and destroyed
-  511 rows at exit 0. Now runs, placed **below** `ON_ERROR_STOP` (measured: above it a failed export
-  exits 0 and continues to the DROPs; below it exits 3 first), with literal paths because `\copy`
-  does not interpolate `:'var'` in a filename (my first repair was broken by exactly that; my own
-  test caught it).
-- **`koi-dump-ok`** — full-read dump validator. Exists because `pg_restore --list` exits 0 with 1198
-  entries on a 4.25 GB truncated dump. Controls demonstrated: partial → exit 1 in 29 s; good → exit 0.
-- **`koi-history`** dispatcher — seven verbs, each tagged with the step that lands it; an unbuilt verb
-  exits 2, never 0.
-- **Postgres instruments on** (`log_lock_waits`, `log_min_duration_statement=10s`, `log_checkpoints`,
-  `log_autovacuum_min_duration=1s`) — the 6.5 h `pg_dump` of 09-11 was undiagnosable because all four
-  were off. Its kill was a human-confirmed restart at 09:44; its slowness stays undetermined.
-- **Backup guard restored**: the partial dump was the newest by mtime and had halved `koi_backup.sh`'s
-  size floor; renamed out of the glob (kept as `koi-dump-ok`'s negative-control fixture).
-- **Three plan-level corrections that changed the work**, all from peers and all verified before
-  acting: the d8 "shared sha256" evidence was `sha256("\n")` from empty extractions; `claims` has no
-  `document_rid` so claims are adjudicated document-scoped (P-22); extraction composition is
-  asymmetric on byte-identical input (n=5: 0.391/0.192/0.037/0.048/0.050), so per-version fact
-  provenance is a parked item with a stated cost, not a blind spot.
-
-### What this session got wrong, and how it was caught
-
-- **Two negative controls that could not fail**, one of them the day the principle went into the
-  plan twice. Rule kept: *break by deletion, not by mutation* — a mutation can land somewhere inert.
-- **Two stalls in my own machine gate** within an hour: `pages free` (macOS keeps it near zero) and
-  `pgrep zoom.us` (resident for over a day). Replaced with swap growth and `aomhost`. *A process
-  being resident is not a claim about the resource.*
-- **Two relayed numbers asserted in my own voice**: load "21" (was 174 — a live Zoom call) and a
-  "28 GB" dump (12.5 GB; `ls` was one command away). And once, a phrase I had written six hours
-  earlier, denied from memory. The tell is the asymmetry: the claim I doubted got verified, its
-  neighbour did not.
-- **Exit codes swallowed by pipes four times**, twice inside checks whose subject was exit-code honesty.
+- **Draft PR #66** (`1d7f708`, 0 GitHub checks): payload-endpoint identity contract
+  (`api/ingest_identity.py`) — collect → preflight → exact-only preregister → freeze
+  with a bijection assertion → write pinned → verify persisted, seated between
+  `merge_extractions()` and the first fact POST. `FactInput` gains
+  `subject_uri`/`object_uri`; an unhonourable pin is a 422, never a silent fallback.
+  Migrations **124** (normalizer compatibility READ, not a GENERATED column) and
+  **125** (producer receipts + a semantic verdict kept structurally separate from
+  structural completion), both applied live. 48 tests.
+- **Measured, not assumed:** all four #62 collapses reproduce today (JW matching the
+  issue to 4 decimals); the 100-fact batch boundary is **not** the mechanism (3 of 4
+  pairs are in the same batch); `route_used` is **wrong**, not thin, and was solved
+  once on `origin/fix/extractor-fallback-reasons` and lost; `GPT-4o`/`GPT-4.1`/
+  `gpt-5.4` are three unrepaired live instances of #61.
+- **Found while fixing:** `facts_to_episode_payload` never forwarded `confidence`
+  (30,474 document facts, 213 with a value — all from the Buehler repair);
+  `httpx.HTTPStatusError` escaped the transport fallback, repair loop AND per-window
+  dead-letter, so one provider 4xx aborted a whole document. Both fixed.
+- **One bounded substack batch ran and proved the point:** 3 documents, 5 wrong
+  bindings — two fuzzy title collapses (JW 0.8518 against a 0.85 threshold; 0.9064),
+  one cross-type, and two bound by EXACT match to an abstract Concept. Job then
+  disabled by the operator.
+- **Bounded repair, operator-directed:** 5 facts soft-retracted via the sanctioned
+  endpoint; 3 `knowledge_episode` UPDATEs federated to the original 4-peer sets.
+  Entity decisions applied — merge **325**, retype **326** + merge **327**, and a
+  `Freedom (internet-blocking software)` Project distinct from the abstract Concept.
+- **Three of my own design errors, each caught by real data, not by re-reading the
+  diff:** the quality layer scored the real fixtures *backwards* (a
+  distinct-over-total ratio punished thoroughness — replaced by `chunk_coverage` +
+  `predicate_concentration`); `tombstone_risk` blocked a correctly-*repaired* graph;
+  and a cross-type advisory would have minted the DWeb Berlin twin. Plus two the
+  tests caught: an advisory that could never fire, and dict last-write-wins.
 
 ## Next steps
 
-1. **Step 4 — `scripts/ingest_document.py`** (fresh session). Canonical spec:
-   `~/.claude/plans/history-preserving-website-sensor-artifacts/q1_fixed_pair.md` (**supersedes**
-   `ingest_side_pair.md`). Four edits: the `superseded_at` CASE in the `ON CONFLICT` arm (staged
-   re-ingest of an already-hidden row keeps its stamp; everything else reveals); `--staged` on the
-   INSERT path only; the flat `history_*` source_meta keys; the ingest-side pair (journal
-   `successor_rid` PATCH with **four** conjuncts incl. the claim triple, + claim cutover) inside
-   `_write_document`'s existing transaction; the symmetric flag guard. Fixtures on a **scratch DB**.
-2. **Step 5 — `api/routers/history_router.py`** + the apply transaction (`apply_transaction.md`,
-   `endpoint_contracts.md`, `state_machine.md`). Degraded mode is **503 `SCHEMA_ABSENT`** on
-   mutating routes, never a 200 a client can mistake for success. `POST /history/read-filter` is its
-   own route. Then **CHECKPOINT** — task `koi-2026-09-13-045186e8-step5-checkpoint`, due 09-14.
-   Contract: demonstrate the store's behaviour when the storage write **succeeds but the bytes are
-   wrong** (a8751c7e's T2 corrupt-remote-preserving-size-and-mtime is the specimen).
-3. ~~Push~~ **Done** — `e1cfac8` in sync with origin, `git ls-remote` verified 22:52.
-3b. **Stream B follow-ups** are koi tasks with due dates (all in the Upcoming view at :5051): review the 8 failing launchd jobs (09-15); `/repair` the 46 incident stubs (09-16); `104add19` close-out — score endpoint E, NC1, regression cohort (09-16); bring `koi-processor-runtime` forward, 20 behind, cp-only per plan step 14 (09-19).
-4. Settled *during* steps 4–5, named so none is lost: `intended_tier` on `/history/intent` (blocks
-   AC21 only); the six `koi-history` subcommands, each with its step; the soak baseline's persistent
-   home (step 17); `/history/resolve`'s contract amendment.
+1. **#68 — align the deep-extraction type contract with `Document` and `Event`.**
+   HARD BLOCKER; see the top block. Nothing else proceeds first.
+2. **#67 — federated fact retractions + peer-application proof.** `retract_fact`
+   emits no federation event at all; peer application is unverifiable from here.
+3. **#69 — transactional document rollback / replay reconciliation.** Stale
+   `document_entity_links` and discourse moves are why "retracted" ≠ "repaired".
+4. **Then** the pinned replay — task `koi-2026-09-14-michaelgarfield-pinned-replay`,
+   due **2026-09-21**. Not before #68, and not with `--force`.
+5. Only after all of the above: deploy #66 to BOTH checkouts, restart the API,
+   verify OpenAPI, canary `endpoints_pinned`, then consider re-enabling the job.
 
 ## Open questions
 
-- **Nothing blocks steps 4–5.** The operator authorised the build directly ("Yes, but hold step 3
-  longer", then "Yes — apply migration 123"); both are on record in this session and in
-  `a8751c7e`'s independent relay.
-- `history_policy='drop'` stays **disabled in v1** (decision D-D) until its fixture and archive-commit
-  step exist. Not a question — recorded so nobody enables it.
-- Two documents superseded at the identical instant under one triple could produce a malformed chain
-  (a reviewer's unverified concern; unreachable in tonight's data). Parking-lot territory.
+- **Peer application of the 3 retraction UPDATEs is unproven (0/4)** and may not be
+  provable without DB/SSH access to a peer. #67 should decide what proof looks like.
+- **`Knowledge Graphs` (plural, vault-backed, 11 facts)** is a separate live identity
+  from the merged `knowledge graph`. Merge 325 was correct but is not final
+  canonicalization — broader #61 work.
+- **169 live duplicate sets (125 drift-created, 347 rows)** need an operator merge
+  pass. Not attempted here.
+- Whether the darren-workflow gate catalog gains the new floors is gated on the
+  runtime clone carrying this branch — adding them earlier breaks the weekly
+  website-sensor.
 
 ## Verification and working tree
 
-- Branch/status: `regen-prod` @ `e1cfac8`, **in sync with `origin/regen-prod`** (pushed 22:52, verified by
-  `git ls-remote`). Tree clean; `p.txt` ("hi") and an empty `:` are other sessions' debris, left alone.
-- Backups: `koi_backup_check.sh` → **all fresh** (5 databases + archive off-host, encrypted, on gaia).
-  Off-host is checksum-verified, **not restore-verified** — gaia has no `pg_restore`; a real restore
-  of the 09-12 dump was done locally (data layer complete, embeddings 100%).
-- `git diff --check`: clean. No canon validator in this repo (not applicable).
-- Migration 123: live. Post-apply checks that can actually fail: unclaimed live rows = 0 of 509;
-  live rows without a live claim = 0; nine indexes present in `pg_indexes`. Three fixtures intact
-  (`656d1923` live/8 chunks, `c3b0ebcd` superseded/0, `58fe10e0` superseded/0) — protected by koi
-  task `koi-2026-09-12-protected-versioning-fixtures`, **DO NOT MODIFY**.
-- Fresh dump `~/koi-backups/personal_koi-step3-20260912-201553.dump` (12,562,904,620 B), full-read
-  verified 175 s. Rollback: `migrations/123_document_history_down.sql` (export runs first).
-- **Machine gate for heavy work** (in the plan's Rollback section): `pgrep -x aomhost` absent · 1m
-  load below 15m · swap flat over 20 s · no competing `pg_dump` · zero active backends. **Never**
-  `pgrep zoom.us` or `pages free` — both are unsatisfiable stalls. Re-measure at the moment of the
-  run; trust no figure in any message.
-- `stat` on this machine is a shadowed `/usr/local/bin` binary that SIGKILLs (rc 137) on every path
-  — use `/usr/bin/stat`. Memory: `reference_stat_binary_shadowed_and_broken.md`.
+- Branch `fix/document-ingest-integrity` @ `1d7f708`; `git status --porcelain` empty;
+  `git diff --check` clean; HEAD == `origin/fix/document-ingest-integrity`.
+- 48/48 `tests/test_ingest_identity.py`; 18/18 across the adjacent suites touched.
+  **3 pre-existing unrelated failures** in `tests/test_knowledge_router_facts_gate.py`,
+  verified identical on a clean tree (stash control).
+- Both migrations dry-run inside a rolled-back transaction AND given negative controls
+  that break them **by deletion** (exit 3 each). Two earlier control attempts died on
+  syntax errors rather than the assertion, proving nothing, and were redone.
+- Canon validator: **not applicable** (`scripts/validate_spec_dag.py` absent).
+- Gates re-derived at wrap time: Buehler curated 115→115 bijective PASS/PASS; the
+  stored thin run FAIL (`chunk_coverage` 0.2131); the three repaired documents
+  `pass_after_preregistration` ×2 and `pass` ×1.
 
 ## Recent sessions
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
+| 2026-09-14 | Claude Code | `7e3da78a` (koi-infra) | **Document-ingest identity hardening (#62/#61/#64) + a live repair it forced.** Draft PR #66 @ `1d7f708`, 48 tests, migrations 124+125 applied live. Proved all four #62 collapses still reproduce and that the batch boundary is NOT the mechanism. One bounded substack batch wrote **5 wrong bindings across 3 docs**; job disabled by the operator. Bounded repair: 5 facts retracted + 3 federated UPDATEs (delivery 4/4, **application 0/4**); merges 325/327, retype 326. Filed #67/#68/#69. **#68 is a hard pre-resume blocker** — the extraction schemas cannot emit `Document` or `Event`, and pinning would make those wrong types permanent. Three of my own design errors caught by real data, not by re-reading the diff. |
 | 2026-09-11/12 | Claude Code | `a8751c7e` (stream B) | **biofi.earth ingested + the backup arc.** New git-versioned website sensor (runtime branch `website-sensor-2026-09-12`, scheduled weekly). Every database and the source archive now **encrypted off-host on gaia**, checksum-verified, with recovery **drilled on the NUC** — which found the arrangement unrecoverable (gaia authorised one SSH key) and fixed it. Restore measured index-bound (57 min for one hnsw index; data proven complete first). `koi_backup_check.sh` now reads the markers nothing read. Migration 123 adversarially reviewed (29 agents) and cleared; federation checked (zero `document:` RIDs ever left this node). Command centre at :5051 `#dash`. ~14 instrument-name defects in my own work, all found by running things; memory written. 7 commits here, all pushed; `e1cfac8` in sync. |
 | 2026-09-07 | Claude Code | `217282eb` (cross-stream, started in darren-workflow) | **This repo owns upcoming work but was NOT modified.** New plan `~/.claude/plans/koi-web-ingest-integrity.md` targets it: `POST /web/preview` returns **zero bytes after 60s for `https://example.com`** (service otherwise healthy — `/health` 200, peers polling), and `/web/ingest` returns `"status": "ingested"` for calls that persist nothing (0 log rows, 0 chunks, vs a positive control of 1,619 rows). Plan defines an `ingested`/`not_persisted`/`skipped` enum enforced server-side here, plus a `web_ingest_jobs` async table. Laptop-first migration order. Nothing executed. |
 | 2026-08-26 | Claude Code | b289ac1e (resumes) | 3rd conflict wave cleaned; built `com.personal-koi.vault-conflict-sweep`; fixed a real `ThrottleInterval < StartInterval` bug + added a mutation-tested anti-storm pin; fixed `test_koi_flow_integration.py`'s months-stale collection failure. |

@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-12 22:55 PDT
+**Updated:** 2026-09-14 11:38 PDT
 
-**Current status:** `regen-prod` @ `e1cfac8`, in sync with origin; migration 123 APPLIED and live (`claims=513, snapshot rows=511`, one-shot — never re-run); every database + the source archive have encrypted, checksum-verified off-host copies on gaia, recovery proven on the NUC; Stream A steps 0–3 done, 4–5 not started.
+**Current status:** `fix/document-ingest-integrity` @ `1d7f708`, clean and pushed. **Draft PR #66** (0 checks — do NOT merge) implements #62 identity pinning, #61 normalizer compat, #64 provenance + semantic quality; 48 tests. Migrations **124/125** applied live. `substack-deep-extract` **disabled and unloaded** (backlog 356) — keep it so.
 
-**Next:** 1) Step 4 — `scripts/ingest_document.py` per artifacts `q1_fixed_pair.md` (CANONICAL), fixtures on a scratch DB. 2) Step 5 — `api/routers/history_router.py` + apply txn; then CHECKPOINT (task `koi-2026-09-13-045186e8-step5-checkpoint`, due 09-14): show behaviour when the write SUCCEEDS but the bytes are WRONG. 3) Stream B follow-ups are dated koi tasks in the :5051 Upcoming view.
+**Next:** 1) **#68 — HARD BLOCKER**: both extraction schemas and `TYPE_PRIORITY` omit `Document` and `Event`, and pinning makes entity_type permanent (hashed into the URI), so #66 would make today's correctable wrong types irreversible. 2) **#67** — `retract_fact` emits no federation event; peer application unproven 0/4. 3) **#69** — transactional rollback/replay. Then the pinned replay (task `koi-2026-09-14-michaelgarfield-pinned-replay`, due 09-21). Do NOT deploy #66, replay, or re-enable the job before these.
 
-**Watch:** Nothing blocks 4–5. Fixtures `656d1923`/`c3b0ebcd`/`58fe10e0` — DO NOT MODIFY. Heavy-work gate: `aomhost` absent, 1m load < 15m, swap flat; never `pgrep zoom.us`/`pages free`. Re-measure at the moment of the run.
+**Watch:** 3 michaelgarfield docs are HALF-repaired — 5 facts retracted, but `deep_extracted_at` still set (deliberate) and entity links/discourse moves stale. Refreshing `koi-processor-runtime` alone is NOT enough: facts are written by the API, so `koi-processor-service` + restart move the write path. Do not add the new gate-catalog floors yet.
 
-**Verification:** `git diff --check` clean; no canon validator. `koi_backup_check.sh` all fresh. Off-host is checksum- not restore-verified. Use `/usr/bin/stat`.
+**Verification:** `git status --porcelain` empty; `git diff --check` clean; 48/48 identity tests; 3 pre-existing unrelated failures in `test_knowledge_router_facts_gate.py` (identical on a clean tree). No canon validator in this repo. Read-only gate: `scripts/check_document_integrity.py`.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
