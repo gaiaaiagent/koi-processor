@@ -36,6 +36,33 @@ import tiktoken
 
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
 
+
+def parse_corpus_date(raw: Optional[str]) -> Optional[datetime]:
+    """Corpus post `date` -> aware datetime for koi_memories.published_at.
+
+    Two shapes reach this script: ISO-8601 from the Gmail bridge
+    (`2025-12-24T10:34:52+00:00`) and the scraped-archive form (`OCT 23, 2024`).
+    Writing the value only into metadata (as this script did until 2026-09-09)
+    left the published_at COLUMN NULL, so date filters and ORDER BY at the
+    column level silently matched nothing. Unparseable -> None, never an abort.
+    """
+    if not raw:
+        return None
+    txt = str(raw).strip()
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%d %b %Y"):
+        try:
+            return datetime.strptime(txt.title(), fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    print(f"WARNING: unparseable post date {raw!r} — published_at left NULL", file=sys.stderr)
+    return None
+
+
 OPENAI_MODEL = "text-embedding-3-large"
 OPENAI_DIMENSIONS = 3072
 MAX_TOKENS_PER_CHUNK = 8000
@@ -44,6 +71,18 @@ CHUNK_TARGET_TOKENS = 1500
 
 SOURCE_SENSOR = "substack-corpus-backfill"
 REPO_NAME = "substack-backfill"
+GMAIL_ACCESS = {
+    "audience": "subscriber_email",
+    "is_private": True,
+    "access_source": "substack-gmail-subscriber",
+    "source_provenance": "gmail-subscriber-email",
+}
+PUBLIC_CORPUS_ACCESS = {
+    "audience": "everyone",
+    "is_private": False,
+    "access_source": "substack-public",
+    "source_provenance": "substack-corpus-import",
+}
 
 RATE_PER_MILLION = 0.13
 COST_ABORT_USD = 5.0
@@ -140,14 +179,102 @@ def parse_corpus(path: str) -> List[Dict]:
     with open(path) as f:
         d = json.load(f)
     posts = d.get("posts", []) if isinstance(d, dict) else d
+    note = str(d.get("note", "")) if isinstance(d, dict) else ""
+    inherited_access = (
+        GMAIL_ACCESS if "harvested from gmail" in note.lower() else PUBLIC_CORPUS_ACCESS
+    )
     out = []
     for p in posts:
         content = p.get("full_content") or p.get("fullContent")
         if p.get("url") and content:
             p = dict(p)
             p["full_content"] = content
+            # The Gmail bridge predates structured provenance in its corpus
+            # files, but has always emitted this stable top-level note. Keep
+            # the marker on each normalized post so payload construction cannot
+            # lose the subscriber-derived access boundary.
+            p["_koi_access"] = dict(inherited_access)
             out.append(p)
     return out
+
+
+def _metadata_access(post: Dict) -> Dict:
+    return {k: v for k, v in post.get("_koi_access", {}).items() if v is not None}
+
+
+def build_parent_payload(*, post: Dict, slug: str, feed_slug: str, author: str,
+                         domain: str, tags: List[str]) -> Tuple[Dict, Dict, Dict]:
+    """Build the parent row without shortening source text or losing access data."""
+    url = post["url"]
+    title = post.get("title", "(untitled)")
+    subtitle = post.get("subtitle", "")
+    date = post.get("date", "") or None
+    access = _metadata_access(post)
+    content = {
+        "text": post.get("full_content", ""),
+        "title": title,
+        "subtitle": subtitle,
+        "url": url,
+    }
+    metadata = {
+        "repo": REPO_NAME, "source_type": "substack_corpus", "feed_slug": feed_slug,
+        "canonical_slug": slug, "url": url, "title": title, "author": author,
+        "domain": domain, "tags": tags, "published_at": date,
+        **access,
+    }
+    return content, metadata, access
+
+
+def build_chunk_metadata(*, post: Dict, slug: str, feed_slug: str, author: str,
+                         domain: str, tags: List[str]) -> Dict:
+    return {
+        "repo": REPO_NAME, "source_type": "substack_corpus", "feed_slug": feed_slug,
+        "canonical_slug": slug, "url": post["url"],
+        "title": post.get("title", "(untitled)"), "author": author,
+        "domain": domain, "tags": tags,
+        **_metadata_access(post),
+    }
+
+
+async def write_corpus_post(*, conn, document_rid: str, parent_content: Dict,
+                            parent_metadata: Dict, published_at: Optional[datetime],
+                            access: Dict, chunks: List[Dict],
+                            embeddings: List[List[float]],
+                            chunk_metadata: Dict) -> Tuple[bool, int]:
+    """Insert one canonical post; a parent conflict leaves its chunks untouched."""
+    inserted_rid = await conn.fetchval(
+        """
+        INSERT INTO koi_memories
+            (rid, event_type, source_sensor, content, metadata, published_at,
+             is_private, access_source)
+        VALUES ($1::text, 'NEW', $2::text, $3::jsonb, $4::jsonb, $5, $6, $7)
+        ON CONFLICT (rid) DO NOTHING
+        RETURNING rid
+        """,
+        document_rid, SOURCE_SENSOR, json.dumps(parent_content), json.dumps(parent_metadata),
+        published_at, access.get("is_private"), access.get("access_source"),
+    )
+    if inserted_rid is None:
+        return False, 0
+
+    inserted_chunks = 0
+    for chunk, emb in zip(chunks, embeddings):
+        chunk_rid = f"{document_rid}#chunk{chunk['index']}"
+        chunk_context = "substack:" + document_rid.removeprefix("substack-corpus:")
+        chunk_content = {"text": chunk["text"], "context": chunk_context}
+        await conn.execute(
+            """
+            INSERT INTO koi_memory_chunks
+                (chunk_rid, document_rid, chunk_index, total_chunks, content,
+                 embedding_3072, metadata)
+            VALUES ($1::text, $2::text, $3::int, $4::int, $5::jsonb, $6::vector, $7::jsonb)
+            ON CONFLICT (chunk_rid) DO NOTHING
+            """,
+            chunk_rid, document_rid, chunk["index"], len(chunks),
+            json.dumps(chunk_content), str(emb), json.dumps(chunk_metadata),
+        )
+        inserted_chunks += 1
+    return True, inserted_chunks
 
 
 async def main():
@@ -242,18 +369,16 @@ async def main():
         inserted_posts = inserted_chunks = actual_tokens = 0
         t0 = time.time()
         for slug, post, chunks in planned:
-            url = post["url"]
-            title = post.get("title", "(untitled)")
-            subtitle = post.get("subtitle", "")
-            full_content = post.get("full_content", "")
             date = post.get("date", "") or None
             document_rid = f"substack-corpus:{feed_slug}:{slug}"
-            parent_content = {"text": full_content[:1000], "title": title, "subtitle": subtitle, "url": url}
-            parent_metadata = {
-                "repo": REPO_NAME, "source_type": "substack_corpus", "feed_slug": feed_slug,
-                "canonical_slug": slug, "url": url, "title": title, "author": author,
-                "domain": domain, "tags": tags, "published_at": date,
-            }
+            parent_content, parent_metadata, access = build_parent_payload(
+                post=post, slug=slug, feed_slug=feed_slug, author=author,
+                domain=domain, tags=tags,
+            )
+            chunk_metadata = build_chunk_metadata(
+                post=post, slug=slug, feed_slug=feed_slug, author=author,
+                domain=domain, tags=tags,
+            )
             embeddings: List[List[float]] = []
             for i in range(0, len(chunks), BATCH_SIZE):
                 batch_chunks = chunks[i : i + BATCH_SIZE]
@@ -264,34 +389,22 @@ async def main():
                     return 3
                 embeddings.extend(await embed_batch(client, texts))
             async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO koi_memories (rid, event_type, source_sensor, content, metadata)
-                    VALUES ($1::text, 'NEW', $2::text, $3::jsonb, $4::jsonb)
-                    ON CONFLICT (rid) DO NOTHING
-                    """,
-                    document_rid, SOURCE_SENSOR, json.dumps(parent_content), json.dumps(parent_metadata),
+                inserted, post_chunk_count = await write_corpus_post(
+                    conn=conn,
+                    document_rid=document_rid,
+                    parent_content=parent_content,
+                    parent_metadata=parent_metadata,
+                    published_at=parse_corpus_date(date),
+                    access=access,
+                    chunks=chunks,
+                    embeddings=embeddings,
+                    chunk_metadata=chunk_metadata,
                 )
-                for chunk, emb in zip(chunks, embeddings):
-                    chunk_rid = f"{document_rid}#chunk{chunk['index']}"
-                    chunk_content = {"text": chunk["text"], "context": f"substack:{feed_slug}:{slug}"}
-                    chunk_metadata = {
-                        "repo": REPO_NAME, "source_type": "substack_corpus", "feed_slug": feed_slug,
-                        "canonical_slug": slug, "url": url, "title": title, "author": author,
-                        "domain": domain, "tags": tags,
-                    }
-                    await conn.execute(
-                        """
-                        INSERT INTO koi_memory_chunks
-                            (chunk_rid, document_rid, chunk_index, total_chunks, content, embedding_3072, metadata)
-                        VALUES ($1::text, $2::text, $3::int, $4::int, $5::jsonb, $6::vector, $7::jsonb)
-                        ON CONFLICT (chunk_rid) DO NOTHING
-                        """,
-                        chunk_rid, document_rid, chunk["index"], len(chunks),
-                        json.dumps(chunk_content), str(emb), json.dumps(chunk_metadata),
-                    )
-                    inserted_chunks += 1
+            if not inserted:
+                print(f"[{feed_slug}] skipped concurrent existing RID: {document_rid}")
+                continue
             inserted_posts += 1
+            inserted_chunks += post_chunk_count
             if inserted_posts % 20 == 0:
                 print(f"[{feed_slug}]   {inserted_posts}/{len(planned)} posts, {inserted_chunks} chunks")
 
