@@ -31,7 +31,7 @@
         "additionalProperties": true,
         "properties": {
           "name": {"type": "string"},
-          "type": {"enum": ["Person", "Organization", "Project", "Concept", "Location", "Protocol", "CaseStudy"]},
+          "type": {"enum": ["Person", "Organization", "Project", "Concept", "Location", "Protocol", "CaseStudy", "Document", "Event"]},
           "first_seen_chunk": {"type": "integer", "minimum": 0},
           "mention_count": {"type": "integer", "minimum": 1}
         }

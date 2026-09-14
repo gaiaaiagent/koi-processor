@@ -34,12 +34,22 @@ Usage:
 Exit codes
     0  both gates pass
     1  a gate failed (identity blocked, or semantic verdict is `fail`)
-    2  semantic verdict is `review` and --strict-review was given
+    2  semantic verdict is `review` and --strict-review was given, OR identity is
+       `pass_after_preregistration` and --strict-preregistration was given
     3  misconfiguration (document not found, payload unreadable, no chunks)
 
 `review` exits 0 by default. It means "a human should look", not "this is broken",
 and making it fail by default would push operators toward running with the gate
 off — which is worse than a verdict nobody blocks on.
+
+`pass_after_preregistration` ALSO exits 0, and that is a correction (2026-09-14).
+The status was introduced precisely to say "the only unbound endpoints are ones
+that do not exist yet, which is every first ingest" — and then the exit code
+lumped it in with `blocked` anyway, so the two michaelgarfield documents whose
+sole finding was a not-yet-existing essay reported exit 1. An operator reading the
+number rather than the word would conclude the gate had refused them. Use
+--strict-preregistration when you genuinely mean "this payload must create
+nothing".
 """
 
 from __future__ import annotations
@@ -54,6 +64,7 @@ from pathlib import Path
 import asyncpg
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from api import document_extraction_contract as contract  # noqa: E402
 from api import ingest_identity as ident  # noqa: E402
 from api.extraction_quality import assess_extraction  # noqa: E402
 from api.resolution_primitives import (  # noqa: E402
@@ -139,12 +150,36 @@ async def main() -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable report")
     ap.add_argument("--strict-review", action="store_true",
                     help="exit 2 when the semantic verdict is `review`")
-    ap.add_argument("--alias-decisions", help="JSON file of audited {label: uri}")
+    ap.add_argument("--strict-preregistration", action="store_true",
+                    help="exit 2 when identity is `pass_after_preregistration`, i.e. "
+                         "the payload would create entities that do not exist yet")
+    ap.add_argument("--alias-decisions", help="JSON file of audited {label: uri} — "
+                                              "WHICH identity a label means")
+    ap.add_argument("--type-decisions", help="JSON file of audited {label: entity_type} — "
+                                            "WHAT a label is; the only thing that clears "
+                                            "a cross_type_conflict")
     args = ap.parse_args()
 
     alias_decisions = {}
     if args.alias_decisions:
-        alias_decisions = json.loads(Path(args.alias_decisions).read_text())
+        alias_decisions = json.loads(Path(args.alias_decisions).expanduser().read_text())
+
+    # Issue #68 requirement 7. `preflight_endpoints` has accepted type decisions
+    # since #66, but nothing passed them: the parameter existed and no caller
+    # supplied it, so the blocker's own remedy ("Supply an audited type decision")
+    # was unreachable from a command line. A decision naming a type the extractor
+    # cannot emit is refused here rather than silently binding nothing.
+    type_decisions = {}
+    if args.type_decisions:
+        type_decisions = json.loads(Path(args.type_decisions).expanduser().read_text())
+        bad = {k: v for k, v in type_decisions.items()
+               if not contract.is_extractable(v)}
+        if bad:
+            print(f"MISCONFIGURED: --type-decisions names type(s) outside "
+                  f"{contract.DOCUMENT_TYPE_CONTRACT_VERSION}: "
+                  f"{json.dumps(bad, sort_keys=True)}. Admitted: "
+                  f"{', '.join(contract.DOCUMENT_ENTITY_TYPE_NAMES)}", file=sys.stderr)
+            return 3
 
     conn = await asyncpg.connect(POSTGRES_URL)
     try:
@@ -171,7 +206,8 @@ async def main() -> int:
             eps = ident.collect_endpoints(payload, normalize=normalize_entity_text)
             pre = await ident.preflight_endpoints(
                 conn, eps, normalize=normalize_entity_text,
-                normalize_alias_fn=normalize_alias, alias_decisions=alias_decisions)
+                normalize_alias_fn=normalize_alias, alias_decisions=alias_decisions,
+                type_decisions=type_decisions)
             identity_evidence["preflight"] = pre.as_evidence()
             ident.require_no_blockers(pre)
             # An endpoint the preflight classified MISSING is not unbindable — a real
@@ -220,6 +256,23 @@ async def main() -> int:
             identity_evidence=identity_evidence)
         report["quality"] = q.as_dict()
 
+        # ── Type contract, reported but never gated ─────────────────────────
+        # Read off the payload as it stands rather than re-running the merge: this
+        # is an audit of what a stored extraction contains, and recomputing would
+        # report what a merge WOULD do today, which is a different claim.
+        seen_types: dict = {}
+        for e in payload.get("entities") or []:
+            seen_types[e.get("type")] = seen_types.get(e.get("type"), 0) + 1
+        report["type_contract"] = {
+            "version": contract.DOCUMENT_TYPE_CONTRACT_VERSION,
+            "admitted": len(contract.DOCUMENT_ENTITY_TYPE_NAMES),
+            "types_present": dict(sorted((str(k), v) for k, v in seen_types.items())),
+            "off_contract_types": sorted(
+                str(k) for k in seen_types if not contract.is_extractable(k)),
+            "conflicts": payload.get("type_conflicts") or [],
+            "audited_type_decisions": type_decisions,
+        }
+
         # ── Provenance, reported but never gated ────────────────────────────
         report["provenance"] = {
             "windows": len(wins),
@@ -235,8 +288,16 @@ async def main() -> int:
             i = report["identity"]
             print(f"document: {args.document_rid}")
             print(f"\nGATE 1 — identity: {i['status'].upper()}")
-            if i["status"] == "blocked":
+            if i["status"] in ("blocked", "pass_after_preregistration"):
                 print(f"  {i['reason'][:400]}")
+                for b in i.get("blockers") or []:
+                    print(f"  BLOCKER {b.get('state')}: {b.get('name')!r} "
+                          f"({b.get('type')}) existing={b.get('existing') or b.get('live_uris')}")
+                pend = i.get("would_preregister") or []
+                if pend:
+                    print(f"  {len(pend)} endpoint(s) a real ingest would pre-register: "
+                          f"{', '.join(map(repr, pend[:8]))}"
+                          + (" …" if len(pend) > 8 else ""))
             else:
                 print(f"  {i['endpoints']} endpoints -> {i['distinct_uris']} distinct URIs "
                       f"(bijective={i['bijective']})")
@@ -250,6 +311,16 @@ async def main() -> int:
             print(f"\nGATE 2 — semantic quality: {q.status.upper()}")
             for d in q.dimensions:
                 print(f"  {d.name:26} {d.status:7} {str(d.value):9} {d.detail[:66]}")
+            tc = report["type_contract"]
+            print(f"\ntype contract: {tc['version']} | {tc['admitted']} admitted types"
+                  f" | {len(tc['conflicts'])} cross-window coercion(s)"
+                  f" | {len(tc['off_contract_types'])} off-contract type(s)")
+            for c in tc["conflicts"][:6]:
+                print(f"  coerced {c['name']!r} -> {c['kept']} over "
+                      f"{'/'.join(c['dropped'])}")
+            if tc["off_contract_types"]:
+                print(f"  off-contract types present: {tc['off_contract_types']} — these "
+                      f"rank below every admitted type in a cross-window merge")
             p = report["provenance"]
             print(f"\nprovenance: {p['windows']} windows | providers={p['providers'] or '-'} "
                   f"| models={p['models'] or '-'} | routes={p['routes']}")
@@ -257,9 +328,12 @@ async def main() -> int:
                 print(f"  {p['windows_without_producer']} window(s) predate migration 125 "
                       f"and carry no producer — route_used alone is unreliable (see #64)")
 
-        if report["identity"]["status"] != "pass" or q.status == "fail":
+        identity_status = report["identity"]["status"]
+        if identity_status not in ("pass", "pass_after_preregistration") or q.status == "fail":
             return 1
         if q.status == "review" and args.strict_review:
+            return 2
+        if identity_status == "pass_after_preregistration" and args.strict_preregistration:
             return 2
         return 0
     finally:

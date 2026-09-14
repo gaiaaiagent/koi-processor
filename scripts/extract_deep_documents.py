@@ -53,6 +53,7 @@ from jsonschema import Draft202012Validator
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.provider_http import provider_async_client  # noqa: E402
 from api import ingest_identity as ident  # noqa: E402
+from api import document_extraction_contract as contract  # noqa: E402
 from api.extraction_quality import assess_extraction  # noqa: E402
 from api.resolution_primitives import (  # noqa: E402
     normalize_entity_text, normalize_alias,
@@ -164,8 +165,13 @@ OPENAI_MAX_TOKENS = int(os.getenv("DOC_EXTRACTOR_OPENAI_MAX_TOKENS", "12000"))
 OPENAI_NO_THINK = os.getenv("DOC_EXTRACTOR_OPENAI_NO_THINK", "0").strip().lower() in ("1", "true", "yes")
 
 # Type-priority coercion (plan §23): highest wins on cross-window conflict.
-TYPE_PRIORITY = {"Person": 7, "Organization": 6, "Project": 5, "Location": 4,
-                 "Protocol": 3, "CaseStudy": 2, "Concept": 1}
+#
+# NO LONGER WRITTEN HERE. Until 2026-09-14 this dict was one of six hand-maintained
+# copies of the extraction type vocabulary, and it was missing `Document` and
+# `Event` — so `.get(etype, 0)` silently ranked them BELOW `Concept`, the floor.
+# Issue #68. The vocabulary is single-sourced and drift-tested now; see
+# api/document_extraction_contract.py + tests/test_document_extraction_type_contract.py.
+TYPE_PRIORITY = contract.TYPE_PRIORITY
 
 
 class ExtractionError(RuntimeError):
@@ -640,6 +646,54 @@ def build_windows(chunks: List[Tuple[int, str]], target_chars: int, overlap_chun
     return windows
 
 
+def assert_contract_surfaces(template: str, schema: dict,
+                             prompt_path: Path, schema_path: Path) -> None:
+    """Refuse to run against a prompt or schema that disagrees with the contract.
+
+    THE COMMITTED FILES ARE NOT NECESSARILY THE FILES THIS RUN LOADS. All four
+    paths are env-overridable (DOC_EXTRACTOR_PROMPT_FILE, _SCHEMA_FILE,
+    _PROMPT_V2_FILE, _SCHEMA_V2_FILE), and the launchd job runs from a SEPARATE
+    checkout (`koi-processor-runtime`) that is refreshed by `git pull` — so it can
+    sit several commits behind this one indefinitely. A test that reads the files
+    in THIS repository proves the repository is consistent; it proves nothing about
+    what an unattended run actually sent to a model.
+
+    Issue #68 requirement 5 asks for drift detection "at startup/tests". This is
+    the startup half, and it is the half that covers the deployment gap that let
+    `Document` and `Event` stay un-emittable while the registry admitted them.
+
+    Fails loudly and terminally: an extraction that cannot emit the right type
+    writes a wrong one, and under PR #66's pinning that wrong type is permanent.
+    """
+    want = list(contract.DOCUMENT_ENTITY_TYPE_NAMES)
+    try:
+        got = schema["properties"]["entities"]["items"]["properties"]["type"]["enum"]
+    except (KeyError, TypeError) as e:
+        raise ExtractionError(
+            "contract_drift",
+            f"{schema_path}: no entities[].type enum to check against "
+            f"{contract.DOCUMENT_TYPE_CONTRACT_VERSION} ({e})", terminal=True) from e
+    if list(got) != want:
+        raise ExtractionError(
+            "contract_drift",
+            f"{schema_path} admits {got}, but {contract.DOCUMENT_TYPE_CONTRACT_VERSION} "
+            f"admits {want}. Refusing to extract: a type the schema forbids cannot be "
+            f"emitted, and a wrong type written under a pinned identity is permanent. "
+            f"Refresh this checkout, or run scripts/render_extraction_contract.py.",
+            terminal=True)
+
+    # The prompt is what the model actually reads. A schema-conformant run whose
+    # PROMPT still lists seven types produces seven-type output that validates
+    # perfectly — the drift would be invisible to every downstream check.
+    missing = [n for n in want if f"`{n}`" not in template]
+    if missing:
+        raise ExtractionError(
+            "contract_drift",
+            f"{prompt_path} never mentions {missing} — the model would not be told "
+            f"those types exist, and its output would still validate. Refresh this "
+            f"checkout, or run scripts/render_extraction_contract.py.", terminal=True)
+
+
 def build_prompt(template: str, window: Window, window_count: int) -> str:
     placeholder = "<!-- The pipeline appends the concatenated window chunks here at call time -->"
     if placeholder not in template:
@@ -653,8 +707,52 @@ def build_prompt(template: str, window: Window, window_count: int) -> str:
 # ── Cross-window merge (deterministic) ────────────────────────────────────────────
 
 def merge_extractions(per_window: List[dict], windows: List[Window]) -> Dict[str, Any]:
-    """Union entities (type-priority coercion) + dedup facts across windows."""
+    """Union entities (type-priority coercion) + dedup facts across windows.
+
+    Entities are keyed on the NORMALIZED NAME ONLY, deliberately: the same entity
+    typed differently by two windows must become one entity, which is what
+    TYPE_PRIORITY resolves. Keying on (name, type) instead would turn every
+    cross-window disagreement into a duplicate pair, which is worse.
+
+    What that costs — and what `type_conflicts` now buys back (issue #68 req. 4) —
+    is that the coercion used to be INVISIBLE. Two genuinely different things
+    sharing one normalized name (the `Freedom` app and the abstract `freedom`) get
+    silently folded into whichever type ranks higher, and the caller sees a clean
+    entity list with no sign a decision was made. Every coercion, and every
+    off-contract type seen, is now reported in the merged payload so the identity
+    gate and the run receipt can show it. Nothing is suppressed; nothing is guessed.
+    """
     ent: Dict[str, Dict[str, Any]] = {}
+    type_conflicts: Dict[str, Dict[str, Any]] = {}
+    unknown_types: Dict[str, int] = {}
+
+    warned: set = set()
+
+    def _note_if_off_contract(etype: Optional[str], name: str) -> None:
+        """Count EVERY entity record carrying a type the contract does not admit.
+
+        Separate from the priority lookup on purpose: folding it in made the count
+        depend on how many comparisons a label happened to be involved in, which is
+        an artefact of window layout rather than a fact about the payload. A cached
+        payload from an older contract version, or a hand-corrected one, can
+        legitimately carry such a type — it must not vanish into the floor without
+        anyone being told, and the number reported must mean something.
+        """
+        if contract.is_extractable(etype):
+            return
+        key = str(etype)
+        unknown_types[key] = unknown_types.get(key, 0) + 1
+        if key not in warned:                     # once per distinct type, not per record
+            warned.add(key)
+            logger.warning(
+                "entity %r carries type %r, which is not in %s — ranked below every "
+                "admitted type for cross-window merging", name, etype,
+                contract.DOCUMENT_TYPE_CONTRACT_VERSION)
+
+    def _priority(etype: Optional[str]) -> int:
+        pri, _known = contract.priority_for(etype)
+        return pri
+
     for ex in per_window:
         for e in ex.get("entities", []):
             k = _norm(e["name"])
@@ -662,12 +760,24 @@ def merge_extractions(per_window: List[dict], windows: List[Window]) -> Dict[str
                 continue
             cur = ent.get(k)
             etype = e["type"]
+            _note_if_off_contract(etype, e["name"])
             if cur is None:
                 ent[k] = {"name": e["name"], "type": etype,
                           "first_seen_chunk": e["first_seen_chunk"], "mention_count": e["mention_count"]}
             else:
-                if TYPE_PRIORITY.get(etype, 0) > TYPE_PRIORITY.get(cur["type"], 0):
-                    cur["type"] = etype
+                if etype != cur["type"]:
+                    incoming, incumbent = _priority(etype), _priority(cur["type"])
+                    kept, dropped = ((etype, cur["type"]) if incoming > incumbent
+                                     else (cur["type"], etype))
+                    rec = type_conflicts.setdefault(
+                        k, {"normalized": k, "name": cur["name"], "kept": kept,
+                            "dropped": [], "occurrences": 0})
+                    rec["kept"] = kept
+                    if dropped not in rec["dropped"]:
+                        rec["dropped"].append(dropped)
+                    rec["occurrences"] += 1
+                    if incoming > incumbent:
+                        cur["type"] = etype
                 cur["first_seen_chunk"] = min(cur["first_seen_chunk"], e["first_seen_chunk"])
                 cur["mention_count"] += e["mention_count"]
                 if len(e["name"]) > len(cur["name"]):      # prefer most-specific surface form
@@ -688,7 +798,16 @@ def merge_extractions(per_window: List[dict], windows: List[Window]) -> Dict[str
                     prev["confidence"] = "high"
 
     type_map = {k: v["type"] for k, v in ent.items()}
-    return {"entities": list(ent.values()), "facts": list(facts.values()), "type_map": type_map}
+    if type_conflicts:
+        logger.warning(
+            "cross-window type coercion on %d label(s): %s", len(type_conflicts),
+            "; ".join(f"{c['name']!r} kept {c['kept']} over {'/'.join(c['dropped'])}"
+                      for c in list(type_conflicts.values())[:6]))
+    return {"entities": list(ent.values()), "facts": list(facts.values()),
+            "type_map": type_map,
+            "type_conflicts": sorted(type_conflicts.values(), key=lambda c: c["normalized"]),
+            "unknown_types": dict(sorted(unknown_types.items())),
+            "type_contract_version": contract.DOCUMENT_TYPE_CONTRACT_VERSION}
 
 
 # ── Discourse merge + write (thorough tier only) ───────────────────────────────────
@@ -930,24 +1049,52 @@ if DOC_IDENTITY_MODE not in ("strict", "warn", "off"):
         f"DOC_IDENTITY_MODE must be strict|warn|off, got {DOC_IDENTITY_MODE!r}. "
         f"Refusing to start: an unrecognised value must not silently mean 'off'.")
 
-# Audited alias decisions (issue #62 requirement 6): {payload label -> canonical URI}.
-# The ONLY thing that can clear an alias-only block, and the only sanctioned way two
-# distinct payload labels may share one URI. Recorded in the run's evidence.
-def _load_alias_decisions() -> Dict[str, str]:
-    path = os.getenv("DOC_IDENTITY_ALIAS_DECISIONS")
+# Audited operator decisions. Two kinds, deliberately separate files and separate
+# env vars, because they answer different questions and must not be conflatable:
+#
+#   DOC_IDENTITY_ALIAS_DECISIONS  {payload label -> canonical URI}   WHICH thing
+#       (issue #62 requirement 6) The ONLY thing that can clear an alias-only
+#       block, and the only sanctioned way two distinct payload labels may share
+#       one URI.
+#
+#   DOC_IDENTITY_TYPE_DECISIONS   {payload label -> entity_type}     WHAT it IS
+#       (issue #68 requirement 7) The ONLY thing that can clear a cross-type
+#       conflict. `preflight_endpoints` has accepted these since #66 and NOTHING
+#       PASSED THEM — the parameter existed, no caller supplied it, so the block's
+#       own suggested remedy was unreachable from the command line. Wired here and
+#       in scripts/check_document_integrity.py.
+#
+# Both are recorded in the run's evidence.
+def _load_decisions(env_var: str, what: str, *,
+                    valid: Optional[set] = None) -> Dict[str, str]:
+    path = os.getenv(env_var)
     if not path:
         return {}
     p = Path(path).expanduser()
     if not p.is_file():
-        raise SystemExit(f"DOC_IDENTITY_ALIAS_DECISIONS points at a missing file: {p}")
+        raise SystemExit(f"{env_var} points at a missing file: {p}")
     data = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
-        raise SystemExit(f"{p}: alias decisions must be a flat object of label -> URI")
+        raise SystemExit(f"{p}: {what} must be a flat object of label -> value")
+    if valid is not None:
+        bad = {k: v for k, v in data.items() if v not in valid}
+        if bad:
+            # A decision naming a type the extractor cannot emit would bind an
+            # endpoint to a type no payload can declare — it reads as resolved
+            # while resolving nothing. Refuse at load, not at use.
+            raise SystemExit(
+                f"{p}: {what} names type(s) outside {contract.DOCUMENT_TYPE_CONTRACT_VERSION}: "
+                f"{json.dumps(bad, sort_keys=True)}. Admitted: "
+                f"{', '.join(sorted(valid))}")
     return data
 
 
-alias_decisions: Dict[str, str] = _load_alias_decisions()
+alias_decisions: Dict[str, str] = _load_decisions(
+    "DOC_IDENTITY_ALIAS_DECISIONS", "alias decisions")
+type_decisions: Dict[str, str] = _load_decisions(
+    "DOC_IDENTITY_TYPE_DECISIONS", "type decisions",
+    valid=set(contract.DOCUMENT_ENTITY_TYPE_NAMES))
 
 
 async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
@@ -1227,6 +1374,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
     prompt_path, schema_path = prompt_schema_for_tier(tier)
     template = prompt_path.read_text(encoding="utf-8")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert_contract_surfaces(template, schema, prompt_path, schema_path)
     want_discourse = (tier == "thorough")
 
     async with pool.acquire() as conn:
@@ -1421,13 +1569,30 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             # the very resolution the rest of the payload depends on.
             frozen = None
             identity_evidence: Dict[str, Any] = {"mode": DOC_IDENTITY_MODE}
+            # The type contract this run was produced under, plus every decision
+            # the merge made on the caller's behalf. Recorded unconditionally —
+            # including when there are none — so a stored run distinguishes
+            # "no coercion happened" from "this build did not look" (issue #68).
+            identity_evidence["type_contract"] = {
+                "version": merged.get("type_contract_version"),
+                "conflicts": merged.get("type_conflicts") or [],
+                "unknown_types": merged.get("unknown_types") or {},
+                "audited_type_decisions": {k: v for k, v in type_decisions.items()},
+                "audited_alias_decisions": sorted(alias_decisions),
+            }
+            if merged.get("unknown_types"):
+                logger.warning(
+                    "extraction carried %d off-contract type(s) %s — they rank below "
+                    "every admitted type in the cross-window merge",
+                    len(merged["unknown_types"]), sorted(merged["unknown_types"]))
             if DOC_IDENTITY_MODE != "off":
                 endpoints = ident.collect_endpoints(merged, normalize=normalize_entity_text)
                 preflight = await ident.preflight_endpoints(
                     conn, endpoints,
                     normalize=normalize_entity_text,
                     normalize_alias_fn=normalize_alias,
-                    alias_decisions=alias_decisions)
+                    alias_decisions=alias_decisions,
+                    type_decisions=type_decisions)
                 identity_evidence["preflight"] = preflight.as_evidence()
                 logger.info("identity preflight: %d endpoints %s (drift-recovered=%d)",
                             len(endpoints), preflight.counts(),
@@ -1686,6 +1851,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                     "repair_passes_allowed": DOC_EXTRACTOR_REPAIR_PASSES,
                     "configured_transport": DOC_EXTRACTOR_TRANSPORT,
                     "schema_file": str(schema_path.name),
+                    "type_contract_version": contract.DOCUMENT_TYPE_CONTRACT_VERSION,
                 }),
                 "fail" if (budget_exhausted or windows_failed) else "pass",
                 quality.status if quality else "not_evaluated",

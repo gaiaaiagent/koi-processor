@@ -1067,7 +1067,7 @@ class TestCrossTypeConflictBlocks:
         assert report.findings[0].state == ident.STATE_MISSING
         ident.require_no_blockers(report)
 
-    async def test_preregistration_refuses_the_twin_even_if_the_gate_was_skipped(self, conn):
+    async def test_preregistration_refuses_the_twin_when_no_decision_covers_it(self, conn):
         """preregister_missing is callable directly, and minting is irreversible
         once the type is hashed into a URI. It refuses rather than trusting the
         caller ran the gate."""
@@ -1075,10 +1075,12 @@ class TestCrossTypeConflictBlocks:
         name = f"Cross Typed {t}"
         await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
                            text=name, etype="Project")
-        _eps, report = await _preflight(conn, [(name, "Organization")],
-                                        type_decisions={name: "Organization"})
-        assert report.findings[0].state == ident.STATE_MISSING   # gate cleared...
-        report.findings[0].state = ident.STATE_MISSING           # ...and still blocked below
+        _eps, report = await _preflight(conn, [(name, "Organization")])
+        # Forced past the gate the way a direct caller would: the state says
+        # MISSING, but the finding still carries the cross-type evidence and NO
+        # audited decision.
+        report.findings[0].state = ident.STATE_MISSING
+        assert report.findings[0].type_decision is None
 
         class _NeverCalled:
             async def post(self, *a, **k):
@@ -1087,3 +1089,75 @@ class TestCrossTypeConflictBlocks:
         with pytest.raises(ident.IdentityError) as exc:
             await ident.preregister_missing(_NeverCalled(), report)
         assert exc.value.blockers[0]["state"] == ident.STATE_CROSS_TYPE_CONFLICT
+
+    async def test_a_decision_naming_a_different_type_does_not_clear_anything(self, conn):
+        """A decision that contradicts the payload is not a decision about it.
+
+        Acting on it would bind the endpoint to a type nothing asserted, so the
+        conflict stands at BOTH gates.
+        """
+        t = _tag()
+        name = f"Cross Typed {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        _eps, report = await _preflight(conn, [(name, "Organization")],
+                                        type_decisions={name: "Event"})
+        assert report.findings[0].state == ident.STATE_CROSS_TYPE_CONFLICT
+        assert report.findings[0].type_decision is None
+        with pytest.raises(ident.IdentityError):
+            ident.require_no_blockers(report)
+
+    async def test_an_audited_decision_reaches_preregistration(self, conn):
+        """CORRECTED CONTRACT, 2026-09-14 (issue #68 requirement 7).
+
+        This test previously asserted the opposite: that preregistration refuses a
+        cross-type mint EVEN WHEN an audited type decision had cleared the gate.
+        That made the escape hatch the blocker's own message advertises —
+        "Supply an audited type decision" — unreachable end to end. The preflight
+        cleared the finding to MISSING and the registration step then raised on it,
+        so the operator's options were really just "merge/retype first", and
+        supplying a decision turned a clean, explanatory block into a later and
+        more confusing failure.
+
+        The refusal is kept for everything it was actually protecting: a caller who
+        skipped the gate (above), and a decision that names a different type
+        (above). What changes is that a decision the preflight ACCEPTED now travels
+        on the finding and is honoured here, and the receipt records that the mint
+        rested on it.
+        """
+        t = _tag()
+        name = f"Cross Typed {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        _eps, report = await _preflight(conn, [(name, "Organization")],
+                                        type_decisions={name: "Organization"})
+        assert report.findings[0].state == ident.STATE_MISSING
+        assert report.findings[0].type_decision == "Organization"
+
+        posted = []
+        minted = f"orn:personal-koi.entity:organization-{t}"
+
+        class _Recording:
+            async def post(self, path, json=None, timeout=None):
+                posted.append(json)
+
+                class _R:
+                    status_code = 200
+
+                    @staticmethod
+                    def json():
+                        return {"success": True, "canonical_uri": minted,
+                                "is_new": True, "cross_type_warning": "same label is a Project"}
+                return _R()
+
+        out = await ident.preregister_missing(_Recording(), report)
+        assert out["uri_map"] == {name: minted}
+        assert posted[0]["entity_type"] == "Organization"
+        assert posted[0]["force_type"] is True and posted[0]["exact_only"] is True
+        receipt = out["receipts"][0]
+        assert receipt["audited_type_decision"] == "Organization", (
+            "a mint that rested on an operator decision must say so in its receipt"
+        )
+        assert receipt["cross_type_warning"], (
+            "the twin must not be minted quietly — the advisory is still recorded"
+        )

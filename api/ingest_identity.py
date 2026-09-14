@@ -313,6 +313,15 @@ class EndpointFinding:
     # A "current_norm" hit is a live instance of issue #61 — the row is invisible
     # to a stock exact lookup and would have been duplicated.
     matched_via: Optional[str] = None
+    # The audited entity_type an operator supplied for this label, when one cleared
+    # a cross-type conflict. It travels ON THE FINDING rather than being re-read
+    # from a dict downstream: `preregister_missing` has its own belt-and-braces
+    # cross-type refusal, and before this field existed that refusal fired even for
+    # a conflict the operator had already decided — so the documented escape hatch
+    # ("Supply an audited type decision") could not actually be taken. Issue #68
+    # requirement 7: conflicts keep blocking, but a decision must be able to clear
+    # them end to end, not just at the first of two gates.
+    type_decision: Optional[str] = None
 
     def as_evidence(self) -> dict:
         return {
@@ -321,6 +330,7 @@ class EndpointFinding:
             "normalized": self.endpoint.normalized,
             "state": self.state,
             "matched_via": self.matched_via,
+            "type_decision": self.type_decision,
             "type_defaulted": self.endpoint.type_defaulted,
             "roles": sorted(self.endpoint.roles),
             "live_uris": sorted(self.live_uris),
@@ -453,6 +463,7 @@ async def preflight_endpoints(
         live_uris = sorted({r["fuseki_uri"] for r in live_exact})
         alias_uris = sorted({r["fuseki_uri"] for r in alias_rows} - set(live_uris))
         matched_via = None
+        type_decision = None
 
         # An AUDITED ALIAS DECISION is checked first, ahead of every heuristic
         # branch below. The operator has named the exact URI this label means, so
@@ -522,8 +533,21 @@ async def preflight_endpoints(
             # Live under another type. Creating the declared-type twin here is the
             # thing the contract exists to prevent, so it blocks unless an audited
             # type decision names the type explicitly.
+            #
+            # A decision that names a DIFFERENT type from the one the payload
+            # declares does not clear anything — it contradicts the payload, and
+            # acting on it would bind the endpoint to a type nobody asserted. Only
+            # an exact agreement clears, and it is recorded on the finding so the
+            # registration step can honour the same decision.
             decided_type = type_decisions.get(ep.name)
-            state = STATE_MISSING if decided_type == ep.entity_type else STATE_CROSS_TYPE_CONFLICT
+            if decided_type is not None and decided_type != ep.entity_type:
+                logger.warning(
+                    "audited type decision for %r says %s but the payload declares "
+                    "%s — the conflict stands", ep.name, decided_type, ep.entity_type)
+            if decided_type == ep.entity_type:
+                state, type_decision = STATE_MISSING, decided_type
+            else:
+                state, type_decision = STATE_CROSS_TYPE_CONFLICT, None
         else:
             state = STATE_MISSING
 
@@ -536,6 +560,7 @@ async def preflight_endpoints(
                 alias_uris=alias_uris,
                 cross_type_uris=sorted({r["fuseki_uri"] for r in cross_type}),
                 matched_via=matched_via,
+                type_decision=type_decision,
             )
         )
 
@@ -586,7 +611,13 @@ async def preregister_missing(
         # stopped a cross-type conflict, but this function can be called directly
         # and minting the cross-type twin is irreversible once its type is hashed
         # into a URI. Refuse rather than trust the caller ran the gate.
-        if finding.cross_type_uris:
+        #
+        # The one thing that gets through is the escape hatch the message below
+        # names: an audited type decision, recorded on the finding by the preflight
+        # that already evaluated it. Before it was carried here, this refusal fired
+        # on decided conflicts too — the suggested remedy did nothing, which is a
+        # worse failure than no remedy at all.
+        if finding.cross_type_uris and finding.type_decision != ep.entity_type:
             raise IdentityError(
                 f"refusing to preregister {ep.name!r} as {ep.entity_type}: the label is "
                 f"already live under another type ({finding.cross_type_uris[:3]}). Supply an "
@@ -594,6 +625,15 @@ async def preregister_missing(
                 blockers=[{"state": STATE_CROSS_TYPE_CONFLICT, "name": ep.name,
                            "requested_type": ep.entity_type,
                            "existing": finding.cross_type_uris}])
+        if finding.cross_type_uris:
+            # Reached only with a matching audited decision (the refusal above). The
+            # twin is being created on purpose; say so loudly enough that it turns up
+            # in a log grep, because the URI it mints cannot be corrected in place.
+            logger.warning(
+                "minting %r as %s ALONGSIDE %d live row(s) of another type (%s) — "
+                "authorised by an audited type decision",
+                ep.name, ep.entity_type, len(finding.cross_type_uris),
+                finding.cross_type_uris[:3])
         body = {
             "entity_type": ep.entity_type,
             "name": ep.name,
@@ -633,6 +673,9 @@ async def preregister_missing(
             "collision_warning": data.get("collision_warning"),
             "normalizer_version": NORMALIZER_VERSION,
             "contract_version": IDENTITY_CONTRACT_VERSION,
+            # Present only when an audited decision was what allowed this mint
+            # despite a live same-label row of another type.
+            "audited_type_decision": (ep.entity_type if finding.cross_type_uris else None),
         })
 
     # An exact-only registration that lands on an URI another endpoint already owns
