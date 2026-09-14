@@ -14,9 +14,20 @@
 >   Its down file DESTROYS data that lives nowhere else; it exports first, below
 >   `ON_ERROR_STOP`.
 >
-> **`com.personal-koi.substack-deep-extract` was RE-ENABLED** (it had been disabled
-> 2026-09-13 21:31:18, 13 min after its batch was bounded to 3/run). Backlog at re-enable:
-> **359** documents, all one feed (`michaelgarfield`) ingested that night.
+> **`com.personal-koi.substack-deep-extract`: re-enabled, ran ONE bounded batch (3 docs),
+> then DISABLED AGAIN BY THE OPERATOR 2026-09-14.** No 07:45 run is scheduled. Do not
+> re-enable until the deployment preconditions below are met. Backlog: **356**.
+>
+> That one batch is why: the gate found it wrote **5 wrong bindings across 3 documents** —
+> two fuzzy title collapses ('The End of Hoop Jumping'→'The End of the Universal Map'
+> JW 0.8518 against a 0.85 threshold; 'How To Think About Science'→'How to Think About
+> the Future' JW 0.9064), one cross-type binding, and two Freedom facts bound by EXACT
+> match to the abstract Concept.
+>
+> **Re-enable preconditions (operator, 2026-09-14):** deploy the hardened code to BOTH
+> `koi-processor-runtime` AND `koi-processor-service`, restart the API, verify OpenAPI
+> exposes `subject_uri`/`object_uri`, and run a canary proving `endpoints_pinned`.
+> Updating only the runtime clone leaves the live API on the unpinned write path.
 >
 > ⚠ **The job runs UN-HARDENED code.** It executes from `koi-processor-runtime` @ `c11a4c3`
 > (`regen-prod`), which does not carry the #62 identity contract — that work is in **draft PR
@@ -27,10 +38,28 @@
 > **169 live duplicate sets, 125 of them drift-created, 347 rows.** These are issue #61 AC6's
 > "existing same-label/same-type duplicate sets". Remediation is an operator merge pass.
 >
-> **Known blocker for the next paper ingest:** `knowledge graph` has two live Concept
-> identities — `…eb35e43aff96` (2026-04-16, 112 facts) and `…eddffd781f1d` (2026-06-02,
-> 0 facts, minted by document-ingest itself). The identity gate blocks any payload
-> referencing that bare label until they are merged.
+> **RESOLVED 2026-09-14 (operator decisions):** `knowledge graph` duplicate merged
+> (log **325**). `DWeb Berlin` retyped Project→Event and merged into
+> `DWeb Camp 2026: Root Systems` (logs **326**, **327**), alias `dweb berlin` retained,
+> no Organization minted. `Freedom (internet-blocking software)` created as a Project
+> distinct from the abstract `freedom` Concept.
+>
+> ⚠ **3 documents from the 2026-09-14 00:00 run are HALF-REPAIRED.** Five facts were
+> soft-retracted and federated as `knowledge_episode` UPDATEs, but
+> `document_entity_links` (16/15/14) and `session_discourse_moves` (7/8/6) are **still
+> stale**. Local fact retraction is NOT complete repair. `deep_extracted_at` is left in
+> place deliberately so the unattended backlog cannot select them. Manual pinned replay
+> required after PR #66 deploys — koi task `koi-2026-09-14-michaelgarfield-pinned-replay`
+> (due 09-21), alias decisions and before/after evidence in
+> `~/Documents/sources/michaelgarfield-substack-repair-20260914/`. Do NOT use `--force`
+> or a generic re-ingest: the current path deletes neither stale links nor stale moves.
+>
+> ⚠ **`retract_fact` emits NO federation event.** Every fact ever retracted on this node
+> is still live on peers. The 3 UPDATEs above were emitted by hand. Worth its own issue.
+>
+> ⚠ **Peer APPLICATION is unverified.** `EventQueue.confirm()` is receipt, not
+> application; the peer read API hides retracted facts; no SSH/DB access to any peer.
+> Delivery to 4 peers is established; application on none is.
 >
 > **Run the gates before ingesting anything:**
 > `venv/bin/python scripts/check_document_integrity.py --document-rid <rid> [--payload <curated.json>]`
