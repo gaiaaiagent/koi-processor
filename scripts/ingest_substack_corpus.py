@@ -32,9 +32,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import asyncpg
+import httpx
 import tiktoken
 
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi")
+KOI_BASE_URL = os.getenv(
+    "PERSONAL_KOI_API_URL",
+    os.getenv("DOC_INGEST_KOI_URL", "http://localhost:8351"),
+)
 
 
 def parse_corpus_date(raw: Optional[str]) -> Optional[datetime]:
@@ -277,6 +282,43 @@ async def write_corpus_post(*, conn, document_rid: str, parent_content: Dict,
     return True, inserted_chunks
 
 
+async def link_author_for_inserted_post(*, inserted: bool, http, document_rid: str,
+                                        author: str, title: str, content: str) -> bool:
+    """Best-effort author link for a newly inserted canonical corpus row."""
+    if not inserted:
+        return False
+    try:
+        response = await http.post(
+            f"{KOI_BASE_URL}/ingest",
+            json={
+                "document_rid": document_rid,
+                "content": content[:2000],
+                "entities": [{
+                    "name": author,
+                    "type": "Person",
+                    "confidence": 0.99,
+                    "context": f"Author of Substack post: {title}",
+                }],
+                "source": SOURCE_SENSOR,
+            },
+            timeout=30.0,
+        )
+        if response.status_code != 200:
+            print(
+                f"WARNING: /ingest returned {response.status_code} while linking "
+                f"author for {document_rid}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+    except Exception as exc:
+        print(
+            f"WARNING: /ingest unavailable while linking author for {document_rid}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 async def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -304,6 +346,7 @@ async def main():
     print(f"[{feed_slug}] Corpus posts (url+content): {len(posts)}")
 
     conn = await asyncpg.connect(args.db_url)
+    link_http = None
     skip_log_path = Path(f"/tmp/{feed_slug}-ingest-skipped-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.log")
     try:
         existing_slugs = await fetch_existing_slugs(conn, feed_slug)
@@ -365,6 +408,7 @@ async def main():
             return 2
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+        link_http = httpx.AsyncClient(timeout=30.0)
 
         inserted_posts = inserted_chunks = actual_tokens = 0
         t0 = time.time()
@@ -405,6 +449,14 @@ async def main():
                 continue
             inserted_posts += 1
             inserted_chunks += post_chunk_count
+            await link_author_for_inserted_post(
+                inserted=inserted,
+                http=link_http,
+                document_rid=document_rid,
+                author=author,
+                title=parent_content["title"],
+                content=parent_content["text"],
+            )
             if inserted_posts % 20 == 0:
                 print(f"[{feed_slug}]   {inserted_posts}/{len(planned)} posts, {inserted_chunks} chunks")
 
@@ -412,6 +464,8 @@ async def main():
         print(f"[{feed_slug}] Done: {inserted_posts}/{len(planned)} posts, {inserted_chunks} chunks in {time.time()-t0:.1f}s; ${final_cost:.4f} ({actual_tokens:,} tok)")
         return 0
     finally:
+        if link_http is not None:
+            await link_http.aclose()
         await conn.close()
 
 

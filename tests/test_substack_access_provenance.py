@@ -84,8 +84,16 @@ class _Chunker:
 
 
 class _Http:
+    def __init__(self, status_code=200, error=None):
+        self.status_code = status_code
+        self.error = error
+        self.calls = []
+
     async def post(self, *args, **kwargs):
-        return type("Response", (), {"status_code": 200})()
+        self.calls.append((args, kwargs))
+        if self.error:
+            raise self.error
+        return type("Response", (), {"status_code": self.status_code})()
 
 
 @pytest.mark.asyncio
@@ -246,3 +254,69 @@ async def test_corpus_insert_writes_private_access_columns():
     chunk_metadata = json.loads(conn.calls[1][2][6])
     assert chunk_metadata["audience"] == "subscriber_email"
     assert chunk_metadata["source_provenance"] == "gmail-subscriber-email"
+
+
+@pytest.mark.asyncio
+async def test_new_corpus_post_links_author_through_local_ingest(monkeypatch):
+    monkeypatch.setattr(corpus, "KOI_BASE_URL", "http://localhost:8351")
+    http = _Http()
+
+    linked = await corpus.link_author_for_inserted_post(
+        inserted=True,
+        http=http,
+        document_rid="substack-corpus:michaelgarfield:newsletter-only",
+        author="Michael Garfield",
+        title="Newsletter only",
+        content="complete newsletter text",
+    )
+
+    assert linked is True
+    assert len(http.calls) == 1
+    args, kwargs = http.calls[0]
+    assert args == ("http://localhost:8351/ingest",)
+    assert kwargs["json"] == {
+        "document_rid": "substack-corpus:michaelgarfield:newsletter-only",
+        "content": "complete newsletter text",
+        "entities": [{
+            "name": "Michael Garfield",
+            "type": "Person",
+            "confidence": 0.99,
+            "context": "Author of Substack post: Newsletter only",
+        }],
+        "source": corpus.SOURCE_SENSOR,
+    }
+    assert kwargs["timeout"] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_corpus_conflict_does_not_call_author_link_service():
+    http = _Http()
+
+    linked = await corpus.link_author_for_inserted_post(
+        inserted=False,
+        http=http,
+        document_rid="substack-corpus:author:existing",
+        author="Author",
+        title="Existing",
+        content="text",
+    )
+
+    assert linked is False
+    assert http.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("service down"), None])
+async def test_author_link_failure_does_not_fail_corpus_ingest(failure):
+    http = _Http(status_code=503, error=failure)
+
+    linked = await corpus.link_author_for_inserted_post(
+        inserted=True,
+        http=http,
+        document_rid="substack-corpus:author:new",
+        author="Author",
+        title="New",
+        content="text",
+    )
+
+    assert linked is False
