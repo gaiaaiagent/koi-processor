@@ -29,10 +29,14 @@
 > exposes `subject_uri`/`object_uri`, and run a canary proving `endpoints_pinned`.
 > Updating only the runtime clone leaves the live API on the unpinned write path.
 >
-> ⚠ **The job runs UN-HARDENED code.** It executes from `koi-processor-runtime` @ `c11a4c3`
-> (`regen-prod`), which does not carry the #62 identity contract — that work is in **draft PR
-> #66**, unmerged. Bringing the runtime clone forward after the merge is what puts the
-> backlog on the hardened path (there is already a dated koi task for the 09-19 refresh).
+> ⚠ **Both code paths are UN-HARDENED today.** The job executes from
+> `koi-processor-runtime` @ `c11a4c3` and the live API is a process started **2026-09-11**,
+> neither of which carries the #62 identity contract — that work is in **draft PR #66**,
+> unmerged. (An earlier version of this line said refreshing the runtime clone was
+> sufficient. It is not: facts are written by the API, so the *service* checkout and a
+> restart are what move the write path. Corrected by the operator 2026-09-14; the full
+> precondition list is above.) **Do not merge PR #66 yet** — it has no GitHub checks and
+> its worktree has carried uncommitted fixes absent from the PR.
 >
 > **New audit surface, queryable now:** `SELECT * FROM entity_current_norm_duplicates;` —
 > **169 live duplicate sets, 125 of them drift-created, 347 rows.** These are issue #61 AC6's
