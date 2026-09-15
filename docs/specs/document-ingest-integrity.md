@@ -25,12 +25,18 @@ write returned 201 and the structural gate passed.
 **Measured 2026-09-13: all four reported collapses still reproduce, unchanged**, with
 Jaro-Winkler scores matching the issue's table to four decimals:
 
-| requested | collapsed onto | JW | Concept threshold |
+| requested | collapsed onto | JW | Concept fuzzy threshold (`similarity_threshold`) |
 |---|---|---:|---:|
-| `Anthropic Claude 3 Opus` | `Anthropic Claude 3 Sonnet` | 0.9411 | 0.88 |
-| `Buehler 2024 fitted exponential degree model` | `…fitted power-law degree model` | 0.9168 | 0.88 |
-| `Buehler 2024 adversarial-X-LoRA generated graph` | `…adversarial-X-LoRA augmented graph` | 0.9608 | 0.88 |
-| `Buehler 2024 global-graph modularity score` | `…global-graph community structure` | 0.9393 | 0.88 |
+| `Anthropic Claude 3 Opus` | `Anthropic Claude 3 Sonnet` | 0.9411 | 0.75 |
+| `Buehler 2024 fitted exponential degree model` | `…fitted power-law degree model` | 0.9168 | 0.75 |
+| `Buehler 2024 adversarial-X-LoRA generated graph` | `…adversarial-X-LoRA augmented graph` | 0.9608 | 0.75 |
+| `Buehler 2024 global-graph modularity score` | `…global-graph community structure` | 0.9393 | 0.75 |
+
+The four scores are compared against Concept's Jaro-Winkler `similarity_threshold`
+of **0.75** (`api/entity_schema.py`; applied in `api/personal_ingest_api.py` as
+`threshold = schema.similarity_threshold` → `if score >= threshold`); 0.88 is
+`semantic_threshold`, the separate embedding-cosine threshold used at Tier 2, which an
+earlier version of this table mislabelled as the fuzzy cut.
 
 They survive the current strict guards because `passes_distinctive_token_check`
 rejects **disjoint** distinctive-token sets, and these pairs are not disjoint: they
@@ -218,8 +224,10 @@ another model's output would make the measurement depend on the thing measured.
 **No dimension is a raw count** (#64 requirement 5). Every one is a ratio whose
 denominator is a property of the source document, and the two load-bearing ones get
 *worse* when output is padded. Demonstrated: padding an honest 3-fact extraction with
-20 invented facts drives `citation_support` 1.0 → 0.13 and `fact_diversity`
-1.0 → 0.17.
+20 invented facts drives `citation_support` 1.0 → 0.13 and `predicate_concentration`
+0.33 → 0.91 (it *rises*, and higher is worse). Every citation-reading dimension reads
+the per-window `chunk_ranges` a fact actually cited, not the span widened across
+windows (`extraction-quality-v2`, 2026-09-14).
 
 | dimension | what it divides by | catches |
 |---|---|---|
@@ -229,7 +237,7 @@ denominator is a property of the source document, and the two load-bearing ones 
 | `citation_support` | facts | endpoint language absent from the cited span |
 | `endpoint_integrity` | — (carried from #62) | wrong-entity bindings |
 | `predicate_concentration` | facts (**higher is worse**) | one relation repeated for volume |
-| `discourse_variety` | moves (thorough) | a single move type |
+| `discourse_concentration` | moves (thorough; **higher is worse**; unmeasured → review under 5 moves) | one move type repeated for volume |
 
 ### A design error this layer had, found by running it on the real fixture
 
@@ -337,7 +345,9 @@ note in §4.
 
 ## 6. Tests
 
-`tests/test_ingest_identity.py`, 37 tests. Isolation is one asyncpg connection in a
+`tests/test_ingest_identity.py` (the current test count is recorded in
+`PROJECT_HANDOFF.md`, not here — it has moved three times since this section was
+written). Isolation is one asyncpg connection in a
 rolled-back transaction plus in-process ASGI; nothing talks to `localhost:8351`,
 because a test that posts over HTTP writes through a separate process holding its own
 pool against the **live** database and no environment variable can redirect that
@@ -370,5 +380,67 @@ constraint did NOT reject a partial waiver"). The first two attempts at those
 controls failed on a syntax error rather than the assertion, which proved nothing,
 and were redone.
 
-Pre-existing, unrelated: 3 failures in `tests/test_knowledge_router_facts_gate.py`,
-verified identical on a clean tree.
+Pre-existing, unrelated: **67 failures/errors across the full suite, byte-identical
+sets between this branch and a clean worktree at the merge-base — zero regressions.**
+Most are per-test schema fixtures missing `entity_merge_log.reversal`, which the
+production schema has; the 3 in `tests/test_knowledge_router_facts_gate.py` recorded
+here earlier are a subset of the 67, not the whole of it.
+
+
+---
+
+## Review fixes (2026-09-14, independent review of PR #66)
+
+Behaviour changes made in response to the independent review, one per finding.
+Tests for each live beside the code they cover (`tests/test_ingest_identity.py`,
+`tests/test_extraction_quality.py`, `tests/test_check_document_integrity.py`,
+`tests/test_migration_126.py`).
+
+- **B1** — `preregister_missing` resolved an ABSOLUTE registration URL (the `base_url`
+  argument, an absolute `post_path`, or the client's own base URL) BEFORE any request,
+  and refused with `IdentityError` when none was available; the extractor passes
+  `base_url=KOI_BASE_URL`. Previously a relative path on a hostless client raised
+  `httpx.UnsupportedProtocol` on every first ingest.
+- **B2** — cross-type conflict detection became per ENDPOINT: the same-label any-type
+  read is no longer filtered by the payload-wide type set, and an alias decision is
+  accepted at preflight only for a live row of the endpoint's own type.
+- **B3** — `FrozenMap.uri_for` / `type_for` were changed to resolve by the canonical
+  normalized key, so every raw spelling of a bound endpoint resolves;
+  `identity_map_incomplete` can no longer fire for spelling variants after
+  preregistration.
+- **M3** — an untyped fact endpoint (absent from `entities[]`, `type_map` and
+  `type_decisions`) was given `entity_type=None` and preflights to the new BLOCKING
+  state `type_undeclared`, with the graph's same-label rows (any type) as evidence;
+  only an audited type decision types it (`--type-decisions` /
+  `DOC_IDENTITY_TYPE_DECISIONS`). Nothing defaults to `Concept` any more.
+- **M4** — the freeze validates an alias decision's target: it must exist, be live (not
+  merged or revoked), be of the endpoint's type, and agree with `expected_uris`; new
+  blocker states `alias_decision_not_live` and `alias_decision_type_mismatch`.
+- **M5** — `EpisodeCreateResponse` gained `fact_ids`, listing the rows the request
+  inserted; `verify_persisted_graph(..., fact_ids=)` now verifies exactly those, and
+  the extractor refuses (`identity_verification_unscoped`) if a server returns none.
+  Episodes are shared by (`source_document`, `group_id`).
+- **M6** — the cross-window merge moved to `api/extraction_merge.py`, keyed on
+  `normalize_entity_text` (the identity key); the extractor re-exports it; facts carry
+  `chunk_ranges` (per-window citations) beside the widened `chunk_range`.
+- **M7** — `scripts/check_document_integrity.py` runs the production merge over the
+  stored windows; evaluates the bijection on the resolvable endpoints even when some
+  are missing; reports would-be-minted endpoints WITH the type they would be minted
+  as; counts blockers before truncating; and refuses a `--payload` whose
+  `curation.document_rid` differs from `--document-rid`.
+  `scripts/curate_cached_payload.py` emits the production merge.
+- **M1/M2** (quality) — `chunk_ranges` are used for coverage and citation; the
+  window-band fallback was fixed; `discourse_variety` was replaced by
+  `discourse_concentration` (higher is worse; `None` → review under 5 moves);
+  `QUALITY_CONTRACT_VERSION` = `extraction-quality-v2`; `ingest_document.py` reads
+  `ext["quality"]` so `semantic_status` reaches gate evidence.
+- **M8** — migration 126 became transactional (in-file `BEGIN;`/`COMMIT;`), records a
+  `koi_migrations` ledger row (`personal:126_document_extraction_type_registry`), and
+  asserts the extractable set EXACTLY (the count check accepted 'Meeting' extractable
+  plus 'CaseStudy' missing as 9). Its down file mirrors this for the legacy seven.
+  Dry-run and both negative controls: `tests/test_migration_126.py`.
+- **B4** (runbook, no code) — deploy #66 to BOTH `koi-processor-service` and
+  `koi-processor-runtime`, restart the API and check `/openapi.json` BEFORE any pinned
+  replay. Curated payloads are validation artifacts for the read-only gate only, not
+  replay inputs — no replay path consumes them until #69 defines sanctioned
+  reconciliation.
