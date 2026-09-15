@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-14 12:47 PDT
+**Updated:** 2026-09-14 17:15 PDT
 
-**Current status:** `fix/document-ingest-integrity`, clean and pushed; the #68 code is `3bbe405` and the branch tip is the wrap commit above it. **Draft PR #66** (0 checks — do NOT merge) now closes #62 and **#68**. #68 landed **in the branch only**: `api/document_extraction_contract.py` is the single source, all four prompt/schema surfaces derive from it, `Document`/`Event` admitted. Migrations 124/125 live; **126 written and NOT applied** (verified no-op). `substack-deep-extract` still **disabled and unloaded** (backlog 356).
+**Current status:** `fix/document-ingest-integrity`, clean, pushed at `c133ab8`. The review's blockers B1–B4/M1–M8 are **fixed in the branch, none deployed** (`cdc445c` identity · `741ab0a` quality · `8c711be` gate · `79f1a21` migration 126). **Draft PR #66** (0 checks — do NOT merge) closes #62 and #68. Migration 126 still **NOT applied**; `substack-deep-extract` still **disabled** (backlog 356).
 
-**Next:** 1) **#67** — `retract_fact` emits no federation event; peer application unproven 0/4. 2) **#69** — transactional rollback/replay; stale entity links are why "retracted" ≠ "repaired". 3) Then the pinned replay (task `koi-2026-09-14-michaelgarfield-pinned-replay`, due 09-21) — curated payloads ready, no `--force`. Do NOT deploy #66 or re-enable the job before these.
+**Next:** 1) **#67** federated fact retraction (peer application 0/4). 2) **#69** transactional rollback/replay. 3) Deploy #66 to BOTH checkouts, restart, verify OpenAPI (`subject_uri`/`object_uri` AND `fact_ids`) — **before** the pinned replay (task due 09-21).
 
-**Watch:** 3 michaelgarfield docs still HALF-repaired (facts retracted; entity links + discourse moves stale). All three now pass the gate with the essays typed `Document`. Three live `Project` rows that are arguably `Document`s need an operator `/entities/retype`, not payload curation — see the handoff. Do not add the gate-catalog floors yet.
+**Watch:** untyped fact endpoints now BLOCK (`type_undeclared`) instead of defaulting to Concept — **239/1,755 cached docs** affected in strict mode; operator's call. Stored michaelgarfield windows would still mint the essays as `Project` (the gate prints this); curated payloads are gate-only artifacts, no replay reads them until #69.
 
-**Verification:** tree clean, `git diff --check` clean; 107 tests across the affected files, 214 across every suite touching the extractor/identity. Full suite vs a clean worktree at the merge-base: **67 failures/errors, identical sets — zero regressions** (the earlier "3 pre-existing" undercounted). No canon validator here. Read-only gate: `scripts/check_document_integrity.py` (now also `--type-decisions`).
+**Verification:** tree clean; 173 tests across the six affected suites (66 new) green; full suite vs merge-base, same flags: nothing fails on the branch that does not fail at the base; 12 core fixes revert-proven; no live writes.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
