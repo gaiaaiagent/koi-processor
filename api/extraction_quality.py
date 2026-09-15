@@ -39,7 +39,13 @@ from typing import Any, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-QUALITY_CONTRACT_VERSION = "extraction-quality-v1"
+# v2 (2026-09-14): the DIMENSION SET changed, not just a threshold. `discourse_variety`
+# (distinct move types / moves) is gone and `discourse_concentration` replaces it, and
+# every citation-reading dimension now reads the per-window `chunk_ranges` list where
+# the merge supplies one. Stored `semantic_report` rows (document_extraction_runs,
+# migration 125) carry this string, so a v1 row and a v2 row for the same document are
+# not comparable dimension-for-dimension — and the version is how a reader tells.
+QUALITY_CONTRACT_VERSION = "extraction-quality-v2"
 
 STATUS_PASS = "pass"
 STATUS_REVIEW = "review"
@@ -60,6 +66,30 @@ def _content_tokens(text: Optional[str]) -> set:
         return set()
     return {t for t in _TOKEN_RE.findall(text.lower())
             if t not in _STOPWORDS and len(t) > 2}
+
+
+def _cited_ranges(fact: dict) -> list:
+    """The spans a fact actually cites, as (lo, hi) pairs.
+
+    `merge_extractions` widens `chunk_range` to [min lo, max hi] across every
+    window a fact appeared in, and ALSO emits `chunk_ranges`, the ranges those
+    windows cited. The widened span is not a citation: a fact seen in window 1 and
+    window 12 did not cite the ten windows in between, and reading it as though it
+    had is how document:ed30e680 reported chunk_coverage 456/456 with 173 chunks
+    cited (review finding M1). Every dimension that reads a citation reads THIS.
+
+    When only `chunk_range` is present — the gate's un-merged payloads, cached
+    payloads written before the merge emitted the list — the single range is the
+    whole citation, as before. The behaviour is chosen by the data present, not by
+    a flag, so an older payload measures exactly as it did.
+    """
+    ranges = fact.get("chunk_ranges") or ([fact["chunk_range"]] if fact.get("chunk_range") else [])
+    out = []
+    for cr in ranges:
+        if not cr:
+            continue
+        out.append((cr[0], cr[-1] if len(cr) > 1 else cr[0]))
+    return out
 
 
 @dataclass
@@ -127,9 +157,17 @@ DEFAULT_THRESHOLDS = {
         "endpoint_integrity": {"fail_below": 1.00, "review_below": 1.00},
         "predicate_concentration": {"higher_is_better": False,
                                     "fail_above": 0.75, "review_above": 0.60},
-        "discourse_variety": {"fail_below": 0.02, "review_below": 0.05},
+        # Starting values, like everything else in this table. 0.90 is a dump —
+        # nine moves in ten of one type; above 0.70 a reader should look.
+        "discourse_concentration": {"higher_is_better": False,
+                                    "fail_above": 0.90, "review_above": 0.70},
     },
 }
+
+# Below this many moves, discourse concentration is not measured (value None →
+# REVIEW). Three moves of one type is 1.0 and would fail a sound short extraction;
+# three of three types is 0.33 and would pass on no evidence.
+_MIN_MOVES_TO_MEASURE = 5
 
 
 def _verdict(value: Optional[float], th: Optional[dict]) -> str:
@@ -197,18 +235,37 @@ def assess_extraction(
     # read the introduction scores low here no matter how many facts it produced,
     # because the denominator is the document, not the output.
     n_windows = len(windows) or 1
+
+    # A window that carries `chunk_indices` (the extractor's Window, the gate's
+    # reconstructed `_Window`) is covered if a cited range intersects them. A
+    # window that carries only `chunk_index_base` gets a band derived from the
+    # sorted bases — [its base, the next base), the last window open-ended — and
+    # is covered only if a cited range intersects that band.
+    #
+    # The earlier fallback for base-only windows was `cr[0] >= base`, which is
+    # true of EVERY window at or before the citation: one fact at chunk 100 marked
+    # the windows based at 0, 10, 20 ... all covered, and document:ed30e680
+    # reported 16/16 where 10 windows overlapped a citation (review finding M1).
+    # It also sat in an `elif` under the intersection test, so a window WITH
+    # indices that did not intersect fell through to it and was credited anyway.
+    bases = sorted({getattr(w, "chunk_index_base", None) for w in windows} - {None})
+
+    def _window_covers(w, lo: int, hi: int) -> bool:
+        idxs = getattr(w, "chunk_indices", None)
+        if idxs:
+            return any(lo <= c <= hi for c in idxs)
+        base = getattr(w, "chunk_index_base", None)
+        if base is None:
+            return False
+        nxt = next((b for b in bases if b > base), None)     # band is [base, nxt)
+        return hi >= base and (nxt is None or lo < nxt)
+
     covered = set()
     for f in facts:
-        cr = f.get("chunk_range") or []
-        if not cr:
-            continue
-        for w in windows:
-            base = getattr(w, "chunk_index_base", None)
-            idxs = getattr(w, "chunk_indices", None)
-            if idxs and any(c in idxs for c in range(cr[0], (cr[-1] if len(cr) > 1 else cr[0]) + 1)):
-                covered.add(getattr(w, "index", None))
-            elif base is not None and cr[0] >= base:
-                covered.add(getattr(w, "index", None))
+        for lo, hi in _cited_ranges(f):
+            for w in windows:
+                if _window_covers(w, lo, hi):
+                    covered.add(getattr(w, "index", None))
     covered.discard(None)
     coverage = len(covered) / n_windows
     dims.append(Dimension(
@@ -234,15 +291,20 @@ def assess_extraction(
     # Padding cannot inflate this: twenty invented facts all citing chunk 0 add one
     # chunk to the numerator, the same as one fact would, while the denominator is
     # the document and does not move.
+    #
+    # Neither can the merge: the per-window ranges are what count (see
+    # `_cited_ranges`), so a fact seen at chunk 1 and chunk 400 cites two chunks,
+    # not four hundred.
+    n_chunks = len(chunks_by_index)
+    known = set(chunks_by_index)
+    lo_bound = min(known) if known else 0
+    hi_bound = max(known) if known else 0
     cited_chunks: set = set()
     for f in facts:
-        cr = f.get("chunk_range") or []
-        if not cr:
-            continue
-        lo_c, hi_c = cr[0], cr[-1]
-        for ci in range(lo_c, hi_c + 1):
-            if ci in chunks_by_index:
-                cited_chunks.add(ci)
+        for lo, hi in _cited_ranges(f):
+            for ci in range(max(lo, lo_bound), min(hi, hi_bound) + 1):
+                if ci in chunks_by_index:
+                    cited_chunks.add(ci)
     chunk_cov = (len(cited_chunks) / len(chunks_by_index)) if chunks_by_index else None
     dims.append(Dimension(
         name="chunk_coverage", status=_verdict(chunk_cov, th.get("chunk_coverage")),
@@ -257,18 +319,21 @@ def assess_extraction(
     # Every fact claims a chunk_range. A range outside the document's chunk count
     # is a fabricated citation — cheap to detect, and it should essentially never
     # happen, hence a 0.95 floor rather than a lenient one.
-    n_chunks = len(chunks_by_index)
-    known = set(chunks_by_index)
-    lo_bound = min(known) if known else 0
-    hi_bound = max(known) if known else 0
+    #
+    # A fact is in range only if EVERY span it cites is: one fabricated citation
+    # among several sightings is still a fabricated citation. The widened span
+    # cannot stand in for this — [min lo, max hi] of ([0,0], [5,3]) is a clean
+    # [0,5], while one of the ranges it was built from is malformed.
     in_range = 0
     bad_ranges = []
     for f in facts:
-        cr = f.get("chunk_range") or []
-        lo = cr[0] if cr else None
-        hi = cr[-1] if cr else None
-        if lo is None or hi is None or lo < lo_bound or hi > hi_bound or lo > hi:
-            bad_ranges.append({"fact_text": (f.get("fact_text") or "")[:120], "chunk_range": cr})
+        ranges = _cited_ranges(f)
+        offending = [[lo, hi] for lo, hi in ranges
+                     if lo < lo_bound or hi > hi_bound or lo > hi]
+        if not ranges or offending:
+            bad_ranges.append({"fact_text": (f.get("fact_text") or "")[:120],
+                               "chunk_range": f.get("chunk_range") or [],
+                               "offending": offending})
         else:
             in_range += 1
     cite_range = (in_range / len(facts)) if facts else None
@@ -285,34 +350,44 @@ def assess_extraction(
     # Does the cited span actually contain the fact's subject/object language? This
     # is the dimension that makes padding counterproductive: an invented fact cites
     # a span that does not mention it, so adding it LOWERS the ratio.
+    #
+    # A fact the merge saw in several windows is supported if ANY of the spans it
+    # cites supports it: each sighting was a separate claim that THIS span says
+    # so, and one of them being right is enough. Testing the widened span instead
+    # would credit the union of everything in between, which is the M1 defect
+    # again from the other side.
     supported = 0
     unsupported = []
     measurable = 0
     for f in facts:
-        cr = f.get("chunk_range") or []
-        if not cr or n_chunks == 0:
+        ranges = _cited_ranges(f)
+        if not ranges or n_chunks == 0:
             continue
-        lo = max(lo_bound, cr[0])
-        hi = min(hi_bound, cr[-1])
-        if lo > hi:
-            continue
-        span = " ".join(chunks_by_index[c] for c in range(lo, hi + 1)
-                        if c in chunks_by_index).lower()
-        span_tokens = _content_tokens(span)
         claim_tokens = (_content_tokens(f.get("subject"))
                         | _content_tokens(f.get("object"))
                         | _content_tokens(f.get("object_literal")))
         if not claim_tokens:
             continue
+        best = None
+        for lo, hi in ranges:
+            lo, hi = max(lo_bound, lo), min(hi_bound, hi)
+            if lo > hi:
+                continue
+            span = " ".join(chunks_by_index[c] for c in range(lo, hi + 1)
+                            if c in chunks_by_index).lower()
+            overlap = len(claim_tokens & _content_tokens(span)) / len(claim_tokens)
+            best = overlap if best is None else max(best, overlap)
+        if best is None:                 # no cited span lies inside the document
+            continue
         measurable += 1
-        overlap = len(claim_tokens & span_tokens) / len(claim_tokens)
-        # Half the distinctive endpoint language must appear in the span it cites.
-        if overlap >= 0.5:
+        # Half the distinctive endpoint language must appear in a span it cites.
+        if best >= 0.5:
             supported += 1
         else:
             unsupported.append({
                 "fact_text": (f.get("fact_text") or "")[:120],
-                "chunk_range": cr, "token_overlap": round(overlap, 3),
+                "chunk_ranges": [[lo, hi] for lo, hi in ranges],
+                "token_overlap": round(best, 3),
             })
     cite_support = (supported / measurable) if measurable else None
     dims.append(Dimension(
@@ -330,20 +405,42 @@ def assess_extraction(
     # about identity, and one of the two would eventually be wrong.
     ident_ok = None
     ident_detail = "identity contract not run for this extraction"
+    ident_evidence = {"identity_mode": (identity_evidence or {}).get("mode")}
     if identity_evidence:
         ver = identity_evidence.get("verification") or {}
+        check_only = identity_evidence.get("check_only")
         if "binding_verified" in ver:
+            # A real run: what was persisted was checked against the frozen map.
+            # This branch stays first — a run that wrote and verified always
+            # outranks a dry resolution of the same payload.
             ident_ok = 1.0 if ver["binding_verified"] else 0.0
             ident_detail = (
                 f"{ver.get('checked_facts', 0)} facts checked, "
                 f"{ver.get('offending_facts', 0)} endpoint(s) outside the frozen map")
+        elif isinstance(check_only, dict):
+            # The operator gate resolves the payload's endpoints without writing
+            # anything, so there is no persisted graph to verify and no
+            # `verification` block — and it must not invent one. What it CAN
+            # report is whether the resolution was a bijection (N distinct typed
+            # endpoints -> N distinct URIs), which is the #62 acceptance
+            # criterion the real run's verification also rests on. The scope is
+            # named in the evidence so a reader never mistakes this for a
+            # verified write.
+            ident_ok = 1.0 if check_only.get("bijective") else 0.0
+            ident_detail = (
+                f"check-only: {int(check_only.get('resolved_endpoints') or 0)} resolved "
+                f"endpoint(s) -> {int(check_only.get('distinct_uris') or 0)} distinct URI(s) "
+                f"(bijective={bool(check_only.get('bijective'))}), "
+                f"{int(check_only.get('would_preregister') or 0)} would be pre-registered; "
+                f"no persisted graph was verified")
+            ident_evidence["scope"] = "check_only"
         elif identity_evidence.get("warn_proceeded_unpinned"):
             ident_detail = "identity mode=warn: facts written UNPINNED, binding not verified"
     dims.append(Dimension(
         name="endpoint_integrity", status=_verdict(ident_ok, th.get("endpoint_integrity")),
         value=ident_ok, threshold=(th.get("endpoint_integrity") or {}).get("fail_below"),
         detail=ident_detail,
-        evidence={"identity_mode": (identity_evidence or {}).get("mode")},
+        evidence=ident_evidence,
     ))
 
     # ── 5. Predicate concentration ──────────────────────────────────────────
@@ -379,16 +476,43 @@ def assess_extraction(
                   "higher_is_worse": True},
     ))
 
-    # ── 6. Discourse variety (thorough only) ────────────────────────────────
-    if "discourse_variety" in th:
-        variety = (len({m.get("move_type") for m in moves}) / len(moves)) if moves else None
+    # ── 6. Discourse concentration (thorough only) ──────────────────────────
+    # The share of moves carried by the single most common move_type. HIGH is the
+    # bad news, exactly as for predicates — and for exactly the reason given
+    # there, this replaces a "distinct move types / moves" ratio. The taxonomy
+    # has eight types, so that ratio was capped at 8/N and FELL with every move a
+    # long document legitimately produced: a 480-move book scored 8/480 = 0.017
+    # and failed for being long. It was the distinct-over-total shape §5 removed
+    # for predicates, and it survived because it lives only on the thorough tier
+    # and no test had ever assessed that tier (review finding M1).
+    #
+    # Under `_MIN_MOVES_TO_MEASURE` the value is None, which `_verdict` routes to
+    # REVIEW — never a pass and never a fail on a handful of moves.
+    if "discourse_concentration" in th:
+        move_counts: dict = {}
+        for m in moves:
+            k = m.get("move_type")
+            move_counts[k] = move_counts.get(k, 0) + 1
+        if len(moves) >= _MIN_MOVES_TO_MEASURE:
+            top_move = max(move_counts, key=lambda k: move_counts[k])
+            move_conc = move_counts[top_move] / len(moves)
+            move_detail = (f"most common move type {top_move!r} holds "
+                           f"{move_counts[top_move]} of {len(moves)} moves "
+                           f"({len(move_counts)} distinct move types)")
+        else:
+            top_move, move_conc = None, None
+            move_detail = (f"too few moves to measure concentration "
+                           f"({len(moves)} < {_MIN_MOVES_TO_MEASURE})")
         dims.append(Dimension(
-            name="discourse_variety", status=_verdict(variety, th.get("discourse_variety")),
-            value=round(variety, 4) if variety is not None else None,
-            threshold=th["discourse_variety"]["fail_below"],
-            detail=f"{len({m.get('move_type') for m in moves})} distinct move types over "
-                   f"{len(moves)} moves",
-            evidence={"moves_total": len(moves)},
+            name="discourse_concentration",
+            status=_verdict(move_conc, th.get("discourse_concentration")),
+            value=round(move_conc, 4) if move_conc is not None else None,
+            threshold=th["discourse_concentration"]["fail_above"],
+            detail=move_detail,
+            evidence={"distinct_move_types": len(move_counts),
+                      "moves_total": len(moves),
+                      "top_move_type": top_move,
+                      "higher_is_worse": True},
         ))
 
     # ── Roll-up ─────────────────────────────────────────────────────────────

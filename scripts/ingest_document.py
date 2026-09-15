@@ -617,8 +617,13 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         # state and is not a pass: the original Buehler run was structurally
         # complete with 25 facts where a curated re-run of the same document found
         # 213, and a single blended status is how that stops being visible.
-        "semantic_status": (result.get("quality") or {}).get("status", "not_evaluated"),
-        "semantic_ok": 1 if (result.get("quality") or {}).get("status") == "pass" else 0,
+        #
+        # Read from `ext`, like every sibling key: the extractor returns `quality`
+        # inside the dict stored under result["extract"]. This read used to look at
+        # result["quality"], which nothing writes, so the gate saw 'not_evaluated' /
+        # 0 on every run regardless of the verdict (review finding M2).
+        "semantic_status": (ext.get("quality") or {}).get("status", "not_evaluated"),
+        "semantic_ok": 1 if (ext.get("quality") or {}).get("status") == "pass" else 0,
     }
 
 
