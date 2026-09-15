@@ -9,7 +9,7 @@ This snapshot was refreshed by the end skill. Use it before planning or recommen
 
 **Updated:** 2026-09-14 17:15 PDT
 
-**Current status:** `fix/document-ingest-integrity`, clean, pushed at `c133ab8`. The review's blockers B1–B4/M1–M8 are **fixed in the branch, none deployed** (`cdc445c` identity · `741ab0a` quality · `8c711be` gate · `79f1a21` migration 126). **Draft PR #66** (0 checks — do NOT merge) closes #62 and #68. Migration 126 still **NOT applied**; `substack-deep-extract` still **disabled** (backlog 356).
+**Current status:** `fix/document-ingest-integrity`, clean and pushed (the tip is the docs wrap above the fix commits). The review's blockers B1–B4/M1–M8 are **fixed in the branch, none deployed** (`cdc445c` identity · `741ab0a` quality · `8c711be` gate · `79f1a21` migration 126). **Draft PR #66** (0 checks — do NOT merge) closes #62 and #68. Migration 126 still **NOT applied**; `substack-deep-extract` still **disabled** (backlog 356).
 
 **Next:** 1) **#67** federated fact retraction (peer application 0/4). 2) **#69** transactional rollback/replay. 3) Deploy #66 to BOTH checkouts, restart, verify OpenAPI (`subject_uri`/`object_uri` AND `fact_ids`) — **before** the pinned replay (task due 09-21).
 
