@@ -19,25 +19,54 @@ Every required field in the schema must appear.
 
 ### Entities (identity layer)
 
-Extract named, knowledge-worthy entities: people, organizations, projects,
-concepts/frameworks, places, protocols, and prior-example case studies.
+<!-- generated:entity-types:begin — from api/document_extraction_contract.py; run scripts/render_extraction_contract.py -->
+Extract named, knowledge-worthy entities: people, organizations, projects, ventures and
+named software products, abstract concepts and frameworks, places, protocols and
+standards, prior-example case studies, named written works, and dated happenings.
 
-**Type each entity as exactly one of:** `Person`, `Organization`, `Project`,
-`Concept`, `Location`, `Protocol`, `CaseStudy`. Canonicalization rules — follow
-these exactly; they prevent the most common mis-types:
+**Type each entity as exactly one of:** `Person`, `Organization`, `Project`, `Concept`,
+`Location`, `Protocol`, `CaseStudy`, `Document`, `Event`. Canonicalization rules —
+follow these exactly; they prevent the most common mis-types:
 
-- **A human full name is `Person`** — never `Concept` or `Project` — even when
-  cited as the author, originator, reviewer, or interviewee of an idea.
-  (e.g. "Ernesto van Peborgh" is a `Person`, not the name of a framework.)
-- **An institution, school, initiative, programme, fund, or lab is `Organization`**
-  — never type a multi-word initiative as a `Person`. Prefer the **most complete
-  surface form** (e.g. `Design School for Regenerating Earth`, not `Design School`).
-- **A prior real-world example / precedent site** the document cites as a model
-  (e.g. Auroville, Findhorn, SEKEM, Crystal Waters) is a `CaseStudy`.
-- **A geographic place** (region, city, country, bioregion, watershed) is `Location`.
-- A named methodology, standard, or interoperability contract is `Protocol`;
-  a named idea/framework/outcome is `Concept`; a named built initiative/site/venture
-  is `Project`.
+- **A human full name is `Person`** — never `Concept` or `Project` — even when cited as
+  the author, originator, reviewer, or interviewee of an idea (e.g. "Ernesto van
+  Peborgh" is a `Person`, not the name of a framework)
+- **An institution, school, initiative, programme, fund, publisher, or lab is
+  `Organization`** — never type a multi-word initiative as a `Person`. Prefer the **most
+  complete surface form** (e.g. `Design School for Regenerating Earth`, not `Design
+  School`)
+- **A named built initiative, site, venture, product, or piece of named consumer
+  software is `Project`.** Software gets `Project` deliberately: there is no
+  software/application type in this vocabulary yet, so an app or tool is a `Project`
+  until that ontology decision is made. `Project` is NOT the bucket for written works or
+  for gatherings — those have their own types below, and using `Project` for them is the
+  specific defect this contract exists to stop (e.g. the website-blocking app `Freedom`
+  is a `Project`)
+- **An abstract idea, framework, method, practice, or named outcome is `Concept`.** When
+  a named product shares its name with an abstract idea the document also discusses,
+  they are TWO DIFFERENT ENTITIES: emit both, and give the product a disambiguating
+  surface form so the two never collide (e.g. `Freedom (internet-blocking software)` as
+  a `Project` alongside `freedom` as a `Concept`)
+- **A geographic place — region, city, country, bioregion, watershed, venue — is
+  `Location`**
+- **A named methodology, standard, or interoperability contract is `Protocol`** (e.g.
+  `HTTPS`, `DNS`)
+- **A prior real-world example or precedent site the document cites as a model is
+  `CaseStudy`** (e.g. Auroville, Findhorn, SEKEM, Crystal Waters)
+- **A NAMED WRITTEN WORK is `Document`** — an essay, book, paper, report, article,
+  newsletter post, catalogue, manifesto, or published talk that the text refers to by
+  title. This is NOT `Project`: a titled piece of writing is a `Document` even when the
+  author also treats it as a body of work. Use the title as it appears (e.g. `The End of
+  Hoop Jumping`, `How To Think About Science`, `Standing by Words`, `Whole Earth
+  Catalog`)
+- **A DATED HAPPENING is `Event`** — a conference, camp, summit, festival, workshop,
+  gathering, retreat, launch, or other occurrence the text places in time. This is NOT
+  `Organization` (the body that convenes it) and NOT `Project`. A private convened
+  conversation with an attendee roster is a `Meeting`, which this vocabulary does not
+  admit — type it `Event` only when it is a public, named, dated happening (e.g. `DWeb
+  Berlin`, `DWeb Camp 2026: Root Systems`, `Burning Man` when referred to as the
+  gathering)
+<!-- generated:entity-types:end — from api/document_extraction_contract.py; run scripts/render_extraction_contract.py -->
 
 `first_seen_chunk` is the lowest global `[N]` where the entity appears in this
 window. `mention_count` is the count within this window (≥1).
@@ -150,7 +179,7 @@ argument steps. A move may summarize several facts.
         "required": ["name","type","first_seen_chunk","mention_count"],
         "properties": {
           "name": {"type": "string"},
-          "type": {"enum": ["Person","Organization","Project","Concept","Location","Protocol","CaseStudy"]},
+          "type": {"enum": ["Person","Organization","Project","Concept","Location","Protocol","CaseStudy","Document","Event"]},
           "first_seen_chunk": {"type": "integer", "minimum": 0},
           "mention_count": {"type": "integer", "minimum": 1}
         }
@@ -201,10 +230,14 @@ argument steps. A move may summarize several facts.
    `confidence`, not `definition`, not `notes` — to a `discourse` or `entities` item.
    If you want to record something there is no key for, fold it into an existing
    free-text field instead.
+<!-- generated:entity-type-hard-rule:begin — from api/document_extraction_contract.py; run scripts/render_extraction_contract.py -->
 2. `entities[].type` MUST be exactly one of:
-   Person, Organization, Project, Concept, Location, Protocol, CaseStudy.
-   There is no Practice/Pattern/Method/Evidence/Claim option here — map to the closest
-   of the seven (a named method or practice is a `Concept`).
+   Person, Organization, Project, Concept, Location, Protocol, CaseStudy, Document, Event.
+   There is no Practice/Pattern/Method/Evidence/Claim/Meeting option here — map
+   to the closest of the 9 (a named method or practice is a `Concept`; a
+   convened dated happening is an `Event`; a titled written work is a
+   `Document`).
+<!-- generated:entity-type-hard-rule:end — from api/document_extraction_contract.py; run scripts/render_extraction_contract.py -->
 3. `facts[].confidence` MUST be one of: high, medium, low.
 4. `document.doc_kind` MUST be copied exactly from its enum — never invent a word.
 5. `chunk_range` is ALWAYS exactly two integers; for a single chunk repeat it: [26, 26].

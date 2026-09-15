@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-12 22:55 PDT
+**Updated:** 2026-09-15 00:05 PDT
 
-**Current status:** `regen-prod` @ `e1cfac8`, in sync with origin; migration 123 APPLIED and live (`claims=513, snapshot rows=511`, one-shot — never re-run); every database + the source archive have encrypted, checksum-verified off-host copies on gaia, recovery proven on the NUC; Stream A steps 0–3 done, 4–5 not started.
+**Current status:** `fix/document-ingest-integrity`, clean and pushed (tip = docs wrap above the fixes). B1–B4/M1–M8 fixed (`cdc445c`…`79f1a21`) AND the re-review's last blocker — the discourse-move uuid5 hash input the M6 rename changed — fixed in `97f6525`. **Draft PR #66** (0 checks — do NOT merge) closes #62/#68; **no merge blocker known to remain.** Migration 126 **NOT applied**; `substack-deep-extract` **disabled** (backlog 356).
 
-**Next:** 1) Step 4 — `scripts/ingest_document.py` per artifacts `q1_fixed_pair.md` (CANONICAL), fixtures on a scratch DB. 2) Step 5 — `api/routers/history_router.py` + apply txn; then CHECKPOINT (task `koi-2026-09-13-045186e8-step5-checkpoint`, due 09-14): show behaviour when the write SUCCEEDS but the bytes are WRONG. 3) Stream B follow-ups are dated koi tasks in the :5051 Upcoming view.
+**Next:** 1) **#67** federated fact retraction. 2) **#69** transactional rollback/replay (also owns the M4 gap: preflight IGNORES an invalid alias decision, so a row can be minted before the freeze refuses). 3) Deploy #66 to BOTH checkouts, restart, verify OpenAPI (`subject_uri`/`object_uri` AND `fact_ids`) — **before** the pinned replay (due 09-21).
 
-**Watch:** Nothing blocks 4–5. Fixtures `656d1923`/`c3b0ebcd`/`58fe10e0` — DO NOT MODIFY. Heavy-work gate: `aomhost` absent, 1m load < 15m, swap flat; never `pgrep zoom.us`/`pages free`. Re-measure at the moment of the run.
+**Watch:** untyped endpoints BLOCK (`type_undeclared`) — **239/1,755 cached docs**; operator's call. 2 pre-existing move rows (June 2026) match no id derivation — reported, untouched.
 
-**Verification:** `git diff --check` clean; no canon validator. `koi_backup_check.sh` all fresh. Off-host is checksum- not restore-verified. Use `/usr/bin/stat`.
+**Verification:** tree clean; 179 tests / seven suites green (`--collect-only` = 179; 6 new pin literal move-id UUIDs: 5 fail at `d51fb41`, control passes); census 13,765/13,767 stored move ids reproduced, 21/21 michaelgarfield rows; full suite 1,934 passed / 2,163 items vs the prior run's 1,929 / 2,158 — different collections (+6 move-id, −1 launchd-parametrized), identical failure set, strict subset of merge-base; no live writes.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
