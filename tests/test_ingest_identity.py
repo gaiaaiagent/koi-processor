@@ -1086,8 +1086,10 @@ class TestCrossTypeConflictBlocks:
             async def post(self, *a, **k):
                 raise AssertionError("preregistration must refuse BEFORE any HTTP call")
 
+        # base_url supplied: without one the B1 refusal fires first, which is a
+        # different (and earlier) protection than the one this test is about.
         with pytest.raises(ident.IdentityError) as exc:
-            await ident.preregister_missing(_NeverCalled(), report)
+            await ident.preregister_missing(_NeverCalled(), report, base_url="http://koi.test")
         assert exc.value.blockers[0]["state"] == ident.STATE_CROSS_TYPE_CONFLICT
 
     async def test_a_decision_naming_a_different_type_does_not_clear_anything(self, conn):
@@ -1150,7 +1152,7 @@ class TestCrossTypeConflictBlocks:
                                 "is_new": True, "cross_type_warning": "same label is a Project"}
                 return _R()
 
-        out = await ident.preregister_missing(_Recording(), report)
+        out = await ident.preregister_missing(_Recording(), report, base_url="http://koi.test")
         assert out["uri_map"] == {name: minted}
         assert posted[0]["entity_type"] == "Organization"
         assert posted[0]["force_type"] is True and posted[0]["exact_only"] is True
@@ -1161,3 +1163,545 @@ class TestCrossTypeConflictBlocks:
         assert receipt["cross_type_warning"], (
             "the twin must not be minted quietly — the advisory is still recorded"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. Independent-review regressions (session 76e0e751, 2026-09-14) — B1–B3, M3–M6
+#
+# Every test here was written BEFORE its fix and observed to fail. Each encodes
+# the payload SHAPE the earlier fixtures did not: a client with no base_url, a
+# multi-type payload, two raw spellings of one label, an untyped fact endpoint,
+# an alias decision naming a dead / wrong-type URI, a shared episode.
+# ═══════════════════════════════════════════════════════════════════════════
+
+import httpx as _httpx
+
+
+def _missing_report(name, etype="Concept"):
+    ep = ident.Endpoint(name=name, entity_type=etype, normalized=normalize_entity_text(name))
+    return ident.PreflightReport(findings=[ident.EndpointFinding(
+        endpoint=ep, state=ident.STATE_MISSING, live_uris=[], tombstoned_uris=[],
+        alias_uris=[], cross_type_uris=[])])
+
+
+def _ok_register(minted):
+    def handler(request):
+        return _httpx.Response(200, json={"success": True, "canonical_uri": minted,
+                                          "is_new": True})
+    return handler
+
+
+@pytest.mark.anyio
+class TestB1PreregistrationUrl:
+    """B1. `preregister_missing` POSTed a RELATIVE path on a client with no base_url.
+
+    The extractor's client is `provider_async_client()`, which sets none, so every
+    strict run with >= 1 missing endpoint — the gate's own docstring calls that
+    "every first ingest" — died in httpx before a socket opened, with a bare
+    `UnsupportedProtocol` that is neither IdentityError nor ExtractionError. The
+    shipped fakes (`_Recording`, `_NeverCalled`) accepted any path, so 107 green
+    tests never sent one request through a real client.
+    """
+
+    async def test_a_real_client_without_base_url_gets_an_absolute_url(self):
+        t = _tag()
+        minted = f"orn:personal-koi.entity:concept-{t}"
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return _ok_register(minted)(request)
+
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as http:
+            out = await ident.preregister_missing(
+                http, _missing_report(f"Brand New {t}"), base_url="http://koi.test:8351")
+        assert out["uri_map"] == {f"Brand New {t}": minted}
+        assert seen == ["http://koi.test:8351/register-entity"], seen
+
+    async def test_no_base_url_anywhere_is_a_typed_refusal_before_any_request(self):
+        """A client with no base_url and no base_url argument must fail as an
+        IdentityError that names the problem, not as an httpx traceback — and
+        must fail before a request is attempted."""
+        t = _tag()
+        seen = []
+
+        def handler(request):  # pragma: no cover - must not be reached
+            seen.append(str(request.url))
+            return _ok_register("x")(request)
+
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as http:
+            with pytest.raises(ident.IdentityError) as exc:
+                await ident.preregister_missing(http, _missing_report(f"Brand New {t}"))
+        assert "base_url" in str(exc.value) or "absolute" in str(exc.value)
+        assert seen == []
+
+    async def test_a_client_with_its_own_base_url_is_honoured(self):
+        t = _tag()
+        minted = f"orn:personal-koi.entity:concept-{t}"
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return _ok_register(minted)(request)
+
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler),
+                                      base_url="http://client.test:1") as http:
+            await ident.preregister_missing(http, _missing_report(f"Brand New {t}"))
+        assert seen == ["http://client.test:1/register-entity"]
+
+
+@pytest.mark.anyio
+class TestB2CrossTypeIsEndpointSpecific:
+    """B2. The cross-type read excluded the PAYLOAD-WIDE set of types, not the
+    endpoint's own type. One live `Project` row declared `Organization` by the
+    payload blocked correctly — until any OTHER endpoint in the same payload was a
+    `Project`, at which point the same label quietly became `missing` and would
+    have been minted as a cross-type twin with force_type. Every shipped
+    cross-type test used a single-endpoint payload; real payloads declare 4+ types.
+    """
+
+    async def test_the_conflict_survives_another_endpoint_of_the_conflicting_type(self, conn):
+        t = _tag()
+        name = f"Cross Typed {t}"
+        other = f"Some Other Thing {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-other-{t}",
+                           text=other, etype="Project")
+        # CONTROL — the shipped test's exact single-endpoint shape.
+        _eps, alone = await _preflight(conn, [(name, "Organization")])
+        assert alone.findings[0].state == ident.STATE_CROSS_TYPE_CONFLICT
+        # PROBE — one extra endpoint typed Project in the same payload.
+        _eps, together = await _preflight(conn, [(name, "Organization"), (other, "Project")])
+        f = next(x for x in together.findings if x.endpoint.name == name)
+        assert f.state == ident.STATE_CROSS_TYPE_CONFLICT, f.as_evidence()
+        assert f.cross_type_uris == [f"orn:personal-koi.entity:project-{t}"]
+        # And the unrelated Project resolves normally — the fix must not over-fire.
+        g = next(x for x in together.findings if x.endpoint.name == other)
+        assert g.state == ident.STATE_LIVE_EXACT
+        assert g.cross_type_uris == []
+
+    async def test_preregistration_still_refuses_in_the_multi_type_payload(self, conn):
+        """The belt-and-braces refusal reads `finding.cross_type_uris`, which the
+        payload-wide read left EMPTY for exactly this shape."""
+        t = _tag()
+        name = f"Cross Typed {t}"
+        other = f"Some Other Thing {t}"
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-{t}",
+                           text=name, etype="Project")
+        await _seed_entity(conn, uri=f"orn:personal-koi.entity:project-other-{t}",
+                           text=other, etype="Project")
+        _eps, report = await _preflight(conn, [(name, "Organization"), (other, "Project")])
+        for f in report.findings:
+            f.state = ident.STATE_MISSING  # a caller who skipped the gate
+
+        class _NeverCalled:
+            async def post(self, *a, **k):
+                raise AssertionError("must refuse BEFORE any HTTP call")
+
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.preregister_missing(_NeverCalled(), report, base_url="http://x")
+        assert exc.value.blockers[0]["state"] == ident.STATE_CROSS_TYPE_CONFLICT
+
+    async def test_an_alias_decision_cannot_bind_a_live_row_of_another_payload_type(self, conn):
+        """Same root, other symptom: a decided URI was accepted if it was live under
+        ANY type present in the payload. A pinned write with a type-mismatched
+        URI 422s, so accepting it here made the gate print PASS for a write that
+        cannot land."""
+        t = _tag()
+        label = f"Decided {t}"
+        wrong = f"orn:personal-koi.entity:project-wrong-{t}"
+        await _seed_entity(conn, uri=wrong, text=f"Unrelated Project {t}", etype="Project")
+        _eps, report = await _preflight(
+            conn, [(label, "Concept"), (f"Filler Project {t}", "Project")],
+            alias_decisions={label: wrong})
+        f = next(x for x in report.findings if x.endpoint.name == label)
+        assert f.state != ident.STATE_LIVE_EXACT, f.as_evidence()
+        assert f.live_uris == []
+
+
+class TestB3FrozenMapUsesTheCanonicalKey:
+    """B3. `collect_endpoints` keyed on (normalize(name), type) and kept the FIRST
+    raw spelling; `FrozenMap.uri_for` was a bare dict.get on that spelling; the
+    episode builder looked up each fact's OWN raw string. `GPT-4` and `gpt_4` are
+    one endpoint and one frozen binding — and the second spelling raised
+    `identity_map_incomplete` AFTER preregistration had already minted. 86 of
+    1,755 cached documents carry such a pair. `by_key` existed and nothing read it.
+    """
+
+    def test_every_raw_spelling_of_a_bound_endpoint_resolves(self):
+        payload = _payload(facts=[
+            {"subject": "GPT-4", "predicate": "IS_A", "object": "model", "fact_text": "t"},
+            {"subject": "gpt_4", "predicate": "HAS_SIZE", "object": "large", "fact_text": "t"},
+        ], entities=[{"name": "GPT-4", "type": "Concept"}])
+        eps = ident.collect_endpoints(payload, normalize=normalize_entity_text)
+        assert len(eps) == 3  # gpt 4, model, large
+        frozen = ident.FrozenMap(
+            by_name={e.name: f"orn:personal-koi.entity:x-{i}" for i, e in enumerate(eps)},
+            by_key={e.key: f"orn:personal-koi.entity:x-{i}" for i, e in enumerate(eps)},
+            by_name_type={e.name: e.entity_type for e in eps}, evidence=[],
+            normalize=normalize_entity_text)
+        assert frozen.uri_for("GPT-4") == frozen.uri_for("gpt_4") is not None
+        assert frozen.type_for("gpt_4") == "Concept"
+        # Positive control: a label the payload never had is still unbound.
+        assert frozen.uri_for("Nothing Like This") is None
+
+    def test_the_episode_builder_pins_both_spellings_to_one_uri(self):
+        """Through the REAL builder, not a stand-in."""
+        edd = _edd()
+        merged = edd.merge_extractions([{
+            "entities": [{"name": "GPT-4", "type": "Concept", "first_seen_chunk": 0,
+                          "mention_count": 1},
+                         {"name": "model", "type": "Concept", "first_seen_chunk": 0,
+                          "mention_count": 1}],
+            "facts": [
+                {"subject": "GPT-4", "predicate": "IS_A", "object": "model",
+                 "fact_text": "a", "chunk_range": [0, 0], "confidence": "high"},
+                {"subject": "gpt_4", "predicate": "RELATES_TO", "object": "model",
+                 "fact_text": "b", "chunk_range": [1, 1], "confidence": "high"},
+            ],
+        }], [])
+        eps = ident.collect_endpoints(merged, normalize=normalize_entity_text)
+        uri = {e.normalized: f"orn:personal-koi.entity:{e.normalized.replace(' ', '-')}"
+               for e in eps}
+        frozen = ident.FrozenMap(
+            by_name={e.name: uri[e.normalized] for e in eps},
+            by_key={e.key: uri[e.normalized] for e in eps},
+            by_name_type={e.name: e.entity_type for e in eps}, evidence=[],
+            normalize=normalize_entity_text)
+        payload = edd.facts_to_episode_payload(
+            merged, name="n", summary="", source_document="d", group_id="g", frozen=frozen)
+        subj = {f["subject_uri"] for f in payload["facts"]}
+        assert subj == {uri["gpt 4"]}, payload["facts"]
+        assert all(f["subject_type"] == "Concept" for f in payload["facts"])
+
+
+class TestM6MergeKeysOnTheCanonicalNormalizer:
+    """M6. The merge keyed entities on a private `_norm` (case + whitespace) while
+    identity keys on `normalize_entity_text` (also `-`/`_`). `omni-mapping` and
+    `omni mapping` therefore survived the merge as TWO typed records, and
+    `collect_endpoints` then raised `payload_type_conflict` on a disagreement the
+    merge was supposed to fold. 7 cached documents; uncaught in main()."""
+
+    def test_hyphen_and_space_spellings_merge_into_one_entity(self):
+        edd = _edd()
+        merged = edd.merge_extractions([
+            {"entities": [{"name": "omni-mapping", "type": "Concept",
+                           "first_seen_chunk": 0, "mention_count": 1}], "facts": []},
+            {"entities": [{"name": "omni mapping", "type": "Project",
+                           "first_seen_chunk": 3, "mention_count": 2}], "facts": []},
+        ], [])
+        assert len(merged["entities"]) == 1, merged["entities"]
+        assert merged["type_conflicts"], "the coercion must be reported, not hidden"
+        assert set(merged["type_map"]) == {normalize_entity_text("omni-mapping")}
+
+    def test_the_merge_key_is_the_identity_key(self):
+        """One normalizer. If these diverge again, this is the test that says so."""
+        edd = _edd()
+        for s in ("GPT-4", "gpt_4", "Omni-Mapping", "  Spaced  Out ", "@handle", "A_b-C"):
+            assert edd._norm(s) == normalize_entity_text(s), s
+
+
+class TestM3UntypedEndpointsNeverDefaultToConcept:
+    """M3. A fact endpoint absent from `entities[]` was typed `Concept` by default,
+    preregistered as `Concept` with force_type, and the default was hashed into
+    the URI. `type_defaulted` was counted and gated nothing. The prompt itself
+    says every fact endpoint MUST appear in entities[], so an untyped endpoint is
+    an extraction defect — it blocks, and only an audited type decision types it.
+    """
+
+    def test_an_untyped_endpoint_carries_no_type(self):
+        eps = ident.collect_endpoints(
+            _payload(facts=[{"subject": "Alpha", "object": "Ghost", "predicate": "P",
+                             "fact_text": "t"}],
+                     entities=[{"name": "Alpha", "type": "Concept"}]),
+            normalize=normalize_entity_text)
+        ghost = next(e for e in eps if e.name == "Ghost")
+        assert ghost.entity_type is None
+        assert ghost.type_defaulted is True
+
+    def test_an_audited_type_decision_types_it(self):
+        eps = ident.collect_endpoints(
+            _payload(facts=[{"subject": "Alpha", "object": "Ada Lovelace", "predicate": "P",
+                             "fact_text": "t"}],
+                     entities=[{"name": "Alpha", "type": "Concept"}]),
+            normalize=normalize_entity_text,
+            type_decisions={"Ada Lovelace": "Person"})
+        ada = next(e for e in eps if e.name == "Ada Lovelace")
+        assert ada.entity_type == "Person"
+        assert ada.type_defaulted is False
+        assert ada.type_source == "audited_decision"
+
+    @pytest.mark.anyio
+    async def test_preflight_blocks_it_and_names_what_the_graph_holds(self, conn):
+        t = _tag()
+        label = f"Untyped Person {t}"
+        person = f"orn:personal-koi.entity:person-{t}"
+        await _seed_entity(conn, uri=person, text=label, etype="Person")
+        eps = ident.collect_endpoints(
+            _payload(facts=[{"subject": label, "object": None, "object_literal": "x",
+                             "predicate": "P", "fact_text": "t"}]),
+            normalize=normalize_entity_text)
+        report = await ident.preflight_endpoints(
+            conn, eps, normalize=normalize_entity_text, normalize_alias_fn=normalize_alias)
+        f = report.findings[0]
+        assert f.state == ident.STATE_TYPE_UNDECLARED
+        assert f.state in ident.BLOCKING_STATES
+        assert person in f.cross_type_uris, "evidence must show the operator what exists"
+        with pytest.raises(ident.IdentityError):
+            ident.require_no_blockers(report)
+        assert not report.missing, "an untyped endpoint must never reach preregistration"
+
+    @pytest.mark.anyio
+    async def test_freeze_refuses_an_untyped_endpoint_even_if_the_gate_was_skipped(self, conn):
+        t = _tag()
+        eps = [ident.Endpoint(name=f"Ghost {t}", entity_type=None,
+                              normalized=normalize_entity_text(f"Ghost {t}"),
+                              type_defaulted=True)]
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.freeze_endpoint_map(conn, eps, normalize=normalize_entity_text)
+        assert exc.value.blockers[0]["state"] == ident.STATE_TYPE_UNDECLARED
+
+
+@pytest.mark.anyio
+class TestM4FreezeValidatesAliasDecisions:
+    """M4. The freeze's alias branch bound the decided URI with ZERO validation —
+    no liveness, no type, and it skipped the `expected_uris` disagreement check.
+    Preflight refused a dead-URI decision; freeze honoured it; the gate printed
+    PASS for a write `_bind_pinned_uri` 422s on."""
+
+    async def test_a_dead_uri_decision_is_refused(self, conn):
+        t = _tag()
+        dead = f"orn:personal-koi.entity:concept-dead-{t}"
+        survivor = f"orn:personal-koi.entity:concept-survivor-{t}"
+        await _seed_entity(conn, uri=survivor, text=f"Survivor {t}", etype="Concept")
+        await _seed_entity(conn, uri=dead, text=f"Dead {t}", etype="Concept",
+                           merged_into=survivor)
+        ep = ident.Endpoint(name=f"Label {t}", entity_type="Concept",
+                            normalized=normalize_entity_text(f"Label {t}"))
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.freeze_endpoint_map(conn, [ep], normalize=normalize_entity_text,
+                                            alias_decisions={ep.name: dead})
+        assert exc.value.blockers[0]["state"] == "alias_decision_not_live"
+
+    async def test_an_unknown_uri_decision_is_refused(self, conn):
+        t = _tag()
+        ep = ident.Endpoint(name=f"Label {t}", entity_type="Concept",
+                            normalized=normalize_entity_text(f"Label {t}"))
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.freeze_endpoint_map(
+                conn, [ep], normalize=normalize_entity_text,
+                alias_decisions={ep.name: f"orn:personal-koi.entity:concept-ghost-{t}"})
+        assert exc.value.blockers[0]["state"] == "alias_decision_not_live"
+
+    async def test_a_wrong_type_decision_is_refused(self, conn):
+        t = _tag()
+        org = f"orn:personal-koi.entity:org-{t}"
+        await _seed_entity(conn, uri=org, text=f"An Org {t}", etype="Organization")
+        ep = ident.Endpoint(name=f"Label {t}", entity_type="Concept",
+                            normalized=normalize_entity_text(f"Label {t}"))
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.freeze_endpoint_map(conn, [ep], normalize=normalize_entity_text,
+                                            alias_decisions={ep.name: org})
+        assert exc.value.blockers[0]["state"] == "alias_decision_type_mismatch"
+
+    async def test_a_decision_disagreeing_with_the_registration_is_refused(self, conn):
+        t = _tag()
+        a = f"orn:personal-koi.entity:concept-a-{t}"
+        b = f"orn:personal-koi.entity:concept-b-{t}"
+        await _seed_entity(conn, uri=a, text=f"A {t}", etype="Concept")
+        await _seed_entity(conn, uri=b, text=f"B {t}", etype="Concept")
+        ep = ident.Endpoint(name=f"Label {t}", entity_type="Concept",
+                            normalized=normalize_entity_text(f"Label {t}"))
+        with pytest.raises(ident.IdentityError) as exc:
+            await ident.freeze_endpoint_map(conn, [ep], normalize=normalize_entity_text,
+                                            alias_decisions={ep.name: a},
+                                            expected_uris={ep.name: b})
+        assert exc.value.blockers[0]["state"] == "registration_disagreement"
+
+    async def test_a_live_same_type_decision_still_binds(self, conn):
+        """Positive control for the four refusals above."""
+        t = _tag()
+        good = f"orn:personal-koi.entity:concept-good-{t}"
+        await _seed_entity(conn, uri=good, text=f"Good {t}", etype="Concept")
+        ep = ident.Endpoint(name=f"Label {t}", entity_type="Concept",
+                            normalized=normalize_entity_text(f"Label {t}"))
+        frozen = await ident.freeze_endpoint_map(conn, [ep], normalize=normalize_entity_text,
+                                                 alias_decisions={ep.name: good})
+        assert frozen.by_name == {ep.name: good}
+        assert frozen.evidence[0]["bound_via"] == "audited_alias_decision"
+
+
+@pytest.mark.anyio
+class TestM5VerificationIsScopedToThisRunsFacts:
+    """M5. `verify_persisted_graph` was EPISODE-scoped, and episodes are keyed on
+    (source_document, group_id): 11 live episodes are shared by 24 documents. A
+    strict run on a shared episode failed verification against a SIBLING
+    document's facts — after this run's facts had committed. The server now
+    returns the ids it wrote, and verification checks exactly those.
+    """
+
+    async def test_the_response_names_the_facts_it_wrote(self, api):
+        client, conn = api
+        t = _tag()
+        uri = f"orn:personal-koi.entity:concept-ok-{t}"
+        await _seed_entity(conn, uri=uri, text=f"Ok {t}", etype="Concept")
+        r = await client.post("/knowledge/episodes", json=_episode([{
+            "subject": f"Ok {t}", "subject_type": "Concept", "subject_uri": uri,
+            "predicate": "P", "object_literal": "a", "fact_text": "one",
+        }], tag=t, create_entities=False))
+        assert r.status_code == 201
+        body = r.json()
+        assert body["facts_created"] == 1
+        assert len(body["fact_ids"]) == 1
+        persisted = await conn.fetchval(
+            "SELECT count(*) FROM knowledge_facts WHERE id = $1::uuid", body["fact_ids"][0])
+        assert persisted == 1
+
+    async def test_a_sibling_documents_facts_do_not_fail_this_run(self, api):
+        client, conn = api
+        t = _tag()
+        a = f"orn:personal-koi.entity:concept-a-{t}"
+        b = f"orn:personal-koi.entity:concept-b-{t}"
+        await _seed_entity(conn, uri=a, text=f"A {t}", etype="Concept")
+        await _seed_entity(conn, uri=b, text=f"B {t}", etype="Concept")
+        shared = _episode([{"subject": f"A {t}", "subject_type": "Concept", "subject_uri": a,
+                            "predicate": "P", "object_literal": "x", "fact_text": "sib"}],
+                          tag=t, create_entities=False)
+        r1 = await client.post("/knowledge/episodes", json=shared)
+        assert r1.status_code == 201
+        # Second "document": same (source_document, group_id) → same episode.
+        mine = dict(shared, facts=[{"subject": f"B {t}", "subject_type": "Concept",
+                                    "subject_uri": b, "predicate": "Q",
+                                    "object_literal": "y", "fact_text": "mine"}])
+        r2 = await client.post("/knowledge/episodes", json=mine)
+        assert r2.status_code == 201
+        assert r2.json()["episode_id"] == r1.json()["episode_id"], "precondition: shared episode"
+
+        frozen = ident.FrozenMap(by_name={f"B {t}": b}, by_key={}, by_name_type={f"B {t}": "Concept"},
+                                 evidence=[])
+        episode_id = uuid.UUID(r2.json()["episode_id"])
+        # CONTROL — the old episode scope flags the sibling's URI.
+        old = await ident.verify_persisted_graph(conn, episode_id, frozen)
+        assert not old.ok and old.offending[0]["persisted_uri"] == a
+        # FIX — scoped to the facts THIS run wrote.
+        new = await ident.verify_persisted_graph(conn, episode_id, frozen,
+                                                 fact_ids=r2.json()["fact_ids"])
+        assert new.ok, new.as_evidence()
+        assert new.checked_facts == 1
+
+
+@pytest.mark.anyio
+class TestTheExtractorSeamEndToEnd:
+    """The production call path, not a stand-in: `establish_identity` with the
+    extractor's own client shape (no base_url), a rolled-back registry, and a
+    mock `/register-entity`. This is the test that would have caught B1, and it
+    also proves type decisions reach `collect_endpoints` (M3) and that the
+    freeze receives the classified endpoints."""
+
+    async def test_a_first_ingest_registers_at_an_absolute_url_and_freezes(self, conn):
+        edd = _edd()
+        t = _tag()
+        known = f"Known {t}"
+        fresh = f"Fresh {t}"
+        known_uri = f"orn:personal-koi.entity:concept-known-{t}"
+        fresh_uri = f"orn:personal-koi.entity:concept-fresh-{t}"
+        await _seed_entity(conn, uri=known_uri, text=known, etype="Concept")
+        seen = []
+
+        def handler(request):
+            seen.append((str(request.url), request.read()))
+            # Mimic the server: the exact-only registration creates the row, so the
+            # freeze's re-read finds it.
+            return _httpx.Response(200, json={"success": True, "canonical_uri": fresh_uri,
+                                              "is_new": True})
+
+        merged = edd.merge_extractions([{
+            "entities": [{"name": known, "type": "Concept", "first_seen_chunk": 0, "mention_count": 1},
+                         {"name": fresh, "type": "Concept", "first_seen_chunk": 0, "mention_count": 1}],
+            "facts": [{"subject": known, "predicate": "RELATES_TO", "object": fresh,
+                       "fact_text": "x", "chunk_range": [0, 0], "confidence": "high"}],
+        }], [])
+        evidence = {"mode": "strict"}
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as http:
+            # Seed the row the mock "registered", inside the same rolled-back txn,
+            # right before the freeze re-reads. Done via a wrapper so the order is
+            # register -> row exists -> freeze, as in production.
+            real_prereg = ident.preregister_missing
+
+            async def prereg_then_seed(*a, **k):
+                out = await real_prereg(*a, **k)
+                await _seed_entity(conn, uri=fresh_uri, text=fresh, etype="Concept")
+                return out
+            edd.ident.preregister_missing = prereg_then_seed
+            try:
+                frozen = await edd.establish_identity(
+                    conn, http, merged, evidence, document_rid=f"document:test-{t}",
+                    mode="strict", alias_decisions_override={}, type_decisions_override={})
+            finally:
+                edd.ident.preregister_missing = real_prereg
+        assert seen and seen[0][0] == f"{edd.KOI_BASE_URL}/register-entity", seen
+        assert frozen is not None
+        assert frozen.by_name == {known: known_uri, fresh: fresh_uri}
+        assert evidence["preregistration"]["registered"] == 1
+        assert evidence["frozen_map"]["distinct_uris"] == 2
+
+    async def test_an_untyped_endpoint_blocks_the_run_and_a_decision_unblocks_it(self, conn):
+        edd = _edd()
+        t = _tag()
+        person = f"Ada {t}"
+        person_uri = f"orn:personal-koi.entity:person-{t}"
+        await _seed_entity(conn, uri=person_uri, text=person, etype="Person")
+        merged = edd.merge_extractions([{
+            "entities": [],   # the extractor forgot to declare the endpoint
+            "facts": [{"subject": person, "predicate": "AUTHORED_BY", "object": None,
+                       "object_literal": "x", "fact_text": "x", "chunk_range": [0, 0],
+                       "confidence": "high"}],
+        }], [])
+
+        class _NeverCalled:
+            base_url = ""
+
+            async def post(self, *a, **k):
+                raise AssertionError("nothing may be registered for an untyped endpoint")
+
+        evidence = {"mode": "strict"}
+        with pytest.raises(ident.IdentityError) as exc:
+            await edd.establish_identity(conn, _NeverCalled(), merged, evidence,
+                                         document_rid=f"document:test-{t}", mode="strict",
+                                         alias_decisions_override={}, type_decisions_override={})
+        assert exc.value.blockers[0]["state"] == ident.STATE_TYPE_UNDECLARED
+        assert exc.value.blockers[0]["type"] is None
+        assert person_uri in exc.value.blockers[0]["cross_type_uris"]
+        assert "error" in evidence
+
+        # With the audited decision the endpoint is typed Person, resolves to the
+        # live row, and nothing is registered.
+        evidence2 = {"mode": "strict"}
+        frozen = await edd.establish_identity(
+            conn, _NeverCalled(), merged, evidence2, document_rid=f"document:test-{t}",
+            mode="strict", alias_decisions_override={},
+            type_decisions_override={person: "Person"})
+        assert frozen.by_name == {person: person_uri}
+        assert frozen.type_for(person) == "Person"
+        assert evidence2["preregistration"]["registered"] == 0
+
+
+@pytest.mark.anyio
+async def test_preflight_applies_a_type_decision_to_an_untyped_endpoint_before_reading(conn):
+    """A decision typing an endpoint the caller left untyped must be applied BEFORE
+    the candidate read, or the decided type's rows are never fetched and the
+    endpoint classifies MISSING beside a live row of exactly that type."""
+    t = _tag()
+    label = f"Untyped Person {t}"
+    person = f"orn:personal-koi.entity:person-{t}"
+    await _seed_entity(conn, uri=person, text=label, etype="Person")
+    ep = ident.Endpoint(name=label, entity_type=None, normalized=normalize_entity_text(label),
+                        type_defaulted=True)
+    report = await ident.preflight_endpoints(
+        conn, [ep], normalize=normalize_entity_text, normalize_alias_fn=normalize_alias,
+        type_decisions={label: "Person"})
+    f = report.findings[0]
+    assert f.state == ident.STATE_LIVE_EXACT and f.live_uris == [person]
+    assert f.endpoint.entity_type == "Person" and f.endpoint.type_source == "audited_decision"
+    assert report.endpoints[0].entity_type == "Person", "the freeze must receive the typed endpoint"

@@ -37,7 +37,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 import sys
 import time
@@ -54,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.provider_http import provider_async_client  # noqa: E402
 from api import ingest_identity as ident  # noqa: E402
 from api import document_extraction_contract as contract  # noqa: E402
+from api import extraction_merge as _merge  # noqa: E402
 from api.extraction_quality import assess_extraction  # noqa: E402
 from api.resolution_primitives import (  # noqa: E402
     normalize_entity_text, normalize_alias,
@@ -180,8 +180,13 @@ class ExtractionError(RuntimeError):
         self.reason, self.detail, self.terminal = reason, detail, terminal
 
 
-def _norm(s: Optional[str]) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+# The merge key IS the identity key. A private normalizer used to live here
+# (lower + whitespace only) and disagreed with `normalize_entity_text` on `-`/`_`,
+# so `omni-mapping` / `omni mapping` survived the merge as two typed records and the
+# identity gate then raised on a conflict the merge existed to fold (review M6).
+# Single-sourced in api/extraction_merge.py; re-exported here under the old name so
+# every existing caller and test still reaches the one production function.
+_norm = _merge.merge_key
 
 
 def compute_next_retry(attempts: int) -> Optional[datetime]:
@@ -706,145 +711,16 @@ def build_prompt(template: str, window: Window, window_count: int) -> str:
 
 # ── Cross-window merge (deterministic) ────────────────────────────────────────────
 
-def merge_extractions(per_window: List[dict], windows: List[Window]) -> Dict[str, Any]:
-    """Union entities (type-priority coercion) + dedup facts across windows.
-
-    Entities are keyed on the NORMALIZED NAME ONLY, deliberately: the same entity
-    typed differently by two windows must become one entity, which is what
-    TYPE_PRIORITY resolves. Keying on (name, type) instead would turn every
-    cross-window disagreement into a duplicate pair, which is worse.
-
-    What that costs — and what `type_conflicts` now buys back (issue #68 req. 4) —
-    is that the coercion used to be INVISIBLE. Two genuinely different things
-    sharing one normalized name (the `Freedom` app and the abstract `freedom`) get
-    silently folded into whichever type ranks higher, and the caller sees a clean
-    entity list with no sign a decision was made. Every coercion, and every
-    off-contract type seen, is now reported in the merged payload so the identity
-    gate and the run receipt can show it. Nothing is suppressed; nothing is guessed.
-    """
-    ent: Dict[str, Dict[str, Any]] = {}
-    type_conflicts: Dict[str, Dict[str, Any]] = {}
-    unknown_types: Dict[str, int] = {}
-
-    warned: set = set()
-
-    def _note_if_off_contract(etype: Optional[str], name: str) -> None:
-        """Count EVERY entity record carrying a type the contract does not admit.
-
-        Separate from the priority lookup on purpose: folding it in made the count
-        depend on how many comparisons a label happened to be involved in, which is
-        an artefact of window layout rather than a fact about the payload. A cached
-        payload from an older contract version, or a hand-corrected one, can
-        legitimately carry such a type — it must not vanish into the floor without
-        anyone being told, and the number reported must mean something.
-        """
-        if contract.is_extractable(etype):
-            return
-        key = str(etype)
-        unknown_types[key] = unknown_types.get(key, 0) + 1
-        if key not in warned:                     # once per distinct type, not per record
-            warned.add(key)
-            logger.warning(
-                "entity %r carries type %r, which is not in %s — ranked below every "
-                "admitted type for cross-window merging", name, etype,
-                contract.DOCUMENT_TYPE_CONTRACT_VERSION)
-
-    def _priority(etype: Optional[str]) -> int:
-        pri, _known = contract.priority_for(etype)
-        return pri
-
-    for ex in per_window:
-        for e in ex.get("entities", []):
-            k = _norm(e["name"])
-            if not k:
-                continue
-            cur = ent.get(k)
-            etype = e["type"]
-            _note_if_off_contract(etype, e["name"])
-            if cur is None:
-                ent[k] = {"name": e["name"], "type": etype,
-                          "first_seen_chunk": e["first_seen_chunk"], "mention_count": e["mention_count"]}
-            else:
-                if etype != cur["type"]:
-                    incoming, incumbent = _priority(etype), _priority(cur["type"])
-                    kept, dropped = ((etype, cur["type"]) if incoming > incumbent
-                                     else (cur["type"], etype))
-                    rec = type_conflicts.setdefault(
-                        k, {"normalized": k, "name": cur["name"], "kept": kept,
-                            "dropped": [], "occurrences": 0})
-                    rec["kept"] = kept
-                    if dropped not in rec["dropped"]:
-                        rec["dropped"].append(dropped)
-                    rec["occurrences"] += 1
-                    if incoming > incumbent:
-                        cur["type"] = etype
-                cur["first_seen_chunk"] = min(cur["first_seen_chunk"], e["first_seen_chunk"])
-                cur["mention_count"] += e["mention_count"]
-                if len(e["name"]) > len(cur["name"]):      # prefer most-specific surface form
-                    cur["name"] = e["name"]
-
-    facts: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    for ex in per_window:
-        for f in ex.get("facts", []):
-            obj_key = _norm(f.get("object")) if f.get("object") else f"lit:{_norm(f.get('object_literal'))}"
-            key = (_norm(f["subject"]), f["predicate"], obj_key)
-            cr = f.get("chunk_range") or [0, 0]
-            if key not in facts:
-                facts[key] = {**f, "chunk_range": list(cr)}
-            else:
-                prev = facts[key]
-                prev["chunk_range"] = [min(prev["chunk_range"][0], cr[0]), max(prev["chunk_range"][1], cr[1])]
-                if f.get("confidence") == "high":
-                    prev["confidence"] = "high"
-
-    type_map = {k: v["type"] for k, v in ent.items()}
-    if type_conflicts:
-        logger.warning(
-            "cross-window type coercion on %d label(s): %s", len(type_conflicts),
-            "; ".join(f"{c['name']!r} kept {c['kept']} over {'/'.join(c['dropped'])}"
-                      for c in list(type_conflicts.values())[:6]))
-    return {"entities": list(ent.values()), "facts": list(facts.values()),
-            "type_map": type_map,
-            "type_conflicts": sorted(type_conflicts.values(), key=lambda c: c["normalized"]),
-            "unknown_types": dict(sorted(unknown_types.items())),
-            "type_contract_version": contract.DOCUMENT_TYPE_CONTRACT_VERSION}
+merge_extractions = _merge.merge_extractions   # see api/extraction_merge.py
 
 
 # ── Discourse merge + write (thorough tier only) ───────────────────────────────────
 
-# Document ARGUMENT taxonomy (plan §Q2; enforced by migration 104's source-aware CHECK).
-# Session discourse keeps its own enums (session_discourse_moves rows with
-# source_type='session'); document moves use these.
-VALID_MOVE_TYPES = {"thesis", "claim", "evidence", "premise",
-                    "counterpoint", "open_question", "definition", "implication"}
-VALID_MOVE_STATUS = {"asserted", "supported", "contested", "speculative", "open", "deferred"}
-
-
-def merge_discourse(per_window: List[dict]) -> List[Dict[str, Any]]:
-    """Dedup discourse moves across windows by (move_type, normalized title).
-    Widen chunk_range; backfill a missing detail/status/supports from a later
-    window. Deterministic order (insertion) so uuid5 ids are stable across re-runs."""
-    out: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for ex in per_window:
-        for m in ex.get("discourse", []) or []:
-            title = (m.get("title") or "").strip()
-            if not title:
-                continue
-            key = (m.get("move_type"), _norm(title))
-            cr = m.get("chunk_range") or [0, 0]
-            if key not in out:
-                out[key] = {**m, "title": title[:400], "chunk_range": list(cr)}
-            else:
-                prev = out[key]
-                prev["chunk_range"] = [min(prev["chunk_range"][0], cr[0]),
-                                       max(prev["chunk_range"][1], cr[1])]
-                if not prev.get("detail") and m.get("detail"):
-                    prev["detail"] = m["detail"]
-                if not prev.get("status") and m.get("status"):
-                    prev["status"] = m["status"]
-                if not prev.get("supports") and m.get("supports"):
-                    prev["supports"] = m["supports"]
-    return list(out.values())
+# Document ARGUMENT taxonomy + cross-window discourse merge live in
+# api/extraction_merge.py (one production merge for extractor, gate and curator).
+VALID_MOVE_TYPES = _merge.VALID_MOVE_TYPES
+VALID_MOVE_STATUS = _merge.VALID_MOVE_STATUS
+merge_discourse = _merge.merge_discourse
 
 
 async def write_discourse_moves(conn, *, document_rid: str, episode_id,
@@ -1116,6 +992,8 @@ async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
     agg = {"facts_created": 0, "facts_skipped": 0, "facts_null_embed": 0,
            "entities_created": 0, "entities_resolved": 0, "endpoints_pinned": 0}
     mismatches: List[dict] = []
+    fact_ids: List[str] = []
+    saw_fact_ids = False
     episode_id = None
     for i, batch in enumerate(chunks):
         sub = {**payload, "facts": batch}
@@ -1123,6 +1001,9 @@ async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
         for k in agg:
             agg[k] += int(ep.get(k) or 0)
         mismatches.extend(ep.get("type_mismatches") or [])
+        if "fact_ids" in ep:
+            saw_fact_ids = True
+            fact_ids.extend(ep.get("fact_ids") or [])
         eid = ep.get("episode_id")
         if episode_id is None:
             episode_id = eid
@@ -1137,7 +1018,10 @@ async def post_episode_batched(http: httpx.AsyncClient, payload: dict) -> dict:
                 f"continue with a document split across episodes")
         logger.info("  episode batch %d/%d: %d facts (created=%s skipped=%s)",
                     i + 1, len(chunks), len(batch), ep.get("facts_created"), ep.get("facts_skipped"))
-    return {**agg, "episode_id": episode_id, "type_mismatches": mismatches}
+    out = {**agg, "episode_id": episode_id, "type_mismatches": mismatches}
+    if saw_fact_ids:
+        out["fact_ids"] = fact_ids     # absent, not empty, when the server has none
+    return out
 
 
 async def file_type_mismatch_task(http: httpx.AsyncClient, conn, document_rid: str, tm: dict) -> None:
@@ -1367,6 +1251,87 @@ async def reclaim_stale_lease(conn, document_rid: str, *, ttl: Optional[float] =
                 "heartbeat_age_s": row["age"]}
 
 
+
+async def establish_identity(conn, http, merged: dict, identity_evidence: Dict[str, Any], *,
+                             document_rid: str, mode: Optional[str] = None,
+                             alias_decisions_override: Optional[Dict[str, str]] = None,
+                             type_decisions_override: Optional[Dict[str, str]] = None):
+    """Run the identity contract (issue #62) over a complete merged payload.
+
+    Returns the FrozenMap to write with, or None when the mode is `off` or the
+    mode is `warn` and the preflight blocked (the caller then writes UNPINNED and
+    the evidence says so). Raises IdentityError in `strict` mode on any blocker.
+
+    Lifted out of `extract_deep_document` so the REAL call path — the same client
+    the extractor uses, the same decisions, the same freeze inputs — can be driven
+    in a test. Every defect the independent review found in this seam (B1 relative
+    URL, B2 payload-wide cross-type, B3 raw-spelling lookup, M3 Concept default,
+    M4 unvalidated alias decision) was invisible to tests that exercised
+    api/ingest_identity.py through stand-ins instead of through this function.
+
+    On failure the document's `deep_extraction_last_error` is stamped before the
+    error propagates, so an unattended run leaves a reason behind instead of a
+    bare traceback in a log nobody reads.
+    """
+    mode = mode or DOC_IDENTITY_MODE
+    a_dec = alias_decisions if alias_decisions_override is None else alias_decisions_override
+    t_dec = type_decisions if type_decisions_override is None else type_decisions_override
+    if mode == "off":
+        return None
+    try:
+        # Audited type decisions reach `collect_endpoints` too: they are what types
+        # a fact endpoint the extractor left out of entities[]. There is no default.
+        endpoints = ident.collect_endpoints(merged, normalize=normalize_entity_text,
+                                            type_decisions=t_dec)
+        preflight = await ident.preflight_endpoints(
+            conn, endpoints,
+            normalize=normalize_entity_text,
+            normalize_alias_fn=normalize_alias,
+            alias_decisions=a_dec,
+            type_decisions=t_dec)
+        identity_evidence["preflight"] = preflight.as_evidence()
+        logger.info("identity preflight: %d endpoints %s (drift-recovered=%d)",
+                    len(endpoints), preflight.counts(),
+                    identity_evidence["preflight"]["drift_recovered"])
+
+        if preflight.blockers:
+            msg = (f"identity preflight found {len(preflight.blockers)} unbindable "
+                   f"endpoint(s): {sorted({f.state for f in preflight.blockers})}")
+            if mode == "strict":
+                ident.require_no_blockers(preflight)   # raises
+            logger.warning("%s — MODE=warn, proceeding UNPINNED. The facts written "
+                           "by this run are order-dependent.", msg)
+            identity_evidence["warn_proceeded_unpinned"] = True
+            return None
+
+        # Exact-only pre-registration of the truly missing identities, then
+        # freeze. The freeze RE-READS rather than trusting the registration
+        # responses, and asserts the bijection. The registration URL is ABSOLUTE:
+        # the client has no base_url (review B1).
+        prereg = await ident.preregister_missing(http, preflight, base_url=KOI_BASE_URL)
+        identity_evidence["preregistration"] = {
+            "registered": len(prereg["uri_map"]),
+            "receipts": prereg["receipts"],
+        }
+        frozen = await ident.freeze_endpoint_map(
+            conn, preflight.endpoints,
+            normalize=normalize_entity_text,
+            expected_uris=prereg["uri_map"],
+            alias_decisions=a_dec)
+        identity_evidence["frozen_map"] = frozen.as_evidence()
+        logger.info("identity frozen: %d endpoints → %d distinct URIs (%d pre-registered)",
+                    len(frozen.by_name), frozen.distinct_uris, len(prereg["uri_map"]))
+        return frozen
+    except ident.IdentityError as e:
+        identity_evidence["error"] = {"message": str(e)[:1500], "blockers": e.blockers[:20]}
+        await conn.execute(
+            """UPDATE document_ingestion_log
+               SET deep_extraction_last_error = $2
+             WHERE document_rid = $1""",
+            document_rid, ("identity_blocked:" + str(e))[:2000])
+        raise
+
+
 async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                                 document_rid: str, tier: str, group_id: Optional[str],
                                 run_id: str, force: bool,
@@ -1585,50 +1550,20 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                     "extraction carried %d off-contract type(s) %s — they rank below "
                     "every admitted type in the cross-window merge",
                     len(merged["unknown_types"]), sorted(merged["unknown_types"]))
-            if DOC_IDENTITY_MODE != "off":
-                endpoints = ident.collect_endpoints(merged, normalize=normalize_entity_text)
-                preflight = await ident.preflight_endpoints(
-                    conn, endpoints,
-                    normalize=normalize_entity_text,
-                    normalize_alias_fn=normalize_alias,
-                    alias_decisions=alias_decisions,
-                    type_decisions=type_decisions)
-                identity_evidence["preflight"] = preflight.as_evidence()
-                logger.info("identity preflight: %d endpoints %s (drift-recovered=%d)",
-                            len(endpoints), preflight.counts(),
-                            identity_evidence["preflight"]["drift_recovered"])
+            frozen = await establish_identity(
+                conn, http, merged, identity_evidence, document_rid=document_rid)
 
-                if preflight.blockers:
-                    msg = (f"identity preflight found {len(preflight.blockers)} unbindable "
-                           f"endpoint(s): {sorted({f.state for f in preflight.blockers})}")
-                    if DOC_IDENTITY_MODE == "strict":
-                        ident.require_no_blockers(preflight)   # raises
-                    logger.warning("%s — MODE=warn, proceeding UNPINNED. The facts written "
-                                   "by this run are order-dependent.", msg)
-                    identity_evidence["warn_proceeded_unpinned"] = True
-                else:
-                    # Exact-only pre-registration of the truly missing identities,
-                    # then freeze. The freeze RE-READS rather than trusting the
-                    # registration responses, and asserts the bijection.
-                    prereg = await ident.preregister_missing(http, preflight)
-                    identity_evidence["preregistration"] = {
-                        "registered": len(prereg["uri_map"]),
-                        "receipts": prereg["receipts"],
-                    }
-                    frozen = await ident.freeze_endpoint_map(
-                        conn, endpoints,
-                        normalize=normalize_entity_text,
-                        expected_uris=prereg["uri_map"],
-                        alias_decisions=alias_decisions)
-                    identity_evidence["frozen_map"] = frozen.as_evidence()
-                    logger.info("identity frozen: %d endpoints → %d distinct URIs "
-                                "(%d pre-registered)",
-                                len(frozen.by_name), frozen.distinct_uris,
-                                len(prereg["uri_map"]))
-
-            payload = facts_to_episode_payload(merged, name=doc_title, summary=summary,
-                                               source_document=source_document,
-                                               group_id=group_id, frozen=frozen)
+            try:
+                payload = facts_to_episode_payload(merged, name=doc_title, summary=summary,
+                                                   source_document=source_document,
+                                                   group_id=group_id, frozen=frozen)
+            except ExtractionError as e:
+                await conn.execute(
+                    """UPDATE document_ingestion_log
+                       SET deep_extraction_last_error = $2
+                     WHERE document_rid = $1""",
+                    document_rid, f"{e.reason}:{e.detail}"[:2000])
+                raise
             logger.info("merged: %d entities, %d facts → POST /knowledge/episodes "
                         "(group=%s, pinned=%s)",
                         len(merged["entities"]), len(merged["facts"]), group_id,
@@ -1643,7 +1578,17 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             # Buehler import was.
             if frozen is not None:
                 pinned = int(ep.get("endpoints_pinned") or 0)
-                verify = await ident.verify_persisted_graph(conn, ep.get("episode_id"), frozen)
+                if "fact_ids" not in ep:
+                    # A server that pins but does not say WHICH rows it wrote
+                    # leaves verification episode-scoped, and episodes are shared
+                    # across documents (review M5). Refuse rather than verify the
+                    # wrong population.
+                    raise ExtractionError(
+                        "identity_verification_unscoped",
+                        "the episode response carries no fact_ids; verification cannot "
+                        "be scoped to this run's rows (server predates PR #66's M5 fix?)")
+                verify = await ident.verify_persisted_graph(
+                    conn, ep.get("episode_id"), frozen, fact_ids=ep.get("fact_ids") or [])
                 identity_evidence["verification"] = {
                     **verify.as_evidence(), "endpoints_pinned_reported": pinned}
                 if not verify.ok:
@@ -1993,6 +1938,15 @@ def main() -> int:
         return asyncio.run(amain(args))
     except ExtractionError as e:
         print(f"ExtractionError: {e}", file=sys.stderr)
+        return 1
+    except ident.IdentityError as e:
+        # A blocked identity contract is an expected, documented outcome of a
+        # strict run — not a crash. Say what blocked, in the same shape the gate
+        # prints, and exit 1 like every other refusal.
+        print(f"IdentityError: {e}", file=sys.stderr)
+        for b in (e.blockers or [])[:10]:
+            print(f"  BLOCKER {b.get('state')}: {b.get('name')!r} ({b.get('type')})",
+                  file=sys.stderr)
         return 1
 
 

@@ -362,6 +362,13 @@ class EpisodeCreateResponse(BaseModel):
     # shortfall is endpoints that still went through the order-dependent resolver, and
     # is the difference between "we pinned the payload" and "we meant to".
     endpoints_pinned: int = 0
+    # Issue #62 / review M5: the ids of the knowledge_facts rows THIS request
+    # inserted (dedup-skipped facts are not listed — they already exist under the
+    # same pinned URIs). Episodes are shared across documents by
+    # (source_document, group_id), so an importer verifying "every persisted
+    # endpoint is in my frozen map" must scope to these rows, not to the episode,
+    # or it fails against a sibling document's facts after its own have committed.
+    fact_ids: List[str] = Field(default_factory=list)
     # Type-hint divergence list — empty unless caller provided subject_type
     # or object_type that conflicted with an existing entity. See TypeMismatch.
     type_mismatches: List[TypeMismatch] = Field(default_factory=list)
@@ -1192,6 +1199,7 @@ def create_router(
                     facts_null_embed=facts_null_embed,
                     entities_typed_by_default=entities_typed_by_default,
                     endpoints_pinned=endpoints_pinned,
+                    fact_ids=[f["id"] for f in emit_facts],
                     type_mismatches=type_mismatches,
                 )
 

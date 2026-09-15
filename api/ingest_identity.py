@@ -56,7 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,16 @@ STATE_GLOBAL_DUPLICATE = "graph_global_duplicate"  # #61: the graph already hold
 # It blocks, and only an explicit audited TYPE decision clears it. The operator has
 # to say which type the thing actually is, because nothing in the payload can.
 STATE_CROSS_TYPE_CONFLICT = "cross_type_conflict"
+# No extracted entity, no type_map entry and no audited decision names a type for
+# this fact endpoint. The first version defaulted it to `Concept`, preregistered
+# it as `Concept` with force_type, and hashed that default into the URI —
+# recording `type_defaulted` in evidence and gating nothing (review finding M3:
+# 1,046 such endpoints across 239 cached documents; 25 live today under another
+# type, so a Person referenced only in a fact would have become a Concept twin).
+# The prompt says every fact endpoint MUST appear in entities[]; an untyped
+# endpoint is therefore an extraction defect, and a type is an identity decision
+# nobody has made. It blocks, and only an audited TYPE decision types it.
+STATE_TYPE_UNDECLARED = "type_undeclared"
 
 BLOCKING_STATES = (
     STATE_AMBIGUOUS,
@@ -100,6 +110,7 @@ BLOCKING_STATES = (
     STATE_ALIAS_ONLY,
     STATE_GLOBAL_DUPLICATE,
     STATE_CROSS_TYPE_CONFLICT,
+    STATE_TYPE_UNDECLARED,
 )
 
 _ENTITY_URI_PREFIX = "orn:personal-koi.entity:"
@@ -129,12 +140,17 @@ class Endpoint:
     identity is actually decided on, and is deliberately NOT the raw name.
     """
     name: str
-    entity_type: str
+    # None when nothing in the payload (or an audited decision) says what this
+    # endpoint IS. A None type cannot be preflighted, preregistered or frozen —
+    # every stage refuses it — so an untyped endpoint is structurally unable to
+    # reach a write. It used to default to "Concept" here; see STATE_TYPE_UNDECLARED.
+    entity_type: Optional[str]
     normalized: str
-    # True when no extracted entity carried this name, i.e. the type below is a
-    # default rather than a statement. Surfaced because the default is hashed into
-    # a created entity's URI and cannot be corrected in place afterwards.
+    # True when the PAYLOAD declared no type for this endpoint. With a decision the
+    # endpoint is typed (type_source="audited_decision") and this stays False.
     type_defaulted: bool = False
+    # Where the type came from: "entities", "type_map", "audited_decision", or None.
+    type_source: Optional[str] = None
     roles: frozenset = field(default_factory=frozenset)  # {"entity","subject","object"}
 
     @property
@@ -146,9 +162,15 @@ def collect_endpoints(
     payload: dict,
     *,
     normalize: Callable[[str], str],
-    default_type: str = "Concept",
+    type_decisions: Optional[dict] = None,
 ) -> list[Endpoint]:
     """Every distinct (current-normalized label, type) the payload will reference.
+
+    Type precedence for a fact endpoint: the extractor's `entities[]` declaration,
+    then the merge's `type_map`, then an audited `type_decisions` entry (keyed by
+    label, matched on its normalization). Nothing else. There is deliberately NO
+    default type: the type is hashed into a created entity's URI, so a guessed
+    type is a permanent identity decision made by a fallback branch.
 
     Takes the union of the extractor's `entities[]` AND every fact subject/object
     name. The union matters: `EpisodeCreateResponse.entities_typed_by_default`
@@ -164,6 +186,8 @@ def collect_endpoints(
     entities = payload.get("entities") or []
     facts = payload.get("facts") or []
     type_map = payload.get("type_map") or {}
+    decided_types = {normalize(k): v for k, v in (type_decisions or {}).items()
+                     if isinstance(k, str) and normalize(k)}
 
     # Collected as SETS, not a dict of last-write-wins. Keying a dict on the
     # normalized name silently resolves a disagreement inside entities[] itself by
@@ -174,7 +198,9 @@ def collect_endpoints(
         name = (ent.get("name") or "").strip()
         if not name:
             continue
-        etype = ent.get("type") or default_type
+        etype = ent.get("type")
+        if not etype:
+            continue   # an untyped entities[] entry declares nothing
         declared_types.setdefault(normalize(name), set()).add(etype)
 
     declared_conflicts = {n: sorted(t) for n, t in declared_types.items() if len(t) > 1}
@@ -202,8 +228,14 @@ def collect_endpoints(
         norm = normalize(name)
         if not norm:
             return
-        declared_type = declared.get(norm) or type_map.get(norm)
-        etype = declared_type or default_type
+        if norm in declared:
+            etype, source = declared[norm], "entities"
+        elif type_map.get(norm):
+            etype, source = type_map[norm], "type_map"
+        elif norm in decided_types:
+            etype, source = decided_types[norm], "audited_decision"
+        else:
+            etype, source = None, None
         key = (norm, etype)
         slot = found.get(key)
         if slot is None:
@@ -211,7 +243,8 @@ def collect_endpoints(
                 "name": name,
                 "entity_type": etype,
                 "normalized": norm,
-                "type_defaulted": declared_type is None,
+                "type_defaulted": source is None,
+                "type_source": source,
                 "roles": {role},
             }
         else:
@@ -260,11 +293,12 @@ def collect_endpoints(
             entity_type=v["entity_type"],
             normalized=v["normalized"],
             type_defaulted=v["type_defaulted"],
+            type_source=v["type_source"],
             roles=frozenset(v["roles"]),
         )
         for v in found.values()
     ]
-    out.sort(key=lambda e: (e.normalized, e.entity_type))
+    out.sort(key=lambda e: (e.normalized, e.entity_type or ""))
     return out
 
 
@@ -282,21 +316,38 @@ _CANDIDATE_SQL = """
      WHERE entity_type = ANY($1::text[])
 """
 
-# Cross-type advisory candidates: same label, ANY type. This is a SEPARATE query on
-# purpose. The one above is type-filtered, so it structurally cannot return a
-# cross-type row — an advisory built from its results could never fire, which a test
-# caught by asserting the advisory was populated and finding it empty. A check that
-# cannot fire is worse than no check, because its silence reads as a clean result.
+# Same-label candidates under ANY type. This is a SEPARATE query on purpose. The
+# one above is type-filtered, so it structurally cannot return a cross-type row —
+# an advisory built from its results could never fire, which a test caught by
+# asserting the advisory was populated and finding it empty. A check that cannot
+# fire is worse than no check, because its silence reads as a clean result.
+#
+# It is NOT filtered by type at all. The first version excluded the PAYLOAD-WIDE
+# set of declared types here (`AND NOT entity_type = ANY(types)`), so one live
+# `Project` row declared `Organization` by the payload blocked correctly — until
+# any OTHER endpoint in the same payload happened to be a `Project`, at which point
+# the same label quietly classified as `missing` and would have been minted as a
+# cross-type twin with force_type (review finding B2; every shipped cross-type test
+# used a single-endpoint payload). The exclusion is now per ENDPOINT, in Python,
+# against the endpoint's OWN type. The same rows also serve as the evidence for an
+# untyped endpoint (what does the graph hold under this label, under any type).
 #
 # Matches on either the stored normalized_text or the CURRENT normalization of the
 # canonical label, for the same reason the type-filtered read does (#61).
-_CROSS_TYPE_SQL = """
+_ANY_TYPE_SQL = """
     SELECT fuseki_uri, entity_text, entity_type, normalized_text,
            merged_into, revoked_at
       FROM entity_registry
      WHERE (normalized_text = ANY($1::text[])
             OR koi_normalize_entity_text(entity_text) = ANY($1::text[]))
-       AND NOT (entity_type = ANY($2::text[]))
+"""
+
+# Rows by URI, any type, live or not — for validating an audited alias decision's
+# target (review finding M4: the freeze bound a decided URI with zero validation).
+_BY_URI_SQL = """
+    SELECT fuseki_uri, entity_text, entity_type, merged_into, revoked_at
+      FROM entity_registry
+     WHERE fuseki_uri = ANY($1::text[])
 """
 
 
@@ -332,6 +383,7 @@ class EndpointFinding:
             "matched_via": self.matched_via,
             "type_decision": self.type_decision,
             "type_defaulted": self.endpoint.type_defaulted,
+            "type_source": self.endpoint.type_source,
             "roles": sorted(self.endpoint.roles),
             "live_uris": sorted(self.live_uris),
             "tombstoned_uris": sorted(self.tombstoned_uris),
@@ -357,6 +409,11 @@ class PreflightReport:
     @property
     def blockers(self) -> list:
         return [f for f in self.findings if f.state in BLOCKING_STATES]
+
+    @property
+    def endpoints(self) -> list:
+        """The endpoints as classified — what the freeze must be given."""
+        return [f.endpoint for f in self.findings]
 
     def counts(self) -> dict:
         out: dict = {}
@@ -413,10 +470,25 @@ async def preflight_endpoints(
     if not endpoints:
         return PreflightReport(findings=[])
 
-    types = sorted({e.entity_type for e in endpoints})
-    rows = list(await conn.fetch(_CANDIDATE_SQL, types))
+    # An audited type decision types an endpoint the payload left untyped.
+    # `collect_endpoints` applies decisions first in production; this covers a
+    # caller that built endpoints without them, and it happens BEFORE the
+    # candidate read so the decided type's rows are actually fetched. Matched on
+    # the normalized label, like everything else here.
+    if type_decisions:
+        decided_by_norm = {normalize(k): v for k, v in type_decisions.items()
+                           if isinstance(k, str) and normalize(k)}
+        endpoints = [
+            replace(e, entity_type=decided_by_norm[e.normalized], type_defaulted=False,
+                    type_source="audited_decision")
+            if e.entity_type is None and e.normalized in decided_by_norm else e
+            for e in endpoints
+        ]
+
+    types = sorted({e.entity_type for e in endpoints if e.entity_type})
+    rows = list(await conn.fetch(_CANDIDATE_SQL, types)) if types else []
     labels = sorted({e.normalized for e in endpoints})
-    cross_rows = list(await conn.fetch(_CROSS_TYPE_SQL, labels, types))
+    any_type_rows = list(await conn.fetch(_ANY_TYPE_SQL, labels))
 
     # Index once. Both keys matter: `stored_norm` is what a stock Tier-1 exact
     # lookup sees, `current_norm` is what the label actually normalizes to today.
@@ -430,10 +502,11 @@ async def preflight_endpoints(
         for alias in _coerce_aliases(row["aliases"]):
             by_alias.setdefault((normalize_alias_fn(alias), etype), []).append(row)
 
-    # Cross-type advisory index, built from the DEDICATED query above. Keyed under
-    # both spellings so a drifted stored value still surfaces the advisory.
+    # Any-type index, built from the DEDICATED query above. Keyed under both
+    # spellings so a drifted stored value still surfaces. The per-endpoint type
+    # filter is applied at the point of use, never here.
     by_current_any_type: dict[str, list] = {}
-    for row in cross_rows:
+    for row in any_type_rows:
         for k in {normalize(row["entity_text"] or ""), row["normalized_text"]}:
             by_current_any_type.setdefault(k, []).append(row)
 
@@ -442,6 +515,18 @@ async def preflight_endpoints(
 
     findings: list = []
     for ep in endpoints:
+        if ep.entity_type is None:
+            # Nothing declared a type and no decision supplied one. Block, and
+            # show what the graph holds under this label so the decision can be
+            # written in one look. Never classified MISSING: MISSING is what gets
+            # preregistered, and there is no type to preregister it as.
+            held = _live(by_current_any_type.get(ep.normalized, []))
+            findings.append(EndpointFinding(
+                endpoint=ep, state=STATE_TYPE_UNDECLARED, live_uris=[],
+                tombstoned_uris=[], alias_uris=[],
+                cross_type_uris=sorted({r["fuseki_uri"] for r in held})))
+            continue
+
         key = ep.key
         stored_hits = by_stored.get(key, [])
         current_hits = by_current.get(key, [])
@@ -458,7 +543,9 @@ async def preflight_endpoints(
         live_exact = _live(exact_rows)
         tombstoned = [r for r in exact_rows if r["merged_into"] is not None]
         alias_rows = _live(by_alias.get((normalize_alias_fn(ep.name), ep.entity_type), []))
-        cross_type = _live(by_current_any_type.get(ep.normalized, []))
+        # Endpoint-specific: rows for THIS label whose type is not THIS endpoint's.
+        cross_type = [r for r in _live(by_current_any_type.get(ep.normalized, []))
+                      if r["entity_type"] != ep.entity_type]
 
         live_uris = sorted({r["fuseki_uri"] for r in live_exact})
         alias_uris = sorted({r["fuseki_uri"] for r in alias_rows} - set(live_uris))
@@ -477,7 +564,12 @@ async def preflight_endpoints(
         # clear it. A decision that cannot be acted on is not an escape hatch.
         decided_uri = alias_decisions.get(ep.name)
         if decided_uri:
-            live_by_uri = {r["fuseki_uri"] for r in _live(rows)}
+            # Live AND of this endpoint's own type. The candidate rows span every
+            # type the payload declares, and accepting any of them let a decision
+            # bind a Concept endpoint to a live Project row whenever the payload
+            # also had a Project somewhere — a binding the pinned write 422s on.
+            live_by_uri = {r["fuseki_uri"] for r in _live(rows)
+                           if r["entity_type"] == ep.entity_type}
             if decided_uri in live_by_uri:
                 findings.append(EndpointFinding(
                     endpoint=ep, state=STATE_LIVE_EXACT, live_uris=[decided_uri],
@@ -586,11 +678,36 @@ def require_no_blockers(report: PreflightReport) -> None:
 # 3. Exact-only preregistration of the truly missing identities
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _register_url(http, post_path: str, base_url: Optional[str]) -> str:
+    """The absolute URL a registration POST will go to — or an IdentityError.
+
+    The extractor's client is `provider_async_client()`, which sets no base_url,
+    and the first version POSTed the bare path "/register-entity" to it. httpx
+    raised `UnsupportedProtocol` before a socket opened — on every strict run with
+    at least one missing endpoint, which the preflight's own docstring calls
+    "every first ingest". It escaped as a bare traceback because it was neither
+    IdentityError nor ExtractionError (review finding B1). Resolve the URL here,
+    and refuse with a typed error BEFORE any request when nothing supplies a host.
+    """
+    if re.match(r"^https?://", post_path):
+        return post_path
+    if base_url:
+        return base_url.rstrip("/") + "/" + post_path.lstrip("/")
+    client_base = str(getattr(http, "base_url", "") or "")
+    if client_base:
+        return client_base.rstrip("/") + "/" + post_path.lstrip("/")
+    raise IdentityError(
+        f"cannot preregister: {post_path!r} is a relative path and neither a base_url "
+        f"argument nor the HTTP client supplies a host; an absolute URL is required "
+        f"before any registration is attempted")
+
+
 async def preregister_missing(
     http,
     report: PreflightReport,
     *,
     post_path: str = "/register-entity",
+    base_url: Optional[str] = None,
     timeout: float = 240.0,
 ) -> dict:
     """Create every MISSING endpoint via exact-only, force-typed registration.
@@ -601,10 +718,15 @@ async def preregister_missing(
     cross-type dedup fallback so a same-name entity of another type does not
     capture it; the advisory cross_type warning still fires and is recorded.
 
+    `base_url` (or an absolute `post_path`, or a client with its own base_url) is
+    required — see `_register_url`. Resolved once, before the first POST, so a
+    misconfiguration cannot mint half the endpoints and then fail.
+
     Returns {payload label -> canonical URI} for the endpoints it registered.
     """
     created: dict = {}
     receipts: list = []
+    url = _register_url(http, post_path, base_url)
     for finding in report.missing:
         ep = finding.endpoint
         # Belt to the preflight's braces. require_no_blockers() should already have
@@ -643,7 +765,7 @@ async def preregister_missing(
             "force_type": True,
             "exact_only": True,
         }
-        response = await http.post(post_path, json=body, timeout=timeout)
+        response = await http.post(url, json=body, timeout=timeout)
         if response.status_code >= 400:
             raise IdentityError(
                 f"exact-only preregistration failed for {ep.name!r} ({ep.entity_type}): "
@@ -701,16 +823,44 @@ async def preregister_missing(
 
 @dataclass
 class FrozenMap:
-    """An immutable payload-endpoint-to-URI binding. Facts must use it directly."""
+    """An immutable payload-endpoint-to-URI binding. Facts must use it directly.
+
+    Lookups are by the CANONICAL KEY, not the raw spelling. `collect_endpoints`
+    folds every spelling of one label into one endpoint and keeps the first
+    spelling as `name`; the facts keep their own spellings. The first version's
+    `uri_for` was a bare `by_name.get(raw)`, so the second spelling of a bound
+    endpoint (`gpt_4` after `GPT-4`) came back None and the episode builder raised
+    `identity_map_incomplete` — AFTER preregistration had already minted (review
+    finding B3; 86 of 1,755 cached documents carry such a pair). `by_key` already
+    held the answer and nothing read it.
+    """
     by_name: dict          # payload label -> canonical URI
     by_key: dict           # (normalized, type) -> canonical URI
     by_name_type: dict     # payload label -> the entity_type the binding was made on
     evidence: list
     contract_version: str = IDENTITY_CONTRACT_VERSION
     normalizer_version: str = NORMALIZER_VERSION
+    # The normalizer the keys were built with. Optional only so hand-built maps in
+    # older tests still construct; a map built by `freeze_endpoint_map` always has
+    # one, and without it a lookup falls back to the raw-spelling read.
+    normalize: Optional[Callable[[str], str]] = field(default=None, repr=False, compare=False)
+    _by_norm: Optional[dict] = field(default=None, init=False, repr=False, compare=False)
+
+    def _key_for(self, name: str) -> Optional[tuple]:
+        if self.normalize is None:
+            return None
+        if self._by_norm is None:
+            # A payload has exactly one type per normalized label (collect_endpoints
+            # raises otherwise), so normalized -> key is a function.
+            self._by_norm = {n: (n, t) for (n, t) in self.by_key}
+        return self._by_norm.get(self.normalize(name or ""))
 
     def uri_for(self, name: str) -> Optional[str]:
-        return self.by_name.get(name)
+        hit = self.by_name.get(name)
+        if hit is not None:
+            return hit
+        key = self._key_for(name)
+        return self.by_key.get(key) if key else None
 
     def type_for(self, name: str) -> Optional[str]:
         """The type this endpoint was BOUND on — not the caller's later guess.
@@ -721,7 +871,11 @@ class FrozenMap:
         map is keyed on a normalized name and an endpoint may have been typed by
         default), and that disagreement would surface as a 422 blaming the pin.
         """
-        return self.by_name_type.get(name)
+        hit = self.by_name_type.get(name)
+        if hit is not None:
+            return hit
+        key = self._key_for(name)
+        return key[1] if key else None
 
     @property
     def distinct_uris(self) -> int:
@@ -756,10 +910,24 @@ async def freeze_endpoint_map(
     """
     alias_decisions = alias_decisions or {}
     if not endpoints:
-        return FrozenMap(by_name={}, by_key={}, by_name_type={}, evidence=[])
+        return FrozenMap(by_name={}, by_key={}, by_name_type={}, evidence=[],
+                         normalize=normalize)
 
-    types = sorted({e.entity_type for e in endpoints})
-    rows = list(await conn.fetch(_CANDIDATE_SQL, types))
+    types = sorted({e.entity_type for e in endpoints if e.entity_type})
+    rows = list(await conn.fetch(_CANDIDATE_SQL, types)) if types else []
+
+    # Every decided URI is read back by URI, whatever its type and whether or not
+    # it is live, so the decision can be VALIDATED rather than trusted. The first
+    # version bound `alias_decisions[name]` verbatim: no liveness check, no type
+    # check, and it skipped the `expected_uris` disagreement check — so a decision
+    # naming a merged-away or wrong-type URI passed the freeze and the pinned
+    # write then 422'd (review finding M4). Preflight already refused these; the
+    # freeze is the step that runs immediately before the write and must not be
+    # weaker than the step before it.
+    decided_uris = sorted({alias_decisions[e.name] for e in endpoints
+                           if alias_decisions.get(e.name)})
+    by_uri = {r["fuseki_uri"]: r
+              for r in (await conn.fetch(_BY_URI_SQL, decided_uris) if decided_uris else [])}
 
     by_stored: dict[tuple, list] = {}
     by_current: dict[tuple, list] = {}
@@ -777,14 +945,48 @@ async def freeze_endpoint_map(
     problems: list = []
 
     for ep in endpoints:
+        if ep.entity_type is None:
+            # Cannot be reached through the preflight (it blocks first); refused
+            # here too so a caller that skipped the gate cannot bind a type-less
+            # endpoint to anything.
+            problems.append({"state": STATE_TYPE_UNDECLARED, "name": ep.name,
+                             "type": None, "candidates": []})
+            continue
+
         decided = alias_decisions.get(ep.name)
         if decided:
+            target = by_uri.get(decided)
+            if target is None or target["merged_into"] is not None or target["revoked_at"] is not None:
+                problems.append({
+                    "state": "alias_decision_not_live",
+                    "name": ep.name, "type": ep.entity_type, "decided_uri": decided,
+                    "reason": ("unknown URI" if target is None
+                               else "merged into " + str(target["merged_into"])
+                               if target["merged_into"] is not None else "revoked"),
+                })
+                continue
+            if target["entity_type"] != ep.entity_type:
+                problems.append({
+                    "state": "alias_decision_type_mismatch",
+                    "name": ep.name, "type": ep.entity_type, "decided_uri": decided,
+                    "target_type": target["entity_type"],
+                })
+                continue
+            if expected_uris is not None and ep.name in expected_uris and expected_uris[ep.name] != decided:
+                problems.append({
+                    "state": "registration_disagreement",
+                    "name": ep.name, "type": ep.entity_type,
+                    "registration_returned": expected_uris[ep.name],
+                    "registry_holds": decided,
+                })
+                continue
             by_name[ep.name] = decided
             by_key[ep.key] = decided
             by_name_type[ep.name] = ep.entity_type
             evidence.append({
                 "name": ep.name, "type": ep.entity_type, "uri": decided,
                 "bound_via": "audited_alias_decision",
+                "canonical_label": target["entity_text"],
             })
             continue
 
@@ -849,7 +1051,7 @@ async def freeze_endpoint_map(
         )
 
     return FrozenMap(by_name=by_name, by_key=by_key, by_name_type=by_name_type,
-                     evidence=evidence)
+                     evidence=evidence, normalize=normalize)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -863,6 +1065,18 @@ _PERSISTED_ENDPOINTS_SQL = """
        AND valid_to IS NULL
 """
 
+# Scoped to the facts THIS run wrote. Episodes are keyed on (source_document,
+# group_id) and are SHARED: 11 live episodes are shared by 24 documents. An
+# episode-wide read verified a sibling document's facts against this run's map
+# and failed — after this run's facts had committed (review finding M5). The
+# server returns `fact_ids` for exactly the rows it inserted; verify those.
+_PERSISTED_BY_ID_SQL = """
+    SELECT id::text AS id, subject_uri, object_uri, predicate, fact_text
+      FROM knowledge_facts
+     WHERE episode_id = $1
+       AND id = ANY($2::uuid[])
+"""
+
 
 @dataclass
 class VerifyReport:
@@ -871,6 +1085,7 @@ class VerifyReport:
     persisted_uris: int
     expected_uris: int
     unused_endpoints: list
+    scope: str = "episode"     # "run_fact_ids" when scoped to this run's rows
 
     @property
     def ok(self) -> bool:
@@ -885,11 +1100,18 @@ class VerifyReport:
             "offending_sample": self.offending[:10],
             "unused_endpoints": len(self.unused_endpoints),
             "binding_verified": self.ok,
+            "scope": self.scope,
         }
 
 
-async def verify_persisted_graph(conn, episode_id, frozen: FrozenMap) -> VerifyReport:
-    """Every persisted subject/object of this episode must be a pinned URI.
+async def verify_persisted_graph(conn, episode_id, frozen: FrozenMap, *,
+                                 fact_ids: Optional[Sequence[str]] = None) -> VerifyReport:
+    """Every persisted subject/object of THIS RUN's facts must be a pinned URI.
+
+    `fact_ids` are the ids the server reported inserting (`EpisodeCreateResponse.
+    fact_ids`). With them, only those rows are checked. Without them the check
+    falls back to the whole episode — correct for an unshared episode and a false
+    failure on a shared one, which is why the extractor always passes them.
 
     Run this BEFORE relational/discourse finalization. A document that fails here
     must not receive document_entity_links, discourse moves, or a deep_extracted_at
@@ -897,7 +1119,10 @@ async def verify_persisted_graph(conn, episode_id, frozen: FrozenMap) -> VerifyR
     which is exactly what the audited Buehler import did.
     """
     allowed = set(frozen.by_name.values())
-    rows = list(await conn.fetch(_PERSISTED_ENDPOINTS_SQL, episode_id))
+    if fact_ids is not None:
+        rows = list(await conn.fetch(_PERSISTED_BY_ID_SQL, episode_id, list(fact_ids)))
+    else:
+        rows = list(await conn.fetch(_PERSISTED_ENDPOINTS_SQL, episode_id))
 
     offending: list = []
     seen: set = set()
@@ -923,6 +1148,7 @@ async def verify_persisted_graph(conn, episode_id, frozen: FrozenMap) -> VerifyR
         persisted_uris=len(seen),
         expected_uris=len(allowed),
         unused_endpoints=unused,
+        scope="run_fact_ids" if fact_ids is not None else "episode",
     )
 
 
