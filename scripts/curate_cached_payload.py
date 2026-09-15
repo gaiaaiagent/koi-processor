@@ -14,8 +14,19 @@ rewrite what is already cached, and re-running the extractor to get a better typ
 means paying for the whole document again AND accepting a different extraction.
 
 So: take the cached payload as-is, apply exactly the overrides an operator has
-audited, validate the result against the live schema, and write it out as a curated
-payload for `check_document_integrity.py --payload` and for a pinned replay.
+audited, validate the result against the live schema, run the PRODUCTION merge over
+it, and write it out as a curated payload for `check_document_integrity.py --payload`.
+
+THE OUTPUT IS A VALIDATION ARTIFACT, NOT A REPLAY INPUT
+-------------------------------------------------------
+Nothing consumes this file except the read-only gate. `extract_deep_documents.py`
+has no `--payload` flag, on purpose: a replay reads the stored windows, and the only
+way an audited override can reach a replay is by reaching the cache through a
+mechanism that #69 (transactional rollback / replay reconciliation) has yet to
+define. Until then this file answers one question — "would the identity and quality
+gates pass with these overrides applied?" — and asserts nothing about what a replay
+would write. `curation.document_rid` is stamped so the gate can refuse to check it
+against a different document.
 
 Nothing here writes to the database. Every statement is a SELECT.
 
@@ -64,6 +75,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from api import document_extraction_contract as contract  # noqa: E402
+from api import extraction_merge as merge  # noqa: E402
 from api.resolution_primitives import normalize_entity_text  # noqa: E402
 
 POSTGRES_URL = os.getenv(
@@ -136,22 +148,17 @@ def apply_overrides(windows: list, retype: dict) -> tuple:
 def merge_for_gate(windows: list) -> dict:
     """The payload shape `check_document_integrity.py --payload` consumes.
 
-    Entities are de-duplicated by (normalized name, type) — the same rule
-    `_payload_from_windows` uses when the gate reads the cache directly — so a
-    curated payload and an uncurated one are compared on identical terms.
+    This is the PRODUCTION merge (`api.extraction_merge`), not a re-implementation:
+    entities coerced by normalized name with the coercions reported, facts
+    de-duplicated with their per-window `chunk_ranges`, discourse merged. An earlier
+    version de-duplicated by (normalized name, type) here — the same divergence the
+    gate had (review finding M7) — so a curated payload could block on a type
+    disagreement the extractor would have folded.
     """
-    seen, entities = set(), []
-    facts, moves = [], []
-    for _idx, d in windows:
-        for e in d.get("entities") or []:
-            k = (normalize_entity_text(e.get("name") or ""), e.get("type"))
-            if k in seen:
-                continue
-            seen.add(k)
-            entities.append(e)
-        facts += d.get("facts") or []
-        moves += d.get("discourse") or []
-    return {"entities": entities, "facts": facts, "discourse": moves, "type_map": {}}
+    raws = [d for _idx, d in windows]
+    payload = merge.merge_extractions(raws)
+    payload["discourse"] = merge.merge_discourse(raws)
+    return payload
 
 
 async def main() -> int:
@@ -222,8 +229,11 @@ async def main() -> int:
         "schema_file": SCHEMAS[args.tier].name,
         "audited_type_overrides": {k: v["type"] for k, v in applied.items()},
         "override_detail": applied,
+        "merge": "api.extraction_merge.merge_extractions (production)",
         "note": ("Audited type overrides applied to the CACHED extraction. No window "
-                 "was re-extracted and no database row was written."),
+                 "was re-extracted and no database row was written. VALIDATION "
+                 "ARTIFACT for check_document_integrity.py --payload only; not a "
+                 "replay input (see #69)."),
     }
 
     for label, rec in sorted(applied.items()):
