@@ -380,11 +380,19 @@ constraint did NOT reject a partial waiver"). The first two attempts at those
 controls failed on a syntax error rather than the assertion, which proved nothing,
 and were redone.
 
-Pre-existing, unrelated: **67 failures/errors across the full suite, byte-identical
-sets between this branch and a clean worktree at the merge-base — zero regressions.**
-Most are per-test schema fixtures missing `entity_merge_log.reversal`, which the
-production schema has; the 3 in `tests/test_knowledge_router_facts_gate.py` recorded
-here earlier are a subset of the 67, not the whole of it.
+Pre-existing, unrelated: the full suite, run with identical flags
+(`-p no:cacheprovider -p no:warnings --continue-on-collection-errors`) in this branch
+and in a throwaway worktree at the merge-base `b57b612`, gives **merge-base 55 failed /
+10 errors / 1,755 passed; branch 54 failed / 10 errors / 1,929 passed**, and `comm`
+over the sorted FAILED/ERROR node-id sets shows the branch's set is a **strict subset**
+of the merge-base's — nothing fails on the branch that does not fail at the base. (An
+earlier version of this paragraph said "67 failures, byte-identical sets"; that was
+the count from an earlier run of a previous session and was stale by the time it was
+written here.) The one merge-base-only failure is an `httpx.ReadTimeout` against a
+live HTTP surface. Most of the rest are per-test schema fixtures missing
+`entity_merge_log.reversal`, which the production schema has; the 3 in
+`tests/test_knowledge_router_facts_gate.py` recorded here earlier are a subset, not
+the whole of it.
 
 
 ---
@@ -423,6 +431,16 @@ Tests for each live beside the code they cover (`tests/test_ingest_identity.py`,
 - **M6** — the cross-window merge moved to `api/extraction_merge.py`, keyed on
   `normalize_entity_text` (the identity key); the extractor re-exports it; facts carry
   `chunk_ranges` (per-window citations) beside the widened `chunk_range`.
+  **Scope of the key change (re-review follow-up):** the entity key is NOT the
+  discourse-move id key. `write_discourse_moves` hashes the title into a uuid5 id and
+  upserts `ON CONFLICT (id)`, and every stored row was derived with lower + strip +
+  collapse-whitespace only. Rebinding `_norm` had silently changed that hash input
+  (5,578 of 13,767 stored document moves on 1,169 documents would have stopped
+  matching their own id; a replay would insert a twin beside each). The extractor
+  now derives move ids through a dedicated `discourse_move_id_key` /
+  `discourse_move_id` with the historical whitespace-only behaviour, pinned by
+  literal UUIDs in `tests/test_discourse_move_ids.py`; merging and identity keep
+  `normalize_entity_text`.
 - **M7** — `scripts/check_document_integrity.py` runs the production merge over the
   stored windows; evaluates the bijection on the resolvable endpoints even when some
   are missing; reports would-be-minted endpoints WITH the type they would be minted

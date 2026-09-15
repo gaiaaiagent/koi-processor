@@ -97,8 +97,9 @@ STATE_CROSS_TYPE_CONFLICT = "cross_type_conflict"
 # this fact endpoint. The first version defaulted it to `Concept`, preregistered
 # it as `Concept` with force_type, and hashed that default into the URI —
 # recording `type_defaulted` in evidence and gating nothing (review finding M3:
-# 1,046 such endpoints across 239 cached documents; 25 live today under another
-# type, so a Person referenced only in a fact would have become a Concept twin).
+# 1,045 such endpoints across 239 cached documents, re-derived read-only; 24
+# live today ONLY under another type, so a Person referenced only in a fact
+# would have become a Concept twin).
 # The prompt says every fact endpoint MUST appear in entities[]; an untyped
 # endpoint is therefore an extraction defect, and a type is an identity decision
 # nobody has made. It blocks, and only an audited TYPE decision types it.
@@ -164,20 +165,20 @@ def collect_endpoints(
     normalize: Callable[[str], str],
     type_decisions: Optional[dict] = None,
 ) -> list[Endpoint]:
-    """Every distinct (current-normalized label, type) the payload will reference.
+    """Every distinct (current-normalized label, type) the payload's FACTS reference.
+
+    Endpoints come from fact subjects/objects ONLY; `entities[]` supplies the type
+    for an endpoint and is never itself a source of endpoints (a declared-but-
+    unreferenced entity has nothing written about it, so there is nothing to bind —
+    see the comment at the fact loop below for what unioning entities[] in cost).
 
     Type precedence for a fact endpoint: the extractor's `entities[]` declaration,
     then the merge's `type_map`, then an audited `type_decisions` entry (keyed by
     label, matched on its normalization). Nothing else. There is deliberately NO
     default type: the type is hashed into a created entity's URI, so a guessed
-    type is a permanent identity decision made by a fallback branch.
-
-    Takes the union of the extractor's `entities[]` AND every fact subject/object
-    name. The union matters: `EpisodeCreateResponse.entities_typed_by_default`
-    exists precisely because extractors emit facts whose endpoints are absent from
-    their own `entities[]` list, and those are the endpoints that get minted with a
-    guessed type. An endpoint set built from `entities[]` alone would leave exactly
-    those unpinned — the ones least able to survive being unpinned.
+    type is a permanent identity decision made by a fallback branch. An endpoint
+    none of the three names is returned with `entity_type=None` and blocks in
+    preflight as `type_undeclared`.
 
     Raises IdentityError when one normalized label is claimed under two types by
     the extractor itself; that is an extraction defect and guessing which one is
@@ -578,8 +579,16 @@ async def preflight_endpoints(
                     cross_type_uris=sorted({r["fuseki_uri"] for r in cross_type}),
                     matched_via="audited_alias_decision"))
                 continue
-            # A decision naming a dead or unknown URI is worse than none: it reads
-            # as resolved while binding nothing. Fall through so it blocks.
+            # A decision naming a dead, unknown or wrong-type URI is IGNORED here,
+            # not refused: the endpoint falls through to the ordinary classification
+            # below, so a same-label live row of its type still resolves it and an
+            # unmatched label still goes `missing` — and `preregister_missing` will
+            # then MINT a row for it before the freeze reads the decision back and
+            # refuses (`alias_decision_not_live` / `alias_decision_type_mismatch`).
+            # The refusal is therefore one step later than it should be, and can
+            # leave a minted row behind. Known gap, deferred to #69 (transactional
+            # rollback/replay is the place to make the mint reversible); an earlier
+            # comment here claimed this branch blocks, which it does not.
             logger.warning(
                 "audited alias decision for %r names %s, which is not a live "
                 "candidate — ignoring the decision", ep.name, decided_uri)
@@ -921,9 +930,10 @@ async def freeze_endpoint_map(
     # version bound `alias_decisions[name]` verbatim: no liveness check, no type
     # check, and it skipped the `expected_uris` disagreement check — so a decision
     # naming a merged-away or wrong-type URI passed the freeze and the pinned
-    # write then 422'd (review finding M4). Preflight already refused these; the
-    # freeze is the step that runs immediately before the write and must not be
-    # weaker than the step before it.
+    # write then 422'd (review finding M4). Preflight does NOT refuse these — it
+    # logs and ignores an unmatched decision (see the alias branch there), so this
+    # read-back is the ONLY validation the decision gets before the write. It runs
+    # immediately before the write and must be at least as strict as the write.
     decided_uris = sorted({alias_decisions[e.name] for e in endpoints
                            if alias_decisions.get(e.name)})
     by_uri = {r["fuseki_uri"]: r

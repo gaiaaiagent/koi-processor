@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -187,6 +188,32 @@ class ExtractionError(RuntimeError):
 # Single-sourced in api/extraction_merge.py; re-exported here under the old name so
 # every existing caller and test still reaches the one production function.
 _norm = _merge.merge_key
+
+
+def discourse_move_id_key(title: Optional[str]) -> str:
+    """The title key hashed into a discourse move's uuid5 id — and NOTHING else.
+
+    lower + strip + collapse whitespace: byte-for-byte the normalizer the extractor
+    used from migration 103 until `cdc445c`, when `_norm` above was rebound to the
+    entity normalizer and this hash input silently changed with it. `normalize_entity_text`
+    also folds `-`/`_` to a space and strips a leading `@`, so every stored move whose
+    title carried one — 5,578 rows on 1,169 documents, 12 of them on the three
+    michaelgarfield replay targets — stopped matching its own id, and a replay would
+    have INSERTed a duplicate beside each row it was meant to repair (ON CONFLICT (id)
+    only ever fires on an equal id). A persisted-id derivation is a contract with the
+    rows already written; it does not follow the identity key. Entity merging and
+    endpoint identity keep `_norm` / `normalize_entity_text` (M6). Pinned by literal
+    UUIDs in tests/test_discourse_move_ids.py.
+    """
+    return re.sub(r"\s+", " ", (title or "").strip().lower())
+
+
+def discourse_move_id(document_rid: str, move_type: str, title: str, chunk_start: int) -> uuid.UUID:
+    """Deterministic id of one document discourse move. chunk_start (global RAG-chunk
+    index) keeps two same-type/same-title moves at different locations distinct
+    (plan §163). Idempotent upsert depends on this never changing for a stored row."""
+    return uuid.uuid5(DISCOURSE_NAMESPACE,
+                      f"{document_rid}:{move_type}:{discourse_move_id_key(title)}:{chunk_start}")
 
 
 def compute_next_retry(attempts: int) -> Optional[datetime]:
@@ -736,9 +763,8 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
         return 0
 
     def move_id(mt: str, title: str, chunk_start: int):
-        # chunk_start (global RAG-chunk index) keeps two same-type/same-title moves at
-        # different locations distinct (plan §163).
-        return uuid.uuid5(DISCOURSE_NAMESPACE, f"{document_rid}:{mt}:{_norm(title)}:{chunk_start}")
+        # The hash input is the WHITESPACE-ONLY key, not `_norm` — see discourse_move_id_key.
+        return discourse_move_id(document_rid, mt, title, chunk_start)
 
     title_to_id: Dict[str, Any] = {}
     inserted = 0
