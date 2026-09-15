@@ -20,6 +20,26 @@
 > census: **239 of 1,755** cached documents (1,045 endpoints) will block in strict
 > mode for that reason. That is the operator's trade to make, not the extractor's.
 >
+> **Re-review follow-up (same session, later):** the re-review of `d51fb41` (session
+> `76e0e751`) found ONE new merge blocker, introduced by the M6 fix itself: rebinding
+> `_norm` to the entity normalizer also changed the **hash input of the persistent
+> discourse-move uuid5 id**, so 5,578 of 13,767 stored document moves (1,169 docs, 12
+> of them on the three michaelgarfield replay targets) would have stopped matching
+> their own id and a replay would have inserted a twin beside each. Fixed in commit
+> `97f6525` with a dedicated whitespace-only `discourse_move_id_key` /
+> `discourse_move_id` used ONLY for the id hash — merging and identity keep
+> `normalize_entity_text`. Pinned by literal UUIDs (`tests/test_discourse_move_ids.py`,
+> 7 tests: 5 fail at `d51fb41`, the hyphen-free control passes on both sides).
+> Read-only census after the patch: **13,765 / 13,767 stored ids reproduced**; the 2
+> that match neither derivation are pre-existing (June 2026) anomalies, reported and
+> untouched; 21/21 michaelgarfield target rows reproduced. Same commit corrects the
+> false M4 "preflight already refuses" comments (preflight IGNORES an invalid alias
+> decision and the endpoint can be minted before the freeze refuses — deferred to
+> #69), the 1,046→1,045 count, the `collect_endpoints` docstring, and the spec's
+> stale "67 byte-identical failures" claim. **The re-review's verdict was BLOCK on
+> that one item only; no merge blocker is known to remain** — deploy, replay and
+> job re-enablement are still gated by #67/#69 and the runbook order below.
+>
 > ### ✅ #68 CLEARED IN THE BRANCH — 2026-09-14, session `bb26783d`, commit `3bbe405`
 >
 > This block used to read "🚫 HARD PRE-RESUME BLOCKER — do not deploy PR #66 or replay
@@ -34,9 +54,9 @@
 > | claim | verified |
 > |---|---|
 > | `com.personal-koi.substack-deep-extract` disabled AND unloaded | ✅ absent from `launchctl list`, present in `print-disabled`. **Keep it that way.** Backlog 356. |
-> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD == origin. Review fixes = `cdc445c`, `741ab0a`, `8c711be`, `79f1a21`; #68 code = `3bbe405`; the tip is the docs wrap on top. |
+> | branch clean, pushed | ✅ `git status --porcelain` empty; HEAD == origin. Review fixes = `cdc445c`, `741ab0a`, `8c711be`, `79f1a21`; re-review follow-up (move-id hash input) = `97f6525`; #68 code = `3bbe405`; the tip is the docs wrap on top. |
 > | PR #66 | ✅ OPEN, **draft**, **0 status checks**; body carries `Closes #62` / `Closes #68` on separate lines (`closingIssuesReferences` lists BOTH — "and #68" was not a closing keyword). **Do not merge.** |
-> | tests | ✅ **173** across the six directly-affected suites, each file run ONCE: 74 `test_ingest_identity.py` + 8 `test_check_document_integrity.py` + 19 `test_extraction_quality.py` + 15 `test_migration_126.py` + 29 `test_document_extraction_type_contract.py` + 28 `..._fixtures.py`. 66 are new this session. (The earlier "214" was the same 107 tests passed to pytest twice.) Full suite, same flags both sides (`--continue-on-collection-errors`): merge-base **55 failed / 10 errors / 1,755 passed**, branch **54 failed / 10 errors / 1,929 passed**; **no failure exists on the branch that is not at the merge-base**; the one difference is a live-HTTP `ReadTimeout` at the merge-base, environmental. |
+> | tests | ✅ **180** across the seven directly-affected suites, each file run ONCE: 74 `test_ingest_identity.py` + 8 `test_check_document_integrity.py` + 19 `test_extraction_quality.py` + 15 `test_migration_126.py` + 29 `test_document_extraction_type_contract.py` + 28 `..._fixtures.py` + 7 `test_discourse_move_ids.py`. 73 are new this session. (The earlier "214" was the same 107 tests passed to pytest twice.) Full suite, same flags both sides (`--continue-on-collection-errors`): merge-base **55 failed / 10 errors / 1,755 passed**, branch **54 failed / 10 errors / 1,929 passed**; **no failure exists on the branch that is not at the merge-base**; the one difference is a live-HTTP `ReadTimeout` at the merge-base, environmental. |
 > | facts retracted | ✅ exactly 5; ID set matches the target set; all other facts preserved |
 > | federation | ✅ 3 `knowledge_episode` UPDATEs delivered to the same 4 peers as the originals; **peer application proven 0/4** — only NUC confirmed *receipt*, and `EventQueue.confirm()` is documented as receipt, not application |
 > | issues filed | ✅ #67 federated fact retractions + peer application proof (OPEN) · ~~#68 type contract~~ **implemented `3bbe405`, AC comment posted** · #69 transactional rollback/replay reconciliation (OPEN) |
@@ -150,9 +170,9 @@
 > **New audit surface:** `SELECT * FROM entity_current_norm_duplicates;` — 169 live
 > duplicate sets, 125 drift-created, 347 rows (#61 AC6).
 
-**Updated:** 2026-09-14 17:15 PDT
-**Session:** Claude Code · `98bc9fe1` · Fix the independently verified review blockers in draft PR #66 (B1–B4, M1–M8)
-**Status:** Branch `fix/document-ingest-integrity`, clean and pushed (review fixes `cdc445c`, `741ab0a`, `8c711be`, `79f1a21`; #68 code `3bbe405`); **draft PR #66** (0 checks, do not merge) closes #62 and #68 with valid keywords; **every review blocker is fixed in the branch, none deployed**; migrations 124/125 live, **126 written and NOT applied** (now transactional + ledgered; still a verified no-op here); `com.personal-koi.substack-deep-extract` still **disabled and unloaded** (backlog 356); three michaelgarfield documents still **half-repaired**; **#67 and #69 still gate the replay**, and deploy comes BEFORE replay.
+**Updated:** 2026-09-14 23:25 PDT
+**Session:** Claude Code · 98bc9fe1-c3bb-4228-abe8-81cb0204c0bd · KOI: PR #66 review blockers + move-id hash input fixed
+**Status:** Branch clean and pushed at the docs wrap above `97f6525`; B1–B4/M1–M8 and the re-review's move-id blocker are fixed in draft PR #66 (closes #62/#68), nothing deployed, migration 126 unapplied, job disabled — no merge blocker known to remain; #67/#69 and the deploy-before-replay order still gate everything live.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -205,6 +225,18 @@ M1–M8 — fixture-first, one lead + two focused subagents, no live writes.
   run wrote; the extractor refuses if a server returns none.
 - **M6** the merge lives in `api/extraction_merge.py`, keyed on
   `normalize_entity_text`; 0 cached docs still raise `payload_type_conflict`.
+  **Follow-up (re-review blocker):** the entity key had also become the
+  discourse-move ID hash input. `discourse_move_id_key` (lower + strip + collapse
+  whitespace — the historical derivation, byte-for-byte) and `discourse_move_id`
+  now own that hash; nothing else changed. Census: drift 5,579 → 2 rows (the 2 are
+  pre-existing anomalies, `471473d4…` and `9da04ce8…`, June 2026, matching NEITHER
+  derivation — reported, not rewritten); the 12 hyphen/underscore-titled
+  michaelgarfield moves keep their stored ids.
+- **M4 (ordering, documented not fixed):** preflight logs and IGNORES an alias
+  decision whose URI is dead/unknown/wrong-type, so the endpoint can go `missing`,
+  be MINTED by preregistration, and only then be refused at the freeze. The comments
+  claiming preflight blocks were false and are corrected; making the mint reversible
+  is #69's job.
 - **M7** `check_document_integrity.py` runs the production merge; bijection is
   evaluated on the resolvable endpoints when some are missing; would-be mints are
   printed WITH their type; blockers counted before truncation; check-only evidence
@@ -330,8 +362,14 @@ deep-document extraction type contract with `Document` and `Event`. Commit
 
 - Branch `fix/document-ingest-integrity`; `git status --porcelain` empty;
   `git diff --check` clean; HEAD == `origin/fix/document-ingest-integrity`.
-- **173** tests across the six directly-affected suites (each file once; see the
-  table at the top); **66 new this session**; every one green.
+- **180** tests across the seven directly-affected suites (each file once; see the
+  table at the top); **73 new this session**; every one green. The move-id fix:
+  `tests/test_discourse_move_ids.py` 7 tests — 5 FAIL at `d51fb41` and with the
+  key reverted to the entity normalizer (pinned UUIDs differ), the hyphen-free
+  control PASSES in all three states; the affected discourse/identity suites
+  (`test_discourse_move_ids` + `test_discourse_search` + `test_ingest_identity` +
+  `..._fixtures`) 130 passed; the six-suite command 173 passed; `git diff --check`
+  clean; full suite re-run after the fix, same flags: 54 failed / 10 errors / 1,934 passed, FAILED/ERROR node-id set IDENTICAL to the previous branch run and still a strict subset of the merge-base's (the passed count moves by ±2 between runs because `test_launchd_job_targets.py` parametrizes over the launchd jobs running at collection time).
 - Full suite vs a throwaway `git worktree` at the merge-base `b57b612`, identical
   flags (`-p no:cacheprovider -p no:warnings --continue-on-collection-errors`):
   merge-base 55 failed / 10 errors / 1,755 passed; branch 54 failed / 10 errors /
@@ -383,6 +421,7 @@ deep-document extraction type contract with `Document` and `Event`. Commit
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
+| 2026-09-14 | Claude Code | `98bc9fe1` (koi-infra, continued) | **Re-review merge blocker closed: discourse-move id hash input restored.** Commit `97f6525`. The M6 rename had made the entity normalizer the uuid5 input for persistent discourse-move ids; read-only census showed 5,579/13,767 stored document moves (1,169 docs, 12 on the michaelgarfield replay targets) no longer matched, so a replay would have twinned them. Dedicated `discourse_move_id_key` (whitespace-only, historical) + `discourse_move_id`; 7 tests pinning literal UUIDs (5 fail at `d51fb41`, hyphen-free control passes on both sides); census after: **13,765/13,767 reproduced**, 21/21 target rows, 2 pre-existing June-2026 anomalies reported and untouched. Same commit: false M4 "preflight already refuses" comments corrected (preflight ignores an invalid alias decision → possible mint before the freeze refuses; deferred to #69), 1,046→1,045, `collect_endpoints` docstring, spec's stale "67 byte-identical" → strict subset. 180 tests across seven suites green; full suite failure set identical to the prior branch run. No live writes; PR #66 still draft. |
 | 2026-09-14 | Claude Code | `98bc9fe1` (koi-infra) | **Review blockers B1–B4 / M1–M8 fixed in draft PR #66.** Four commits (`cdc445c` identity, `741ab0a` quality, `8c711be` gate, `79f1a21` migration 126), fixture-first, each core fix revert-proven, **zero regressions** vs the merge-base (54F/10E vs 55F/10E; +174 passing). B1: registration URL is absolute or a typed refusal — previously every first ingest died in httpx. B2: cross-type per endpoint. B3: frozen-map lookups by canonical key. **M3: untyped endpoints BLOCK (`type_undeclared`) instead of defaulting to Concept — 239/1,755 cached docs affected, operator's call.** M4: alias decisions validated at the freeze. M5: `fact_ids` + run-scoped verification. M6: one merge key (`api/extraction_merge.py`). M7: gate on the production merge, prints the type it would mint (`-> Project` from the stored windows — the B4 hazard, now visible). M1/M2/M8 fixed; B4 runbook order corrected (deploy BEFORE replay); curated payloads are gate-only validation artifacts; `curation.document_rid` checked; three shared handoff rows restored; spec 0.88→0.75 (`similarity_threshold`); PR now `Closes #62` / `Closes #68` (both link). No live writes. |
 | 2026-09-14 | Claude Code | `bb26783d` (koi-infra) | **Issue #68 — one authoritative document-extraction type contract.** Commit `3bbe405`, pushed; PR #66 body rewritten (`Closes #62 and #68`). Root cause was the inverse of the title: the registry already marked **9** types extractable while three code surfaces said seven, and nothing compared them. `api/document_extraction_contract.py` is now the single source and all four surfaces are DERIVED (`render_extraction_contract.py --check`); `assert_contract_surfaces()` re-checks the LOADED prompt+schema at run start, because the job runs from a different checkout. Found two things not in the issue: the audited-type-decision escape hatch was **dead end-to-end** (no caller passed `type_decisions`, and preregistration refused even a decided conflict), and the operator gate **crashed with KeyError** on exactly the two documents #68 is about. 57 new tests, each drift check with a positive control; full suite vs a clean worktree = **67 failures, identical sets, zero regressions**. All three michaelgarfield payloads now exit 0 with the essays typed `Document`. No live writes; migration 126 written and NOT applied (verified no-op). |
 | 2026-09-14 | Claude Code | `7e3da78a` (koi-infra) | **Document-ingest identity hardening (#62/#61/#64) + a live repair it forced.** Draft PR #66 @ `1d7f708`, 48 tests, migrations 124+125 applied live. Proved all four #62 collapses still reproduce and that the batch boundary is NOT the mechanism. One bounded substack batch wrote **5 wrong bindings across 3 docs**; job disabled by the operator. Bounded repair: 5 facts retracted + 3 federated UPDATEs (delivery 4/4, **application 0/4**); merges 325/327, retype 326. Filed #67/#68/#69. **#68 is a hard pre-resume blocker** — the extraction schemas cannot emit `Document` or `Event`, and pinning would make those wrong types permanent. Three of my own design errors caught by real data, not by re-reading the diff. |

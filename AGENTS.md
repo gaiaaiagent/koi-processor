@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-14 17:15 PDT
+**Updated:** 2026-09-14 23:25 PDT
 
-**Current status:** `fix/document-ingest-integrity`, clean and pushed (the tip is the docs wrap above the fix commits). The review's blockers B1–B4/M1–M8 are **fixed in the branch, none deployed** (`cdc445c` identity · `741ab0a` quality · `8c711be` gate · `79f1a21` migration 126). **Draft PR #66** (0 checks — do NOT merge) closes #62 and #68. Migration 126 still **NOT applied**; `substack-deep-extract` still **disabled** (backlog 356).
+**Current status:** `fix/document-ingest-integrity`, clean and pushed (tip = docs wrap above the fixes). B1–B4/M1–M8 fixed (`cdc445c`…`79f1a21`) AND the re-review's last blocker — the discourse-move uuid5 hash input the M6 rename changed — fixed in `97f6525`. **Draft PR #66** (0 checks — do NOT merge) closes #62/#68; **no merge blocker known to remain.** Migration 126 **NOT applied**; `substack-deep-extract` **disabled** (backlog 356).
 
-**Next:** 1) **#67** federated fact retraction (peer application 0/4). 2) **#69** transactional rollback/replay. 3) Deploy #66 to BOTH checkouts, restart, verify OpenAPI (`subject_uri`/`object_uri` AND `fact_ids`) — **before** the pinned replay (task due 09-21).
+**Next:** 1) **#67** federated fact retraction. 2) **#69** transactional rollback/replay (also owns the M4 gap: preflight IGNORES an invalid alias decision, so a row can be minted before the freeze refuses). 3) Deploy #66 to BOTH checkouts, restart, verify OpenAPI (`subject_uri`/`object_uri` AND `fact_ids`) — **before** the pinned replay (due 09-21).
 
-**Watch:** untyped fact endpoints now BLOCK (`type_undeclared`) instead of defaulting to Concept — **239/1,755 cached docs** affected in strict mode; operator's call. Stored michaelgarfield windows would still mint the essays as `Project` (the gate prints this); curated payloads are gate-only artifacts, no replay reads them until #69.
+**Watch:** untyped endpoints BLOCK (`type_undeclared`) — **239/1,755 cached docs**; operator's call. 2 pre-existing move rows (June 2026) match no id derivation — reported, untouched.
 
-**Verification:** tree clean; 173 tests across the six affected suites (66 new) green; full suite vs merge-base, same flags: nothing fails on the branch that does not fail at the base; 12 core fixes revert-proven; no live writes.
+**Verification:** tree clean; 180 tests / seven suites green (7 new pin literal move-id UUIDs; 5 fail at `d51fb41`, control passes); census 13,765/13,767 stored move ids reproduced, 21/21 michaelgarfield rows; full-suite failure set unchanged, strict subset of merge-base; no live writes.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
