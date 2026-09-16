@@ -34,6 +34,7 @@ from api.koi_envelope import (
     EnvelopeError,
 )
 from api.koi_protocol import NodeProfile, timestamp_to_z_format
+from api import fact_retraction
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,18 @@ class KOIPoller:
             try:
                 await self._poll_all_peers()
                 await self._push_webhook_peers()
+                # Fact-retraction retry/expiry sweep (issue #67). Opt-in:
+                # default OFF so a deployed node's behaviour is unchanged until
+                # the operator sets KOI_FACT_RETRACTION_SWEEP=true. Re-read every
+                # cycle so a flip takes effect without a restart.
+                if (
+                    os.getenv("KOI_FACT_RETRACTION_SWEEP", "false").lower() == "true"
+                    and self.event_queue is not None
+                ):
+                    try:
+                        await fact_retraction.sweep_once(self.pool, self.event_queue)
+                    except Exception as e:
+                        logger.warning(f"fact_retraction.sweep failed: {e}")
                 # Vault sync cycle (if configured)
                 if self.vault_sync:
                     try:
@@ -601,6 +614,11 @@ class KOIPoller:
 
         # Process each event
         confirm_batch = []
+        # Application reports (issue #67): a handler that returns a dict with
+        # `application: True` — today only the fact-retraction path — is
+        # telling the publisher what happened to its event. Confirm alone is
+        # receipt; these ride the same confirm request as `applications`.
+        applications: List[Dict[str, Any]] = []
         for event in events:
             event_id = event.get("event_id")
             rid = event.get("rid")
@@ -612,7 +630,7 @@ class KOIPoller:
                 continue
 
             try:
-                await self._process_event(
+                result = await self._process_event(
                     rid=rid,
                     event_type=event_type,
                     contents=contents,
@@ -622,9 +640,19 @@ class KOIPoller:
                 )
                 if event_id:
                     confirm_batch.append(event_id)
+                if isinstance(result, dict) and result.get("application"):
+                    applications.append({**result, "node": self.node_rid})
             except Exception as e:
                 logger.warning(f"Failed to process event {rid}: {e}")
-                # Don't confirm — will re-deliver on next poll
+                # Don't confirm. This used to say "will re-deliver on next
+                # poll" — it will NOT: EventQueue.poll marks `delivered_to`
+                # at hand-over and excludes on it, so an unconfirmed event is
+                # never offered to this peer again (proved by
+                # tests/test_fact_retraction_boundary.py::
+                # test_pin_unconfirmed_events_are_not_redelivered). It is
+                # LOST for this peer until its 24h/72h expiry unless the
+                # publisher re-emits it. The fact-retraction ledger + sweep
+                # (api/fact_retraction.py) exist because of this.
 
         # Confirm processed events
         if confirm_batch:
@@ -632,6 +660,7 @@ class KOIPoller:
                 base_url=base_url,
                 source_node=source_node,
                 event_ids=confirm_batch,
+                applications=applications,
             )
 
     async def _process_event(
@@ -704,8 +733,10 @@ class KOIPoller:
             from api.domain_event_handlers import apply_domain_event
             domain_payload = contents.get("payload", {})
             async with self.pool.acquire() as conn:
-                await apply_domain_event(conn, domain, rid, event_type, domain_payload, source_node)
-            return
+                # The handler's return value (an application report for a
+                # fact retraction, None otherwise) goes back to _poll_peer.
+                return await apply_domain_event(
+                    conn, domain, rid, event_type, domain_payload, source_node)
 
         # Shape-based dispatch for federated DOCUMENTS.
         #
@@ -916,12 +947,21 @@ class KOIPoller:
         base_url: str,
         source_node: str,
         event_ids: List[str],
+        applications: Optional[List[Dict[str, Any]]] = None,
     ):
-        """Confirm receipt of events with the source node."""
-        confirm_payload = {
+        """Confirm receipt of events with the source node.
+
+        `applications` (issue #67): per-event application reports from the
+        handlers. Added to the payload ONLY when non-empty, so the request is
+        byte-identical to the pre-#67 shape otherwise; an older publisher
+        ignores the unknown key.
+        """
+        confirm_payload: Dict[str, Any] = {
             "type": "confirm_events",
             "event_ids": event_ids,
         }
+        if applications:
+            confirm_payload["applications"] = list(applications)
 
         if self.private_key:
             request_body = sign_envelope(
@@ -977,5 +1017,9 @@ class KOIPoller:
                     f"Confirm failed: HTTP {resp.status_code} from {source_node}: {resp.text}"
                 )
         except Exception as e:
-            # Confirm failure is harmless — events will re-deliver
+            # A failed confirm does NOT make the events re-deliver (poll()
+            # excludes on delivered_to). They were applied locally; what is
+            # lost is the publisher's receipt — and, for a retraction, its
+            # application report, which the publisher's sweep will age into
+            # `unverifiable` (api/fact_retraction.py).
             logger.warning(f"Confirm call failed for {source_node}: {e}")
