@@ -7,15 +7,15 @@
 
 This snapshot was refreshed by the end skill. Use it before planning or recommending project work.
 
-**Updated:** 2026-09-15 00:05 PDT
+**Updated:** 2026-09-16 11:05 PDT
 
-**Current status:** `fix/document-ingest-integrity`, clean and pushed (tip = docs wrap above the fixes). B1–B4/M1–M8 fixed (`cdc445c`…`79f1a21`) AND the re-review's last blocker — the discourse-move uuid5 hash input the M6 rename changed — fixed in `97f6525`. **Draft PR #66** (0 checks — do NOT merge) closes #62/#68; **no merge blocker known to remain.** Migration 126 **NOT applied**; `substack-deep-extract` **disabled** (backlog 356).
+**Current status:** `fix/federated-fact-retractions` clean and pushed at `e362178` (5 commits over `0c39fa1` = `regen-prod` after PR #66 merged). **Draft PR #70** = #67's durable-retraction foundation (one-transaction retraction, unicast per admitting edge, migration 127 ledger, signed application reports, `LEAST` upsert, pending tombstones, lookups, opt-in sweep, read-only audit). **#67 stays OPEN** (AC table posted). 127 **NOT applied**; nothing deployed; no peer contacted; no live writes.
 
-**Next:** 1) **#67** federated fact retraction. 2) **#69** transactional rollback/replay (also owns the M4 gap: preflight IGNORES an invalid alias decision, so a row can be minted before the freeze refuses). 3) Deploy #66 to BOTH checkouts, restart, verify OpenAPI (`subject_uri`/`object_uri` AND `fact_ids`) — **before** the pinned replay (due 09-21).
+**Next:** 1) Review PR #70; deploy in order: 127 on publisher AND recipients → code to BOTH checkouts → restart → `ps -o lstart=`. 2) #67 leftovers: two un-obligated scripts (`extract_deep_documents.py` dedup, `ingest_research_papers.py` invalid-fact retire) + repair application for the 4,043-line plan. 3) #69 rollback/replay (replay task due 09-21 gated by it).
 
-**Watch:** untyped endpoints BLOCK (`type_undeclared`) — **239/1,755 cached docs**; operator's call. 2 pre-existing move rows (June 2026) match no id derivation — reported, untouched.
+**Watch:** audit: **3,847 facts probably still live on nuc-personal** (+196 unverifiable); the NUC gets no code automatically and its old code still resurrects via UPDATE-before-NEW. `personal_koi_test` carries an unmerged migration 119 edge CHECK; tests drop it in-transaction.
 
-**Verification:** tree clean; 179 tests / seven suites green (`--collect-only` = 179; 6 new pin literal move-id UUIDs: 5 fail at `d51fb41`, control passes); census 13,765/13,767 stored move ids reproduced, 21/21 michaelgarfield rows; full suite 1,934 passed / 2,163 items vs the prior run's 1,929 / 2,158 — different collections (+6 move-id, −1 launchd-parametrized), identical failure set, strict subset of merge-base; no live writes.
+**Verification:** tree clean, HEAD == origin; 136 new tests green; full suite vs `0c39fa1`, same flags: 54F/10E both sides, failure sets identical, +138 passing; tripwire OK; 20-finding review applied.
 
 Full source of truth: `PROJECT_HANDOFF.md`. Re-read it when more detail is needed and re-verify volatile external facts before acting.
 <!-- end-skill:handoff:end -->
