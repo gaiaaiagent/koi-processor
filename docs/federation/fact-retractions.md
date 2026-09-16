@@ -326,6 +326,12 @@ behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
 * Operator identity: a session-token caller's `_identity` is an email. It stays in the
   publisher's ledger row; the wire and every peer see `"operator"` (service identities pass
   through as opaque role names) — `test_review_operator_email_never_leaves_the_node`.
+* **No originator check.** A node can retract a fact it received from a peer (the fact's
+  `source_node_rid` is that peer's) and the tombstone is delivered back to every admitting
+  peer, the originator included, which records it `applied`. This is the same trust model the
+  NEW/UPDATE upsert paths already have (any peer with an admitting edge can overwrite
+  `valid_to` on you); #67 does not change it, and a per-fact ownership rule is a separate
+  design decision (review design note P8).
 * The 3 `unauthorized` rows (cowichan-valley, front-range, friend-e2e; one fact each,
   `possibly_live` evidence) date from before `2c497f0` (2026-08-25), when every approved edge
   still received every domain event — the narrow-scope peers confirmed `knowledge_episode`
