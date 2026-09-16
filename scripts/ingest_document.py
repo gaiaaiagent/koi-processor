@@ -579,6 +579,51 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
         # End-state invariant (the right "0 residual dups" gate floor): 1 = no duplicate
         # triples remain after the sweeps; 0 only if a sweep was skipped/broken.
         "no_residual_dups": int(ext.get("no_residual_dups") if ext.get("no_residual_dups") is not None else 1),
+        # ── Identity contract (#62) ──────────────────────────────────────────
+        # The floor the old gate never had. A green structural result said every
+        # stage ran; it said nothing about whether the entities those stages wrote
+        # are the ones the payload meant. The audited Buehler import passed strict
+        # with 11 fact endpoints bound to the wrong entity.
+        #
+        # 1 = a payload-endpoint map was frozen AND every persisted subject/object
+        # was verified against it. 0 = not verified, which includes warn mode, off
+        # mode, and rag tier (no facts to bind). The gate floors this at standard
+        # and thorough only — see phase_expectations.yaml.
+        "identity_verified": int(ext.get("identity_verified") or 0),
+        "identity_mode": ext.get("identity_mode"),
+        "identity_endpoints": int(ext.get("identity_endpoints") or 0),
+        # DISTINCT-ENDPOINT CARDINALITY (#62 acceptance). Equal values mean the
+        # bijection held: N distinct typed payload endpoints became N distinct
+        # identities. The gate floors on the derived boolean because its evaluator
+        # supports only `>=`, but both operands are emitted so a reader can see
+        # WHICH side shrank rather than only that something did.
+        "identity_distinct_uris": int(ext.get("identity_distinct_uris") or 0),
+        "identity_bijective": 1 if (
+            int(ext.get("identity_endpoints") or 0)
+            == int(ext.get("identity_distinct_uris") or 0)
+        ) else 0,
+        "endpoints_pinned": int(ext.get("endpoints_pinned") or 0),
+        # ── Producer provenance (#64) ────────────────────────────────────────
+        # 1 = every window this run produced recorded which provider/model made it.
+        # `providers`/`models` are lists, not one value: a run that fell back
+        # through transports legitimately has more than one producer, and
+        # flattening that to "the model" is the misattribution #64 is about.
+        "producers_recorded": int(ext.get("producers_recorded") or 0),
+        "providers": ext.get("providers") or [],
+        "models": ext.get("models") or [],
+        "transports": ext.get("transports") or [],
+        # ── Semantic quality (#64), kept STRUCTURALLY SEPARATE ───────────────
+        # Never folded into the structural keys above. 'not_evaluated' is its own
+        # state and is not a pass: the original Buehler run was structurally
+        # complete with 25 facts where a curated re-run of the same document found
+        # 213, and a single blended status is how that stops being visible.
+        #
+        # Read from `ext`, like every sibling key: the extractor returns `quality`
+        # inside the dict stored under result["extract"]. This read used to look at
+        # result["quality"], which nothing writes, so the gate saw 'not_evaluated' /
+        # 0 on every run regardless of the verdict (review finding M2).
+        "semantic_status": (ext.get("quality") or {}).get("status", "not_evaluated"),
+        "semantic_ok": 1 if (ext.get("quality") or {}).get("status") == "pass" else 0,
     }
 
 
