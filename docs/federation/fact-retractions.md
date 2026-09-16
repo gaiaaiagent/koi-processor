@@ -79,9 +79,15 @@ of their queue. **"Delivery 4/4" was one hand-over and three refusals.** Applica
 the one receipt, is unproven from this node (§3).
 
 The audit classifies exactly that: nuc-personal `tombstone_confirmed` on all five; shawn,
-front-range and cowichan-valley `unauthorized` (evidence `unverifiable`: a `delivered_to` mark
-on both the live copy and the tombstone, receipt of neither); friend-e2e, the REJECTED
-octo-salish-sea edge and the REVOKED short-RID cowichan-valley edge `never_sent`.
+front-range and cowichan-valley `scope_excluded` (a `delivered_to` mark on both the live copy
+and the tombstone, receipt of neither, on events queued after per-edge scoping and after
+those peers' edges last changed, with no approved scope admitting `knowledge_episode` — a
+provable poll-filter exclusion, i.e. never handed over); friend-e2e, the REJECTED
+octo-salish-sea edge and the REVOKED short-RID cowichan-valley edge `never_sent`. The
+incident run exits **0**: nothing is outstanding for those five beyond the receipt-only
+proof on nuc-personal. (An earlier draft of this document called the three `unauthorized`;
+the 2026-09-16 adversarial review showed that overstated exclusion marks as possible
+holdings, and the classifier now distinguishes them — §4.4.)
 
 ### 1.4 The systemic number
 
@@ -96,13 +102,17 @@ The full-population run (§4.6, no `--limit`, exit 1, `elapsed_s` 19.4) reports,
 | (fact, peer) `possibly_live` | **3,847** — all on nuc-personal |
 | (fact, peer) `unverifiable` | 196 — all on nuc-personal |
 | (fact, peer) `tombstone_confirmed` | 26 (20 nuc-personal; 2 each cowichan-valley, front-range, friend-e2e — facts *born* with a `valid_to`, so the carried copy already matched) |
-| (fact, peer) `unauthorized` | 732 (cowichan-valley 244, front-range 244, shawn 243, friend-e2e 1) — 729 with `unverifiable` evidence, 3 with `possibly_live` evidence |
-| dry-run plan | **4,043** `would_queue` lines, all to nuc-personal; 0 `wait`; 732 `blocked` |
+| (fact, peer) `scope_excluded` | 729 (cowichan-valley 243, front-range 243, shawn 243) — `delivered_to` marks on 2026-09 events, edges unchanged since before them, no admitting scope: provable exclusions, not holdings |
+| (fact, peer) `unauthorized` | **3** (cowichan-valley, front-range, friend-e2e — one fact each, `b11c0a85…`, 2026-08-13, from before per-edge scoping): `possibly_live` evidence on a peer policy no longer admits |
+| dry-run plan | **4,043** `would_queue` lines, all to nuc-personal; 0 `wait`; 3 `blocked` |
 
 So the honest sentence is: **nuc-personal probably holds 3,847 facts this node has retracted,
-plus 196 it may hold; the narrow-scope peers hold an unknown number of facts from before
-`2c497f0` (2026-08-25, when domain events started being scoped per edge — until then every
-approved edge received the whole knowledge stream), and policy today forbids telling them.**
+plus 196 it may hold; three narrow-scope peers each hold one fact from before `2c497f0`
+(2026-08-25, when domain events started being scoped per edge — until then every approved
+edge received the whole knowledge stream), and policy today forbids telling them; the other
+729 marks on those peers are exclusions, not holdings.** (Corrected 2026-09-16: the first
+version of this table counted the 729 as `unauthorized` and dated them before `2c497f0`;
+every one of them is on a 2026-09 event.)
 Read live, `confirmed_by` on `knowledge_episode` NEW events by month: cowichan-valley,
 front-range and friend-e2e each confirmed 271 in 2026-06, 13 in 2026-07 and 142 in 2026-08,
 shawn 271 in 2026-06 only, none of the four in 2026-09 — i.e. June through August, and shawn
@@ -179,15 +189,17 @@ The `state` column is the operator's evidence, and it is deliberately finer than
 | `queued` | outbox row + unicast event committed together with `valid_to` | the retraction transaction |
 | `delivered` | this node's `poll()` **handed the event over** (not merely marked it) | `delivery_observer` hook, same connection as the `delivered_to` write |
 | `received` | the peer confirmed **receipt** — nothing about application | `record_receipts` on `/koi-net/events/confirm` |
-| `applied` | the peer **reported** application (`status: applied`, `already_tombstoned`, or `pending`-recorded) in the confirm payload | `record_applications`; report stored verbatim in `application` |
-| `rejected` | the peer reported it could not apply; reason retained verbatim | `record_applications` |
+| `applied` | the peer **reported** application (`status: applied`, `already_tombstoned` with the SAME `valid_to`, or `pending`-recorded) in a **signed** confirm payload | `record_applications`; report stored verbatim in `application` |
+| `rejected` | the peer reported it could not apply; reason retained verbatim. Two reasons are not verdicts: `ledger_unavailable…` (the peer has not run migration 127 — the sweep re-queues it) and `peer_holds_different_valid_to` (the peer keeps its earlier tombstone; AC2 violated, visible, futile to re-send) | `record_applications` |
 | `retrying` | the prior event expired with no report; a fresh event id was queued, `attempt` incremented, old id kept in `attempt_history` | the sweep |
-| `failed` | terminal: attempts exhausted (default 5), or the edge stopped admitting `knowledge_fact` while the obligation was open (`edge_scope_excluded_at_poll` / `edge_no_longer_admits_knowledge_fact`) | observer or sweep |
+| `failed` | attempts exhausted (default 5) — terminal; or the edge stopped admitting `knowledge_fact` while the obligation was open (`edge_scope_excluded_at_poll` / `edge_no_longer_admits_knowledge_fact`) — reopened by the sweep if the edge admits again | observer or sweep |
 | `unverifiable` | receipt confirmed, event expired, **no application report ever arrived** — an older peer or a lost report; indistinguishable from applied without the lookup slice | the sweep |
 | `unauthorized` | a peer with positive evidence (`confirmed_by`) of having received the original fact whose edge no longer admits `knowledge_fact`; nothing was sent | the retraction transaction |
 
-Terminal states keep their first verdict; a later differing report is counted but does not
-overwrite (`test_terminal_states_keep_their_first_verdict`). A report from a node other than
+Terminal states keep their first verdict; a later differing report is counted and logged
+but neither overwrites nor is stored (`test_terminal_states_keep_their_first_verdict`).
+Application reports are accepted only from a **signed** envelope — an unsigned confirm
+records receipt and ignores them (`test_review_unsigned_confirm_ignores_applications_under_the_default_policy`). A report from a node other than
 the row's `target_node` is ignored and logged.
 
 ### 2.4 Recipient selection
@@ -205,15 +217,22 @@ an event that carried the fact it is recorded `unauthorized` so the operator can
 
 [`api/domain_event_handlers.py`](../../api/domain_event_handlers.py):
 
-* **Monotone tombstones.** `_insert_fact`'s upsert is now
-  `valid_to = COALESCE(knowledge_facts.valid_to, EXCLUDED.valid_to)`: a stale or replayed
-  NEW/UPDATE carrying `valid_to = NULL` can no longer resurrect a tombstoned fact
-  (`test_req_new_after_tombstone_does_not_resurrect`).
+* **`valid_to` only moves earlier.** `_insert_fact`'s upsert is now
+  `valid_to = LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to)` (LEAST ignores NULLs): a
+  stale or replayed NEW/UPDATE carrying `valid_to = NULL` cannot resurrect a tombstoned fact
+  (`test_req_new_after_tombstone_does_not_resurrect`), a replay carrying a LATER end cannot
+  extend one, and a retraction shortens a fact that was born with a future validity end
+  (`test_review_valid_to_only_moves_earlier_over_federation`). The retraction handler and the
+  pending-tombstone landing use the same rule.
 * **Retraction path.** A payload with a `retraction` block is routed to
   `_apply_fact_retraction` before anything can write. Validation *rejects* rather than raises
   (non-UUID id; missing, unparseable or naive `valid_to`; `retraction.valid_to` disagreeing
-  with the row's; ledger tables absent → `rejected: ledger_unavailable`). It never raises
-  `FederationDeferred`, because an unconfirmed event is never redelivered.
+  with the row's). It never raises `FederationDeferred`, because an unconfirmed event is
+  never redelivered. On a recipient **without migration 127** a PRESENT fact is still
+  tombstoned (reported `applied`, reason `ledger_unavailable_not_ledgered` — old code did
+  as much through the upsert, so refusing would have been a regression); only an ABSENT
+  fact is `rejected: ledger_unavailable_fact_absent`, because a pending tombstone needs the
+  ledger, and the publisher's sweep re-queues that once the peer has 127.
 * **Pending tombstones (UPDATE-before-NEW).** If the fact is absent locally, no fact row is
   minted; a ledger row with `applied_at NULL` is written. Both fact-insert paths (bundled
   episode, standalone fact) call `apply_pending_tombstones` after inserting, so a late NEW
@@ -223,8 +242,9 @@ an event that carried the fact it is recorded `unauthorized` so the operator can
   `{application: true, domain, event_id, fact_id, status, valid_to, valid_to_matches, reason, applied_at}`
   where `valid_to` is the **local** value after the call, so a mismatch is visible to the
   publisher verbatim. `status` ∈ `applied` (the local fact was live; `valid_to` now equals the
-  payload's, to the microsecond) · `already_tombstoned` (kept; `valid_to_matches` says whether
-  it agrees — also the idempotent answer to a duplicate) · `pending` · `rejected`.
+  payload's, to the microsecond) · `already_tombstoned` (the local, earlier-or-equal value is
+  kept; `valid_to_matches` says whether it agrees — also the idempotent answer to a duplicate;
+  a mismatch is recorded `rejected` on the publisher) · `pending` · `rejected`.
 * **The confirm extension.** [`api/koi_poller.py`](../../api/koi_poller.py) `_poll_peer` collects those reports and sends them in
   the confirm request as `applications`; `/koi-net/events/confirm` passes them to
   `record_applications`. Confirm alone still means receipt.
@@ -232,9 +252,12 @@ an event that carried the fact it is recorded `unauthorized` so the operator can
 ### 2.6 Retry / expiry sweep
 
 `plan_requeue` is a pure read; `apply_requeue` executes it; `sweep_once` does both in one
-transaction. Rules in order: edge no longer admits → `failed`; event gone or expired with
-attempts left → `retrying` with a fresh event id; attempts exhausted → `failed`; `received`
-and expired with no report → `unverifiable`; otherwise wait. Wired into the poller loop
+transaction. Rules in order: edge no longer admits → `failed`; `rejected` for a
+`ledger_unavailable…` reason → `retrying` now (the peer consumed the old event; it lacks
+127) while attempts remain; `failed` for a scope reason with the edge admitting again →
+`retrying`; event gone or expired with attempts left → `retrying` with a fresh event id;
+attempts exhausted → `failed`; `received` and expired with no report → `unverifiable`;
+otherwise wait. Wired into the poller loop
 behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
 
 ### 2.7 The authorized lookup surfaces
@@ -246,8 +269,11 @@ behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
   `valid_to IS NULL` filter (`test_endpoint_retract_then_tombstone_lookup_and_ordinary_read`).
 * `POST /koi-net/facts/lookup` — signed envelope required; caller must hold an APPROVED
   edge **from the answering node** whose scope admits `knowledge_fact`. Payload
-  `{"fact_ids": [uuid, …]}` (max 100). Returns the same status per fact **minus** the
-  deliveries ledger (never another peer's states). This is the cross-node slice a publisher
+  `{"fact_ids": [uuid, …]}` (max 100). Returns **validity only** per fact — `exists`,
+  `valid_to`, `tombstoned`, `pending_tombstone`, `ledger_available`, and the
+  `(origin_node, valid_to, applied_at)` of ledger rows — never the triple, literal, group,
+  source, reasons, documents, or another peer's delivery states (an authorized peer must not
+  be able to read a fact it was never sent by guessing its UUID). This is the cross-node slice a publisher
   uses to *prove* application instead of trusting the report. It is in
   [`api/koi_net_router.py`](../../api/koi_net_router.py) on this branch; it has not been called against a live peer.
 
@@ -255,7 +281,7 @@ behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
 
 ## 3. What is proven, and what is not
 
-**Proven in this branch (scratch DB, rolled back — 8 boundary, 33 outbox, 21 apply, 3 integration, 14 migration and 26 audit tests, counted by `grep -c "def test_"`):**
+**Proven in this branch (scratch DB, rolled back — collected counts: 7 boundary, 52 outbox, 27 apply, 3 integration, 15 migration, 31 audit = 135):**
 
 * The retraction endpoint queues exactly one unicast event per authorized recipient, in the
   same transaction as `valid_to`, carrying the committed `valid_to` byte-for-byte; none to a
@@ -281,12 +307,45 @@ behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
 * Nothing in this branch has run against a live peer. The incident's five tombstones were
   applied on the NUC by the **old** upsert path (`valid_to = EXCLUDED.valid_to`), if they were
   applied at all; the only evidence is one receipt per event.
-* The 3 `unauthorized` rows with `possibly_live` evidence (cowichan-valley, front-range,
-  friend-e2e; one fact each) and the 729 with `unverifiable` evidence date from before
-  `2c497f0` (2026-08-25), when every approved edge still received every domain event — the
-  narrow-scope peers confirmed `knowledge_episode` NEWs June through August 2026, shawn in
-  June only (§1.4). Those peers may hold live copies that policy now forbids
-  tombstoning. That is an operator decision, not something the code can resolve.
+* **An OLD-code recipient (the NUC's shape today) with the NEW retraction event**, replayed
+  against `git show 0c39fa1:api/domain_event_handlers.py` in the review: a present live fact
+  is tombstoned to the microsecond (the upsert); an absent fact with a present episode is
+  MINTED as a tombstoned row and a later NEW with `valid_to = NULL` **resurrects it** (old
+  `EXCLUDED.valid_to`); an absent episode raises `FederationDeferred`, is never confirmed,
+  and the publisher's sweep retries into the same FK five times, then `failed`. Only
+  deploying this code (plus 127) on the peer removes the resurrection path — AC3/AC5 hold
+  on a recipient running this branch, not on the NUC as it is.
+* `EventQueue.cleanup()` has **no caller** anywhere (`grep -rn "cleanup()" api scripts`), which
+  is why 220k expired rows survive on live and the audit's history is complete
+  (`history_unknown = 0`) — by accident. Wiring cleanup would erase carried history at 72 h;
+  do not do it without first moving the audit's history source elsewhere.
+* The WEBHOOK push path (`peek_undelivered` → `mark_delivered`) does not call the delivery
+  observer, so a webhook peer's deliveries would go `queued` → `received` without a
+  `delivered` step. Zero WEBHOOK edges exist on either node; wire the observer before
+  approving one.
+* Operator identity: a session-token caller's `_identity` is an email. It stays in the
+  publisher's ledger row; the wire and every peer see `"operator"` (service identities pass
+  through as opaque role names) — `test_review_operator_email_never_leaves_the_node`.
+* The 3 `unauthorized` rows (cowichan-valley, front-range, friend-e2e; one fact each,
+  `possibly_live` evidence) date from before `2c497f0` (2026-08-25), when every approved edge
+  still received every domain event — the narrow-scope peers confirmed `knowledge_episode`
+  NEWs June through August 2026, shawn in June only (§1.4). Those peers may hold live copies
+  that policy now forbids tombstoning. That is an operator decision, not something the code
+  can resolve. The 729 `scope_excluded` marks on those peers are NOT holdings.
+* **The #67 defect class has other writers.** `create_episode`'s supersession auto-retire
+  now records the same obligation as `/retract` (same transaction, same helper —
+  `test_review_supersession_in_create_episode_records_obligations`). Two scripts still
+  write `valid_to` directly with NO obligation:
+  [`scripts/extract_deep_documents.py`](../../scripts/extract_deep_documents.py) (semantic
+  dedup of paraphrase duplicates within an episode) and
+  [`scripts/ingest_research_papers.py`](../../scripts/ingest_research_papers.py)
+  (`retire_invalid_scientific_facts`). Both run from the runtime clone against the database
+  directly; routing them through `/retract` from inside their own transactions risks a
+  lock wait against the API's `FOR UPDATE`, so they are left as a named follow-up. The
+  audit finds what they retract (as `possibly_live`); nothing federates it yet.
+* `include_expired=true` on `GET /knowledge/facts/search` and `GET /knowledge/entity/{uri}/facts`
+  returns retracted facts without authentication. Pre-existing, unchanged by this branch,
+  and outside "ordinary retrieval" (an explicit opt-in) — noted against AC7.
 
 ---
 
@@ -296,13 +355,20 @@ behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
 
 1. **Migration 127 on the publisher, before the code that calls `retract`.** Apply:
    `psql -d personal_koi -v ON_ERROR_STOP=1 -f migrations/127_fact_retraction_ledger.sql`
-   (ledger id `personal:127_fact_retraction_ledger`; down file exports before dropping).
-   With the code deployed and 127 absent, every retract returns 503 and writes nothing —
-   loud, by design.
-2. **Migration 127 on each recipient.** A recipient without it answers every retraction
-   `rejected: ledger_unavailable` (the publisher's row goes `rejected`, terminal) and cannot
-   record a pending tombstone, so an UPDATE-before-NEW there lands the fact live. Its
-   `apply_pending_tombstones` degrades to a logged no-op.
+   (ledger id `personal:127_fact_retraction_ledger`; the down file exports both tables to
+   `/tmp/koi_127_down_*.csv` before dropping, guarded on table existence so a half-finished
+   rollback can be re-run; a re-run overwrites those files). With the code deployed and 127
+   absent, every `/retract` returns 503 and writes nothing — loud, by design, and true on a
+   node with federation OFF as well (a behaviour change for any non-federated deployment
+   that cherry-picks this: apply 127 with it). `create_episode`'s supersession auto-retire
+   does NOT refuse without 127 — it writes `valid_to`, records no obligation, and warns once
+   per process — so an un-migrated publisher keeps ingesting.
+2. **Migration 127 on each recipient.** A recipient without it still tombstones a PRESENT
+   fact (reported `applied`, `ledger_unavailable_not_ledgered`) but cannot record a pending
+   tombstone: an absent fact is `rejected: ledger_unavailable_fact_absent`, the publisher's
+   sweep re-queues it (fresh event, attempt+1, up to 5), and an UPDATE-before-NEW there lands
+   the fact live until 127 is applied. Its `apply_pending_tombstones` degrades to a logged
+   no-op (once per process).
 3. Code to **both** local checkouts (`koi-processor-service` serves :8351;
    `koi-processor-runtime` runs the launchd jobs) and restart with
    `~/.config/personal-koi/restart.sh`. Verify with `ps -o lstart=` on the serving PID, not
@@ -359,8 +425,8 @@ scripts/audit_fact_retractions.py [--dsn DSN] [--node-rid RID] [--fact-id UUID .
 
 Exit codes: **0** no outstanding obligations · **1** outstanding (plan non-empty, or any
 `possibly_live` / `unverifiable` / `unauthorized` / `tombstone_valid_to_mismatch` /
-`history_unknown`) · **2** `--apply` refused · **3** misconfigured (cannot connect; node RID
-undeterminable; read-only mode not in effect).
+`peer_unmigrated` / `scope_failed_reopenable` / `history_unknown`) · **2** `--apply` refused ·
+**3** misconfigured (cannot connect; node RID undeterminable; read-only mode not in effect).
 
 **Read-only by mechanism.** The connection runs `SET default_transaction_read_only = on`
 before opening the transaction the audit reads in, and asserts
@@ -391,12 +457,15 @@ a copy), the evidence booleans, the ledger row when 127 is present, and one clas
 | classification | rule | in the plan? |
 |---|---|---|
 | `applied` | ledger `applied` — the only source of this word | no |
-| `rejected` / `failed` | ledger, verbatim | no |
+| `peer_unmigrated` | ledger `rejected` with a `ledger_unavailable…` reason: the peer lacks migration 127 | yes — "apply migration 127 there first" |
+| `scope_failed_reopenable` | ledger `failed` for a scope reason, and the edge admits again now | yes |
+| `rejected` / `failed` | any other ledger `rejected` / `failed`, verbatim | no |
 | `tombstone_confirmed` | peer ∈ `confirmed_by` of an event carrying the **exact** `valid_to` (or ledger `received`); `application_proven` stays false | no |
-| `tombstone_valid_to_mismatch` | the only confirmed tombstone carries a different `valid_to` | yes — with the committed value |
+| `tombstone_valid_to_mismatch` | the only confirmed tombstone carries a different `valid_to` (transport evidence) — or ledger `rejected: peer_holds_different_valid_to` | transport case: yes, with the committed value; ledger case: no (the peer keeps its earlier tombstone by design), still outstanding |
 | `tombstone_unconfirmed` | an exact tombstone was unicast to the peer, is still pollable, is ledger `queued`/`delivered`/`retrying`, or carries a `delivered_to` mark on a peer that **confirmed** the live copy | `wait` if still pollable, else `would_queue` |
 | `possibly_live` | live copy confirmed, no tombstone evidence | yes |
-| `unverifiable` | live copy `delivered_to`-only (a `delivered_to` mark on the tombstone adds nothing — two non-evidence marks are not evidence), or ledger `unverifiable` | yes |
+| `scope_excluded` | every `delivered_to` mark on the live copy is a **provable** poll-filter exclusion: the event was queued after per-edge scoping (`2c497f0`, floor `2026-08-26T02:50:25Z` — the commit time, a lower bound on enforcement) AND after the peer's edges last changed (`koi_net_edges.updated_at`), and no approved scope admits the event's domain. By `test_pin_delivered_to_marks_scope_excluded_events` that mark means "not handed over". | no (not outstanding) |
+| `unverifiable` | live copy `delivered_to`-only and NOT provably an exclusion (before the floor, or the edge changed after the event), or ledger `unverifiable` | yes |
 | `never_sent` | no evidence the peer was ever handed the live copy | no |
 | `unauthorized` | any of the four plan-eligible classes on a peer whose edge does not admit `knowledge_fact` now; `evidence_class` keeps the underlying class | no — listed under `blocked` |
 | `history_unknown` | see `history` | no |
@@ -414,7 +483,9 @@ Nothing automatic. It means: evidence says the peer may hold the fact, and the a
 scope, re-run the audit, and let a future repair send the tombstone; (b) accept that the peer
 keeps a copy this node has retracted; (c) ask the peer's operator out of band. The audit will
 keep reporting the row (and exit 1) until one of those happens. On the live database that is
-732 rows today, 729 of them with `unverifiable` evidence from before `2c497f0` (2026-08-25).
+**3** rows today (one fact, `b11c0a85…` of 2026-08-13, on each of cowichan-valley, front-range
+and friend-e2e). The 729 rows an earlier draft counted here are `scope_excluded` — exclusion
+marks on 2026-09 events, not holdings — and need no decision.
 
 ### 4.6 Reproduce the live numbers
 
@@ -429,8 +500,10 @@ POSTGRES_URL=postgresql://darrenzal:@localhost:5432/personal_koi \
   --fact-id a269d7f3-3db3-4680-9f18-0a3356dcb30d
 ```
 
-Both exit 1 today. Every number in §1.3–1.4 is read from the `summary` / `facts` / `plan`
-blocks of those runs, not from a separate query.
+The full run exits 1 (3,847 `possibly_live` + 196 `unverifiable` on nuc-personal, 3
+`unauthorized`); the incident run exits 0. Every number in §1.3–1.4 is read from the
+`summary` / `facts` / `plan` blocks of those runs — and, on 2026-09-16, independently
+recounted from the per-fact `peers` rows — not from a separate query.
 
 ---
 
@@ -441,14 +514,14 @@ against a live peer. `unmet` = the branch does not do it.
 
 | # | criterion | status | evidence / gap |
 |---|---|---|---|
-| 1 | Retracting one previously federated fact produces one durable update per authorized original recipient without manual episode reconstruction | **met-in-branch** | `test_req_retract_queues_one_unicast_event_per_authorized_recipient`; `test_only_admitting_approved_edges_get_an_event`; `test_queue_failure_mid_fanout_rolls_back_the_retraction`. Not deployed. |
-| 2 | Each recipient stores the same fact UUID with the same non-null `valid_to` | **met-in-branch, unproven live** | `test_payload_carries_committed_valid_to_byte_for_byte`; recipient `applied` reports the local value and `valid_to_matches`. Cross-node equality needs `facts/lookup` on a peer running this code — none exists. |
-| 3 | Repeated delivery is idempotent and cannot resurrect or duplicate the fact | **met-in-branch** | `already_tombstoned` report; COALESCE upsert (`test_req_new_after_tombstone_does_not_resurrect`); `record_inbound_tombstone` upsert key `(fact_id, valid_to, origin_node)`. |
+| 1 | Retracting one previously federated fact produces one durable update per authorized original recipient without manual episode reconstruction | **met-in-branch for the API writers** (`/retract` and `create_episode` supersession); **unmet for two scripts** | `test_req_retract_queues_one_unicast_event_per_authorized_recipient`; `test_only_admitting_approved_edges_get_an_event`; `test_queue_failure_mid_fanout_rolls_back_the_retraction`; `test_review_supersession_in_create_episode_records_obligations`. `extract_deep_documents.py` semantic dedup and `ingest_research_papers.py` invalid-fact retirement still write `valid_to` with no obligation (§3). Not deployed. |
+| 2 | Each recipient stores the same fact UUID with the same non-null `valid_to` | **met-in-branch, unproven live** | `test_payload_carries_committed_valid_to_byte_for_byte`; recipient `applied` reports the local value and `valid_to_matches`; a peer holding a DIFFERENT value is recorded `rejected: peer_holds_different_valid_to`, never `applied` (`test_review_mismatched_tombstone_is_rejected_not_applied`). Cross-node equality needs `facts/lookup` on a peer running this code — none exists. |
+| 3 | Repeated delivery is idempotent and cannot resurrect or duplicate the fact | **met-in-branch** | `already_tombstoned` report; LEAST upsert (`test_req_new_after_tombstone_does_not_resurrect`, `test_review_valid_to_only_moves_earlier_over_federation`); `record_inbound_tombstone` upsert key `(fact_id, valid_to, origin_node)`. |
 | 4 | An offline peer retries after reconnect and eventually reports application or a visible terminal failure | **met-in-branch, opt-in** | sweep: `test_expired_unconfirmed_event_is_requeued_with_a_fresh_id`, `test_attempts_exhausted_is_terminal_failure`. Only runs with `KOI_FACT_RETRACTION_SWEEP=true` (default off) — with the default, no retry happens. |
-| 5 | UPDATE-before-NEW has a defined, tested outcome that cannot expose the retracted fact as active | **met-in-branch, with a stated hole** | pending tombstone + `apply_pending_tombstones` on both insert paths ([`tests/test_fact_retraction_apply.py`](../../tests/test_fact_retraction_apply.py): `test_retraction_for_unknown_fact_is_pending_and_mints_no_row`, `test_pending_tombstone_lands_on_late_episode_new`, `test_pending_tombstone_lands_on_late_standalone_fact`). On a recipient **without migration 127** the tombstone is rejected, not recorded, and a later NEW lands live. |
+| 5 | UPDATE-before-NEW has a defined, tested outcome that cannot expose the retracted fact as active | **met-in-branch, with a stated hole** | pending tombstone + `apply_pending_tombstones` on both insert paths ([`tests/test_fact_retraction_apply.py`](../../tests/test_fact_retraction_apply.py): `test_retraction_for_unknown_fact_is_pending_and_mints_no_row`, `test_pending_tombstone_lands_on_late_episode_new`, `test_pending_tombstone_lands_on_late_standalone_fact`). On a recipient **without migration 127** an absent fact's tombstone is rejected (`ledger_unavailable_fact_absent`, re-queued by the sweep) and a NEW arriving before the retry lands live until 127 is applied there. |
 | 6 | Operator evidence distinguishes queued, delivered, received, applied, rejected, and unverifiable states | **met-in-branch** | the nine ledger states (§2.3); `GET …/tombstone`; the audit. On the live database the ledger is absent, so today only transport evidence exists. |
-| 7 | Ordinary peer search omits retracted facts while an authorized UUID lookup proves tombstone application | **partially met** | omission: pre-existing `valid_to IS NULL` filters, pinned by `test_endpoint_retract_then_tombstone_lookup_and_ordinary_read`. Lookup surfaces exist (§2.7). "Proves application" on a peer requires calling that peer's `facts/lookup`; not exercised live. |
-| 8 | A historical audit reports locally retracted facts that may remain active on peers and supports a dry-run repair plan | **met** | [`scripts/audit_fact_retractions.py`](../../scripts/audit_fact_retractions.py), 26 tests, run read-only against the live database (§1.4: 4,188 / 4,063 / 3,847 `possibly_live` / plan 4,043). Repair *application* (`--apply`) is deliberately not implemented. |
+| 7 | Ordinary peer search omits retracted facts while an authorized UUID lookup proves tombstone application | **partially met** | omission: pre-existing `valid_to IS NULL` filters, pinned by `test_endpoint_retract_then_tombstone_lookup_and_ordinary_read` (the pre-existing unauthenticated `include_expired=true` opt-in is unchanged, §3). Lookup surfaces exist (§2.7, validity-only cross-node). "Proves application" on a peer requires calling that peer's `facts/lookup`; not exercised live. |
+| 8 | A historical audit reports locally retracted facts that may remain active on peers and supports a dry-run repair plan | **met** | [`scripts/audit_fact_retractions.py`](../../scripts/audit_fact_retractions.py), 31 tests, run read-only against the live database (§1.4: 4,188 / 4,063 / 3,847 `possibly_live` / 729 `scope_excluded` / 3 `unauthorized` / plan 4,043). Repair *application* (`--apply`) is deliberately not implemented. |
 | 9 | Tests cover access-policy changes and ensure tombstones are not sent to unauthorized peers | **met-in-branch** | `test_scope_narrowed_after_queueing_is_failed_not_delivered`, `test_confirmed_original_recipient_without_scope_is_recorded_unauthorized`, `test_revoked_edge_fails_the_open_obligation`; audit: `test_unauthorized_when_scope_no_longer_admits`, `test_revoked_edge_peer_with_confirmed_live_copy_is_unauthorized`. |
 
 The lead reconciles this table with the final branch state before the PR is opened.

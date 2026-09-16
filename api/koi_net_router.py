@@ -1081,6 +1081,17 @@ async def events_confirm(request: Request):
     # Ledger absent (migration 127 not applied) → both calls are no-ops.
     applications = payload.get("applications") or []
     app_summary: Dict[str, Any] = {}
+    # Application reports are accepted ONLY from a signed envelope: under the
+    # relaxed policy (no KOI_* env) an unsigned confirm names its own node_id,
+    # and letting that mint `applied` for an arbitrary peer is the spoof the
+    # review's probe P4 demonstrated. Receipt keeps the pre-existing trust
+    # model; application does not inherit it.
+    if applications and not signed:
+        logger.warning(
+            "fact_retraction.confirm ignoring %d application report(s) from UNSIGNED "
+            "request naming node=%s", len(applications), confirming_node)
+        app_summary = {"ignored_unsigned": len(applications)}
+        applications = []
     if _db_pool is not None:
         try:
             async with _db_pool.acquire() as conn:
@@ -1116,9 +1127,12 @@ async def facts_lookup(request: Request):
     tombstone — rather than trust the peer's report — asks here. Signed
     envelope required; the caller must hold an APPROVED edge whose scope
     admits `knowledge_fact` (the same rule that decides whether it could have
-    received the fact in the first place). Returns validity + this node's
-    tombstone ledger for the fact; never this node's delivery ledger for
-    OTHER peers.
+    received the fact in the first place). Returns VALIDITY ONLY — exists,
+    valid_to, tombstoned, pending_tombstone, and the (origin, valid_to,
+    applied_at) of ledger rows — never the triple, literal, group, source,
+    reasons or documents, and never this node's delivery ledger for OTHER
+    peers (review finding P9: an authorized peer must not be able to read a
+    fact it was never sent by guessing its UUID).
 
     Payload: {"fact_ids": ["<uuid>", ...]} (max 100).
     """
@@ -1160,8 +1174,19 @@ async def facts_lookup(request: Request):
         results = []
         for fid in fact_ids:
             status = await fact_retraction.tombstone_status(conn, fid)
-            status.pop("deliveries", None)  # never expose other peers' delivery states
-            results.append(status)
+            results.append({
+                "fact_id": status["fact_id"],
+                "exists": status["exists"],
+                "valid_to": status["valid_to"],
+                "tombstoned": status["tombstoned"],
+                "pending_tombstone": status["pending_tombstone"],
+                "ledger_available": status["ledger_available"],
+                "retractions": [
+                    {"origin_node": r["origin_node"], "valid_to": r["valid_to"],
+                     "applied_at": r["applied_at"]}
+                    for r in status["retractions"]
+                ],
+            })
 
     resp = {"node_rid": _node_profile.node_rid, "facts": results}
     return JSONResponse(content=_wrap_response(resp, source_node, signed))

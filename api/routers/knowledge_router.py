@@ -770,6 +770,9 @@ class FactRetractFederation(BaseModel):
     enabled: bool            # KOI_FEDERATE_KNOWLEDGE and a configured event queue
     node_rid: Optional[str] = None
     deliveries: List[FactRetractDelivery] = Field(default_factory=list)
+    # True when federation is on but no APPROVED outbound edge admits
+    # knowledge_fact — the retraction was recorded but reaches no peer.
+    no_admitting_peers: bool = False
 
 
 class FactRetractResponse(BaseModel):
@@ -821,7 +824,13 @@ def create_router(
     # Federation Phase 1 step 2e: knowledge_episode emit. emit_domain_event is
     # internally gated by KOI_FEDERATE_KNOWLEDGE — a no-op when the flag is off,
     # so the call site below is unconditional (no caller-side double-gate).
-    from api.federation_events import emit_domain_event
+    from api.federation_events import emit_domain_event, _knowledge_federation_enabled
+    from api import fact_retraction
+
+    def _fed_queue_now():
+        """The federation EventQueue as wired NOW (set at startup; None if absent)."""
+        from api import federation_events as _fe
+        return _fe._event_queue
 
     # Service-token gate for mutating endpoints (retract). Accepts the
     # KOI_CLAIMS_SERVICE_TOKEN service token OR a valid session token; see
@@ -1128,14 +1137,32 @@ def create_router(
                                 if (row['predicate'] == predicate_upper
                                         and row['object_uri'] != object_uri
                                         and sim > 0.5):
-                                    await conn.execute("""
-                                        UPDATE knowledge_facts
-                                        SET valid_to = NOW()
-                                        WHERE id = $1
-                                    """, row['id'])
+                                    # Issue #67 (review finding 3): this
+                                    # auto-retire is a retraction too, and it
+                                    # used to write valid_to with no
+                                    # federation obligation — the superseded
+                                    # fact stayed live on peers. Same
+                                    # transaction, same helper as /retract.
+                                    # on_missing_ledger="skip": a publisher
+                                    # without migration 127 still ingests
+                                    # (warned once; the audit finds the gap).
+                                    sup = await fact_retraction.retract_fact_transactional(
+                                        conn,
+                                        fact_id=row['id'],
+                                        event_queue=_fed_queue_now(),
+                                        federation_enabled=_knowledge_federation_enabled(),
+                                        reason=(
+                                            f"superseded_by:{predicate_upper} "
+                                            f"{(object_uri or fact.object_literal or '')[:120]}"
+                                        ),
+                                        retracted_by=_identity,
+                                        on_missing_ledger="skip",
+                                    )
                                     logger.info(
                                         f"Superseded fact {row['id']}: "
-                                        f"{row['fact_text']} → {fact.fact_text}")
+                                        f"{row['fact_text']} → {fact.fact_text} "
+                                        f"(retraction_id={sup.retraction_id if sup else None} "
+                                        f"deliveries={len(sup.deliveries) if sup else 0})")
                                     facts_superseded += 1
 
                     # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
@@ -2943,12 +2970,6 @@ def create_router(
         body: Optional[FactRetractRequest] = None,
         _identity: str = Depends(require_service_auth),
     ):
-        from api import fact_retraction
-        from api.federation_events import (
-            _event_queue as _fed_queue,
-            _knowledge_federation_enabled,
-        )
-
         try:
             fid = UUID(fact_id)
         except (ValueError, AttributeError, TypeError):
@@ -2965,7 +2986,7 @@ def create_router(
                     result = await fact_retraction.retract_fact_transactional(
                         conn,
                         fact_id=fid,
-                        event_queue=_fed_queue,
+                        event_queue=_fed_queue_now(),
                         federation_enabled=_knowledge_federation_enabled(),
                         reason=reason,
                         retracted_by=_identity,
@@ -2982,6 +3003,7 @@ def create_router(
             enabled=result.federation_enabled and result.node_rid is not None,
             node_rid=result.node_rid,
             deliveries=[FactRetractDelivery(**d) for d in result.deliveries],
+            no_admitting_peers=result.no_admitting_peers,
         )
 
         if result.already_retracted:
@@ -3019,8 +3041,6 @@ def create_router(
         fact_id: str,
         _identity: str = Depends(require_service_auth),
     ):
-        from api import fact_retraction
-
         try:
             fid = UUID(fact_id)
         except (ValueError, AttributeError, TypeError):

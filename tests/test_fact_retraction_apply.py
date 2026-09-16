@@ -359,10 +359,10 @@ async def test_non_null_incoming_valid_to_still_lands_on_a_live_fact(ledger):
     assert vt is not None and vt.isoformat() == OTHER_VALID_TO
 
 
-def test_coalesce_conflict_clause_survives_the_drift_stripper():
+def test_least_conflict_clause_survives_the_drift_stripper():
     """`_insert_with_drift_retry` re-interpolates the clause and `_strip_conflict_assignments`
-    splits it on top-level commas. The COALESCE form has a comma inside parentheses."""
-    coalesce = "valid_to = COALESCE(knowledge_facts.valid_to, EXCLUDED.valid_to)"
+    splits it on top-level commas. The LEAST form has a comma inside parentheses."""
+    coalesce = "valid_to = LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to)"
     # Bind to the real call site, not a copy of it.
     assert coalesce in inspect.getsource(_insert_fact), "_insert_fact no longer uses the monotone form"
     clause = f"""
@@ -370,7 +370,7 @@ def test_coalesce_conflict_clause_survives_the_drift_stripper():
             {coalesce}
     """
     kept = _strip_conflict_assignments(clause, "turn_range_end")
-    assert "COALESCE(knowledge_facts.valid_to, EXCLUDED.valid_to)" in kept
+    assert "LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to)" in kept
     dropped = _strip_conflict_assignments(clause, "valid_to")
     assert dropped.strip().upper().endswith("DO NOTHING"), dropped
 
@@ -435,17 +435,30 @@ async def test_non_uuid_fact_id_is_rejected(ledger):
 
 
 @pytest.mark.anyio
-async def test_unmigrated_recipient_rejects_with_ledger_unavailable(no_ledger):
+async def test_unmigrated_recipient_rejects_only_an_absent_fact(no_ledger):
+    """Contract changed by the 2026-09-16 review (finding 1): a recipient without
+    migration 127 lands the tombstone on a PRESENT fact (reported `applied`,
+    reason `ledger_unavailable_not_ledgered`) and rejects only when the fact is
+    ABSENT, because a pending tombstone needs the ledger. The earlier version of
+    this test asserted the fact stayed untouched — a regression against old
+    code, which tombstoned it through the upsert."""
     conn = no_ledger
     ep_id, fact_id = await seed_fact(conn, valid_to=None)
     payload = retraction_payload(fact_id, ep_id)
 
     report = await _dispatch_retraction(conn, payload)   # must not raise
-
-    _assert_report_shape(report, status="rejected",
+    _assert_report_shape(report, status="applied",
                          event_id=payload["_federation_event_id"], fact_id=fact_id)
-    assert report["reason"] == "ledger_unavailable"
-    await _assert_untouched(conn, fact_id, payload["_federation_event_id"], expect_ledger_table=False)
+    assert report["reason"] == "ledger_unavailable_not_ledgered"
+    assert (await _valid_to(conn, fact_id)).isoformat() == INCIDENT_VALID_TO
+
+    absent = str(uuid.uuid4())
+    payload2 = retraction_payload(absent, ep_id)
+    report2 = await _dispatch_retraction(conn, payload2)
+    _assert_report_shape(report2, status="rejected",
+                         event_id=payload2["_federation_event_id"], fact_id=absent)
+    assert report2["reason"] == "ledger_unavailable_fact_absent"
+    assert await conn.fetchval("SELECT 1 FROM knowledge_facts WHERE id = $1::uuid", absent) is None
 
 
 @pytest.mark.anyio
@@ -634,3 +647,76 @@ async def test_poll_loop_sweep_hook_is_env_gated_default_off(monkeypatch, env, e
     await poller._poll_loop()
 
     assert len(calls) == expect_calls
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Review findings (2026-09-16 adversarial review) — each written red first
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.anyio
+async def test_review_unmigrated_recipient_still_tombstones_a_present_fact(monkeypatch):
+    """Finding 1: rejecting BEFORE touching the fact on a recipient without
+    migration 127 was a regression against old code, which at least landed
+    valid_to on a present fact. Now: present fact → tombstoned, reported
+    `applied` with reason `ledger_unavailable_not_ledgered`; only an ABSENT
+    fact is rejected (no pending tombstone can be recorded)."""
+    from tests.fact_retraction_testkit import open_scratch_conn, close_scratch_conn
+    monkeypatch.setenv("KOI_FEDERATE_KNOWLEDGE", "true")
+    c, tx = await open_scratch_conn()      # no apply_ledger_migration
+    try:
+        ep, fid = await seed_fact(c)
+        rep = await apply_domain_event(
+            c, "knowledge_fact", f"orn:personal-koi.knowledge-fact:{fid}", "UPDATE",
+            retraction_payload(fid, ep), NODE_A)
+        assert rep["status"] == "applied" and rep["reason"] == "ledger_unavailable_not_ledgered"
+        vt = await c.fetchval("SELECT valid_to FROM knowledge_facts WHERE id = $1::uuid", fid)
+        assert vt is not None and vt.isoformat() == INCIDENT_VALID_TO
+        # absent fact: still rejected, and the reason names the missing ledger
+        missing = str(uuid.uuid4())
+        rep2 = await apply_domain_event(
+            c, "knowledge_fact", f"orn:personal-koi.knowledge-fact:{missing}", "UPDATE",
+            retraction_payload(missing, ep), NODE_A)
+        assert rep2["status"] == "rejected" and rep2["reason"] == "ledger_unavailable_fact_absent"
+        assert await c.fetchval("SELECT 1 FROM knowledge_facts WHERE id = $1::uuid", missing) is None
+    finally:
+        await close_scratch_conn(c, tx)
+
+
+@pytest.mark.anyio
+async def test_review_valid_to_only_moves_earlier_over_federation(ledger):
+    conn = ledger
+    """A fact born with a FUTURE validity end (a validity interval) that is
+    then retracted must end at the retraction time, on every path:
+    a pending tombstone landing on a late NEW carrying valid_to=2030, a NEW
+    replay carrying a later valid_to over a tombstone, and a retraction
+    arriving on a fact whose local valid_to is later. Never later, never NULL."""
+    ep, fid = str(uuid.uuid4()), str(uuid.uuid4())
+    T_RET = INCIDENT_VALID_TO
+    T_FUTURE = "2030-01-01T00:00:00+00:00"
+    # pending tombstone, then a NEW carrying a future valid_to
+    rep = await apply_domain_event(conn, "knowledge_fact", f"orn:personal-koi.knowledge-fact:{fid}",
+                                   "UPDATE", retraction_payload(fid, ep, valid_to=T_RET), NODE_A)
+    assert rep["status"] == "pending"
+    await apply_domain_event(conn, "knowledge_episode", f"orn:personal-koi.knowledge-episode:{ep}", "NEW",
+                             episode_payload(ep, [fact_payload(fid, ep, valid_to=T_FUTURE)],
+                                             event_id=str(uuid.uuid4())), NODE_A)
+    vt = await conn.fetchval("SELECT valid_to FROM knowledge_facts WHERE id = $1::uuid", fid)
+    assert vt.isoformat() == T_RET, "the pending tombstone must shorten a future validity end"
+    # a NEW replay with a LATER valid_to does not move it later
+    await apply_domain_event(conn, "knowledge_episode", f"orn:personal-koi.knowledge-episode:{ep}", "NEW",
+                             episode_payload(ep, [fact_payload(fid, ep, valid_to=T_FUTURE)],
+                                             event_id=str(uuid.uuid4())), NODE_A)
+    assert (await conn.fetchval("SELECT valid_to FROM knowledge_facts WHERE id = $1::uuid", fid)).isoformat() == T_RET
+    # a fact whose local valid_to is in the future, then a retraction arrives
+    ep2, fid2 = str(uuid.uuid4()), str(uuid.uuid4())
+    await apply_domain_event(conn, "knowledge_episode", f"orn:personal-koi.knowledge-episode:{ep2}", "NEW",
+                             episode_payload(ep2, [fact_payload(fid2, ep2, valid_to=T_FUTURE)],
+                                             event_id=str(uuid.uuid4())), NODE_A)
+    rep = await apply_domain_event(conn, "knowledge_fact", f"orn:personal-koi.knowledge-fact:{fid2}",
+                                   "UPDATE", retraction_payload(fid2, ep2, valid_to=T_RET), NODE_A)
+    assert rep["status"] == "applied" and rep["valid_to"] == T_RET
+    # and an EARLIER local tombstone is kept, reported as a mismatch
+    rep = await apply_domain_event(conn, "knowledge_fact", f"orn:personal-koi.knowledge-fact:{fid2}",
+                                   "UPDATE", retraction_payload(fid2, ep2, valid_to=T_FUTURE), NODE_B)
+    assert rep["status"] == "already_tombstoned" and rep["valid_to_matches"] is False
+    assert rep["valid_to"] == T_RET

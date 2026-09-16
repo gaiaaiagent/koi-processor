@@ -475,13 +475,14 @@ async def test_applications_map_to_ledger_states(conn, eq, status, expected_stat
 
 
 @pytest.mark.anyio
-async def test_already_tombstoned_with_mismatch_is_named(conn, eq):
+async def test_already_tombstoned_with_match_is_applied(conn, eq):
     ep, fid, r, ev = await _setup_queued(conn, eq)
     await fr.record_applications(conn, PEER_AUTH, [{
-        "event_id": ev, "status": "already_tombstoned", "valid_to_matches": False,
-        "valid_to": "2020-01-01T00:00:00+00:00"}])
+        "event_id": ev, "status": "already_tombstoned", "valid_to_matches": True,
+        "valid_to": r.valid_to}])
     s = await _state(conn, fid)
-    assert s["state"] == "applied" and s["state_reason"] == "peer_already_tombstoned_valid_to_mismatch"
+    assert s["state"] == "applied" and s["state_reason"] == "peer_already_tombstoned"
+    # the mismatch case is test_review_mismatched_tombstone_is_rejected_not_applied
 
 
 @pytest.mark.anyio
@@ -639,6 +640,13 @@ async def test_sweep_once_runs_plan_and_apply(conn, pool, eq):
 # 6. Surfaces
 # ═══════════════════════════════════════════════════════════════════════════
 
+async def _fake_embed(text, **kwargs):
+    """Deterministic 3072-dim embedding (same shape as tests/unit/test_knowledge_router.py).
+    Needed so create_episode's dedup/supersession candidate query runs."""
+    seed = hash(text)
+    return [float(((seed + i) % 97) + 1) / 97.0 for i in range(3072)]
+
+
 @pytest.fixture
 async def knowledge_client(conn, pool, eq, monkeypatch):
     from api.routers.knowledge_router import create_router
@@ -647,7 +655,7 @@ async def knowledge_client(conn, pool, eq, monkeypatch):
     prev = federation_events._event_queue
     federation_events.set_event_queue(eq)
     app = FastAPI()
-    app.include_router(create_router(pool), prefix="/knowledge")
+    app.include_router(create_router(pool, generate_document_embedding=_fake_embed), prefix="/knowledge")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
     federation_events.set_event_queue(prev)
@@ -752,14 +760,18 @@ async def test_confirm_endpoint_records_receipts_and_applications(conn, eq, koi_
     assert resp.json()["confirmed"] == 1
     assert (await _state(conn, fid))["state"] == "received"
 
-    # receipt + application report (what this code's poller sends)
+    # receipt + application report (what this code's poller sends — SIGNED;
+    # an unsigned report is ignored, see the review tests below)
     report = {"application": True, "domain": "knowledge_fact", "event_id": ev, "fact_id": fid,
               "status": "applied", "valid_to": r.valid_to, "valid_to_matches": True,
               "reason": None, "node": PEER_AUTH}
-    resp = await client.post("/koi-net/events/confirm",
-                             json={"node_id": PEER_AUTH, "event_ids": [ev], "applications": [report]})
+    env = sign_envelope({"type": "confirm_events", "event_ids": [ev], "applications": [report]},
+                        PEER_AUTH, NODE_A, priv)
+    resp = await client.post("/koi-net/events/confirm", json=env)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["applications"]["applied"] == 1
+    body = resp.json()
+    payload = body["payload"] if "payload" in body else body
+    assert payload["applications"]["applied"] == 1
     s = await _state(conn, fid)
     assert s["state"] == "applied"
     app = s["application"]
@@ -804,3 +816,211 @@ async def test_facts_lookup_is_signed_and_edge_scoped(conn, eq, koi_net_client):
     assert (await client.post("/koi-net/facts/lookup", json=env)).status_code == 400
     env = sign_envelope({"fact_ids": []}, PEER_AUTH, NODE_A, priv)
     assert (await client.post("/koi-net/facts/lookup", json=env)).status_code == 400
+
+
+@pytest.mark.anyio
+async def test_unsigned_confirm_cannot_record_applications_under_the_live_policy(
+    conn, eq, koi_net_client, monkeypatch,
+):
+    """Spoofing guard. The live node runs KOI_NET_REQUIRE_APPROVED_EDGE_FOR_POLL=true
+    (read from the serving process's environment 2026-09-16), under which
+    /koi-net/events/confirm refuses an UNSIGNED request outright
+    (IDENTITY_REQUIRED) — so an `applications` report can only ever be
+    recorded for the node that signed the envelope. With the flag on, an
+    unsigned confirm naming PEER_AUTH must be 403 and move nothing."""
+    client, priv = koi_net_client
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    await eq.poll(PEER_AUTH, rid_types=["knowledge_fact"])
+    monkeypatch.setenv("KOI_NET_REQUIRE_APPROVED_EDGE_FOR_POLL", "true")
+    resp = await client.post("/koi-net/events/confirm", json={
+        "node_id": PEER_AUTH, "event_ids": [ev],
+        "applications": [{"event_id": ev, "status": "applied"}]})
+    assert resp.status_code == 403, resp.text
+    s = await _state(conn, fid)
+    assert s["state"] == "delivered" and s["application"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. Review findings (2026-09-16 adversarial review) — each written red first
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.anyio
+async def test_review_mismatched_tombstone_is_rejected_not_applied(conn, eq):
+    """AC2 says the SAME valid_to. A peer that reports already_tombstoned with a
+    different value has not met it; recording that as `applied` hid the
+    violation. It is `rejected: peer_holds_different_valid_to`, report kept."""
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    await fr.record_applications(conn, PEER_AUTH, [{
+        "event_id": ev, "status": "already_tombstoned", "valid_to_matches": False,
+        "valid_to": "2020-01-01T00:00:00+00:00"}])
+    s = await _state(conn, fid)
+    assert s["state"] == "rejected" and s["state_reason"] == "peer_holds_different_valid_to"
+    app = s["application"]
+    app = json.loads(app) if isinstance(app, str) else app
+    assert app["valid_to"] == "2020-01-01T00:00:00+00:00"
+
+
+@pytest.mark.anyio
+async def test_review_unmigrated_peer_rejection_is_reopened_by_the_sweep(conn, eq):
+    """`rejected: ledger_unavailable…` is a peer that has not run migration 127 —
+    an infrastructure condition, not a verdict. The sweep re-queues it (fresh
+    event, attempt+1) while attempts remain, without waiting for expiry (the
+    peer already consumed the event), and fails it terminally after that."""
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    await fr.record_applications(conn, PEER_AUTH, [{
+        "event_id": ev, "status": "rejected", "reason": "ledger_unavailable_fact_absent"}])
+    assert (await _state(conn, fid))["state"] == "rejected"
+    plan = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid]
+    assert plan and plan[0]["action"] == "retry", plan
+    async with conn.transaction():
+        await fr.apply_requeue(conn, plan, event_queue=eq, node_rid=NODE_A)
+    s = await _state(conn, fid)
+    assert s["state"] == "retrying" and s["attempt"] == 2 and s["event_id"] != ev
+    # once the peer has 127 it reports applied on the new event → applied
+    await fr.record_applications(conn, PEER_AUTH, [{"event_id": s["event_id"], "status": "applied"}])
+    assert (await _state(conn, fid))["state"] == "applied"
+
+
+@pytest.mark.anyio
+async def test_review_scope_failure_is_reopened_when_the_edge_widens_again(conn, eq):
+    """`failed: edge_scope_excluded_at_poll` was terminal even after the operator
+    widened the edge back. Policy reversal reopens it: the sweep retries."""
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    # the operator narrows the edge; the peer's next poll excludes the event
+    await seed_edge(conn, NODE_A, PEER_AUTH, "APPROVED", ["Person"])
+    assert await eq.poll(PEER_AUTH, rid_types=["Person"]) == []
+    assert (await _state(conn, fid))["state"] == "failed"
+    plan = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid]
+    assert plan == [], "still narrow: nothing to do"
+    await seed_edge(conn, NODE_A, PEER_AUTH, "APPROVED", ["knowledge_fact"])
+    plan = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid]
+    assert plan and plan[0]["action"] == "retry" and "edge_admits_again" in plan[0]["reason"]
+    async with conn.transaction():
+        await fr.apply_requeue(conn, plan, event_queue=eq, node_rid=NODE_A)
+    assert (await _state(conn, fid))["state"] == "retrying"
+
+
+@pytest.mark.anyio
+async def test_review_unsigned_confirm_ignores_applications_under_the_default_policy(
+    conn, eq, koi_net_client,
+):
+    """With NO KOI_* policy set, an unsigned confirm is accepted (pre-existing
+    trust model for confirmed_by). It must still not be able to mint `applied`
+    for an arbitrary node_id: applications are recorded only from a SIGNED
+    envelope. Receipt is recorded; the report is ignored and counted."""
+    client, priv = koi_net_client
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    await eq.poll(PEER_AUTH, rid_types=["knowledge_fact"])
+    resp = await client.post("/koi-net/events/confirm", json={
+        "node_id": PEER_AUTH, "event_ids": [ev],
+        "applications": [{"event_id": ev, "status": "applied", "valid_to": "1999-01-01T00:00:00+00:00"}]})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["confirmed"] == 1
+    assert body.get("applications", {}).get("ignored_unsigned") == 1
+    s = await _state(conn, fid)
+    assert s["state"] == "received" and s["application"] is None
+    # the same report inside a signed envelope IS recorded
+    env = sign_envelope({"type": "confirm_events", "event_ids": [ev],
+                         "applications": [{"event_id": ev, "status": "applied"}]},
+                        PEER_AUTH, NODE_A, priv)
+    resp = await client.post("/koi-net/events/confirm", json=env)
+    assert resp.status_code == 200, resp.text
+    assert (await _state(conn, fid))["state"] == "applied"
+
+
+@pytest.mark.anyio
+async def test_review_facts_lookup_discloses_validity_only(conn, eq, koi_net_client):
+    """Cross-node lookup answers 'is this UUID tombstoned here', not what the
+    fact says: no subject/predicate/object/literal/group/source, no
+    reasons or documents from the ledger rows."""
+    client, priv = koi_net_client
+    await seed_edges(conn)
+    ep, fid = await seed_fact(conn)
+    await _retract(conn, eq, fid, reason="secret reason")
+    env = sign_envelope({"fact_ids": [fid]}, PEER_AUTH, NODE_A, priv)
+    body = (await client.post("/koi-net/facts/lookup", json=env)).json()
+    payload = body["payload"] if "payload" in body else body
+    f = payload["facts"][0]
+    assert set(f) == {"fact_id", "exists", "valid_to", "tombstoned", "pending_tombstone",
+                      "ledger_available", "retractions"}, set(f)
+    assert f["tombstoned"] is True
+    assert all(set(r) == {"origin_node", "valid_to", "applied_at"} for r in f["retractions"]), f["retractions"]
+    assert "secret reason" not in json.dumps(body)
+
+
+@pytest.mark.anyio
+async def test_review_supersession_in_create_episode_records_obligations(conn, knowledge_client):
+    """The #67 defect class had a second API writer: create_episode's
+    supersession auto-retire set valid_to on the old fact and bundled only the
+    NEW facts, so the superseded fact's tombstone never federated. It now
+    records the same ledger row + per-peer obligation as /retract."""
+    await seed_edges(conn)
+    tag = uuid.uuid4().hex[:8]
+    body = {
+        "name": f"sup {tag}", "content": "c", "source_description": "review",
+        "source_document": f"sup-{tag}.md", "group_id": f"g-{tag}",
+        "valid_at": "2026-09-16T00:00:00+00:00", "metadata": {},
+        "facts": [{"subject": f"SupSubj {tag}", "predicate": "HAS_STATUS",
+                   "object": f"Old {tag}", "fact_text": f"{tag} status is old",
+                   "valid_from": "2026-09-16T00:00:00+00:00"}],
+        "create_entities": True, "expire_existing": True,
+    }
+    r1 = await knowledge_client.post("/knowledge/episodes", json=body, headers=SVC_AUTH)
+    assert r1.status_code == 201, r1.text
+    old_id = r1.json()["fact_ids"][0]
+    body["facts"][0].update(object=f"New {tag}", fact_text=f"{tag} status is new")
+    body["name"] = f"sup2 {tag}"
+    r2 = await knowledge_client.post("/knowledge/episodes", json=body, headers=SVC_AUTH)
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["facts_superseded"] == 1
+    committed = await conn.fetchval("SELECT valid_to FROM knowledge_facts WHERE id = $1::uuid", old_id)
+    assert committed is not None
+    dels = await _deliveries(conn, old_id)
+    assert [(d["target_node"], d["state"]) for d in dels] == [(PEER_AUTH, "queued")]
+    events = await _events_for(conn, old_id)
+    assert len(events) == 1 and events[0]["contents"]["payload"]["valid_to"] == committed.isoformat()
+    assert events[0]["contents"]["payload"]["retraction"]["reason"].startswith("superseded_by:")
+
+
+@pytest.mark.anyio
+async def test_review_operator_email_never_leaves_the_node(conn, eq):
+    """Finding 4: a session-token caller's `_identity` is the operator's email.
+    It stays in the local ledger; the wire carries an opaque role."""
+    await seed_edges(conn)
+    ep, fid = await seed_fact(conn)
+    r = await _retract(conn, eq, fid, by="someone@example.com", reason="wrong binding")
+    ev = (await _events_for(conn, fid))[0]
+    wire = json.dumps(ev["contents"])
+    assert "someone@example.com" not in wire
+    assert ev["contents"]["payload"]["retraction"]["retracted_by"] == "operator"
+    assert await conn.fetchval(
+        "SELECT retracted_by FROM knowledge_fact_retractions WHERE id = $1", r.retraction_id
+    ) == "someone@example.com"
+    # service identities are opaque role names and pass through
+    ep2, fid2 = await seed_fact(conn)
+    await _retract(conn, eq, fid2, by="service:claims-service")
+    ev2 = (await _events_for(conn, fid2))[0]
+    assert ev2["contents"]["payload"]["retraction"]["retracted_by"] == "service:claims-service"
+
+
+@pytest.mark.anyio
+async def test_review_junk_id_in_a_confirm_batch_does_not_lose_the_batch(conn, eq):
+    """Finding 11: `$2::uuid[]` raised on one non-UUID id and the whole batch's
+    receipts were lost while the transport had already recorded them."""
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    await eq.poll(PEER_AUTH, rid_types=["knowledge_fact"])
+    n = await fr.record_receipts(conn, PEER_AUTH, ["not-a-uuid", ev, ""])
+    assert n == 1
+    assert (await _state(conn, fid))["state"] == "received"
+    assert await fr.record_deliveries(conn, PEER_AUTH, ["junk"], ["also-junk"]) == {"delivered": 0, "failed": 0}
+
+
+@pytest.mark.anyio
+async def test_review_no_admitting_peer_is_named_in_the_result(conn, eq):
+    """Finding 19: federation on, queue present, no edge admits knowledge_fact →
+    the retraction is recorded, reaches nobody, and SAYS so."""
+    await seed_edge(conn, NODE_A, PEER_NARROW, "APPROVED", ["Person"])
+    ep, fid = await seed_fact(conn)
+    r = await _retract(conn, eq, fid)
+    assert r.retracted and r.deliveries == [] and r.no_admitting_peers is True

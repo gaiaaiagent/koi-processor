@@ -173,19 +173,10 @@ async def test_pin_emit_domain_event_swallows_queue_failure(monkeypatch):
     assert result is None
 
 
-def test_pin_emit_domain_event_is_called_after_commit_in_create_episode():
-    """The episode emit sits outside the `async with pool.acquire()` block.
-
-    That is the right choice for a create (an event for a row a rollback
-    removed would be worse). It is also why the same helper cannot serve a
-    retraction: post-commit means a crash between COMMIT and add() loses the
-    federation update with no record that it was ever owed.
-    """
-    import api.routers.knowledge_router as kr
-    src = inspect.getsource(kr.create_router)
-    i_emit = src.index('"knowledge_episode",\n            "UPDATE" if episode_reused else "NEW"')
-    i_comment = src.index("emit the bundled knowledge_episode event AFTER the")
-    assert i_comment < i_emit, "the post-commit comment moved; re-read the emit site"
+# (A fifth "pin" — that create_episode's emit runs after COMMIT — was a
+# comment-ordering tautology and was removed after the 2026-09-16 review. The
+# real proof is tests/unit/test_knowledge_router.py::test_emit_fires_after_commit,
+# which instruments the pool and asserts the emit runs outside the acquire block.)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

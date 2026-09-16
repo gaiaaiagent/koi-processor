@@ -97,6 +97,15 @@ STATES = frozenset({
 })
 # States in which the publisher is still waiting on the transport.
 OPEN_STATES = frozenset({STATE_QUEUED, STATE_DELIVERED, STATE_RETRYING})
+# Terminal-looking states the sweep may REOPEN (review findings P2/P3):
+#   rejected + a reason starting with this prefix = the peer has not applied
+#   migration 127 (an infrastructure condition, not a verdict on the fact);
+#   failed + one of these reasons = a policy change that the operator may
+#   reverse by widening the edge again.
+REOPENABLE_REJECT_PREFIX = "ledger_unavailable"
+SCOPE_FAIL_REASONS = frozenset({
+    "edge_scope_excluded_at_poll", "edge_no_longer_admits_knowledge_fact",
+})
 # Recipient report statuses (the `status` key of an application report).
 REPORT_APPLIED = "applied"
 REPORT_ALREADY_TOMBSTONED = "already_tombstoned"
@@ -111,6 +120,8 @@ LOCAL_ORIGIN = "local"
 
 # apply_pending_tombstones warns once per process when the ledger is absent.
 _warned_ledger_absent = False
+# retract_fact_transactional(on_missing_ledger="skip") warns once per process.
+_warned_ledger_absent_publisher = False
 
 _SNAPSHOT_KEYS = (
     "id", "episode_id", "subject_uri", "predicate", "object_uri", "object_literal",
@@ -292,6 +303,23 @@ async def select_recipients(
 # Payload
 # ---------------------------------------------------------------------------
 
+def wire_identity(retracted_by: Optional[str]) -> Optional[str]:
+    """What `retracted_by` becomes on the wire.
+
+    A session-token caller's identity is the operator's EMAIL
+    (api/auth_deps.py); before this branch it was only ever logged locally.
+    It must not travel to peers, be stored in their ledgers, or be re-exposed
+    by their lookups (review finding 4). Service identities (`service:…`) are
+    opaque role names and pass through; anything else becomes "operator". The
+    real identity stays in the publisher's own ledger row.
+    """
+    if not retracted_by:
+        return None
+    if retracted_by.startswith("service:"):
+        return retracted_by
+    return "operator"
+
+
 def build_retraction_payload(
     snapshot: Dict[str, Any],
     *,
@@ -314,7 +342,7 @@ def build_retraction_payload(
         "origin_node": origin_node,
         "valid_to": valid_to_iso,
         "reason": reason,
-        "retracted_by": retracted_by,
+        "retracted_by": wire_identity(retracted_by),
         "attempt": attempt,
         "episode_rid": episode_rid(snapshot["episode_id"]) if snapshot.get("episode_id") else None,
         "source_document": source_document,
@@ -346,6 +374,8 @@ class RetractionResult:
     federation_enabled: bool
     node_rid: Optional[str]
     deliveries: List[Dict[str, Any]] = field(default_factory=list)
+    ledgered: bool = True   # False only for on_missing_ledger="skip" with 127 absent
+    no_admitting_peers: bool = False  # federation on, queue present, no edge admits knowledge_fact
 
 
 async def retract_fact_transactional(
@@ -356,6 +386,7 @@ async def retract_fact_transactional(
     federation_enabled: bool,
     reason: Optional[str],
     retracted_by: Optional[str],
+    on_missing_ledger: str = "raise",
 ) -> Optional[RetractionResult]:
     """Retract `fact_id` and record every outbound obligation, on `conn`.
 
@@ -375,8 +406,24 @@ async def retract_fact_transactional(
     event_queue: the node's EventQueue (its `.node_rid` is this node's
       identity) or None when federation is not configured.
     federation_enabled: the KOI_FEDERATE_KNOWLEDGE gate, read by the caller.
+    on_missing_ledger: "raise" (the endpoint: refuse before any write) or
+      "skip" (create_episode's supersession auto-retire: the valid_to write
+      goes ahead, the obligation is NOT recorded, a warning is logged once per
+      process and the result carries `ledgered=False`). "skip" exists because
+      refusing would fail every ingest on a publisher that has not run 127,
+      which is worse than the audit finding the gap later.
     """
-    await require_ledger(conn)
+    global _warned_ledger_absent_publisher
+    ledgered = await ledger_available(conn)
+    if not ledgered:
+        if on_missing_ledger != "skip":
+            await require_ledger(conn)
+        if not _warned_ledger_absent_publisher:
+            _warned_ledger_absent_publisher = True
+            logger.warning(
+                "fact_retraction.unledgered_retraction: migration 127 is not applied; "
+                "valid_to is written but NO federation obligation is recorded "
+                "(logged once per process; the audit will report these as possibly_live)")
 
     row = await conn.fetchrow(
         """
@@ -434,6 +481,16 @@ async def retract_fact_transactional(
     valid_to_iso = snapshot["valid_to"]
     assert valid_to_iso == updated["valid_to"].isoformat()
 
+    if not ledgered:
+        return RetractionResult(
+            fact_id=str(fact_id), retracted=True, already_retracted=False,
+            valid_to=valid_to_iso, subject_uri=updated["subject_uri"],
+            predicate=updated["predicate"], object_uri=updated["object_uri"],
+            episode_id=_iso(updated["episode_id"]), retraction_id=None,
+            federation_enabled=bool(federation_enabled), node_rid=node_rid,
+            ledgered=False,
+        )
+
     retraction_id = await conn.fetchval(
         """
         INSERT INTO knowledge_fact_retractions
@@ -461,6 +518,23 @@ async def retract_fact_transactional(
 
     plan = await select_recipients(
         conn, node_rid, fact_id=fact_id, episode_id=updated["episode_id"])
+    if not plan.authorized:
+        # Federation is on and a queue exists, yet no APPROVED outbound edge
+        # admits knowledge_fact. Legitimate on a node with no knowledge peers;
+        # ALSO exactly what a scope-vocabulary change would look like (the
+        # unmerged 119_edge_scope_contexts rewrites rid_types as ORN contexts,
+        # under which `scope_admits` admits nobody — review finding 19).
+        # test_scope_admits_agrees_with_a_real_poll pins the mirror; this log
+        # line is the runtime tell. Not an error: the retraction is valid and
+        # the ledger row is written; the audit reports the peers.
+        n_edges = await conn.fetchval(
+            "SELECT count(*) FROM koi_net_edges WHERE source_node = $1 AND status = 'APPROVED'",
+            node_rid)
+        logger.warning(
+            "fact_retraction.no_admitting_peers fact=%s approved_outbound_edges=%s "
+            "(no edge scope admits knowledge_fact; retraction is local-only)",
+            fact_id, n_edges)
+        result.no_admitting_peers = True
 
     for target in plan.authorized:
         event_id = str(uuid4())
@@ -525,6 +599,19 @@ async def retract_fact_transactional(
 # Publisher: transport observations
 # ---------------------------------------------------------------------------
 
+def _valid_uuids(ids: Iterable[Any]) -> List[str]:
+    """Only well-formed UUIDs reach a `::uuid[]` bind. One junk id in a confirm
+    batch used to raise DataError and lose the WHOLE batch's receipts and
+    reports while the transport had already recorded them (review finding 11)."""
+    out: List[str] = []
+    for raw in ids or []:
+        try:
+            out.append(str(UUID(str(raw))))
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return out
+
+
 async def record_deliveries(
     conn: asyncpg.Connection,
     requesting_node: str,
@@ -536,11 +623,21 @@ async def record_deliveries(
     A retraction event is unicast to a peer whose edge admitted the domain at
     queue time. If poll() later EXCLUDES it, the edge changed in between —
     the obligation is now unfulfillable under policy and is closed as
-    `failed` (terminal, named), not left as queued forever.
+    `failed` (named; the sweep reopens it if the edge admits again).
+
+    poll() runs without an explicit transaction, so its `delivered_to` write
+    autocommits before this observer runs. If the observer fails the ledger
+    stays `queued` while the event was handed over (review finding P7). That
+    is self-healing, not silent: the peer's confirm moves the row to
+    `received`/`applied` from `queued` too, and if no confirm ever comes the
+    sweep re-queues it — a duplicate delivery the recipient treats as
+    `already_tombstoned`.
     """
     if not await ledger_available(conn):
         return {"delivered": 0, "failed": 0}
     delivered = failed = 0
+    handed_over_ids = _valid_uuids(handed_over_ids)
+    excluded_ids = _valid_uuids(excluded_ids)
     if handed_over_ids:
         status = await conn.execute(
             f"""
@@ -571,7 +668,14 @@ async def record_deliveries(
 
 
 def make_delivery_observer() -> Callable[..., Awaitable[None]]:
-    """The hook installed on `EventQueue.delivery_observer` at startup."""
+    """The hook installed on `EventQueue.delivery_observer` at startup.
+
+    Only `EventQueue.poll` calls it. The WEBHOOK push path
+    (`peek_undelivered` → `mark_delivered`) does not, so a webhook peer's
+    deliveries go `queued` → `received` without a `delivered` step (review
+    finding 18). Zero WEBHOOK edges exist on either node; wire the observer
+    into `_push_webhook_peers` before approving one.
+    """
 
     async def _observer(conn, requesting_node, handed_over_ids, excluded_ids):
         await record_deliveries(conn, requesting_node, handed_over_ids, excluded_ids)
@@ -585,6 +689,7 @@ async def record_receipts(
     event_ids: Sequence[str],
 ) -> int:
     """confirm(): receipt only. Never touches applied/rejected rows."""
+    event_ids = _valid_uuids(event_ids)
     if not event_ids or not await ledger_available(conn):
         return 0
     status = await conn.execute(
@@ -609,7 +714,10 @@ def _report_to_state(report: Dict[str, Any]) -> tuple[str, str]:
         return STATE_APPLIED, "peer_reported_applied"
     if status == REPORT_ALREADY_TOMBSTONED:
         if report.get("valid_to_matches") is False:
-            return STATE_APPLIED, "peer_already_tombstoned_valid_to_mismatch"
+            # AC2 says the SAME valid_to. A peer holding a different tombstone
+            # has not met it; the fact is not active there, but recording this
+            # as `applied` would hide the violation (review finding P1).
+            return STATE_REJECTED, "peer_holds_different_valid_to"
         return STATE_APPLIED, "peer_already_tombstoned"
     if status == REPORT_PENDING:
         return STATE_APPLIED, "pending_tombstone_recorded_fact_absent"
@@ -626,9 +734,16 @@ async def record_applications(
     Each report must name `event_id`. The row must belong to `confirming_node`
     — a node cannot acknowledge on another node's behalf; such reports are
     counted as `ignored`. Rows already terminal (`applied`, `rejected`,
-    `failed`, `unauthorized`) keep their first verdict; a later report is
-    stored in `application` history only if it differs, and counted.
+    `failed`, `unauthorized`) keep their first verdict: a later report is
+    counted as `already_terminal` and logged at WARNING when it differs, but
+    NOT stored (review finding P6 — the earlier docstring claimed a history
+    that did not exist). A reopenable rejection is re-queued by the sweep
+    under a fresh event id, and the report on THAT event lands normally.
     The report itself is stored VERBATIM in `application`.
+
+    Caller responsibility: `confirming_node` must be AUTHENTICATED (the
+    signed envelope's source_node). The confirm endpoint refuses to pass
+    applications from an unsigned request (review finding P4).
     """
     summary = {"applied": 0, "rejected": 0, "ignored": 0, "unknown_event": 0, "already_terminal": 0}
     if not await ledger_available(conn):
@@ -662,6 +777,11 @@ async def record_applications(
         state, why = _report_to_state(report)
         if row["state"] in (STATE_APPLIED, STATE_REJECTED, STATE_FAILED, STATE_UNAUTHORIZED):
             summary["already_terminal"] += 1
+            if state != row["state"]:
+                logger.warning(
+                    "fact_retraction.application_after_terminal event=%s node=%s row_state=%s "
+                    "later_report=%s (kept first verdict)",
+                    eid, confirming_node, row["state"], json.dumps(report, default=_jsonable)[:500])
             continue
         await conn.execute(
             """
@@ -692,6 +812,9 @@ async def plan_requeue(
 
     Rules, in order:
       * edge no longer admits knowledge_fact       → fail  (policy changed)
+      * rejected with a `ledger_unavailable…` reason → retry now (fresh event;
+        the peer consumed the old one) while attempts remain, else fail
+      * failed with a scope reason, edge admits again → retry now, else fail
       * event row gone, or expired, and attempts left → retry (fresh event)
       * event row gone, or expired, attempts exhausted → fail
       * received, event expired, no report          → unverifiable
@@ -705,16 +828,18 @@ async def plan_requeue(
     rows = await conn.fetch(
         """
         SELECT d.id, d.retraction_id, d.target_node, d.event_id::TEXT AS event_id,
-               d.attempt, d.state, r.fact_id::TEXT AS fact_id, r.valid_to,
+               d.attempt, d.state, d.state_reason, r.fact_id::TEXT AS fact_id, r.valid_to,
                ev.expires_at, ev.confirmed_by
         FROM knowledge_fact_retraction_deliveries d
         JOIN knowledge_fact_retractions r ON r.id = d.retraction_id
         LEFT JOIN koi_net_events ev ON ev.event_id = d.event_id
-        WHERE d.state IN ('queued', 'delivered', 'retrying', 'received')
+        WHERE (d.state IN ('queued', 'delivered', 'retrying', 'received')
+               OR (d.state = 'rejected' AND d.state_reason LIKE $2)
+               OR (d.state = 'failed' AND d.state_reason = ANY($3::text[])))
           AND r.origin_node = $1
         ORDER BY d.id
         """,
-        node_rid,
+        node_rid, REOPENABLE_REJECT_PREFIX + "%", sorted(SCOPE_FAIL_REASONS),
     )
     now = await conn.fetchval("SELECT NOW()")
     plan: List[Dict[str, Any]] = []
@@ -727,8 +852,27 @@ async def plan_requeue(
             "event_id": r["event_id"], "attempt": r["attempt"], "state": r["state"],
             "event_expired": expired,
         }
-        if not admits:
+        if r["state"] == STATE_FAILED:
+            # Only scope failures are selected. Reopen iff the edge admits again.
+            if not admits:
+                continue  # still narrow: nothing to do, stays failed
+            if r["attempt"] < max_attempts:
+                item.update(action="retry", reason="edge_admits_again_after_scope_failure",
+                            next_attempt=r["attempt"] + 1)
+            else:
+                item.update(action="fail", reason=f"attempts_exhausted:{max_attempts}")
+        elif not admits:
+            if r["state"] == STATE_REJECTED:
+                continue  # unmigrated peer AND no longer admitted: leave the rejection
             item.update(action="fail", reason="edge_no_longer_admits_knowledge_fact")
+        elif r["state"] == STATE_REJECTED:
+            # Reopenable: the peer lacked migration 127. Do not wait for expiry —
+            # the peer already consumed and confirmed the old event.
+            if r["attempt"] < max_attempts:
+                item.update(action="retry", reason="peer_unmigrated_retry",
+                            next_attempt=r["attempt"] + 1)
+            else:
+                item.update(action="fail", reason=f"attempts_exhausted:{max_attempts}")
         elif r["state"] == STATE_RECEIVED:
             if expired:
                 item.update(action="unverifiable",
@@ -899,6 +1043,11 @@ async def apply_pending_tombstones(
     ledger is absent (returns []; warns once per process, then debug) so an un-migrated recipient
     keeps applying episodes — the guard is deliberate: crashing every episode
     apply on a peer that has not run 127 would be the worse failure.
+
+    Several pending rows for one fact (two origins, two values): the EARLIEST
+    valid_to lands and every pending row for that fact is marked applied —
+    "applied" on a ledger row means "the local fact carries a tombstone", not
+    "this row's exact value is the one that landed" (review finding P5).
     """
     global _warned_ledger_absent
     ids = [str(x) for x in fact_ids if x]
@@ -925,10 +1074,14 @@ async def apply_pending_tombstones(
             ORDER BY fact_id, valid_to ASC
         ),
         upd AS (
+            -- Over federation valid_to only ever moves EARLIER: a pending
+            -- tombstone lands on a live fact AND shortens a fact that arrived
+            -- with a later validity end (a fact born with an interval, then
+            -- retracted). It never moves later and never becomes NULL.
             UPDATE knowledge_facts f
             SET valid_to = p.valid_to
             FROM pend p
-            WHERE f.id = p.fact_id AND f.valid_to IS NULL
+            WHERE f.id = p.fact_id AND (f.valid_to IS NULL OR f.valid_to > p.valid_to)
             RETURNING f.id
         )
         UPDATE knowledge_fact_retractions r

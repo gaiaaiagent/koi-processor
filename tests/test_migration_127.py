@@ -145,6 +145,16 @@ class TestDryRun:
         assert [dict(r) for r in await _ledger_rows(conn)] == [
             {"migration_id": LEDGER_ID_127, "checksum": "v1_retraction_ledger_and_deliveries"}]
 
+    async def test_python_state_vocabulary_equals_the_sql_check(self, conn):
+        """Both sides pinned to the same literal set: the SQL CHECK (above) and
+        api/fact_retraction.STATES. Python-side drift used to surface only as a
+        runtime CheckViolation (review finding 14)."""
+        from api import fact_retraction as fr
+        assert fr.STATES == STATES
+        await conn.execute(_body(UP_127))
+        check = await _state_check(conn)
+        assert set(re.findall(r"'([a-z_]+)'", check)) == fr.STATES
+
     async def test_up_is_idempotent(self, conn):
         await conn.execute(_body(UP_127))
         await conn.execute(_body(UP_127))

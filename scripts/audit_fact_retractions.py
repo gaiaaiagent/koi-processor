@@ -131,14 +131,41 @@ C_POSSIBLY_LIVE = "possibly_live"
 C_UNVERIFIABLE = "unverifiable"
 C_NEVER_SENT = "never_sent"
 C_UNAUTHORIZED = "unauthorized"
+# Added after the 2026-09-16 adversarial review:
+#   scope_excluded — the only marks this peer carries are PROVABLE poll-filter
+#     exclusions: the event was queued after per-edge scoping was enforced
+#     (commit 2c497f0) AND after the peer's edges last changed, and none of the
+#     peer's APPROVED scopes admits the event's domain. By the branch's own pin
+#     (test_pin_delivered_to_marks_scope_excluded_events) that mark means the
+#     peer was NOT handed the event. Not outstanding; not `unauthorized`.
+#   peer_unmigrated — the ledger says the peer rejected with a
+#     `ledger_unavailable…` reason: it has not applied migration 127. Sendable
+#     (the sweep re-queues it); apply 127 there first.
+#   scope_failed_reopenable — the ledger says `failed` for a scope reason and the
+#     edge admits again now. Sendable (the sweep re-queues it).
+C_SCOPE_EXCLUDED = "scope_excluded"
+C_PEER_UNMIGRATED = "peer_unmigrated"
+C_SCOPE_FAILED_REOPENABLE = "scope_failed_reopenable"
+
+# Per-edge scoping of domain events was introduced by commit 2c497f0
+# (2026-08-25 19:50:25 -0700). Before it every APPROVED edge received every
+# domain event regardless of scope, so a delivered_to mark from before this
+# instant can be a real hand-over. This is the COMMIT time — a lower bound on
+# when the live service began enforcing it; an event queued between the commit
+# and the deploy is classified as if enforced (i.e. as an exclusion mark) only
+# when the other two conditions also hold. Verified on the live database
+# 2026-09-16: every such row is from 2026-09, well past either bound.
+SCOPE_ENFORCEMENT_FLOOR = datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
 
 # Classes that carry an obligation a repair could discharge — IF scope admits.
 SENDABLE = frozenset({
     C_POSSIBLY_LIVE, C_UNVERIFIABLE, C_TOMBSTONE_UNCONFIRMED, C_TOMBSTONE_MISMATCH,
+    C_PEER_UNMIGRATED, C_SCOPE_FAILED_REOPENABLE,
 })
 # Classes that make the run "outstanding" (exit 1) even with an empty plan.
 OUTSTANDING = frozenset({
     C_POSSIBLY_LIVE, C_UNVERIFIABLE, C_UNAUTHORIZED, C_TOMBSTONE_MISMATCH, C_HISTORY_UNKNOWN,
+    C_PEER_UNMIGRATED, C_SCOPE_FAILED_REOPENABLE,
 })
 
 EXIT_OK = 0
@@ -333,14 +360,22 @@ async def _edges(conn: asyncpg.Connection, node_rid: str) -> Dict[str, Dict[str,
     for r in rows:
         peer = r["target_node"]
         entry = out.setdefault(peer, {"edges": [], "edge_status": None, "scope_admits_now": False,
-                                      "admitting_scope": None})
+                                      "admitting_scope": None, "approved_scopes": [],
+                                      "edges_changed_at": None})
         entry["edges"].append({
             "edge_type": r["edge_type"], "status": r["status"],
             "rid_types": list(r["rid_types"]) if r["rid_types"] is not None else None,
         })
+        # The newest change to ANY of this peer's edges (any status): a mark
+        # older than this cannot be reclassified from the current scope.
+        if r["updated_at"] is not None and (
+                entry["edges_changed_at"] is None or r["updated_at"] > entry["edges_changed_at"]):
+            entry["edges_changed_at"] = r["updated_at"]
         approved = r["status"] == "APPROVED"
         if approved:
             entry["edge_status"] = "APPROVED"
+            entry["approved_scopes"].append(
+                list(r["rid_types"]) if r["rid_types"] is not None else None)
             if scope_admits(r["rid_types"]):
                 entry["scope_admits_now"] = True
                 entry["admitting_scope"] = (
@@ -348,6 +383,26 @@ async def _edges(conn: asyncpg.Connection, node_rid: str) -> Dict[str, Dict[str,
         elif entry["edge_status"] is None:
             entry["edge_status"] = r["status"]
     return out
+
+
+def _is_exclusion_mark(event: Dict[str, Any], edge: Optional[Dict[str, Any]]) -> bool:
+    """True when a delivered_to mark on `event` for this peer is PROVABLY a
+    poll-filter exclusion (see C_SCOPE_EXCLUDED). Requires: the event was
+    queued after per-edge scoping (SCOPE_ENFORCEMENT_FLOOR) and after the
+    peer's edges last changed; and no APPROVED scope admits the event's domain
+    (a peer with no edge at all cannot have polled, so its mark is also an
+    exclusion — but that case never occurs: poll() marks only for a polling
+    node with an edge)."""
+    q = event.get("queued_at")
+    if q is None or q <= SCOPE_ENFORCEMENT_FLOOR:
+        return False
+    if edge is None:
+        return False
+    changed = edge.get("edges_changed_at")
+    if changed is not None and q <= changed:
+        return False
+    domain = event.get("domain") or fact_retraction.DOMAIN
+    return not any(scope_admits(s, domain) for s in edge.get("approved_scopes") or [])
 
 
 async def _ledger(conn: asyncpg.Connection, fact_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
@@ -478,6 +533,7 @@ def _classify_peer(
         "classification": None,
         "evidence_class": None,
         "application_proven": False,
+        "plan_futile": False,
         "note": None,
     }
 
@@ -502,11 +558,32 @@ def _classify_peer(
             cls = C_APPLIED
             note = f"recipient reported application ({ledger_row['state_reason']})"
         elif state == fact_retraction.STATE_REJECTED:
-            cls = C_REJECTED
-            note = f"recipient rejected: {ledger_row['state_reason']}"
+            reason = ledger_row["state_reason"] or ""
+            if reason.startswith(fact_retraction.REOPENABLE_REJECT_PREFIX):
+                cls = C_PEER_UNMIGRATED
+                note = (f"recipient rejected: {reason} — it has not applied migration 127; "
+                        f"the sweep re-queues this, apply 127 there first")
+            elif reason == "peer_holds_different_valid_to":
+                # Unlike a transport-evidence mismatch (a confirmed tombstone
+                # event with the wrong value, which a re-send corrects on old
+                # code and shortens on new code), this is a NEW-code recipient
+                # that already refused: it keeps its earlier tombstone by
+                # design. Re-sending is futile — visible, outstanding, no plan.
+                cls = C_TOMBSTONE_MISMATCH
+                row["plan_futile"] = True
+                note = ("recipient keeps an EARLIER tombstone with a different valid_to "
+                        "(report in `application`); re-sending cannot change it")
+            else:
+                cls = C_REJECTED
+                note = f"recipient rejected: {reason}"
         elif state == fact_retraction.STATE_FAILED:
-            cls = C_FAILED
-            note = f"terminal: {ledger_row['state_reason']}"
+            reason = ledger_row["state_reason"] or ""
+            if reason in fact_retraction.SCOPE_FAIL_REASONS and scope_now:
+                cls = C_SCOPE_FAILED_REOPENABLE
+                note = f"failed for scope ({reason}) but the edge admits again; the sweep re-queues this"
+            else:
+                cls = C_FAILED
+                note = f"terminal: {ledger_row['state_reason']}"
         elif state == fact_retraction.STATE_UNVERIFIABLE:
             cls = C_UNVERIFIABLE
             note = f"ledger: {ledger_row['state_reason']}"
@@ -554,11 +631,19 @@ def _classify_peer(
             cls = C_POSSIBLY_LIVE
             note = note or "peer confirmed receipt of the live copy; no tombstone evidence"
         elif live_marked_only:
-            cls = C_UNVERIFIABLE
-            note = note or ("live copy carries a delivered_to mark only — hand-over or scope "
-                            "exclusion, indistinguishable here; no tombstone receipt"
-                            + ("; the tombstone's delivered_to mark is equally uninformative"
-                               if tomb_marked_only else ""))
+            marked_live = [e for e in live if peer in (e["delivered_to"] or [])]
+            if marked_live and not addressed(live) and all(_is_exclusion_mark(e, edge) for e in marked_live):
+                cls = C_SCOPE_EXCLUDED
+                note = note or ("every delivered_to mark on the live copy is a provable poll-filter "
+                                "exclusion (event queued after per-edge scoping and after this "
+                                "peer's edges last changed; no approved scope admits the domain) — "
+                                "the peer was never handed the fact")
+            else:
+                cls = C_UNVERIFIABLE
+                note = note or ("live copy carries a delivered_to mark only — hand-over or scope "
+                                "exclusion, indistinguishable here; no tombstone receipt"
+                                + ("; the tombstone's delivered_to mark is equally uninformative"
+                                   if tomb_marked_only else ""))
         else:
             cls = C_NEVER_SENT
             note = note or "no evidence this peer was ever handed the live copy"
@@ -669,7 +754,7 @@ async def audit(
             peer_rows.append(row)
             by_class[row["classification"]] += 1
 
-            if row["classification"] in SENDABLE:
+            if row["classification"] in SENDABLE and not row["plan_futile"]:
                 if row["classification"] == C_TOMBSTONE_UNCONFIRMED and row["tombstone_in_flight"]:
                     live_ev = next((e for e in events if e["carried"] == "tombstone"
                                     and e["valid_to_matches_local"] and not e["expired"]
@@ -685,13 +770,18 @@ async def audit(
                                  f"(expires {_iso(live_ev['expires_at']) if live_ev else '?'})"),
                     })
                 else:
+                    suffix = ""
+                    if row["classification"] == C_PEER_UNMIGRATED:
+                        suffix = " (peer reported ledger_unavailable — apply migration 127 there first)"
+                    elif row["classification"] == C_SCOPE_FAILED_REOPENABLE:
+                        suffix = " (edge admits again after a scope failure)"
                     plan.append({
                         "action": "would_queue", "fact_id": fid, "peer": peer,
                         "domain": fact_retraction.DOMAIN, "event_type": fact_retraction.EVENT_TYPE,
                         "valid_to": local_iso, "classification": row["classification"],
                         "text": (f"would queue {fact_retraction.DOMAIN} {fact_retraction.EVENT_TYPE} "
                                  f"retraction event to {peer} for fact {fid} "
-                                 f"carrying valid_to={local_iso}"),
+                                 f"carrying valid_to={local_iso}{suffix}"),
                     })
             elif row["classification"] == C_UNAUTHORIZED:
                 blocked.append({

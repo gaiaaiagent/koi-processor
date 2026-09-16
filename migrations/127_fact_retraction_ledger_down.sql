@@ -24,9 +24,17 @@
 
 \set ON_ERROR_STOP on
 
--- Export first. If either of these fails, ON_ERROR_STOP aborts before any DROP.
+-- Export first. If either export fails, ON_ERROR_STOP aborts before any DROP.
+-- Guarded on table existence so a re-run after a half-finished rollback (tables
+-- already gone, ledger row still present) can complete instead of aborting on
+-- the export (review finding 17). Paths are fixed: a re-run overwrites them.
+SELECT to_regclass('knowledge_fact_retractions') IS NOT NULL AS has_retractions, to_regclass('knowledge_fact_retraction_deliveries') IS NOT NULL AS has_deliveries \gset
+\if :has_retractions
 \copy (SELECT * FROM knowledge_fact_retractions ORDER BY id) TO '/tmp/koi_127_down_retractions.csv' WITH CSV HEADER
+\endif
+\if :has_deliveries
 \copy (SELECT * FROM knowledge_fact_retraction_deliveries ORDER BY id) TO '/tmp/koi_127_down_deliveries.csv' WITH CSV HEADER
+\endif
 
 BEGIN;
 

@@ -844,9 +844,16 @@ async def _insert_fact(conn, episode_id: str, fact: Dict[str, Any]) -> None:
     # splits on TOP-LEVEL commas only, so the drift-retry path keeps this
     # assignment intact when it drops some other column (pinned in
     # tests/test_fact_retraction_apply.py).
+    # Over federation, valid_to only ever moves EARLIER. LEAST ignores NULLs in
+    # PostgreSQL, so: existing NULL + incoming T → T (a tombstone lands);
+    # existing T + incoming NULL → T (a stale NEW cannot resurrect); two
+    # values → the earlier (a retraction shortens a validity interval; a
+    # replay carrying a later end cannot extend one). Review finding
+    # (probe_pending_vs_new_with_valid_to): COALESCE kept a later existing
+    # value over an earlier retraction.
     conflict = """
         ON CONFLICT (id) DO UPDATE SET
-            valid_to = COALESCE(knowledge_facts.valid_to, EXCLUDED.valid_to)
+            valid_to = LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to)
     """
     await _insert_with_drift_retry(
         conn, "knowledge_facts", cols_vals, casts, conflict,
@@ -873,7 +880,7 @@ async def _apply_knowledge_fact(
     this one returns None.
 
     Idempotency: ON CONFLICT (id) DO UPDATE SET
-    valid_to = COALESCE(knowledge_facts.valid_to, EXCLUDED.valid_to).
+    valid_to = LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to).
     Facts are content-stable once minted; only validity_interval is mutable
     per the plan's temporal-validity design, and a tombstone is never cleared
     by a later NULL. Apply-first-record-on-success: the fact INSERT runs
@@ -1051,8 +1058,11 @@ async def _apply_fact_retraction(
     if retraction.get("valid_to") != raw_valid_to:
         return rejected("retraction_valid_to_mismatch", fact_id)
 
-    if not await fact_retraction.ledger_available(conn):
-        return rejected("ledger_unavailable", fact_id)
+    # Review finding 1: a recipient WITHOUT migration 127 must still land the
+    # tombstone on a PRESENT fact — old code did (via the upsert), so refusing
+    # here was a regression. Only the absent-fact case is rejected, because a
+    # pending tombstone needs the ledger to live in.
+    ledger = await fact_retraction.ledger_available(conn)
 
     episode_id = payload.get("episode_id")
     try:
@@ -1065,11 +1075,15 @@ async def _apply_fact_retraction(
         if k not in ("retraction", "_federation_event_id")
     }
 
+    report_reason: Optional[str] = None
     async with conn.transaction():
+        # valid_to only moves EARLIER over federation: a live fact is
+        # tombstoned, a fact whose local validity end is LATER than the
+        # retraction is shortened to it, an earlier local tombstone is kept.
         landed = await conn.fetchval(
             """
             UPDATE knowledge_facts SET valid_to = $2
-            WHERE id = $1 AND valid_to IS NULL
+            WHERE id = $1 AND (valid_to IS NULL OR valid_to > $2)
             RETURNING valid_to
             """,
             fact_uuid, valid_to,
@@ -1082,7 +1096,8 @@ async def _apply_fact_retraction(
             local_valid_to = await conn.fetchval(
                 "SELECT valid_to FROM knowledge_facts WHERE id = $1", fact_uuid)
             if local_valid_to is not None:
-                # Keep the local tombstone; report whether the peer agrees.
+                # Keep the local (earlier-or-equal) tombstone; report whether
+                # the peer agrees.
                 status = fact_retraction.REPORT_ALREADY_TOMBSTONED
                 matches = local_valid_to == valid_to
             else:
@@ -1092,18 +1107,29 @@ async def _apply_fact_retraction(
                 status = fact_retraction.REPORT_PENDING
                 matches = None
 
-        await fact_retraction.record_inbound_tombstone(
-            conn,
-            fact_id=fact_uuid,
-            valid_to=valid_to,
-            origin_node=source_node,
-            episode_id=episode_uuid,
-            snapshot=snapshot,
-            applied=(status != fact_retraction.REPORT_PENDING),
-            reason=retraction.get("reason"),
-            retracted_by=retraction.get("retracted_by"),
-            source_document=retraction.get("source_document"),
-        )
+        if not ledger:
+            if status == fact_retraction.REPORT_PENDING:
+                # Nothing landed and nothing can be recorded: the publisher's
+                # sweep re-queues this once the peer has migration 127.
+                return rejected("ledger_unavailable_fact_absent", fact_id)
+            report_reason = "ledger_unavailable_not_ledgered"
+            logger.warning(
+                f"domain.knowledge_fact.retraction_unledgered rid={rid} fact_id={fact_id} "
+                f"status={status} reason=migration_127_not_applied_here"
+            )
+        else:
+            await fact_retraction.record_inbound_tombstone(
+                conn,
+                fact_id=fact_uuid,
+                valid_to=valid_to,
+                origin_node=source_node,
+                episode_id=episode_uuid,
+                snapshot=snapshot,
+                applied=(status != fact_retraction.REPORT_PENDING),
+                reason=retraction.get("reason"),
+                retracted_by=retraction.get("retracted_by"),
+                source_document=retraction.get("source_document"),
+            )
 
         if event_id:
             await conn.execute(
@@ -1124,7 +1150,7 @@ async def _apply_fact_retraction(
     )
     return _retraction_report(
         event_id=event_id, fact_id=fact_id, status=status,
-        valid_to=local_valid_to, valid_to_matches=matches,
+        valid_to=local_valid_to, valid_to_matches=matches, reason=report_reason,
     )
 
 

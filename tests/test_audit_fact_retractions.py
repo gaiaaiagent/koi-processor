@@ -633,3 +633,132 @@ def test_main_runs_read_only_against_the_scratch_db(capsys):
     assert body["read_only"] is True
     assert isinstance(body["facts"], list)
     assert body["summary"]["selected"] == len(body["facts"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2026-09-16 adversarial review — each written red first
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _seed_ledger_delivery(conn, fid, db_valid_to, peer, state, reason):
+    retraction_id = await conn.fetchval(
+        """
+        INSERT INTO knowledge_fact_retractions (fact_id, valid_to, origin_node, fact_snapshot, applied_at)
+        VALUES ($1::uuid, $2, $3, '{}'::jsonb, NOW())
+        ON CONFLICT (fact_id, valid_to, origin_node) DO UPDATE SET applied_at = knowledge_fact_retractions.applied_at
+        RETURNING id
+        """,
+        fid, db_valid_to, NODE_A)
+    await conn.execute(
+        """
+        INSERT INTO knowledge_fact_retraction_deliveries
+            (retraction_id, target_node, event_id, attempt, state, state_reason)
+        VALUES ($1, $2, $3::uuid, 1, $4, $5)
+        """,
+        retraction_id, peer, str(uuid.uuid4()), state, reason)
+
+
+@pytest.mark.anyio
+async def test_review_post_scoping_exclusion_mark_is_scope_excluded_not_unauthorized(conn):
+    """Finding 2. The incident's three narrow peers carry delivered_to marks on
+    events queued in 2026-09 — after per-edge scoping (2c497f0) and after their
+    edges last changed — and none of their approved scopes admits
+    knowledge_episode. By the boundary pin those marks are exclusions: the peer
+    was never handed the fact. `unauthorized` ("may hold it; policy forbids
+    telling it") overstated that 729 times on live."""
+    await seed_edges(conn)
+    # the narrow edge was last changed BEFORE the event
+    await conn.execute(
+        "UPDATE koi_net_edges SET updated_at = '2026-08-30T00:00:00+00:00' WHERE target_node = $1",
+        PEER_NARROW)
+    ep, fid, _ = await seed_retracted_fact(conn)
+    await seed_live_copy(conn, ep, fid, delivered_to=[PEER_NARROW])   # mark only, 2026-09 (NOW)
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_NARROW)
+    assert row["classification"] == "scope_excluded", row["note"]
+    assert row["evidence_class"] is None
+    assert plan_for(report, fid, PEER_NARROW) == []
+    assert not [b for b in report["blocked"] if b["peer"] == PEER_NARROW]
+    assert report["summary"]["outstanding"] is False
+
+
+@pytest.mark.anyio
+async def test_review_mark_from_before_scoping_or_before_edge_change_stays_unverifiable(conn):
+    """The conservative side of the same rule: a mark from before the scoping
+    floor, or from before the peer's edge last changed, cannot be reclassified
+    from the CURRENT scope — it stays unverifiable → unauthorized."""
+    await seed_edges(conn)
+    ep, fid, _ = await seed_retracted_fact(conn)
+    # (a) queued before 2c497f0
+    await seed_live_copy_at(conn, ep, fid, delivered_to=[PEER_NARROW],
+                            queued_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_NARROW)
+    assert row["classification"] == "unauthorized" and row["evidence_class"] == "unverifiable"
+    # (b) queued after the floor but the edge changed AFTER the event
+    ep2, fid2, _ = await seed_retracted_fact(conn)
+    await seed_live_copy_at(conn, ep2, fid2, delivered_to=[PEER_NARROW],
+                            queued_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    await conn.execute(
+        "UPDATE koi_net_edges SET updated_at = NOW() WHERE target_node = $1", PEER_NARROW)
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid2])
+    row = peer_row(report, fid2, PEER_NARROW)
+    assert row["classification"] == "unauthorized" and row["evidence_class"] == "unverifiable"
+
+
+async def seed_live_copy_at(conn, ep, fid, *, delivered_to=(), confirmed_by=(), queued_at):
+    return await seed_event(
+        conn, domain="knowledge_episode", event_type="NEW", rid=episode_rid(ep),
+        payload=episode_payload(ep, [fact_payload(fid, ep, valid_to=None)]),
+        delivered_to=delivered_to, confirmed_by=confirmed_by, queued_at=queued_at,
+    )
+
+
+@pytest.mark.anyio
+async def test_review_ledger_unmigrated_rejection_is_sendable(conn):
+    """P2. `rejected: ledger_unavailable…` is an un-migrated peer, not a verdict:
+    classified peer_unmigrated, planned (with the 127 hint), outstanding."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_AUTH, "rejected", "ledger_unavailable_fact_absent")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_AUTH)
+    assert row["classification"] == "peer_unmigrated"
+    plan = plan_for(report, fid, PEER_AUTH)
+    assert len(plan) == 1 and "migration 127" in plan[0]["text"]
+    assert report["summary"]["outstanding"] is True
+
+
+@pytest.mark.anyio
+async def test_review_ledger_scope_failure_is_sendable_once_the_edge_admits_again(conn):
+    """P3. `failed: edge_scope_excluded_at_poll` on a peer whose edge admits again."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_AUTH, "failed", "edge_scope_excluded_at_poll")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_AUTH)
+    assert row["classification"] == "scope_failed_reopenable"
+    assert len(plan_for(report, fid, PEER_AUTH)) == 1
+    # still narrow → stays failed, no plan
+    ep2, fid2, db2 = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid2, db2, PEER_NARROW, "failed", "edge_scope_excluded_at_poll")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid2])
+    assert peer_row(report, fid2, PEER_NARROW)["classification"] == "failed"
+    assert plan_for(report, fid2, PEER_NARROW) == []
+
+
+@pytest.mark.anyio
+async def test_review_ledger_mismatch_rejection_is_outstanding_without_a_plan_line(conn):
+    """P1. `rejected: peer_holds_different_valid_to`: the recipient keeps its
+    earlier tombstone by design, so re-sending is futile — no plan line — but
+    the AC2 violation is visible and the run is outstanding."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_AUTH, "rejected", "peer_holds_different_valid_to")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_AUTH)
+    assert row["classification"] == "tombstone_valid_to_mismatch"
+    assert plan_for(report, fid, PEER_AUTH) == []
+    assert report["summary"]["outstanding"] is True
