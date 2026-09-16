@@ -281,7 +281,7 @@ behind `KOI_FACT_RETRACTION_SWEEP=true` (default **off**, re-read every cycle).
 
 ## 3. What is proven, and what is not
 
-**Proven in this branch (scratch DB, rolled back — collected counts: 7 boundary, 52 outbox, 27 apply, 3 integration, 15 migration, 31 audit = 135):**
+**Proven in this branch (scratch DB, rolled back — collected counts: 7 boundary, 52 outbox, 28 apply, 3 integration, 15 migration, 31 audit = 136):**
 
 * The retraction endpoint queues exactly one unicast event per authorized recipient, in the
   same transaction as `valid_to`, carrying the committed `valid_to` byte-for-byte; none to a

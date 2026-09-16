@@ -720,3 +720,23 @@ async def test_review_valid_to_only_moves_earlier_over_federation(ledger):
                                    "UPDATE", retraction_payload(fid2, ep2, valid_to=T_FUTURE), NODE_B)
     assert rep["status"] == "already_tombstoned" and rep["valid_to_matches"] is False
     assert rep["valid_to"] == T_RET
+
+
+@pytest.mark.anyio
+async def test_review_episode_update_carrying_an_earlier_valid_to_shortens_a_future_end(ledger):
+    """The case that separates LEAST from COALESCE in `_insert_fact`: the fact
+    is already present with a FUTURE validity end, and an episode UPDATE
+    (the incident's manual-reconstruction shape) re-emits it carrying an
+    EARLIER valid_to. COALESCE keeps the future end and loses the retraction;
+    LEAST lands the earlier value. Revert-proven 2026-09-16: fails with COALESCE."""
+    conn = ledger
+    ep, fid = str(uuid.uuid4()), str(uuid.uuid4())
+    T_RET, T_FUTURE = INCIDENT_VALID_TO, "2030-01-01T00:00:00+00:00"
+    await apply_domain_event(conn, "knowledge_episode", f"orn:personal-koi.knowledge-episode:{ep}", "NEW",
+                             episode_payload(ep, [fact_payload(fid, ep, valid_to=T_FUTURE)],
+                                             event_id=str(uuid.uuid4())), NODE_A)
+    assert (await conn.fetchval("SELECT valid_to FROM knowledge_facts WHERE id = $1::uuid", fid)).isoformat() == T_FUTURE
+    await apply_domain_event(conn, "knowledge_episode", f"orn:personal-koi.knowledge-episode:{ep}", "UPDATE",
+                             episode_payload(ep, [fact_payload(fid, ep, valid_to=T_RET)],
+                                             event_id=str(uuid.uuid4())), NODE_A)
+    assert (await conn.fetchval("SELECT valid_to FROM knowledge_facts WHERE id = $1::uuid", fid)).isoformat() == T_RET
