@@ -1020,6 +1020,10 @@ class KOIPoller:
             # A failed confirm does NOT make the events re-deliver (poll()
             # excludes on delivered_to). They were applied locally; what is
             # lost is the publisher's receipt — and, for a retraction, its
-            # application report, which the publisher's sweep will age into
-            # `unverifiable` (api/fact_retraction.py).
+            # application report. The publisher's ledger row stays
+            # `delivered`; once the event expires its sweep RE-QUEUES a fresh
+            # event (attempts permitting), which this node answers
+            # `already_tombstoned` (api/fact_retraction.plan_requeue). Only a
+            # row that reached `received` without a report ages into
+            # `unverifiable`.
             logger.warning(f"Confirm call failed for {source_node}: {e}")

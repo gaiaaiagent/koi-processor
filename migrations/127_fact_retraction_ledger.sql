@@ -1,7 +1,8 @@
 -- =============================================================================
 -- Migration 127: knowledge-fact retraction ledger + per-peer delivery states
 -- =============================================================================
--- Date:     2026-09-15
+-- Date:     2026-09-15 (state vocabulary + shape assertion revised 2026-09-17,
+--           before any application; this file has never been applied anywhere)
 -- Issue:    #67 — federated fact retractions and recipient-application proof
 -- Database: personal_koi (PostgreSQL 14.15)
 --
@@ -46,6 +47,10 @@
 --     delivered     the publisher's poll() handed the event to this peer
 --     received      the peer confirmed receipt (koi-net confirm) — NOT application
 --     applied       the peer REPORTED application (confirm payload `applications`)
+--     pending       the peer reported the fact is ABSENT there and recorded a
+--                   pending tombstone (its apply paths land it when the fact
+--                   arrives). Not application, not terminal: a later signed
+--                   report may advance it. The sweep leaves it alone.
 --     rejected      the peer reported it could not apply (report retained verbatim)
 --     retrying      the prior event expired without an application report; a
 --                   fresh event was queued (attempt incremented)
@@ -110,7 +115,7 @@ CREATE TABLE IF NOT EXISTS knowledge_fact_retraction_deliveries (
     CONSTRAINT knowledge_fact_retraction_deliveries_retraction_target_key
         UNIQUE (retraction_id, target_node),
     CONSTRAINT knowledge_fact_retraction_deliveries_state_check CHECK (
-        state IN ('queued', 'delivered', 'received', 'applied', 'rejected',
+        state IN ('queued', 'delivered', 'received', 'applied', 'pending', 'rejected',
                   'retrying', 'failed', 'unverifiable', 'unauthorized')
     ),
     -- An obligation that was never queued cannot have an event; one that was
@@ -138,54 +143,114 @@ COMMENT ON TABLE knowledge_fact_retraction_deliveries IS
 COMMENT ON COLUMN knowledge_fact_retractions.valid_to IS
     'The committed knowledge_facts.valid_to, copied exactly. Never constructed.';
 COMMENT ON COLUMN knowledge_fact_retraction_deliveries.state IS
-    'queued | delivered | received | applied | rejected | retrying | failed | unverifiable | unauthorized';
+    'queued | delivered | received | applied | pending | rejected | retrying | failed | unverifiable | unauthorized';
 
 -- -----------------------------------------------------------------------------
--- Assertion. Exact shape, not "the tables exist": the two constraints the code
--- leans on must be present, and the state vocabulary must be exactly the nine
--- states the ledger module names. A count would pass with a typo in one state.
+-- Assertion. Exact shape, not "the tables exist". `CREATE TABLE IF NOT EXISTS`
+-- keeps a pre-existing table AS IT IS, so a drifted table (a hand-made one, a
+-- half-applied earlier draft) would pass a mere existence check and then fail
+-- at runtime as a CheckViolation or a missing column. Asserted here:
+--   * the state vocabulary is EXACTLY the ten states the ledger module names —
+--     no missing state, no extra one (an extra state is drift too);
+--   * the two UNIQUE keys the code upserts on have exactly these columns, in
+--     this order;
+--   * the event-presence CHECK exists;
+--   * every column the module reads or writes exists on each table.
+-- Each failure names what is wrong.
 -- -----------------------------------------------------------------------------
 DO $$
 DECLARE
-    expected_states TEXT[] := ARRAY['applied', 'delivered', 'failed', 'queued',
+    expected_states TEXT[] := ARRAY['applied', 'delivered', 'failed', 'pending', 'queued',
                                     'received', 'rejected', 'retrying',
                                     'unauthorized', 'unverifiable'];
+    found_states    TEXT[];
     state_check     TEXT;
-    s               TEXT;
-    missing         TEXT[] := '{}';
-    have_unique     BOOLEAN;
     have_presence   BOOLEAN;
+    unique_cols     TEXT[];
+    expected_cols   TEXT[];
+    missing_cols    TEXT[];
 BEGIN
+    -- 1. state vocabulary, exactly
     SELECT pg_get_constraintdef(oid) INTO state_check
       FROM pg_constraint
-     WHERE conname = 'knowledge_fact_retraction_deliveries_state_check';
+     WHERE conname = 'knowledge_fact_retraction_deliveries_state_check'
+       AND conrelid = 'knowledge_fact_retraction_deliveries'::regclass;
     IF state_check IS NULL THEN
         RAISE EXCEPTION '127: state CHECK constraint is missing';
     END IF;
-    FOREACH s IN ARRAY expected_states LOOP
-        IF position('''' || s || '''' IN state_check) = 0 THEN
-            missing := array_append(missing, s);
-        END IF;
-    END LOOP;
-    IF cardinality(missing) > 0 THEN
-        RAISE EXCEPTION '127: state CHECK lacks states %: %', missing, state_check;
+    SELECT array_agg(m[1] ORDER BY m[1]) INTO found_states
+      FROM regexp_matches(state_check, $re$'([a-z_]+)'$re$, 'g') AS m;
+    IF found_states IS DISTINCT FROM expected_states THEN
+        RAISE EXCEPTION '127: state CHECK vocabulary is % but must be exactly % (definition: %)',
+            found_states, expected_states, state_check;
     END IF;
 
+    -- 2. unique keys, exact columns in order
+    SELECT array_agg(a.attname ORDER BY k.ord) INTO unique_cols
+      FROM pg_constraint c
+      CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+     WHERE c.conname = 'knowledge_fact_retractions_fact_valid_origin_key'
+       AND c.conrelid = 'knowledge_fact_retractions'::regclass
+       AND c.contype = 'u';
+    IF unique_cols IS DISTINCT FROM ARRAY['fact_id', 'valid_to', 'origin_node'] THEN
+        RAISE EXCEPTION '127: knowledge_fact_retractions unique key is % but must be (fact_id, valid_to, origin_node)',
+            unique_cols;
+    END IF;
+    SELECT array_agg(a.attname ORDER BY k.ord) INTO unique_cols
+      FROM pg_constraint c
+      CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+     WHERE c.conname = 'knowledge_fact_retraction_deliveries_retraction_target_key'
+       AND c.conrelid = 'knowledge_fact_retraction_deliveries'::regclass
+       AND c.contype = 'u';
+    IF unique_cols IS DISTINCT FROM ARRAY['retraction_id', 'target_node'] THEN
+        RAISE EXCEPTION '127: knowledge_fact_retraction_deliveries unique key is % but must be (retraction_id, target_node)',
+            unique_cols;
+    END IF;
+
+    -- 3. event-presence check
     SELECT EXISTS (SELECT 1 FROM pg_constraint
-                    WHERE conname = 'knowledge_fact_retractions_fact_valid_origin_key')
-      INTO have_unique;
-    SELECT EXISTS (SELECT 1 FROM pg_constraint
-                    WHERE conname = 'knowledge_fact_retraction_deliveries_event_presence_check')
+                    WHERE conname = 'knowledge_fact_retraction_deliveries_event_presence_check'
+                      AND conrelid = 'knowledge_fact_retraction_deliveries'::regclass)
       INTO have_presence;
-    IF NOT have_unique OR NOT have_presence THEN
-        RAISE EXCEPTION '127: constraint missing (unique=% presence=%)', have_unique, have_presence;
+    IF NOT have_presence THEN
+        RAISE EXCEPTION '127: knowledge_fact_retraction_deliveries_event_presence_check is missing';
     END IF;
 
-    RAISE NOTICE '127: assertion PASSED (ledger + deliveries with % states)', cardinality(expected_states);
+    -- 4. columns the module reads/writes
+    expected_cols := ARRAY['id', 'fact_id', 'valid_to', 'origin_node', 'episode_id', 'reason',
+                           'retracted_by', 'source_document', 'source_node_rid', 'fact_snapshot',
+                           'applied_at', 'created_at'];
+    SELECT array_agg(c ORDER BY c) INTO missing_cols
+      FROM unnest(expected_cols) AS c
+     WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'knowledge_fact_retractions'
+                          AND column_name = c);
+    IF missing_cols IS NOT NULL THEN
+        RAISE EXCEPTION '127: knowledge_fact_retractions lacks column(s) %', missing_cols;
+    END IF;
+    expected_cols := ARRAY['id', 'retraction_id', 'target_node', 'event_id', 'attempt',
+                           'attempt_history', 'state', 'state_reason', 'application', 'queued_at',
+                           'delivered_at', 'received_at', 'applied_at', 'state_changed_at',
+                           'created_at'];
+    SELECT array_agg(c ORDER BY c) INTO missing_cols
+      FROM unnest(expected_cols) AS c
+     WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'knowledge_fact_retraction_deliveries'
+                          AND column_name = c);
+    IF missing_cols IS NOT NULL THEN
+        RAISE EXCEPTION '127: knowledge_fact_retraction_deliveries lacks column(s) %', missing_cols;
+    END IF;
+
+    RAISE NOTICE '127: assertion PASSED (ledger + deliveries, % states, both unique keys, all columns)',
+        cardinality(expected_states);
 END $$;
 
 INSERT INTO koi_migrations (migration_id, checksum)
-VALUES ('personal:127_fact_retraction_ledger', 'v1_retraction_ledger_and_deliveries')
+VALUES ('personal:127_fact_retraction_ledger', 'v2_retraction_ledger_pending_state')
 ON CONFLICT (migration_id) DO NOTHING;
 
 COMMIT;

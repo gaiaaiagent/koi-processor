@@ -1015,7 +1015,11 @@ async def events_poll(request: Request):
             content=_wrap_response(resp.model_dump(exclude_none=True), requesting_node, signed)
         )
 
-    events = await _event_queue.poll(requesting_node, limit, rid_types)
+    # Issue #67: fact-retraction events are handed only to a SIGNED requester.
+    # An unsigned poll naming a peer must not be able to read, or consume, that
+    # peer's unicast retractions (review finding 4). Fail-closed regardless of
+    # KOI_REQUIRE_SIGNED_ENVELOPES; the rest of the stream keeps the policy.
+    events = await _event_queue.poll(requesting_node, limit, rid_types, authenticated=signed)
 
     wire_events = []
     for ev in events:
@@ -1081,30 +1085,45 @@ async def events_confirm(request: Request):
     # Ledger absent (migration 127 not applied) → both calls are no-ops.
     applications = payload.get("applications") or []
     app_summary: Dict[str, Any] = {}
-    # Application reports are accepted ONLY from a signed envelope: under the
-    # relaxed policy (no KOI_* env) an unsigned confirm names its own node_id,
-    # and letting that mint `applied` for an arbitrary peer is the spoof the
-    # review's probe P4 demonstrated. Receipt keeps the pre-existing trust
-    # model; application does not inherit it.
-    if applications and not signed:
-        logger.warning(
-            "fact_retraction.confirm ignoring %d application report(s) from UNSIGNED "
-            "request naming node=%s", len(applications), confirming_node)
-        app_summary = {"ignored_unsigned": len(applications)}
+    # The retraction LEDGER (receipt AND application) is written only from a
+    # SIGNED envelope. Under the relaxed policy (no KOI_* env) an unsigned
+    # confirm names its own node_id: letting that mint `applied` for an
+    # arbitrary peer is the spoof the first review's probe P4 demonstrated,
+    # and letting it mint `received` moved a never-polled delivery to
+    # `received`, after which the sweep aged it to `unverifiable` instead of
+    # retrying (second review, finding 6). The transport's `confirmed_by`
+    # keeps its pre-existing trust model; the ledger does not inherit it.
+    if not signed:
+        if applications:
+            logger.warning(
+                "fact_retraction.confirm ignoring %d application report(s) from UNSIGNED "
+                "request naming node=%s", len(applications), confirming_node)
+            app_summary["ignored_unsigned"] = len(applications)
         applications = []
     if _db_pool is not None:
         try:
             async with _db_pool.acquire() as conn:
                 async with conn.transaction():
-                    receipts = await fact_retraction.record_receipts(
-                        conn, confirming_node, [str(e) for e in event_ids])
+                    ids = [str(e) for e in event_ids]
+                    if signed:
+                        receipts = await fact_retraction.record_receipts(conn, confirming_node, ids)
+                    else:
+                        receipts = 0
+                        withheld = await fact_retraction.count_open_deliveries(
+                            conn, confirming_node, ids)
+                        if withheld:
+                            logger.warning(
+                                "fact_retraction.confirm UNSIGNED request naming node=%s "
+                                "confirmed %d retraction event(s); receipt NOT recorded in the "
+                                "ledger (signed envelope required)", confirming_node, withheld)
+                            app_summary["ignored_unsigned_receipts"] = withheld
                     if applications:
                         app_summary = await fact_retraction.record_applications(
                             conn, confirming_node, applications)
             if receipts or app_summary:
                 logger.info(
-                    "fact_retraction.confirm node=%s receipts=%d applications=%s",
-                    confirming_node, receipts, app_summary or {})
+                    "fact_retraction.confirm node=%s signed=%s receipts=%d applications=%s",
+                    confirming_node, signed, receipts, app_summary or {})
         except Exception as exc:  # noqa: BLE001 — ledger bookkeeping must not fail a confirm
             logger.warning(
                 f"fact_retraction.confirm ledger update failed for {confirming_node}: {exc}")

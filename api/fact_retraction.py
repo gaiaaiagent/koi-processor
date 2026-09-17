@@ -30,9 +30,17 @@ WHAT IT DOES NOT CLAIM
 ----------------------
 `applied` is the RECIPIENT'S report, carried back in the koi-net confirm
 payload (`applications`). A peer running older code reports nothing, so its
-deliveries stop at `received` and age into `unverifiable`. Proving application
-on such a peer needs the signed lookup slice (`/koi-net/facts/lookup`), which
-the publisher may call but which this session never runs against a live peer.
+deliveries stop at `received` and age into `unverifiable`. A peer that does
+not hold the fact reports `pending` — recorded as its own state, never as
+`applied` — and nothing on this side learns when the fact later arrives
+there. Proving application on any peer needs the signed lookup slice
+(`/koi-net/facts/lookup`), which the publisher may call but which this
+session never runs against a live peer.
+
+AUTHENTICATION. The ledger is written only from SIGNED koi-net envelopes:
+an unsigned poll is not handed retraction events (`EventQueue.poll`,
+`authenticated=False`), and an unsigned confirm records neither receipt nor
+application here. This holds regardless of KOI_REQUIRE_SIGNED_ENVELOPES.
 
 WIRE SHAPE (domain `knowledge_fact`, event_type `UPDATE`)
 ---------------------------------------------------------
@@ -86,15 +94,31 @@ STATE_QUEUED = "queued"
 STATE_DELIVERED = "delivered"
 STATE_RECEIVED = "received"
 STATE_APPLIED = "applied"
+# The recipient reported `pending`: it holds NO fact row, only a pending
+# tombstone (applied_at NULL) that its own apply paths land when the fact
+# arrives. Not application — the fact is absent there — and not terminal: a
+# later signed report (a re-sent event answered `already_tombstoned` with the
+# same valid_to once the fact has landed) may still advance it to `applied`.
+# The sweep leaves it alone: there is nothing live to retract and nothing to
+# retry. Cross-node proof needs `POST /koi-net/facts/lookup` on that peer.
+STATE_PENDING = "pending"
 STATE_REJECTED = "rejected"
 STATE_RETRYING = "retrying"
 STATE_FAILED = "failed"
 STATE_UNVERIFIABLE = "unverifiable"
 STATE_UNAUTHORIZED = "unauthorized"
 STATES = frozenset({
-    STATE_QUEUED, STATE_DELIVERED, STATE_RECEIVED, STATE_APPLIED, STATE_REJECTED,
-    STATE_RETRYING, STATE_FAILED, STATE_UNVERIFIABLE, STATE_UNAUTHORIZED,
+    STATE_QUEUED, STATE_DELIVERED, STATE_RECEIVED, STATE_APPLIED, STATE_PENDING,
+    STATE_REJECTED, STATE_RETRYING, STATE_FAILED, STATE_UNVERIFIABLE, STATE_UNAUTHORIZED,
 })
+# States a later application report may still move (everything the recipient
+# has not given a verdict on). `applied`/`rejected`/`failed`/`unauthorized`
+# keep their first verdict.
+REPORTABLE_STATES = frozenset({
+    STATE_QUEUED, STATE_DELIVERED, STATE_RETRYING, STATE_RECEIVED, STATE_PENDING,
+    STATE_UNVERIFIABLE,
+})
+TERMINAL_STATES = frozenset({STATE_APPLIED, STATE_REJECTED, STATE_FAILED, STATE_UNAUTHORIZED})
 # States in which the publisher is still waiting on the transport.
 OPEN_STATES = frozenset({STATE_QUEUED, STATE_DELIVERED, STATE_RETRYING})
 # Terminal-looking states the sweep may REOPEN (review findings P2/P3):
@@ -706,6 +730,28 @@ async def record_receipts(
     return int(status.split()[-1])
 
 
+async def count_open_deliveries(
+    conn: asyncpg.Connection,
+    target_node: str,
+    event_ids: Sequence[str],
+) -> int:
+    """How many of `event_ids` are this peer's not-yet-received retraction
+    deliveries. Used to make an UNSIGNED confirm's withheld receipts visible
+    in the log without recording them."""
+    event_ids = _valid_uuids(event_ids)
+    if not event_ids or not await ledger_available(conn):
+        return 0
+    return int(await conn.fetchval(
+        f"""
+        SELECT count(*) FROM knowledge_fact_retraction_deliveries
+        WHERE target_node = $1
+          AND event_id = ANY($2::uuid[])
+          AND state IN ('{STATE_QUEUED}', '{STATE_DELIVERED}', '{STATE_RETRYING}')
+        """,
+        target_node, list(event_ids),
+    ) or 0)
+
+
 def _report_to_state(report: Dict[str, Any]) -> tuple[str, str]:
     status = report.get("status")
     if status == REPORT_REJECTED:
@@ -720,7 +766,9 @@ def _report_to_state(report: Dict[str, Any]) -> tuple[str, str]:
             return STATE_REJECTED, "peer_holds_different_valid_to"
         return STATE_APPLIED, "peer_already_tombstoned"
     if status == REPORT_PENDING:
-        return STATE_APPLIED, "pending_tombstone_recorded_fact_absent"
+        # The fact is ABSENT on the peer; it recorded a pending tombstone.
+        # Never `applied` (review finding 2): nothing is stored there yet.
+        return STATE_PENDING, "peer_recorded_pending_tombstone_fact_absent"
     return STATE_REJECTED, f"unrecognized_report_status:{status!r}"
 
 
@@ -737,15 +785,19 @@ async def record_applications(
     `failed`, `unauthorized`) keep their first verdict: a later report is
     counted as `already_terminal` and logged at WARNING when it differs, but
     NOT stored (review finding P6 — the earlier docstring claimed a history
-    that did not exist). A reopenable rejection is re-queued by the sweep
-    under a fresh event id, and the report on THAT event lands normally.
-    The report itself is stored VERBATIM in `application`.
+    that did not exist). `pending` and `unverifiable` are NOT terminal: a
+    later genuine report advances them. A reopenable rejection is re-queued
+    by the sweep under a fresh event id, and the report on THAT event lands
+    normally. The report itself is stored VERBATIM in `application`.
+    Every rejection is logged at WARNING (`fact_retraction.delivery_rejected`)
+    so terminal outcomes are visible in the aggregate, not only per UUID.
 
     Caller responsibility: `confirming_node` must be AUTHENTICATED (the
     signed envelope's source_node). The confirm endpoint refuses to pass
     applications from an unsigned request (review finding P4).
     """
-    summary = {"applied": 0, "rejected": 0, "ignored": 0, "unknown_event": 0, "already_terminal": 0}
+    summary = {"applied": 0, "pending": 0, "rejected": 0, "ignored": 0, "unknown_event": 0,
+               "already_terminal": 0}
     if not await ledger_available(conn):
         summary["ignored"] = sum(1 for _ in applications)
         return summary
@@ -760,8 +812,10 @@ async def record_applications(
             continue
         row = await conn.fetchrow(
             """
-            SELECT id, target_node, state FROM knowledge_fact_retraction_deliveries
-            WHERE event_id = $1::uuid
+            SELECT d.id, d.target_node, d.state, r.fact_id::TEXT AS fact_id
+            FROM knowledge_fact_retraction_deliveries d
+            JOIN knowledge_fact_retractions r ON r.id = d.retraction_id
+            WHERE d.event_id = $1::uuid
             """,
             eid,
         )
@@ -775,7 +829,7 @@ async def record_applications(
             summary["ignored"] += 1
             continue
         state, why = _report_to_state(report)
-        if row["state"] in (STATE_APPLIED, STATE_REJECTED, STATE_FAILED, STATE_UNAUTHORIZED):
+        if row["state"] in TERMINAL_STATES:
             summary["already_terminal"] += 1
             if state != row["state"]:
                 logger.warning(
@@ -794,7 +848,11 @@ async def record_applications(
             """,
             row["id"], state, why, json.dumps(report, default=_jsonable),
         )
-        summary["applied" if state == STATE_APPLIED else "rejected"] += 1
+        summary[state] += 1
+        if state == STATE_REJECTED:
+            logger.warning(
+                "fact_retraction.delivery_rejected fact=%s peer=%s event=%s reason=%s",
+                row["fact_id"], confirming_node, eid, why)
     return summary
 
 
@@ -811,14 +869,19 @@ async def plan_requeue(
     """Pure read. What the sweep WOULD do to every open delivery.
 
     Rules, in order:
+      * received (the peer confirmed): event expired, no report → unverifiable,
+        else wait. Receipt is evidence the edge cannot un-make: a later scope
+        change never turns a `received` row into `failed` (review finding 3),
+        and the peer's application report still lands on it.
       * edge no longer admits knowledge_fact       → fail  (policy changed)
       * rejected with a `ledger_unavailable…` reason → retry now (fresh event;
         the peer consumed the old one) while attempts remain, else fail
       * failed with a scope reason, edge admits again → retry now, else fail
       * event row gone, or expired, and attempts left → retry (fresh event)
       * event row gone, or expired, attempts exhausted → fail
-      * received, event expired, no report          → unverifiable
       * otherwise                                    → wait
+    `pending` rows are not selected: the peer holds a pending tombstone and no
+    fact; there is nothing to retry and nothing to fail.
     """
     await require_ledger(conn)
     # Same rule as select_recipients: a peer is admitted if ANY of its APPROVED
@@ -852,7 +915,14 @@ async def plan_requeue(
             "event_id": r["event_id"], "attempt": r["attempt"], "state": r["state"],
             "event_expired": expired,
         }
-        if r["state"] == STATE_FAILED:
+        if r["state"] == STATE_RECEIVED:
+            # Receipt is kept whatever the edge does afterwards.
+            if expired:
+                item.update(action="unverifiable",
+                            reason="receipt_confirmed_no_application_report_before_expiry")
+            else:
+                item.update(action="wait", reason="receipt_confirmed_report_may_still_arrive")
+        elif r["state"] == STATE_FAILED:
             # Only scope failures are selected. Reopen iff the edge admits again.
             if not admits:
                 continue  # still narrow: nothing to do, stays failed
@@ -873,12 +943,6 @@ async def plan_requeue(
                             next_attempt=r["attempt"] + 1)
             else:
                 item.update(action="fail", reason=f"attempts_exhausted:{max_attempts}")
-        elif r["state"] == STATE_RECEIVED:
-            if expired:
-                item.update(action="unverifiable",
-                            reason="receipt_confirmed_no_application_report_before_expiry")
-            else:
-                item.update(action="wait", reason="receipt_confirmed_report_may_still_arrive")
         elif expired:
             if r["attempt"] < max_attempts:
                 item.update(action="retry", reason="event_expired_unconfirmed",
@@ -917,6 +981,13 @@ async def apply_requeue(
                 item["delivery_id"], state, item.get("reason"),
             )
             summary["failed" if action == "fail" else "unverifiable"] += 1
+            # Visible in the aggregate (review finding 8): a terminal failure
+            # used to be findable only by reading this row's UUID.
+            log = logger.warning if action == "fail" else logger.info
+            log("fact_retraction.delivery_%s delivery=%s fact=%s peer=%s attempt=%s reason=%s",
+                "failed" if action == "fail" else "unverifiable",
+                item["delivery_id"], item.get("fact_id"), item.get("target_node"),
+                item.get("attempt"), item.get("reason"))
             continue
         if action != "retry":
             continue
@@ -934,6 +1005,10 @@ async def apply_requeue(
         snapshot = ret["fact_snapshot"]
         if isinstance(snapshot, str):
             snapshot = json.loads(snapshot)
+        history = ret["attempt_history"]
+        if isinstance(history, str):
+            history = json.loads(history)
+        history = list(history or [])
         attempt = ret["attempt"] + 1
         event_id = str(uuid4())
         payload = build_retraction_payload(
@@ -941,7 +1016,10 @@ async def apply_requeue(
             retraction_id=ret["id"], origin_node=node_rid,
             valid_to_iso=ret["valid_to"].isoformat(), reason=ret["reason"],
             retracted_by=ret["retracted_by"], attempt=attempt,
-            source_document=ret["source_document"], original_event_ids=[],
+            source_document=ret["source_document"],
+            # The earlier attempts' event ids, so the recipient can correlate
+            # a retry with what it may already have seen (review finding 16).
+            original_event_ids=[h["event_id"] for h in history if h.get("event_id")],
             event_id=event_id,
         )
         queued = await event_queue.add(
@@ -952,10 +1030,7 @@ async def apply_requeue(
         )
         if queued is None:
             raise RetractionError(f"requeue event {event_id} reported duplicate")
-        history = ret["attempt_history"]
-        if isinstance(history, str):
-            history = json.loads(history)
-        history = list(history or []) + [{"attempt": attempt, "event_id": event_id}]
+        history = history + [{"attempt": attempt, "event_id": event_id}]
         await conn.execute(
             """
             UPDATE knowledge_fact_retraction_deliveries
@@ -967,6 +1042,9 @@ async def apply_requeue(
             item["delivery_id"], event_id, attempt, json.dumps(history), item.get("reason"),
         )
         summary["retried"] += 1
+        logger.info("fact_retraction.delivery_retrying delivery=%s fact=%s peer=%s attempt=%s reason=%s",
+                    item["delivery_id"], item.get("fact_id"), item["target_node"], attempt,
+                    item.get("reason"))
     return summary
 
 
@@ -985,7 +1063,12 @@ async def sweep_once(
             return {"retried": 0, "failed": 0, "unverifiable": 0, "waited": 0}
         async with conn.transaction():
             plan = await plan_requeue(conn, node_rid=node_rid, max_attempts=max_attempts)
-            return await apply_requeue(conn, plan, event_queue=event_queue, node_rid=node_rid)
+            summary = await apply_requeue(conn, plan, event_queue=event_queue, node_rid=node_rid)
+    if summary["retried"] or summary["failed"] or summary["unverifiable"]:
+        logger.info("fact_retraction.sweep node=%s retried=%d failed=%d unverifiable=%d waited=%d",
+                    node_rid, summary["retried"], summary["failed"], summary["unverifiable"],
+                    summary["waited"])
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1142,7 +1225,7 @@ async def tombstone_status(conn: asyncpg.Connection, fact_id: UUID) -> Dict[str,
     out["ledger_available"] = True
     rets = await conn.fetch(
         """
-        SELECT id, valid_to, origin_node, episode_id, reason, retracted_by,
+        SELECT id, valid_to, origin_node, episode_id, reason,
                source_document, applied_at, created_at
         FROM knowledge_fact_retractions WHERE fact_id = $1 ORDER BY id
         """,
@@ -1152,7 +1235,9 @@ async def tombstone_status(conn: asyncpg.Connection, fact_id: UUID) -> Dict[str,
         {
             "retraction_id": r["id"], "valid_to": _iso(r["valid_to"]),
             "origin_node": r["origin_node"], "episode_id": _iso(r["episode_id"]),
-            "reason": r["reason"], "retracted_by": r["retracted_by"],
+            # `retracted_by` (an operator email for session callers) stays in
+            # the ledger row; it is not part of any lookup surface.
+            "reason": r["reason"],
             "source_document": r["source_document"],
             "applied_at": _iso(r["applied_at"]), "created_at": _iso(r["created_at"]),
         }

@@ -35,6 +35,9 @@ CLASSIFICATION per (fact, peer), first match wins:
                               oldest koi_net_events row (cleanup may have
                               deleted its history)
   applied / rejected / failed the 127 ledger's terminal verdicts, verbatim
+  pending                     the 127 ledger says the peer reported the fact
+                              ABSENT there and recorded a pending tombstone —
+                              nothing live to repair, application NOT proven
   tombstone_confirmed         exact tombstone in confirmed_by (or ledger
                               `received`) — receipt; application unproven
   tombstone_valid_to_mismatch the only confirmed tombstone carries a
@@ -73,14 +76,37 @@ A run against the live `personal_koi` is therefore safe and expected.
 EXIT CODES
   0  no outstanding obligations
   1  outstanding obligations (plan non-empty, or possibly_live / unverifiable
-     / unauthorized / tombstone_valid_to_mismatch / history_unknown present)
+     / unauthorized / tombstone_valid_to_mismatch / history_unknown /
+     peer_unmigrated / scope_failed_reopenable present, or a TERMINAL failure
+     — `failed` with attempts exhausted, or a non-reopenable `rejected` —
+     present; those are listed under "terminal failures")
   2  --apply refused
   3  misconfigured (cannot connect, node RID undeterminable, read-only
-     mode not in effect)
+     mode not in effect, `--scope-enforced-since auto` unverifiable)
+
+  The exit code and `outstanding` are SELECTION-scoped: with --limit,
+  --fact-id or --since they speak for the selected facts only. The
+  population counts in the header are always whole-database.
 
 USAGE
   scripts/audit_fact_retractions.py [--dsn DSN] [--node-rid RID]
       [--fact-id UUID ...] [--since ISO] [--limit N] [--json]
+      [--scope-enforced-since ISO|auto]
+
+SCOPE ENFORCEMENT FLOOR (`scope_excluded`)
+  A delivered_to mark is a PROVABLE poll-filter exclusion only if the event
+  was queued after this node's service began enforcing per-edge scoping
+  (commit 2c497f0, 2026-08-25 19:50:25 -0700). That instant is a property of
+  the node running the audit, not of the code in this file: on a checkout
+  that does not contain the commit (the NUC's aa4be29) every such mark is a
+  possible hand-over. So the floor is never assumed:
+    --scope-enforced-since <ISO>   the operator asserts the instant
+    --scope-enforced-since auto    verified: the checkout this file runs from
+                                   must contain 2c497f0 (git merge-base); the
+                                   floor is that commit's committer time
+    (absent)                       no floor; the class is disabled and such
+                                   marks stay `unverifiable` (→ unauthorized)
+  The floor used, and where it came from, is printed in the report header.
 
 COST: one pass over every knowledge-carrying koi_net_events row (their
 `contents` hold the fact ids and, for episodes, the embeddings — ~1.4 GB on
@@ -95,6 +121,7 @@ import asyncio
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -122,6 +149,7 @@ FACT_PREFIX = fact_retraction.FACT_RID_PREFIX
 # Classification vocabulary.
 C_HISTORY_UNKNOWN = "history_unknown"
 C_APPLIED = "applied"
+C_PENDING = "pending"
 C_REJECTED = "rejected"
 C_FAILED = "failed"
 C_TOMBSTONE_CONFIRMED = "tombstone_confirmed"
@@ -149,13 +177,65 @@ C_SCOPE_FAILED_REOPENABLE = "scope_failed_reopenable"
 
 # Per-edge scoping of domain events was introduced by commit 2c497f0
 # (2026-08-25 19:50:25 -0700). Before it every APPROVED edge received every
-# domain event regardless of scope, so a delivered_to mark from before this
-# instant can be a real hand-over. This is the COMMIT time — a lower bound on
-# when the live service began enforcing it; an event queued between the commit
-# and the deploy is classified as if enforced (i.e. as an exclusion mark) only
-# when the other two conditions also hold. Verified on the live database
-# 2026-09-16: every such row is from 2026-09, well past either bound.
-SCOPE_ENFORCEMENT_FLOOR = datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
+# domain event regardless of scope, so a delivered_to mark from before that
+# instant can be a real hand-over. The instant is a property of the NODE
+# running the audit (when did ITS service start enforcing), so it is never
+# assumed here: `resolve_scope_floor` takes it from the operator, or verifies
+# `auto` against the checkout this file runs from (second review, finding 7 —
+# the NUC's aa4be29 does not contain the commit). With no floor the
+# `scope_excluded` class is disabled.
+SCOPE_ENFORCEMENT_COMMIT = "2c497f0"
+SCOPE_ENFORCEMENT_COMMIT_TIME = datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
+
+
+class ScopeFloorError(ValueError):
+    """`--scope-enforced-since` could not be resolved to a verified instant."""
+
+
+def resolve_scope_floor(
+    raw: Optional[str],
+    *,
+    repo_root: Optional[pathlib.Path] = None,
+) -> tuple[Optional[datetime], str]:
+    """(floor, how). None → no floor. An ISO instant → as given. `auto` → the
+    checkout at `repo_root` (default: this file's repo) must contain
+    SCOPE_ENFORCEMENT_COMMIT as an ancestor of HEAD; the floor is that commit's
+    committer time read from git. Anything else raises ScopeFloorError."""
+    if raw is None or str(raw).strip() == "":
+        return None, "not given: scope_excluded classification disabled"
+    text = str(raw).strip()
+    if text.lower() != "auto":
+        parsed = _parse_carried(text)
+        if parsed is None:
+            raise ScopeFloorError(f"--scope-enforced-since {raw!r} is neither an ISO timestamp nor 'auto'")
+        return parsed, f"given on the command line ({parsed.isoformat()})"
+    root = pathlib.Path(repo_root) if repo_root is not None else REPO_ROOT
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", SCOPE_ENFORCEMENT_COMMIT, "HEAD"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: cannot run git in {root}: {exc}; commit "
+            f"{SCOPE_ENFORCEMENT_COMMIT} unverifiable") from exc
+    if proc.returncode != 0:
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: commit {SCOPE_ENFORCEMENT_COMMIT} is not an ancestor of "
+            f"HEAD in {root} (git exit {proc.returncode}: {proc.stderr.strip() or 'no output'}); "
+            f"this node may never have enforced per-edge scoping — give the instant explicitly "
+            f"or omit the flag")
+    shown = subprocess.run(
+        ["git", "-C", str(root), "show", "-s", "--format=%cI %H", SCOPE_ENFORCEMENT_COMMIT],
+        capture_output=True, text=True, timeout=30)
+    if shown.returncode != 0 or not shown.stdout.strip():
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: cannot read commit {SCOPE_ENFORCEMENT_COMMIT} in {root}")
+    when_s, full_sha = shown.stdout.strip().split(" ", 1)
+    when = _parse_carried(when_s)
+    if when is None:
+        raise ScopeFloorError(f"--scope-enforced-since auto: unparseable commit time {when_s!r}")
+    return when, (f"auto: {SCOPE_ENFORCEMENT_COMMIT} ({full_sha[:12]}, committed {when.isoformat()}) "
+                  f"is an ancestor of HEAD in {root}")
 
 # Classes that carry an obligation a repair could discharge — IF scope admits.
 SENDABLE = frozenset({
@@ -163,10 +243,15 @@ SENDABLE = frozenset({
     C_PEER_UNMIGRATED, C_SCOPE_FAILED_REOPENABLE,
 })
 # Classes that make the run "outstanding" (exit 1) even with an empty plan.
+# `failed` (attempts exhausted, or a policy failure the edge never reopened)
+# and a non-reopenable `rejected` are obligations the transport GAVE UP on —
+# outstanding, and listed under "terminal failures" (second review, finding 8).
+# `pending` is not: the peer holds no fact, so nothing is live there.
 OUTSTANDING = frozenset({
     C_POSSIBLY_LIVE, C_UNVERIFIABLE, C_UNAUTHORIZED, C_TOMBSTONE_MISMATCH, C_HISTORY_UNKNOWN,
-    C_PEER_UNMIGRATED, C_SCOPE_FAILED_REOPENABLE,
+    C_PEER_UNMIGRATED, C_SCOPE_FAILED_REOPENABLE, C_FAILED, C_REJECTED,
 })
+TERMINAL = frozenset({C_FAILED, C_REJECTED})
 
 EXIT_OK = 0
 EXIT_OUTSTANDING = 1
@@ -385,16 +470,22 @@ async def _edges(conn: asyncpg.Connection, node_rid: str) -> Dict[str, Dict[str,
     return out
 
 
-def _is_exclusion_mark(event: Dict[str, Any], edge: Optional[Dict[str, Any]]) -> bool:
+def _is_exclusion_mark(
+    event: Dict[str, Any],
+    edge: Optional[Dict[str, Any]],
+    floor: Optional[datetime],
+) -> bool:
     """True when a delivered_to mark on `event` for this peer is PROVABLY a
-    poll-filter exclusion (see C_SCOPE_EXCLUDED). Requires: the event was
-    queued after per-edge scoping (SCOPE_ENFORCEMENT_FLOOR) and after the
-    peer's edges last changed; and no APPROVED scope admits the event's domain
-    (a peer with no edge at all cannot have polled, so its mark is also an
-    exclusion — but that case never occurs: poll() marks only for a polling
-    node with an edge)."""
+    poll-filter exclusion (see C_SCOPE_EXCLUDED). Requires: an explicit
+    enforcement `floor` (never assumed — None disables the class), the event
+    queued after it and after the peer's edges last changed; and no APPROVED
+    scope admits the event's domain (a peer with no edge at all cannot have
+    polled, so its mark is also an exclusion — but that case never occurs:
+    poll() marks only for a polling node with an edge)."""
+    if floor is None:
+        return False
     q = event.get("queued_at")
-    if q is None or q <= SCOPE_ENFORCEMENT_FLOOR:
+    if q is None or q <= floor:
         return False
     if edge is None:
         return False
@@ -484,6 +575,7 @@ def _classify_peer(
     events: List[Dict[str, Any]],
     ledger_row: Optional[Dict[str, Any]],
     now: datetime,
+    scope_floor: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     scope_now = bool(edge and edge["scope_admits_now"])
     live = [e for e in events if e["carried"] == "live_copy"]
@@ -557,6 +649,11 @@ def _classify_peer(
         if state == fact_retraction.STATE_APPLIED:
             cls = C_APPLIED
             note = f"recipient reported application ({ledger_row['state_reason']})"
+        elif state == fact_retraction.STATE_PENDING:
+            cls = C_PENDING
+            note = ("recipient reported the fact ABSENT there and recorded a pending tombstone; "
+                    "nothing live to repair, application not proven "
+                    f"({ledger_row['state_reason']})")
         elif state == fact_retraction.STATE_REJECTED:
             reason = ledger_row["state_reason"] or ""
             if reason.startswith(fact_retraction.REOPENABLE_REJECT_PREFIX):
@@ -632,7 +729,8 @@ def _classify_peer(
             note = note or "peer confirmed receipt of the live copy; no tombstone evidence"
         elif live_marked_only:
             marked_live = [e for e in live if peer in (e["delivered_to"] or [])]
-            if marked_live and not addressed(live) and all(_is_exclusion_mark(e, edge) for e in marked_live):
+            if marked_live and not addressed(live) and all(
+                    _is_exclusion_mark(e, edge, scope_floor) for e in marked_live):
                 cls = C_SCOPE_EXCLUDED
                 note = note or ("every delivered_to mark on the live copy is a provable poll-filter "
                                 "exclusion (event queued after per-edge scoping and after this "
@@ -643,7 +741,9 @@ def _classify_peer(
                 note = note or ("live copy carries a delivered_to mark only — hand-over or scope "
                                 "exclusion, indistinguishable here; no tombstone receipt"
                                 + ("; the tombstone's delivered_to mark is equally uninformative"
-                                   if tomb_marked_only else ""))
+                                   if tomb_marked_only else "")
+                                + ("; no --scope-enforced-since floor given, so a provable "
+                                   "exclusion cannot be told apart" if scope_floor is None else ""))
         else:
             cls = C_NEVER_SENT
             note = note or "no evidence this peer was ever handed the live copy"
@@ -668,8 +768,13 @@ async def audit(
     fact_ids: Optional[Sequence[str]] = None,
     since: Optional[datetime] = None,
     limit: Optional[int] = None,
+    scope_enforced_since: Optional[datetime] = None,
+    scope_enforced_since_source: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """The audit as a dict (JSON-able through `render_json`). Pure read on `conn`."""
+    """The audit as a dict (JSON-able through `render_json`). Pure read on `conn`.
+
+    `scope_enforced_since` enables the `scope_excluded` class (see the module
+    docstring). None = disabled."""
     t0 = time.monotonic()
     now: datetime = await conn.fetchval("SELECT NOW()")
     ledger_ok = await fact_retraction.ledger_available(conn)
@@ -696,6 +801,7 @@ async def audit(
     facts_out: List[Dict[str, Any]] = []
     plan: List[Dict[str, Any]] = []
     blocked: List[Dict[str, Any]] = []
+    terminal: List[Dict[str, Any]] = []
     by_class: Counter = Counter()
     by_history: Counter = Counter()
 
@@ -750,9 +856,19 @@ async def audit(
             ledger_row = _pick_ledger_delivery(fact_ledger, peer, node_rid, local_valid_to)
             row = _classify_peer(
                 peer=peer, history=history, edge=edges.get(peer), events=events,
-                ledger_row=ledger_row, now=now)
+                ledger_row=ledger_row, now=now, scope_floor=scope_enforced_since)
             peer_rows.append(row)
             by_class[row["classification"]] += 1
+            if row["classification"] in TERMINAL:
+                terminal.append({
+                    "fact_id": fid, "peer": peer, "state": row["classification"],
+                    "state_reason": (row["ledger"] or {}).get("state_reason"),
+                    "attempt": (row["ledger"] or {}).get("attempt"),
+                    "valid_to": local_iso,
+                    "text": (f"terminal {row['classification']}: {peer} for fact {fid} "
+                             f"({(row['ledger'] or {}).get('state_reason')}; "
+                             f"attempt {(row['ledger'] or {}).get('attempt')})"),
+                })
 
             if row["classification"] in SENDABLE and not row["plan_futile"]:
                 if row["classification"] == C_TOMBSTONE_UNCONFIRMED and row["tombstone_in_flight"]:
@@ -835,7 +951,9 @@ async def audit(
         "plan_would_queue": sum(1 for p in plan if p["action"] == "would_queue"),
         "plan_wait": sum(1 for p in plan if p["action"] == "wait"),
         "blocked": len(blocked),
+        "terminal_failures": terminal,
         "outstanding": outstanding,
+        "outstanding_is_selection_scoped": bool(fact_ids or since or limit is not None),
         "exit_code": EXIT_OUTSTANDING if outstanding else EXIT_OK,
         "elapsed_s": round(time.monotonic() - t0, 3),
     }
@@ -845,6 +963,9 @@ async def audit(
         "generated_at": now,
         "node_rid": node_rid,
         "ledger_available": ledger_ok,
+        "scope_enforced_since": scope_enforced_since,
+        "scope_enforced_since_source": scope_enforced_since_source
+            or ("given" if scope_enforced_since else "not given: scope_excluded classification disabled"),
         "filters": {"fact_ids": list(fact_ids) if fact_ids else None,
                     "since": since, "limit": limit},
         "facts": facts_out,
@@ -877,6 +998,8 @@ def render_human(report: Dict[str, Any]) -> str:
     else:
         w("ledger: absent (migration 127 not applied) — no `applied` verdict is possible; "
           "classification uses koi_net_events evidence only")
+    w(f"scope enforced since: {report.get('scope_enforced_since') or 'NOT GIVEN'} "
+      f"({report.get('scope_enforced_since_source')})")
     w(f"population: {pop['retracted_total']} locally retracted facts; "
       f"{pop['retracted_with_history']} carried by at least one surviving koi_net_events row; "
       f"{pop['retracted_without_history']} with no surviving history "
@@ -928,14 +1051,22 @@ def render_human(report: Dict[str, Any]) -> str:
             w(f"  {b['text']}")
     else:
         w("  (none)")
+    w("terminal failures (the transport gave up; outstanding, no plan line):")
+    if s.get("terminal_failures"):
+        for tf in s["terminal_failures"]:
+            w(f"  {tf['text']}")
+    else:
+        w("  (none)")
     w("")
     w("summary:")
     w(f"  facts selected: {s['selected']}  by history: {s['facts_by_history']}  "
       f"with future valid_to (validity intervals, not retractions): {s['selected_with_future_valid_to']}")
     w(f"  (fact, peer) by classification: {dict(sorted(s['by_classification'].items()))}")
-    w(f"  plan: would_queue={s['plan_would_queue']} wait={s['plan_wait']}  blocked={s['blocked']}")
-    w(f"  outstanding: {'yes' if s['outstanding'] else 'no'}  exit_code: {s['exit_code']}  "
-      f"elapsed: {s['elapsed_s']}s")
+    w(f"  plan: would_queue={s['plan_would_queue']} wait={s['plan_wait']}  blocked={s['blocked']}  "
+      f"terminal failures={len(s.get('terminal_failures') or [])}")
+    w(f"  outstanding: {'yes' if s['outstanding'] else 'no'}"
+      f"{' (selection-scoped: filters given)' if s.get('outstanding_is_selection_scoped') else ''}"
+      f"  exit_code: {s['exit_code']}  elapsed: {s['elapsed_s']}s")
     return "\n".join(out) + "\n"
 
 
@@ -957,6 +1088,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     p.add_argument("--since", default=None, metavar="ISO",
                    help="only facts with valid_to >= this timestamp")
     p.add_argument("--limit", type=int, default=None, help="at most N facts (newest valid_to first)")
+    p.add_argument("--scope-enforced-since", default=None, metavar="ISO|auto",
+                   help=("enable the scope_excluded class: the instant this node's service began "
+                         "enforcing per-edge scoping (ISO), or 'auto' to verify commit 2c497f0 is in "
+                         "this checkout and use its time; absent = class disabled"))
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--apply", action="store_true",
                    help="REFUSED: repair application is a #67 follow-up, not implemented here")
@@ -977,6 +1112,11 @@ async def _run(args: argparse.Namespace) -> int:
             except ValueError:
                 print(f"error: --fact-id {raw!r} is not a UUID", file=sys.stderr)
                 return EXIT_MISCONFIGURED
+    try:
+        floor, floor_how = resolve_scope_floor(args.scope_enforced_since)
+    except ScopeFloorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_MISCONFIGURED
 
     try:
         conn = await connect_read_only(args.dsn)
@@ -999,7 +1139,8 @@ async def _run(args: argparse.Namespace) -> int:
                     return EXIT_MISCONFIGURED
                 node_rid = inferred["node_rid"]
                 source = inferred["how"]
-            report = await audit(conn, node_rid, fact_ids=args.fact_id, since=since, limit=args.limit)
+            report = await audit(conn, node_rid, fact_ids=args.fact_id, since=since, limit=args.limit,
+                                 scope_enforced_since=floor, scope_enforced_since_source=floor_how)
             report["node_rid_source"] = source
             report["read_only"] = True
     finally:

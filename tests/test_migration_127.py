@@ -38,12 +38,15 @@ UP_127 = MIGRATIONS / "127_fact_retraction_ledger.sql"
 DOWN_127 = MIGRATIONS / "127_fact_retraction_ledger_down.sql"
 LEDGER_ID_127 = "personal:127_fact_retraction_ledger"
 
-# The nine states api/fact_retraction.py names. Written out, not imported, so a
+# The ten states api/fact_retraction.py names. Written out, not imported, so a
 # test of the SQL cannot be satisfied by the Python drifting in step with it.
+# `pending` was added 2026-09-17 (second review, finding 2), before the
+# migration had been applied anywhere.
 STATES = frozenset({
-    "queued", "delivered", "received", "applied", "rejected",
+    "queued", "delivered", "received", "applied", "pending", "rejected",
     "retrying", "failed", "unverifiable", "unauthorized",
 })
+CHECKSUM_127 = "v2_retraction_ledger_pending_state"
 
 DB_URL = os.getenv("POSTGRES_URL", "postgresql://darrenzal:@localhost:5432/personal_koi_test")
 
@@ -138,12 +141,12 @@ class TestDryRun:
         assert check is not None
         for s in STATES:
             assert f"'{s}'" in check, f"state {s!r} missing from CHECK: {check}"
-        # Nothing beyond the nine.
+        # Nothing beyond the ten.
         found = set(re.findall(r"'([a-z_]+)'", check))
         assert found == STATES, found
 
         assert [dict(r) for r in await _ledger_rows(conn)] == [
-            {"migration_id": LEDGER_ID_127, "checksum": "v1_retraction_ledger_and_deliveries"}]
+            {"migration_id": LEDGER_ID_127, "checksum": CHECKSUM_127}]
 
     async def test_python_state_vocabulary_equals_the_sql_check(self, conn):
         """Both sides pinned to the same literal set: the SQL CHECK (above) and
@@ -246,3 +249,89 @@ class TestDryRun:
         with pytest.raises(asyncpg.exceptions.PostgresError) as exc_info:
             await conn.execute(body)
         assert "unverifiable" in str(exc_info.value)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. Drifted pre-existing shape (second review, finding 14)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `CREATE TABLE IF NOT EXISTS` keeps whatever table is already there. The
+# assertion used to check nine literals by substring and two constraint names,
+# so a drifted table — an extra state, a wrong unique key, a missing column —
+# passed and surfaced later as a runtime error. Each case below pre-creates a
+# plausible drift, runs the up body, and requires the assertion to RAISE and
+# NAME the drift. The positive control is TestDryRun above (clean slate passes).
+
+_DRIFTED_RETRACTIONS = """
+CREATE TABLE knowledge_fact_retractions (
+    id BIGSERIAL PRIMARY KEY, fact_id UUID NOT NULL, valid_to TIMESTAMPTZ NOT NULL,
+    origin_node TEXT NOT NULL, episode_id UUID, reason TEXT, retracted_by TEXT,
+    source_document TEXT, source_node_rid TEXT, fact_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    applied_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT knowledge_fact_retractions_fact_valid_origin_key UNIQUE (%(unique)s)
+)"""
+
+_DRIFTED_DELIVERIES = """
+CREATE TABLE knowledge_fact_retraction_deliveries (
+    id BIGSERIAL PRIMARY KEY,
+    retraction_id BIGINT NOT NULL REFERENCES knowledge_fact_retractions (id) ON DELETE CASCADE,
+    target_node TEXT NOT NULL, event_id UUID, attempt INTEGER NOT NULL DEFAULT 1,
+    attempt_history JSONB NOT NULL DEFAULT '[]'::jsonb, state TEXT NOT NULL, state_reason TEXT,
+    application JSONB, queued_at TIMESTAMPTZ, delivered_at TIMESTAMPTZ, received_at TIMESTAMPTZ,
+    %(applied_at)s
+    state_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT knowledge_fact_retraction_deliveries_retraction_target_key UNIQUE (retraction_id, target_node),
+    CONSTRAINT knowledge_fact_retraction_deliveries_state_check CHECK (state IN (%(states)s)),
+    CONSTRAINT knowledge_fact_retraction_deliveries_event_presence_check CHECK (
+        (state = 'unauthorized' AND event_id IS NULL) OR (state <> 'unauthorized' AND event_id IS NOT NULL))
+)"""
+
+_GOOD_STATES = ", ".join(f"'{s}'" for s in sorted(STATES))
+
+
+async def _precreate(conn, *, unique="fact_id, valid_to, origin_node",
+                     states=_GOOD_STATES, applied_at="applied_at TIMESTAMPTZ,"):
+    await conn.execute(_DRIFTED_RETRACTIONS % {"unique": unique})
+    await conn.execute(_DRIFTED_DELIVERIES % {"states": states, "applied_at": applied_at})
+
+
+@pytest.mark.anyio
+class TestDriftedPreexistingShape:
+
+    async def test_control_a_conforming_preexisting_table_passes(self, conn):
+        """The drift harness itself must not trip the assertion."""
+        await _precreate(conn)
+        await conn.execute(_body(UP_127))
+        assert len(await _ledger_rows(conn)) == 1
+
+    async def test_extra_state_is_named(self, conn):
+        await _precreate(conn, states=_GOOD_STATES + ", 'confirmed'")
+        with pytest.raises(asyncpg.exceptions.PostgresError) as exc_info:
+            await conn.execute(_body(UP_127))
+        msg = str(exc_info.value)
+        assert "state CHECK vocabulary" in msg and "confirmed" in msg, msg
+        # (the transaction is aborted here; the RAISE precedes the ledger INSERT
+        # in the file, so nothing was recorded)
+
+    async def test_missing_state_is_named(self, conn):
+        await _precreate(conn, states=", ".join(f"'{s}'" for s in sorted(STATES - {"pending"})))
+        with pytest.raises(asyncpg.exceptions.PostgresError) as exc_info:
+            await conn.execute(_body(UP_127))
+        assert "state CHECK vocabulary" in str(exc_info.value)
+        assert "pending" in str(exc_info.value)
+
+    async def test_wrong_unique_key_is_named(self, conn):
+        """The recipient upserts ON CONFLICT (fact_id, valid_to, origin_node); a
+        key on (fact_id, origin_node) would swallow a second valid_to."""
+        await _precreate(conn, unique="fact_id, origin_node")
+        with pytest.raises(asyncpg.exceptions.PostgresError) as exc_info:
+            await conn.execute(_body(UP_127))
+        msg = str(exc_info.value)
+        assert "unique key is" in msg and "{fact_id,origin_node}" in msg, msg
+
+    async def test_missing_column_is_named(self, conn):
+        await _precreate(conn, applied_at="")
+        with pytest.raises(asyncpg.exceptions.PostgresError) as exc_info:
+            await conn.execute(_body(UP_127))
+        msg = str(exc_info.value)
+        assert "knowledge_fact_retraction_deliveries lacks column(s)" in msg and "applied_at" in msg, msg

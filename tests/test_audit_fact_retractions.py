@@ -672,7 +672,10 @@ async def test_review_post_scoping_exclusion_mark_is_scope_excluded_not_unauthor
         PEER_NARROW)
     ep, fid, _ = await seed_retracted_fact(conn)
     await seed_live_copy(conn, ep, fid, delivered_to=[PEER_NARROW])   # mark only, 2026-09 (NOW)
-    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    # The floor is explicit since the second review (finding 7); the
+    # no-floor case is test_r2_scope_excluded_needs_an_explicit_enforcement_floor.
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid],
+                                   scope_enforced_since=audit_mod.SCOPE_ENFORCEMENT_COMMIT_TIME)
     row = peer_row(report, fid, PEER_NARROW)
     assert row["classification"] == "scope_excluded", row["note"]
     assert row["evidence_class"] is None
@@ -691,7 +694,8 @@ async def test_review_mark_from_before_scoping_or_before_edge_change_stays_unver
     # (a) queued before 2c497f0
     await seed_live_copy_at(conn, ep, fid, delivered_to=[PEER_NARROW],
                             queued_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
-    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid],
+                                   scope_enforced_since=audit_mod.SCOPE_ENFORCEMENT_COMMIT_TIME)
     row = peer_row(report, fid, PEER_NARROW)
     assert row["classification"] == "unauthorized" and row["evidence_class"] == "unverifiable"
     # (b) queued after the floor but the edge changed AFTER the event
@@ -700,7 +704,8 @@ async def test_review_mark_from_before_scoping_or_before_edge_change_stays_unver
                             queued_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
     await conn.execute(
         "UPDATE koi_net_edges SET updated_at = NOW() WHERE target_node = $1", PEER_NARROW)
-    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid2])
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid2],
+                                   scope_enforced_since=audit_mod.SCOPE_ENFORCEMENT_COMMIT_TIME)
     row = peer_row(report, fid2, PEER_NARROW)
     assert row["classification"] == "unauthorized" and row["evidence_class"] == "unverifiable"
 
@@ -762,3 +767,116 @@ async def test_review_ledger_mismatch_rejection_is_outstanding_without_a_plan_li
     assert row["classification"] == "tombstone_valid_to_mismatch"
     assert plan_for(report, fid, PEER_AUTH) == []
     assert report["summary"]["outstanding"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Second review round (session b35cb9db, 2026-09-17) — each written red first
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.anyio
+async def test_r2_ledger_pending_is_its_own_class_and_never_proves_application(conn):
+    """Finding 2. A `pending` delivery means the peer holds NO fact — it recorded
+    a pending tombstone. It used to be stored as `applied` and the audit set
+    application_proven=True for a peer that stores nothing. Now: its own class,
+    application_proven False, nothing live to repair (not outstanding, no plan)."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_AUTH, "pending",
+                                "peer_recorded_pending_tombstone_fact_absent")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_AUTH)
+    assert row["classification"] == "pending", row["note"]
+    assert row["application_proven"] is False
+    assert "absent" in row["note"]
+    assert plan_for(report, fid, PEER_AUTH) == []
+    assert report["summary"]["by_classification"].get("pending") == 1
+    assert report["summary"]["outstanding"] is False
+
+
+@pytest.mark.anyio
+async def test_r2_exhausted_failed_and_terminal_rejected_are_outstanding_and_listed(conn):
+    """Finding 8. `failed` (attempts exhausted) and a non-reopenable `rejected`
+    were excluded from OUTSTANDING, so a run with only terminal failures exited
+    0 and the human output listed them only under their fact. They are
+    obligations the transport gave up on: outstanding (exit 1), and named in an
+    aggregate "terminal failures" section."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_AUTH, "failed", "attempts_exhausted:5")
+    ep2, fid2, db_valid_to2 = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid2, db_valid_to2, PEER_AUTH, "rejected", "valid_to_unparseable")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid, fid2])
+    assert peer_row(report, fid, PEER_AUTH)["classification"] == "failed"
+    assert peer_row(report, fid2, PEER_AUTH)["classification"] == "rejected"
+    assert report["plan"] == []
+    assert report["summary"]["outstanding"] is True
+    assert report["summary"]["exit_code"] == 1
+    terminal = report["summary"]["terminal_failures"]
+    assert {(t["fact_id"], t["peer"], t["state"]) for t in terminal} == {
+        (fid, PEER_AUTH, "failed"), (fid2, PEER_AUTH, "rejected")}
+    text = audit_mod.render_human(report)
+    assert "terminal failures" in text
+    assert "attempts_exhausted:5" in text and "valid_to_unparseable" in text
+
+
+@pytest.mark.anyio
+async def test_r2_scope_excluded_needs_an_explicit_enforcement_floor(conn):
+    """Finding 7. `scope_excluded` rested on a hardcoded floor — the commit time
+    of 2c497f0 — which assumed the node running the audit has run that code.
+    The NUC's checkout (aa4be29) does not contain it, so there every
+    delivered_to mark is a possible hand-over. Without an explicit floor the
+    class is unavailable and the mark stays `unverifiable` (→ unauthorized);
+    with one, the same shape is `scope_excluded`. The floor is reported."""
+    await seed_edges(conn)
+    await conn.execute(
+        "UPDATE koi_net_edges SET updated_at = '2026-08-30T00:00:00+00:00' WHERE target_node = $1",
+        PEER_NARROW)
+    ep, fid, _ = await seed_retracted_fact(conn)
+    await seed_live_copy(conn, ep, fid, delivered_to=[PEER_NARROW])   # mark only, queued NOW
+
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_NARROW)
+    assert row["classification"] == "unauthorized" and row["evidence_class"] == "unverifiable", row["note"]
+    assert report["scope_enforced_since"] is None
+    assert report["summary"]["outstanding"] is True
+
+    floor = datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid], scope_enforced_since=floor)
+    row = peer_row(report, fid, PEER_NARROW)
+    assert row["classification"] == "scope_excluded", row["note"]
+    assert report["scope_enforced_since"] == floor.isoformat()
+    assert report["summary"]["outstanding"] is False
+    text = audit_mod.render_human(report)
+    assert "scope enforced since: 2026-08-26T02:50:25+00:00" in text
+
+
+def test_r2_scope_floor_resolution_is_explicit_or_verified(tmp_path):
+    """`--scope-enforced-since` takes an ISO instant (operator asserts it), `auto`
+    (verified: the checkout the audit runs from must contain 2c497f0, and the
+    floor is that commit's time), or is absent (no floor). `auto` in a
+    checkout without the commit is a misconfiguration, not a silent default."""
+    none = audit_mod.resolve_scope_floor(None)
+    assert none == (None, "not given: scope_excluded classification disabled")
+    explicit, how = audit_mod.resolve_scope_floor("2026-08-26T02:50:25+00:00")
+    assert explicit == datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
+    assert how.startswith("given on the command line")
+    with pytest.raises(audit_mod.ScopeFloorError):
+        audit_mod.resolve_scope_floor("not-a-timestamp")
+    # auto, verified against THIS repo (positive control: 2c497f0 is an ancestor of HEAD here)
+    auto, how = audit_mod.resolve_scope_floor("auto", repo_root=audit_mod.REPO_ROOT)
+    assert auto == datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
+    assert "2c497f0" in how and "ancestor" in how
+    # auto in a directory that is not that repo → refused, never defaulted
+    with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
+        audit_mod.resolve_scope_floor("auto", repo_root=tmp_path)
+    assert "2c497f0" in str(exc_info.value)
+
+
+def test_r2_cli_auto_floor_outside_the_repo_is_exit_3(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(audit_mod, "REPO_ROOT", tmp_path)
+    rc = audit_mod.main(["--dsn", DB_URL, "--node-rid", NODE_A, "--scope-enforced-since", "auto",
+                         "--limit", "1"])
+    assert rc == audit_mod.EXIT_MISCONFIGURED
+    assert "2c497f0" in capsys.readouterr().err

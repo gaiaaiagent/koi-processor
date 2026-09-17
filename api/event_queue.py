@@ -29,6 +29,13 @@ DeliveryObserver = Callable[
 ]
 
 
+# A fact-retraction event (issue #67): domain `knowledge_fact` whose payload
+# carries a `retraction` block. Withheld from unauthenticated polls — see poll().
+RETRACTION_EVENT_SQL = (
+    "contents->>'_koi_domain' = 'knowledge_fact' AND (contents->'payload') ? 'retraction'"
+)
+
+
 class EventQueue:
     """Database-backed event queue for KOI-net protocol."""
 
@@ -149,28 +156,58 @@ class EventQueue:
         requesting_node: str,
         limit: int = 50,
         rid_types: Optional[List[str]] = None,
+        authenticated: bool = True,
     ) -> List[Dict[str, Any]]:
         """Poll for events not yet delivered to the requesting node.
 
         Returns list of event dicts with event_id, event_type, rid, manifest, contents.
         Marks events as delivered_to this node.
+
+        `authenticated=False` means the caller's identity is CLAIMED (an
+        unsigned request naming `node_id`), not proven. Fact-retraction events
+        (issue #67 — domain `knowledge_fact` with a `retraction` block) are then
+        withheld: neither served nor marked `delivered_to`, so the peer whose
+        name was used still receives them on its own signed poll. This is
+        independent of KOI_REQUIRE_SIGNED_ENVELOPES: an unsigned caller naming
+        a peer used to be handed that peer's unicast retractions (fact text and
+        triple) and to consume them. Everything else keeps the pre-existing,
+        policy-governed behaviour.
         """
         async with self.pool.acquire() as conn:
             # Fetch events not yet delivered to this node and not expired.
             # target_node scoping: NULL = broadcast (visible to all), non-NULL = unicast.
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT id, event_id::TEXT, event_type, rid, manifest, contents, source_node, queued_at
                 FROM koi_net_events
                 WHERE NOT ($1 = ANY(delivered_to))
                   AND expires_at > NOW()
                   AND (target_node IS NULL OR target_node = $1)
+                  AND ($3 OR NOT ({RETRACTION_EVENT_SQL}))
                 ORDER BY queued_at ASC
                 LIMIT $2
                 """,
                 requesting_node,
                 limit,
+                bool(authenticated),
             )
+
+            if not authenticated:
+                withheld = await conn.fetchval(
+                    f"""
+                    SELECT count(*) FROM koi_net_events
+                    WHERE NOT ($1 = ANY(delivered_to))
+                      AND expires_at > NOW()
+                      AND (target_node IS NULL OR target_node = $1)
+                      AND ({RETRACTION_EVENT_SQL})
+                    """,
+                    requesting_node,
+                )
+                if withheld:
+                    logger.warning(
+                        f"event_queue.poll_unsigned_withheld node={requesting_node} "
+                        f"retraction_events={withheld} (served only to a signed poll)"
+                    )
 
             if not rows:
                 return []
