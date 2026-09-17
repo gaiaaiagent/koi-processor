@@ -8,7 +8,9 @@ Endpoints:
     POST /koi-net/handshake           — Exchange NodeProfile, establish edges
     POST /koi-net/events/broadcast    — Receive events from peers
     POST /koi-net/events/poll         — Serve queued events to polling nodes
-    POST /koi-net/events/confirm      — Acknowledge receipt of events
+    POST /koi-net/events/confirm      — Acknowledge receipt of events (+ optional
+                                        `applications` reports for fact retractions, #67)
+    POST /koi-net/facts/lookup        — Authorized UUID lookup incl. tombstoned state (#67)
     POST /koi-net/manifests/fetch     — Serve manifests by RID
     POST /koi-net/bundles/fetch       — Serve bundles by RID
     POST /koi-net/rids/fetch          — List available RIDs
@@ -24,6 +26,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from uuid import UUID
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -66,6 +69,7 @@ from api.node_identity import (
     node_rid_suffix,
 )
 from api.event_queue import EventQueue
+from api import fact_retraction
 from api.vault_sync import VaultSyncManager, VaultUnavailableError
 
 # RFC 8785 (JCS) canonicalization. Pinned at requirements.txt:91. Imported at
@@ -225,6 +229,10 @@ async def setup_koi_net(pool: asyncpg.Pool, embed_fn=None):
     )
     _node_profile.ontology_version = os.getenv("KOI_ONTOLOGY_VERSION", "1.0.0")
     _event_queue = EventQueue(pool, _node_profile.node_rid)
+    # Issue #67: poll() reports which events it handed over vs. excluded by
+    # scope, so the retraction ledger can record `delivered` (and `failed` on
+    # a scope change) instead of reading delivered_to, which conflates both.
+    _event_queue.delivery_observer = fact_retraction.make_delivery_observer()
 
     # Pipeline integration is not available in personal-koi
     pipeline = None
@@ -1007,7 +1015,11 @@ async def events_poll(request: Request):
             content=_wrap_response(resp.model_dump(exclude_none=True), requesting_node, signed)
         )
 
-    events = await _event_queue.poll(requesting_node, limit, rid_types)
+    # Issue #67: fact-retraction events are handed only to a SIGNED requester.
+    # An unsigned poll naming a peer must not be able to read, or consume, that
+    # peer's unicast retractions (review finding 4). Fail-closed regardless of
+    # KOI_REQUIRE_SIGNED_ENVELOPES; the rest of the stream keeps the policy.
+    events = await _event_queue.poll(requesting_node, limit, rid_types, authenticated=signed)
 
     wire_events = []
     for ev in events:
@@ -1063,10 +1075,140 @@ async def events_confirm(request: Request):
             return _protocol_error(403, "UNAPPROVED_EDGE", f"No approved edge for {confirming_node}")
 
     confirmed = await _event_queue.confirm(event_ids, confirming_node)
+
+    # Issue #67. `confirmed_by` is receipt and nothing else (proved in
+    # tests/test_fact_retraction_boundary.py::test_pin_confirm_is_receipt_only).
+    # The retraction ledger records receipt separately from APPLICATION, which
+    # a recipient on this code reports in the optional `applications` list —
+    # one report per retraction event it processed. An older peer sends none;
+    # its deliveries stay `received` and the sweep ages them to `unverifiable`.
+    # Ledger absent (migration 127 not applied) → both calls are no-ops.
+    applications = payload.get("applications") or []
+    app_summary: Dict[str, Any] = {}
+    # The retraction LEDGER (receipt AND application) is written only from a
+    # SIGNED envelope. Under the relaxed policy (no KOI_* env) an unsigned
+    # confirm names its own node_id: letting that mint `applied` for an
+    # arbitrary peer is the spoof the first review's probe P4 demonstrated,
+    # and letting it mint `received` moved a never-polled delivery to
+    # `received`, after which the sweep aged it to `unverifiable` instead of
+    # retrying (second review, finding 6). The transport's `confirmed_by`
+    # keeps its pre-existing trust model; the ledger does not inherit it.
+    if not signed:
+        if applications:
+            logger.warning(
+                "fact_retraction.confirm ignoring %d application report(s) from UNSIGNED "
+                "request naming node=%s", len(applications), confirming_node)
+            app_summary["ignored_unsigned"] = len(applications)
+        applications = []
+    if _db_pool is not None:
+        try:
+            async with _db_pool.acquire() as conn:
+                async with conn.transaction():
+                    ids = [str(e) for e in event_ids]
+                    if signed:
+                        receipts = await fact_retraction.record_receipts(conn, confirming_node, ids)
+                    else:
+                        receipts = 0
+                        withheld = await fact_retraction.count_open_deliveries(
+                            conn, confirming_node, ids)
+                        if withheld:
+                            logger.warning(
+                                "fact_retraction.confirm UNSIGNED request naming node=%s "
+                                "confirmed %d retraction event(s); receipt NOT recorded in the "
+                                "ledger (signed envelope required)", confirming_node, withheld)
+                            app_summary["ignored_unsigned_receipts"] = withheld
+                    if applications:
+                        app_summary = await fact_retraction.record_applications(
+                            conn, confirming_node, applications)
+            if receipts or app_summary:
+                logger.info(
+                    "fact_retraction.confirm node=%s signed=%s receipts=%d applications=%s",
+                    confirming_node, signed, receipts, app_summary or {})
+        except Exception as exc:  # noqa: BLE001 — ledger bookkeeping must not fail a confirm
+            logger.warning(
+                f"fact_retraction.confirm ledger update failed for {confirming_node}: {exc}")
+
     resp = ConfirmEventsResponse(confirmed=confirmed)
+    body = resp.model_dump()
+    if app_summary:
+        body["applications"] = app_summary
     return JSONResponse(
-        content=_wrap_response(resp.model_dump(), confirming_node, signed)
+        content=_wrap_response(body, confirming_node, signed)
     )
+
+
+@koi_net_router.post("/facts/lookup")
+async def facts_lookup(request: Request):
+    """Authorized cross-node UUID lookup INCLUDING tombstoned state (issue #67).
+
+    Ordinary retrieval on every node hides retracted facts (`valid_to IS
+    NULL` filters). A publisher that wants to PROVE a peer applied a
+    tombstone — rather than trust the peer's report — asks here. Signed
+    envelope required; the caller must hold an APPROVED edge whose scope
+    admits `knowledge_fact` (the same rule that decides whether it could have
+    received the fact in the first place). Returns VALIDITY ONLY — exists,
+    valid_to, tombstoned, pending_tombstone, and the (origin, valid_to,
+    applied_at) of ledger rows — never the triple, literal, group, source,
+    reasons or documents, and never this node's delivery ledger for OTHER
+    peers (review finding P9: an authorized peer must not be able to read a
+    fact it was never sent by guessing its UUID).
+
+    Payload: {"fact_ids": ["<uuid>", ...]} (max 100).
+    """
+    try:
+        payload, source_node, signed = await _unwrap_request(request)
+    except EnvelopeError as exc:
+        return _envelope_error_response(exc)
+
+    if not payload:
+        return _protocol_error(400, "EMPTY_PAYLOAD", "Empty payload")
+    if not source_node:
+        return _protocol_error(403, "IDENTITY_REQUIRED", "Signed envelope required for facts/lookup")
+
+    if _db_pool is None or _node_profile is None:
+        return _protocol_error(503, "NOT_READY", "KOI-net not initialized")
+
+    raw_ids = payload.get("fact_ids") or []
+    if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+        return _protocol_error(400, "BAD_FACT_IDS", "fact_ids must be a non-empty list of at most 100 UUIDs")
+    fact_ids = []
+    for raw in raw_ids:
+        try:
+            fact_ids.append(UUID(str(raw)))
+        except (ValueError, TypeError):
+            return _protocol_error(400, "BAD_FACT_IDS", f"not a UUID: {raw!r}")
+
+    async with _db_pool.acquire() as conn:
+        edge = await conn.fetchrow(
+            """
+            SELECT rid_types FROM koi_net_edges
+            WHERE target_node = $1 AND source_node = $2 AND status = 'APPROVED'
+            """,
+            source_node, _node_profile.node_rid,
+        )
+        if edge is None or not fact_retraction.scope_admits(edge["rid_types"]):
+            return _protocol_error(
+                403, "UNAPPROVED_EDGE",
+                f"No approved edge admitting knowledge_fact for {source_node}")
+        results = []
+        for fid in fact_ids:
+            status = await fact_retraction.tombstone_status(conn, fid)
+            results.append({
+                "fact_id": status["fact_id"],
+                "exists": status["exists"],
+                "valid_to": status["valid_to"],
+                "tombstoned": status["tombstoned"],
+                "pending_tombstone": status["pending_tombstone"],
+                "ledger_available": status["ledger_available"],
+                "retractions": [
+                    {"origin_node": r["origin_node"], "valid_to": r["valid_to"],
+                     "applied_at": r["applied_at"]}
+                    for r in status["retractions"]
+                ],
+            })
+
+    resp = {"node_rid": _node_profile.node_rid, "facts": results}
+    return JSONResponse(content=_wrap_response(resp, source_node, signed))
 
 
 @koi_net_router.post("/manifests/fetch")
@@ -1465,6 +1607,7 @@ async def koi_net_health():
             "extensions": [
                 "/koi-net/handshake",
                 "/koi-net/events/confirm",
+                "/koi-net/facts/lookup",
                 "/koi-net/health",
                 "/koi-net/commons/intake",
                 "/koi-net/commons/intake/decide",

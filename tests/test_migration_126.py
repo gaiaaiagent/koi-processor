@@ -191,7 +191,7 @@ async def conn():
     await c.close()
 
 
-_META_LINE = re.compile(r"^\s*(BEGIN|COMMIT)\s*;\s*$|^\s*\\(set|copy)\b")
+_META_LINE = re.compile(r"^\s*(BEGIN|COMMIT)\s*;\s*$|^\s*\\(set|copy|gset|if|elif|else|endif|echo)\b|^.*\\gset\s*$")
 
 
 def _body(path: pathlib.Path) -> str:
@@ -199,8 +199,9 @@ def _body(path: pathlib.Path) -> str:
 
     We are already inside the fixture's transaction, so the file's own BEGIN/COMMIT
     must go (a nested BEGIN only warns, but COMMIT would end the fixture's
-    transaction and defeat the rollback). ``\\set``/``\\copy`` are psql-only and
-    asyncpg would reject them. plpgsql's bare ``BEGIN`` (no semicolon) is untouched.
+    transaction and defeat the rollback). ``\\set``/``\\copy``/``\\gset``/``\\if``…
+    are psql-only and asyncpg would reject them (127's down file guards its exports
+    with ``\\gset``/``\\if``). plpgsql's bare ``BEGIN`` (no semicolon) is untouched.
     """
     lines = path.read_text().splitlines()
     kept = [ln for ln in lines if not _META_LINE.match(ln)]

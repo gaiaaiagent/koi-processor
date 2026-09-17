@@ -11,10 +11,16 @@ dispatched only when the flag is on. See plan koi-graph-graceful-toucan.
 Called from koi_poller._process_event() when contents contain a "_koi_domain" marker.
 
 Note on `FederationDeferred`: handlers raise this to signal "do not confirm
-this event; redeliver next poll cycle." Used by knowledge_fact when an event
-references an episode_id not yet present locally. koi_poller's broad except
-clause (lines 614-627) treats raises as "skip-without-confirm" — there is
-no return-path equivalent.
+this event." Used by knowledge_fact when an event references an episode_id
+not yet present locally. koi_poller's broad except clause in `_poll_peer`
+treats raises as "skip-without-confirm" — there is no return-path equivalent.
+It does NOT cause redelivery; see the class docstring.
+
+Return value: `apply_domain_event` returns whatever the handler returns. Every
+handler returns None except the fact-retraction path
+(`_apply_fact_retraction`), which returns an application REPORT dict; the
+poller carries such reports back to the publisher in the confirm payload
+(issue #67).
 """
 
 import json
@@ -23,21 +29,34 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional
+from uuid import UUID
 
 import asyncpg
 
 from api.utils import parse_ts
 from api.resolution_primitives import normalize_alias_list
 from api import document_federation
+from api import fact_retraction
 from api.document_federation import DOCUMENT_DOMAIN  # re-exported for the poller
 
 logger = logging.getLogger(__name__)
 
 
 class FederationDeferred(Exception):
-    """Raised by a handler to defer event confirmation. The poller will
-    log and redeliver on the next poll cycle. Use sparingly — only for
-    expected, recoverable conditions like missing-FK-parent races.
+    """Raised by a handler to leave an event UNCONFIRMED. The poller logs it
+    and does not confirm. Use sparingly — only for expected, recoverable
+    conditions like missing-FK-parent races.
+
+    This used to say "the poller will redeliver on the next poll cycle". It
+    will not, and never did: `EventQueue.poll` marks `delivered_to` at
+    hand-over and its WHERE clause excludes on that column, not on
+    `confirmed_by`. Proved by
+    tests/test_fact_retraction_boundary.py::test_pin_unconfirmed_events_are_not_redelivered.
+    The practical consequence: an unconfirmed event is LOST for that peer
+    until the koi_net_events row expires (24h default, 72h remote) — nothing
+    brings it back. That is why the fact-retraction ledger and its sweep
+    (api/fact_retraction.py) exist, and why the retraction handler below
+    never raises this.
     """
     pass
 
@@ -102,9 +121,12 @@ async def apply_domain_event(
 
     if event_type == "FORGET":
         await _handle_forget(conn, domain, rid, payload)
-        return
+        return None
 
-    await handler(conn, rid, event_type, payload, source_node)
+    # The handler's return value is the caller's: None for every handler
+    # except `_apply_fact_retraction`, whose report the poller carries back
+    # to the publisher in the confirm payload (issue #67).
+    return await handler(conn, rid, event_type, payload, source_node)
 
 
 async def _handle_forget(conn, domain: str, rid: str, payload: Dict[str, Any]):
@@ -673,6 +695,7 @@ async def _apply_knowledge_episode(
             await _insert_episode(conn, payload)
 
             facts_applied = 0
+            applied_fact_ids = []
             for fact in facts:
                 fact_id = fact.get("id")
                 if not fact_id:
@@ -686,6 +709,7 @@ async def _apply_knowledge_episode(
                     await _insert_fact(conn, episode_id, fact)
                     await conn.execute("RELEASE SAVEPOINT fact_insert")
                     facts_applied += 1
+                    applied_fact_ids.append(fact_id)
                 except Exception as e:
                     await conn.execute("ROLLBACK TO SAVEPOINT fact_insert")
                     await conn.execute("RELEASE SAVEPOINT fact_insert")
@@ -693,6 +717,15 @@ async def _apply_knowledge_episode(
                         f"domain.knowledge_episode.fact_skip episode={episode_id} "
                         f"fact_id={fact_id} err={e}"
                     )
+
+            # UPDATE-before-NEW (issue #67): a retraction that arrived before
+            # this episode left a PENDING tombstone in the ledger. Land it now,
+            # in the same savepoint as the inserts, so the fact is never
+            # visible live. Degrades to a no-op (with a warning) on a recipient
+            # that has not applied migration 127; any other failure propagates
+            # and rolls the episode back with it.
+            if applied_fact_ids:
+                await fact_retraction.apply_pending_tombstones(conn, applied_fact_ids)
 
             if event_id:
                 await conn.execute(
@@ -800,9 +833,27 @@ async def _insert_fact(conn, episode_id: str, fact: Dict[str, Any]) -> None:
             cols_vals[emb_col] = emb_literal
             casts[emb_col] = "::vector"
 
+    # Tombstones are MONOTONE (issue #67). A NEW/UPDATE that carries
+    # `valid_to = NULL` — stale, replayed, or delivered out of order after a
+    # retraction — must never clear a tombstone that is already here; a
+    # non-null incoming valid_to still lands on a live fact (the old episode
+    # soft-delete path). Before this it was `valid_to = EXCLUDED.valid_to`,
+    # which resurrected retracted facts (UPDATE-before-NEW).
+    #
+    # The inner comma is inside parentheses: `_strip_conflict_assignments`
+    # splits on TOP-LEVEL commas only, so the drift-retry path keeps this
+    # assignment intact when it drops some other column (pinned in
+    # tests/test_fact_retraction_apply.py).
+    # Over federation, valid_to only ever moves EARLIER. LEAST ignores NULLs in
+    # PostgreSQL, so: existing NULL + incoming T → T (a tombstone lands);
+    # existing T + incoming NULL → T (a stale NEW cannot resurrect); two
+    # values → the earlier (a retraction shortens a validity interval; a
+    # replay carrying a later end cannot extend one). Review finding
+    # (probe_pending_vs_new_with_valid_to): COALESCE kept a later existing
+    # value over an earlier retraction.
     conflict = """
         ON CONFLICT (id) DO UPDATE SET
-            valid_to = EXCLUDED.valid_to
+            valid_to = LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to)
     """
     await _insert_with_drift_retry(
         conn, "knowledge_facts", cols_vals, casts, conflict,
@@ -823,22 +874,34 @@ async def _apply_knowledge_fact(
     of their parent episode — either oversized-bundle splits (plan step 8a)
     or any future late-bound emit site.
 
-    Idempotency: ON CONFLICT (id) DO UPDATE SET valid_to = EXCLUDED.valid_to.
+    Retractions (issue #67): a payload carrying a `retraction` block is a
+    tombstone, not an upsert, and is routed to `_apply_fact_retraction`
+    BEFORE anything here can write. That path returns an application report;
+    this one returns None.
+
+    Idempotency: ON CONFLICT (id) DO UPDATE SET
+    valid_to = LEAST(knowledge_facts.valid_to, EXCLUDED.valid_to).
     Facts are content-stable once minted; only validity_interval is mutable
-    per the plan's temporal-validity design. Apply-first-record-on-success:
-    the fact INSERT runs first; only on success is
-    federation_applied_events recorded. On FK miss the raise propagates
-    before the idempotency row is written.
+    per the plan's temporal-validity design, and a tombstone is never cleared
+    by a later NULL. Apply-first-record-on-success: the fact INSERT runs
+    first; only on success is federation_applied_events recorded. On FK miss
+    the raise propagates before the idempotency row is written.
 
     FK-skew handling: if `episode_id` is not yet present locally, asyncpg
     raises ForeignKeyViolationError. The handler logs INFO and raises
-    FederationDeferred. The poller's broad except (koi_poller.py:625-627)
-    catches the exception and skips confirming the event, so it redelivers
-    next poll cycle. Bounded by koi_net_events 72h TTL.
+    FederationDeferred. The poller's broad except in `_poll_peer` catches
+    the exception and skips confirming the event. NOTE: that does NOT make
+    the event redeliver — poll() marks `delivered_to` at hand-over, so the
+    event is lost for this peer until its 72h expiry (see the
+    FederationDeferred docstring). The fact then arrives only if the
+    publisher re-emits it.
 
     Originator metadata (`source_node_rid`, `group_id`, `created_at`) is
     preserved verbatim from payload; `source_node` arg is for logging only.
     """
+    if fact_retraction.is_retraction_payload(payload):
+        return await _apply_fact_retraction(conn, rid, payload, source_node)
+
     fact_id = payload.get("id")
     if not fact_id:
         logger.warning(f"domain.knowledge_fact.skip rid={rid} reason=missing_id")
@@ -874,6 +937,10 @@ async def _apply_knowledge_fact(
                 )
             raise
 
+        # UPDATE-before-NEW: land a pending tombstone recorded before this
+        # fact arrived (same rationale as in _apply_knowledge_episode).
+        await fact_retraction.apply_pending_tombstones(conn, [fact_id])
+
         if event_id:
             await conn.execute(
                 """
@@ -888,6 +955,202 @@ async def _apply_knowledge_fact(
     logger.info(
         f"domain.knowledge_fact.apply rid={rid} id={fact_id} "
         f"episode_id={episode_id} source={source_node}"
+    )
+
+
+def _retraction_report(
+    *,
+    event_id: Optional[str],
+    fact_id: Optional[str],
+    status: str,
+    valid_to: Optional[datetime] = None,
+    valid_to_matches: Optional[bool] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The application report the poller carries back in the confirm payload.
+
+    `status` → the publisher's delivery state via
+    `fact_retraction._report_to_state`; `valid_to` is the LOCAL value after
+    this call (never the incoming one), so a mismatch is visible to the
+    publisher verbatim.
+    """
+    return {
+        "application": True,
+        "domain": fact_retraction.DOMAIN,
+        "event_id": event_id,
+        "fact_id": fact_id,
+        "status": status,
+        "valid_to": valid_to.isoformat() if valid_to is not None else None,
+        "valid_to_matches": valid_to_matches,
+        "reason": reason,
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _apply_fact_retraction(
+    conn,
+    rid: str,
+    payload: Dict[str, Any],
+    source_node: str,
+) -> Dict[str, Any]:
+    """Apply a federated fact RETRACTION (issue #67) and report what happened.
+
+    Wire shape: api/fact_retraction.py module docstring — the fact snapshot
+    plus a `retraction` block. This handler is the recipient half of the
+    obligation the publisher records in its deliveries ledger, and the report
+    it returns is the only evidence of application the publisher ever gets
+    (confirm is receipt; see `EventQueue.confirm`).
+
+    Contract:
+      * Validation is strict and REJECTS rather than raises. `parse_ts`
+        returns None silently on garbage, so an unparseable `valid_to` would
+        otherwise reach the UPDATE as NULL and clear nothing — or worse, be
+        reported applied. Rejected: non-UUID id; missing / unparseable /
+        naive `valid_to`; a `retraction.valid_to` that disagrees with the
+        row's; ledger tables absent (migration 127 not applied here).
+        A rejection touches nothing.
+      * `applied`            — the local fact was live; valid_to is now the
+                               payload's value, to the microsecond.
+      * `already_tombstoned` — the local fact already had a valid_to. It is
+                               KEPT (a tombstone is never overwritten), and
+                               `valid_to_matches` says whether it agrees.
+                               This is also the idempotent answer to a
+                               duplicate delivery.
+      * `pending`            — no local fact row. No row is minted; the
+                               ledger row with applied_at NULL is the pending
+                               tombstone that `apply_pending_tombstones`
+                               lands when the fact arrives.
+      * The ledger row's origin_node is the AUTHENTICATED `source_node`, not
+        the payload's claimed `retraction.origin_node`.
+      * Never raises FederationDeferred: an unconfirmed event is not
+        redelivered, so a raise here would be silent loss of the tombstone.
+    """
+    event_id = payload.get("_federation_event_id")
+    retraction = payload["retraction"]
+
+    def rejected(reason: str, fact_id: Optional[str] = None) -> Dict[str, Any]:
+        logger.warning(
+            f"domain.knowledge_fact.retraction_reject rid={rid} fact_id={fact_id} "
+            f"event_id={event_id} source={source_node} reason={reason}"
+        )
+        return _retraction_report(
+            event_id=event_id, fact_id=fact_id, status=fact_retraction.REPORT_REJECTED,
+            reason=reason,
+        )
+
+    try:
+        fact_uuid = UUID(str(payload.get("id")))
+    except (ValueError, TypeError, AttributeError):
+        return rejected("invalid_fact_id")
+    fact_id = str(fact_uuid)
+
+    raw_valid_to = payload.get("valid_to")
+    if raw_valid_to is None:
+        return rejected("valid_to_missing", fact_id)
+    valid_to = parse_ts(raw_valid_to)
+    if valid_to is None:
+        return rejected("valid_to_unparseable", fact_id)
+    if valid_to.tzinfo is None:
+        # The publisher sends `row["valid_to"].isoformat()` of a TIMESTAMPTZ,
+        # which always carries an offset. A naive value is not from a
+        # conforming publisher, and asyncpg would bind it as local time.
+        return rejected("valid_to_no_timezone", fact_id)
+    if retraction.get("valid_to") != raw_valid_to:
+        return rejected("retraction_valid_to_mismatch", fact_id)
+
+    # Review finding 1: a recipient WITHOUT migration 127 must still land the
+    # tombstone on a PRESENT fact — old code did (via the upsert), so refusing
+    # here was a regression. Only the absent-fact case is rejected, because a
+    # pending tombstone needs the ledger to live in.
+    ledger = await fact_retraction.ledger_available(conn)
+
+    episode_id = payload.get("episode_id")
+    try:
+        episode_uuid = UUID(str(episode_id)) if episode_id else None
+    except (ValueError, TypeError, AttributeError):
+        return rejected("invalid_episode_id", fact_id)
+
+    snapshot = {
+        k: v for k, v in payload.items()
+        if k not in ("retraction", "_federation_event_id")
+    }
+
+    report_reason: Optional[str] = None
+    async with conn.transaction():
+        # valid_to only moves EARLIER over federation: a live fact is
+        # tombstoned, a fact whose local validity end is LATER than the
+        # retraction is shortened to it, an earlier local tombstone is kept.
+        landed = await conn.fetchval(
+            """
+            UPDATE knowledge_facts SET valid_to = $2
+            WHERE id = $1 AND (valid_to IS NULL OR valid_to > $2)
+            RETURNING valid_to
+            """,
+            fact_uuid, valid_to,
+        )
+        if landed is not None:
+            status = fact_retraction.REPORT_APPLIED
+            local_valid_to = landed
+            matches = True
+        else:
+            local_valid_to = await conn.fetchval(
+                "SELECT valid_to FROM knowledge_facts WHERE id = $1", fact_uuid)
+            if local_valid_to is not None:
+                # Keep the local (earlier-or-equal) tombstone; report whether
+                # the peer agrees.
+                status = fact_retraction.REPORT_ALREADY_TOMBSTONED
+                matches = local_valid_to == valid_to
+            else:
+                # Fact not here yet (UPDATE-before-NEW). Do NOT mint a fact
+                # row; the ledger row below with applied=False is the pending
+                # tombstone.
+                status = fact_retraction.REPORT_PENDING
+                matches = None
+
+        if not ledger:
+            if status == fact_retraction.REPORT_PENDING:
+                # Nothing landed and nothing can be recorded: the publisher's
+                # sweep re-queues this once the peer has migration 127.
+                return rejected("ledger_unavailable_fact_absent", fact_id)
+            report_reason = "ledger_unavailable_not_ledgered"
+            logger.warning(
+                f"domain.knowledge_fact.retraction_unledgered rid={rid} fact_id={fact_id} "
+                f"status={status} reason=migration_127_not_applied_here"
+            )
+        else:
+            await fact_retraction.record_inbound_tombstone(
+                conn,
+                fact_id=fact_uuid,
+                valid_to=valid_to,
+                origin_node=source_node,
+                episode_id=episode_uuid,
+                snapshot=snapshot,
+                applied=(status != fact_retraction.REPORT_PENDING),
+                reason=retraction.get("reason"),
+                retracted_by=retraction.get("retracted_by"),
+                source_document=retraction.get("source_document"),
+            )
+
+        if event_id:
+            await conn.execute(
+                """
+                INSERT INTO federation_applied_events (domain, event_id, source_node)
+                VALUES ('knowledge_fact', $1::uuid, $2)
+                ON CONFLICT DO NOTHING
+                """,
+                event_id,
+                source_node,
+            )
+
+    logger.info(
+        f"domain.knowledge_fact.retraction rid={rid} fact_id={fact_id} status={status} "
+        f"valid_to={valid_to.isoformat()} local_valid_to="
+        f"{local_valid_to.isoformat() if local_valid_to is not None else None} "
+        f"matches={matches} event_id={event_id} source={source_node}"
+    )
+    return _retraction_report(
+        event_id=event_id, fact_id=fact_id, status=status,
+        valid_to=local_valid_to, valid_to_matches=matches, reason=report_reason,
     )
 
 
@@ -914,8 +1177,10 @@ async def _apply_doclink(
     This is load-bearing: asyncpg auto-commits per-statement otherwise, so a
     failure in the doclink upsert would leave a stale idempotency row that
     permanently blocks legitimate retry. With the single-txn wrap, any raise
-    inside the block rolls back BOTH statements — the event redelivers next
-    poll with no idempotency row to block it, no double-count risk.
+    inside the block rolls back BOTH statements — if the publisher ever
+    re-sends the event there is no idempotency row to block it, and no
+    double-count risk. (The poller itself does NOT redeliver an unconfirmed
+    event; see the FederationDeferred docstring.)
 
     `mention_count` is taken from `payload["mention_delta"]` — the
     publisher-supplied delta, NEVER inferred from a SELECT or post-insert
@@ -1144,11 +1409,14 @@ async def _apply_document(
     Containment (AC10) is enforced HERE, not on the edge: `extract_rid_type()`
     returns None for `regen.newsletter:` RIDs, so the poll-side `rid_types`
     filter — which only skips when a type *is* extracted — cannot scope them. A
-    disallowed RID is logged and dropped cleanly (it is confirmed, not
-    redelivered: redelivering something we will always reject is a loop).
+    disallowed RID is logged and dropped cleanly (it is confirmed; leaving
+    something we will always reject unconfirmed buys nothing).
 
     Failures that a retry could fix — a missing API key, an embedding outage —
-    raise, so the poller leaves the event unconfirmed and it redelivers.
+    raise, so the poller leaves the event unconfirmed. NOTE: that does not
+    make it redeliver — poll() excludes on `delivered_to`, set at hand-over
+    (FederationDeferred docstring). The document arrives again only if the
+    publisher re-emits it or its koi_net_events row is otherwise re-queued.
     """
     if not document_federation.document_federation_enabled():
         logger.warning(
@@ -1194,8 +1462,8 @@ async def _apply_document(
     # trace. A chunk with a null embedding is invisible to retrieval but counts
     # as a healthy row under count(*) — the precedent is 3,464 entities (11.8%)
     # that sat unsearchable with null embeds. Raising AFTER the write committed
-    # would both persist that half-visible document and redeliver it; raising
-    # inside the transaction rolls it back, so the redelivery starts clean.
+    # would persist that half-visible document; raising inside the transaction
+    # rolls it back, so a later re-send starts clean.
     async with conn.transaction():
         result = await ingest_document_rag_conn(
             conn,
@@ -1208,7 +1476,8 @@ async def _apply_document(
         if result.get("null_embeds"):
             raise FederationDeferred(
                 f"{rid}: {result['null_embeds']}/{result['chunks_total']} chunks "
-                f"failed to embed — rolled back, not confirming, will redeliver"
+                f"failed to embed — rolled back, not confirming (the event is not "
+                f"redelivered; it needs a re-emit)"
             )
 
     logger.info(

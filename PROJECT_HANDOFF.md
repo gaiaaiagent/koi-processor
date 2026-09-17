@@ -1,5 +1,79 @@
 # Project handoff
 
+> ## #67 SECOND REVIEW ROUND APPLIED — 2026-09-17, session `86419f51`
+>
+> Bounded source-fix round on `fix/federated-fact-retractions` from reviewed head `6905f4f`,
+> using session `b35cb9db`'s 16-finding review as the finding set. Code round = commit
+> `433b167`; the docs/handoff commit follows it (read `git rev-parse HEAD`). **Nothing
+> deployed, 127 NOT applied live, no restart, no peer contacted, no historical re-emission, no
+> live writes** (live `personal_koi`: SELECTs + the read-only audit only; tripwire OK on every
+> run). The one unintended write was to the SCRATCH DB: a `psql -c BEGIN -f 127.sql -c ROLLBACK`
+> wrapper did nothing because the file carries its own `BEGIN/COMMIT` — that became the real
+> up/up/down (below); the scratch DB was returned to its pre-state.
+>
+> | done | detail |
+> |---|---|
+> | PR body | reworded — no closing keyword adjacent to the issue number anywhere (the old "does not close …" was linked for auto-close); `closingIssuesReferences` re-checked after the edit |
+> | `pending` state | 10th delivery state (127 CHECK + `_report_to_state` + audit class `pending`): no `applied_at`, non-terminal, not outstanding, `application_proven` False, sweep leaves it |
+> | `received` preserved | never `failed` by a later edge narrowing; wait / `unverifiable` after expiry; the peer's later report lands |
+> | signed-only retraction transport | `EventQueue.poll(authenticated=signed)` withholds retraction events from unsigned polls (not served, not marked, count logged); unsigned confirm writes neither receipt nor application to the ledger. Independent of `KOI_REQUIRE_SIGNED_ENVELOPES`. Safe: 8/8 `koi_net_nodes` hold keys; the poller signs whenever it has one (NUC `aa4be29` included) |
+> | audit floor | `--scope-enforced-since ISO\|auto` (auto = `2c497f0` must be an ancestor of HEAD in the running checkout, else exit 3); absent = `scope_excluded` disabled. Live with `auto`: numbers identical to 09-16 (4,188/4,063/3,847/196/26/729/3/plan 4,043); without: 729 → `unauthorized` (732) |
+> | terminal visibility | `failed` (exhausted) + non-reopenable `rejected` OUTSTANDING + listed under "terminal failures"; WARNING per failed/rejected, INFO per retry/unverifiable, sweep summary |
+> | 127 assertion | exact state set (no extras), both unique keys' columns in order, all columns; 5 drifted-table negative controls; real up/up/down on scratch: exit 0/0/0, `INSERT 0 0` on the second up, post-state == pre-state; checksum label `v2_retraction_ledger_pending_state` |
+> | doc | `/recall-walk shape=relationship` = third unauthenticated expired-fact surface; `…/tombstone` exact field list (triple yes, `retracted_by` no — removed from the response); trust model rewritten (LEAST + no originator check = permanent tombstone authority for any admitting edge; NOT "unchanged"); counts; §5.1 deferred table |
+> | tests | **155** in the six files (7/61/28/3/20/36); 19 new, each red first; 7 revert-proof mutants each red. Full suite, same flags both sides (base **54F / 10E / 1,832 passed**, branch **54F / 10E / 1,987 passed** (+155 = the six #67 files); FAILED/ERROR node-id sets **identical** (64 = 64, no id only on either side)). |
+> | deferred, tracked | personal-koi tasks (`source_type=github-issue`) with AC in `context`: `koi-67-signed-envelopes-general-stream` (deploy gate: general-stream unsigned poll), `koi-67-multi-origin-application-proof-drift`, `koi-67-origin-authority`, `koi-67-payload-minimization`, `koi-67-unauthenticated-expired-fact-surfaces`. Each visibly unmet in doc §5.1, the PR body, and the #67 AC comment |
+>
+> **Next:** re-review PR #70 at the new head; then the deploy order in the PR body (127 → code
+> to both checkouts → restart → `ps -o lstart=` → `KOI_FACT_RETRACTION_SWEEP=true` → gate
+> `koi-67-signed-envelopes-general-stream` → NUC by hand → canary). Leftovers unchanged: two
+> un-obligated scripts, repair application, NUC proof, #69.
+>
+> ## #67 FEDERATED FACT RETRACTIONS — BUILT IN BRANCH 2026-09-15/16, session `272b40d9`
+>
+> Branch `fix/federated-fact-retractions` (worktree `koi-federated-retractions-20260915`),
+> off `regen-prod` @ `0c39fa1` (PR #66 was merged into regen-prod at 2026-09-16 05:36Z, minutes
+> before this session began — the handoff's "do NOT merge" was already moot). **Draft PR #70**,
+> base `regen-prod`, 4 commits `f1be6e3` `551e352` `fe6db5f` `fbad1fd`, pushed. **#67 stays
+> OPEN** — AC status posted there. Nothing deployed; migration **127 NOT applied**; the
+> substack job untouched; no peer contacted; live DB touched with SELECTs and the read-only
+> audit only. **Read `docs/federation/fact-retractions.md` before touching any of this.**
+>
+> ### What is true now (re-derived at wrap, not carried forward)
+>
+> | claim | verified |
+> |---|---|
+> | `retract_fact` emits nothing → FIXED in branch | one transaction: `FOR UPDATE` → `valid_to = NOW()` → committed-row snapshot → `knowledge_fact_retractions` row → one UNICAST `knowledge_fact` UPDATE per authorized recipient via `EventQueue.add(conn=conn)` → one `knowledge_fact_retraction_deliveries` row per peer. Atomicity revert-proven with a two-connection pool (`test_add_with_conn_writes_on_the_caller_connection_not_the_pool`). `create_episode`'s supersession auto-retire records the same obligation. |
+> | "delivery 4/4" in the incident | **FALSE — repeat-class after memory `feedback_delivered_to_is_not_transmission`.** Only nuc-personal's edge admits `knowledge_episode`/`knowledge_fact`; the other three `delivered_to` entries are poll-filter exclusion marks. Delivery 1/4, receipt 1/4, application 0/4. Pinned by `test_pin_delivered_to_marks_scope_excluded_events`. |
+> | a polled-but-unconfirmed event is redelivered | **FALSE** — `poll()` marks `delivered_to` at hand-over and excludes on it; the `koi_poller` comment and the `FederationDeferred` docstring said otherwise. Pinned; every copy of the claim corrected. NEW failure class, flagged. |
+> | tests | **136** new across 6 files (`--collect-only`: 7 boundary, 52 outbox, 28 apply, 3 integration, 15 migration-127, 31 audit). Combined with the federation suites: 284 passed / 2 failed (the pre-existing `TestApplyEntity` pair). Full suite vs a throwaway worktree at `0c39fa1`, same flags (`--continue-on-collection-errors`, `tests/test_intent_registry.py` + `test_task_registry.py` + `test_contract.py` ignored on BOTH sides because they write through the live :8351 API): base **54F / 10E / 1,830 passed**, branch **54F / 10E / 1,968 passed**; FAILED/ERROR node-id sets **identical** (68 = 68, `comm` empty both ways); collected-id diff: every branch-only id is in the new files. Tripwire OK on every run. |
+> | live audit (read-only by mechanism) | **4,188** locally retracted facts; 4,063 with surviving koi_net_events history (cleanup() has NO caller — 220k expired rows survive, which is the only reason history is complete); **3,847 (fact,peer) possibly_live + 196 unverifiable, all on nuc-personal**; 729 `scope_excluded` (2026-09 exclusion marks on cowichan-valley/front-range/shawn, 243 each); **3** `unauthorized` (one fact `b11c0a85…` 2026-08-13 on cowichan-valley/front-range/friend-e2e); plan 4,043 lines. Incident facts: `tombstone_confirmed` on nuc-personal ×5, application unproven; incident run exits 0. Recounted from the per-fact rows, not the summary block. Outputs: session scratchpad `audit-live/{full-v2,incident-v2}.json`. |
+> | adversarial review | 20 findings (session scratchpad `review/REPORT.md`), all acted on or documented in commit `fe6db5f`. Its first version of the audit counted the 729 exclusion marks as "unauthorized, pre-2c497f0" — false; corrected and the commit message rewritten before push. |
+> | scratch DB drift | `personal_koi_test` carries `119_edge_scope_contexts` from an UNMERGED branch (`indigenomics/extraction-resilience`): `koi_net_edges` has CHECK `koi_is_rid_context_array(rid_types)` rejecting every live-shaped scope. Live has neither. Tests drop the constraint inside their rolled-back transaction (`tests/fact_retraction_testkit.py::neutralize_edge_scope_drift`). Flagged as an incident stub. If 119 ever merges, `scope_admits` admits nobody → retractions go local-only; `test_scope_admits_agrees_with_a_real_poll` and the `no_admitting_peers` warning are the tells. |
+> | live process | :8351 PID started **2026-09-15 22:29:16** (not by this session); env `KOI_STRICT_MODE=false`, `KOI_FEDERATE_KNOWLEDGE=true`, `KOI_NET_REQUIRE_APPROVED_EDGE_FOR_POLL=true` (so unsigned confirms are already refused live). |
+>
+> ### Still unmet for #67 (exact)
+>
+> 1. Cross-node PROOF of application needs a peer running this code + 127. The NUC receives
+>    no code automatically (two-node-topology.md); until updated by hand its rows stop at
+>    `received`/`unverifiable`, and its OLD code still resurrects via UPDATE-before-NEW
+>    (replayed against `git show 0c39fa1:api/domain_event_handlers.py` in the review).
+> 2. `scripts/extract_deep_documents.py` (semantic dedup) and `scripts/ingest_research_papers.py`
+>    (`retire_invalid_scientific_facts`) still write `valid_to` directly with no obligation.
+>    Routing them through `/retract` from inside their own transactions risks a lock wait
+>    against the API's `FOR UPDATE` — needs its own slice.
+> 3. Repair APPLICATION for the 4,043-line historical plan is not implemented (`--apply` exits 2).
+> 4. `include_expired=true` on `/knowledge/facts/search` and `/knowledge/entity/{uri}/facts` is
+>    an unauthenticated opt-in returning retracted facts — pre-existing, documented against AC7.
+> 5. Retry is opt-in (`KOI_FACT_RETRACTION_SWEEP=true`, default off).
+>
+> ### Deploy order when the operator decides to (NOT done)
+>
+> 127 on the publisher AND every recipient (a recipient without it tombstones present facts
+> but rejects absent ones; the sweep re-queues those) → code to BOTH `koi-processor-service`
+> and `koi-processor-runtime` → `restart.sh`, verify with `ps -o lstart=` → `/retract` returns
+> 503 until 127 is applied (loud, by design; also on a node with federation off).
+>
 > ## ⚠ LIVE CHANGES MADE 2026-09-13/14 — sessions `7e3da78a` + `bb26783d`, worktree `koi-document-ingest-integrity-20260913`
 >
 > Read this before touching the entity registry, the extractor, or the substack job.
@@ -170,9 +244,9 @@
 > **New audit surface:** `SELECT * FROM entity_current_norm_duplicates;` — 169 live
 > duplicate sets, 125 drift-created, 347 rows (#61 AC6).
 
-**Updated:** 2026-09-15 00:05 PDT
-**Session:** Claude Code · 98bc9fe1-c3bb-4228-abe8-81cb0204c0bd · KOI: PR #66 review blockers + move-id hash input fixed
-**Status:** Branch clean and pushed at the docs wrap above `97f6525`; B1–B4/M1–M8 and the re-review's move-id blocker are fixed in draft PR #66 (closes #62/#68), nothing deployed, migration 126 unapplied, job disabled — no merge blocker known to remain; #67/#69 and the deploy-before-replay order still gate everything live.
+**Updated:** 2026-09-16 11:05 PDT
+**Session:** Claude Code · 272b40d9-b7a5-42f1-b462-c4fb92535dd9 · KOI #67: federated fact retractions (draft PR #70)
+**Status:** `fix/federated-fact-retractions` clean and pushed at `fbad1fd` (4 commits over `0c39fa1`); draft PR #70 open against `regen-prod`; #67 OPEN with the AC table posted; migration 127 written, tested, NOT applied; nothing deployed; no peer contacted; no live writes.
 
 > **Read this before re-opening the topology doc.** That one paragraph was rewritten **six times on
 > 2026-09-04** by two sessions, producing ~a dozen false claims, every one the same shape: *a probe
@@ -316,9 +390,9 @@ deep-document extraction type contract with `Document` and `Event`. Commit
 
 ## Next steps
 
-1. **#67 — federated fact retractions + peer-application proof.** `retract_fact`
-   emits no federation event at all; peer application is unverifiable from here
-   (delivery 4/4, application 0/4).
+1. **#67 — review draft PR #70, then decide the deploy** (127 on publisher + recipients FIRST;
+   the NUC by hand). The remaining #67 gaps are listed exactly in the banner above; the two
+   un-obligated scripts and the repair-application slice are the next code work.
 2. **#69 — transactional document rollback / replay reconciliation.** Stale
    `document_entity_links` and discourse moves are why "retracted" ≠ "repaired".
 3. **Deploy #66 to BOTH `koi-processor-service` and `koi-processor-runtime`**, restart
@@ -421,6 +495,7 @@ deep-document extraction type contract with `Document` and `Event`. Commit
 
 | Date | Provider | Session | Summary |
 |---|---|---|---|
+| 2026-09-15/16 | Claude Code | `272b40d9` (koi-infra) | **#67 federated fact retractions built in branch; draft PR #70; issue kept open.** Boundary pinned before change (confirm = receipt; `delivered_to` marks exclusions — the incident's "4/4" was 1/4; unconfirmed events are NEVER redelivered, a false comment at four sites). One-transaction retraction via `EventQueue.add(conn=)` (two-connection revert-proof), unicast per admitting edge, migration 127 ledger with nine states, signed `applications` on confirm, `LEAST` upsert so `valid_to` only moves earlier, pending tombstones for UPDATE-before-NEW, tombstone lookups, sweep (opt-in), read-only audit + dry-run plan. Live audit: 3,847 facts probably still live on nuc-personal. 20-finding adversarial review applied (one lead + 3 subagents). 136 new tests; full-suite failure set identical to base. No live writes, nothing deployed. |
 | 2026-09-14 | Claude Code | `98bc9fe1` (koi-infra, continued) | **Re-review merge blocker closed: discourse-move id hash input restored.** Commit `97f6525`. The M6 rename had made the entity normalizer the uuid5 input for persistent discourse-move ids; read-only census showed 5,579/13,767 stored document moves (1,169 docs, 12 on the michaelgarfield replay targets) no longer matched, so a replay would have twinned them. Dedicated `discourse_move_id_key` (whitespace-only, historical) + `discourse_move_id`; 6 tests pinning literal UUIDs (5 fail at `d51fb41`, hyphen-free control passes on both sides); census after: **13,765/13,767 reproduced**, 21/21 target rows, 2 pre-existing June-2026 anomalies reported and untouched. Same commit: false M4 "preflight already refuses" comments corrected (preflight ignores an invalid alias decision → possible mint before the freeze refuses; deferred to #69), 1,046→1,045, `collect_endpoints` docstring, spec's stale "67 byte-identical" → strict subset. 179 tests across seven suites green (`--collect-only` = 179); full-suite failure set identical to the prior branch run (1,934 vs 1,929 passed is a different collection, +6 move-id items −1 launchd-parametrized case, not the same run). No live writes; PR #66 still draft. |
 | 2026-09-14 | Claude Code | `98bc9fe1` (koi-infra) | **Review blockers B1–B4 / M1–M8 fixed in draft PR #66.** Four commits (`cdc445c` identity, `741ab0a` quality, `8c711be` gate, `79f1a21` migration 126), fixture-first, each core fix revert-proven, **zero regressions** vs the merge-base (54F/10E vs 55F/10E; +174 passing). B1: registration URL is absolute or a typed refusal — previously every first ingest died in httpx. B2: cross-type per endpoint. B3: frozen-map lookups by canonical key. **M3: untyped endpoints BLOCK (`type_undeclared`) instead of defaulting to Concept — 239/1,755 cached docs affected, operator's call.** M4: alias decisions validated at the freeze. M5: `fact_ids` + run-scoped verification. M6: one merge key (`api/extraction_merge.py`). M7: gate on the production merge, prints the type it would mint (`-> Project` from the stored windows — the B4 hazard, now visible). M1/M2/M8 fixed; B4 runbook order corrected (deploy BEFORE replay); curated payloads are gate-only validation artifacts; `curation.document_rid` checked; three shared handoff rows restored; spec 0.88→0.75 (`similarity_threshold`); PR now `Closes #62` / `Closes #68` (both link). No live writes. |
 | 2026-09-14 | Claude Code | `bb26783d` (koi-infra) | **Issue #68 — one authoritative document-extraction type contract.** Commit `3bbe405`, pushed; PR #66 body rewritten (`Closes #62 and #68`). Root cause was the inverse of the title: the registry already marked **9** types extractable while three code surfaces said seven, and nothing compared them. `api/document_extraction_contract.py` is now the single source and all four surfaces are DERIVED (`render_extraction_contract.py --check`); `assert_contract_surfaces()` re-checks the LOADED prompt+schema at run start, because the job runs from a different checkout. Found two things not in the issue: the audited-type-decision escape hatch was **dead end-to-end** (no caller passed `type_decisions`, and preregistration refused even a decided conflict), and the operator gate **crashed with KeyError** on exactly the two documents #68 is about. 57 new tests, each drift check with a positive control; full suite vs a clean worktree = **67 failures, identical sets, zero regressions**. All three michaelgarfield payloads now exit 0 with the essays typed `Document`. No live writes; migration 126 written and NOT applied (verified no-op). |

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import asyncpg
 from rid_lib.core import RID as _RidLibRID
@@ -23,6 +23,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_TTL_HOURS = 24
 REMOTE_TTL_HOURS = 72
 
+# poll() hook signature: (conn, requesting_node, handed_over_ids, excluded_ids).
+DeliveryObserver = Callable[
+    [asyncpg.Connection, str, List[str], List[str]], Awaitable[None]
+]
+
+
+# A fact-retraction event (issue #67): domain `knowledge_fact` whose payload
+# carries a `retraction` block. Withheld from unauthenticated polls — see poll().
+RETRACTION_EVENT_SQL = (
+    "contents->>'_koi_domain' = 'knowledge_fact' AND (contents->'payload') ? 'retraction'"
+)
+
 
 class EventQueue:
     """Database-backed event queue for KOI-net protocol."""
@@ -30,6 +42,13 @@ class EventQueue:
     def __init__(self, pool: asyncpg.Pool, node_rid: str):
         self.pool = pool
         self.node_rid = node_rid
+        # Optional hook, called INSIDE poll()'s connection after delivered_to is
+        # written: observer(conn, requesting_node, handed_over_event_ids,
+        # excluded_event_ids). `delivered_to` alone cannot tell those two
+        # populations apart (the starvation fix marks both), so a ledger that
+        # needs "this peer actually received the event" has to be told here.
+        # Set by api/fact_retraction.py at startup; None means no observer.
+        self.delivery_observer: Optional[DeliveryObserver] = None
 
     async def add(
         self,
@@ -41,6 +60,7 @@ class EventQueue:
         ttl_hours: int = DEFAULT_TTL_HOURS,
         event_id: Optional[str] = None,
         target_node: Optional[str] = None,
+        conn: Optional[asyncpg.Connection] = None,
     ) -> Optional[str]:
         """Add an event to the queue. Returns the event_id.
 
@@ -50,90 +70,151 @@ class EventQueue:
 
         target_node: If set, only this node can receive the event (unicast).
                      If None, event is available to all polling nodes (broadcast).
+
+        conn: Caller-supplied connection. When given, the INSERT runs on it —
+              inside whatever transaction the caller holds — and nothing is
+              acquired from the pool. This is what makes koi_net_events usable
+              as a transactional outbox (issue #67): the retraction's
+              `valid_to` write and its outbound event commit together or not at
+              all. Without it, add() acquires its own connection and the row
+              is committed independently of the caller's work.
         """
+        if conn is not None:
+            return await self._add_on(
+                conn, event_type, rid, manifest, contents, source_node,
+                ttl_hours, event_id, target_node,
+            )
+        async with self.pool.acquire() as acquired:
+            return await self._add_on(
+                acquired, event_type, rid, manifest, contents, source_node,
+                ttl_hours, event_id, target_node,
+            )
+
+    async def _add_on(
+        self,
+        conn: asyncpg.Connection,
+        event_type: str,
+        rid: str,
+        manifest: Optional[Dict[str, Any]],
+        contents: Optional[Dict[str, Any]],
+        source_node: Optional[str],
+        ttl_hours: int,
+        event_id: Optional[str],
+        target_node: Optional[str],
+    ) -> Optional[str]:
         effective_source = source_node or self.node_rid
-        async with self.pool.acquire() as conn:
-            if event_id:
-                # Inbound event with sender-assigned event_id — dedup on insert
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO koi_net_events
-                        (event_id, event_type, rid, manifest, contents, source_node, target_node, expires_at)
-                    VALUES
-                        ($1::UUID, $2, $3, $4, $5, $6, $7, NOW() + ($8 || ' hours')::INTERVAL)
-                    ON CONFLICT (source_node, event_id, COALESCE(target_node, ''))
-                        WHERE event_id IS NOT NULL DO NOTHING
-                    RETURNING event_id::TEXT
-                    """,
-                    event_id,
-                    event_type,
-                    rid,
-                    json.dumps(manifest) if manifest else None,
-                    json.dumps(contents) if contents else None,
-                    effective_source,
-                    target_node,
-                    str(ttl_hours),
-                )
-                if row is None:
-                    logger.debug(f"Duplicate event {event_id} from {effective_source}, skipped")
-                    return None
-                logger.info(f"Queued {event_type} event for {rid} (id={event_id}, target={target_node})")
-                return event_id
-            else:
-                # Locally generated event — DB assigns event_id
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO koi_net_events
-                        (event_type, rid, manifest, contents, source_node, target_node, expires_at)
-                    VALUES
-                        ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' hours')::INTERVAL)
-                    RETURNING event_id::TEXT
-                    """,
-                    event_type,
-                    rid,
-                    json.dumps(manifest) if manifest else None,
-                    json.dumps(contents) if contents else None,
-                    effective_source,
-                    target_node,
-                    str(ttl_hours),
-                )
-                new_id = row["event_id"]
-                logger.info(f"Queued {event_type} event for {rid} (id={new_id}, target={target_node})")
-                return new_id
+        if event_id:
+            # Inbound event with sender-assigned event_id — dedup on insert
+            row = await conn.fetchrow(
+                """
+                INSERT INTO koi_net_events
+                    (event_id, event_type, rid, manifest, contents, source_node, target_node, expires_at)
+                VALUES
+                    ($1::UUID, $2, $3, $4, $5, $6, $7, NOW() + ($8 || ' hours')::INTERVAL)
+                ON CONFLICT (source_node, event_id, COALESCE(target_node, ''))
+                    WHERE event_id IS NOT NULL DO NOTHING
+                RETURNING event_id::TEXT
+                """,
+                event_id,
+                event_type,
+                rid,
+                json.dumps(manifest) if manifest else None,
+                json.dumps(contents) if contents else None,
+                effective_source,
+                target_node,
+                str(ttl_hours),
+            )
+            if row is None:
+                logger.debug(f"Duplicate event {event_id} from {effective_source}, skipped")
+                return None
+            logger.info(f"Queued {event_type} event for {rid} (id={event_id}, target={target_node})")
+            return event_id
+        else:
+            # Locally generated event — DB assigns event_id
+            row = await conn.fetchrow(
+                """
+                INSERT INTO koi_net_events
+                    (event_type, rid, manifest, contents, source_node, target_node, expires_at)
+                VALUES
+                    ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' hours')::INTERVAL)
+                RETURNING event_id::TEXT
+                """,
+                event_type,
+                rid,
+                json.dumps(manifest) if manifest else None,
+                json.dumps(contents) if contents else None,
+                effective_source,
+                target_node,
+                str(ttl_hours),
+            )
+            new_id = row["event_id"]
+            logger.info(f"Queued {event_type} event for {rid} (id={new_id}, target={target_node})")
+            return new_id
 
     async def poll(
         self,
         requesting_node: str,
         limit: int = 50,
         rid_types: Optional[List[str]] = None,
+        authenticated: bool = True,
     ) -> List[Dict[str, Any]]:
         """Poll for events not yet delivered to the requesting node.
 
         Returns list of event dicts with event_id, event_type, rid, manifest, contents.
         Marks events as delivered_to this node.
+
+        `authenticated=False` means the caller's identity is CLAIMED (an
+        unsigned request naming `node_id`), not proven. Fact-retraction events
+        (issue #67 — domain `knowledge_fact` with a `retraction` block) are then
+        withheld: neither served nor marked `delivered_to`, so the peer whose
+        name was used still receives them on its own signed poll. This is
+        independent of KOI_REQUIRE_SIGNED_ENVELOPES: an unsigned caller naming
+        a peer used to be handed that peer's unicast retractions (fact text and
+        triple) and to consume them. Everything else keeps the pre-existing,
+        policy-governed behaviour.
         """
         async with self.pool.acquire() as conn:
             # Fetch events not yet delivered to this node and not expired.
             # target_node scoping: NULL = broadcast (visible to all), non-NULL = unicast.
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT id, event_id::TEXT, event_type, rid, manifest, contents, source_node, queued_at
                 FROM koi_net_events
                 WHERE NOT ($1 = ANY(delivered_to))
                   AND expires_at > NOW()
                   AND (target_node IS NULL OR target_node = $1)
+                  AND ($3 OR NOT ({RETRACTION_EVENT_SQL}))
                 ORDER BY queued_at ASC
                 LIMIT $2
                 """,
                 requesting_node,
                 limit,
+                bool(authenticated),
             )
+
+            if not authenticated:
+                withheld = await conn.fetchval(
+                    f"""
+                    SELECT count(*) FROM koi_net_events
+                    WHERE NOT ($1 = ANY(delivered_to))
+                      AND expires_at > NOW()
+                      AND (target_node IS NULL OR target_node = $1)
+                      AND ({RETRACTION_EVENT_SQL})
+                    """,
+                    requesting_node,
+                )
+                if withheld:
+                    logger.warning(
+                        f"event_queue.poll_unsigned_withheld node={requesting_node} "
+                        f"retraction_events={withheld} (served only to a signed poll)"
+                    )
 
             if not rows:
                 return []
 
             events = []
             ids_to_mark = []
+            excluded_event_ids: List[str] = []
 
             for row in rows:
                 # If rid_types filter specified, gate BOTH rid-typed events and
@@ -184,7 +265,15 @@ class EventQueue:
                         # re-drops the same rows, returning an empty list
                         # forever. That starves the peer of everything behind
                         # them until the 24h TTL lapses.
+                        #
+                        # Consequence, and the reason delivery_observer exists:
+                        # after this, `delivered_to` ∋ peer is true for an event
+                        # the peer never saw. Anyone reading that column as
+                        # transmission is wrong (2026-09-07 false disclosure;
+                        # the #67 incident's "delivery 4/4").
                         ids_to_mark.append(row["id"])
+                        if row["event_id"]:
+                            excluded_event_ids.append(row["event_id"])
                         continue
 
                 event = {
@@ -213,6 +302,21 @@ class EventQueue:
                 logger.info(
                     f"Delivered {len(events)} events to {requesting_node}"
                 )
+
+            if self.delivery_observer is not None and (events or excluded_event_ids):
+                # Same connection, after the delivered_to write. The observer is
+                # the only place that learns which of the marked rows were
+                # actually handed over; a failure here must not fail the poll.
+                try:
+                    await self.delivery_observer(
+                        conn, requesting_node,
+                        [e["event_id"] for e in events if e["event_id"]],
+                        excluded_event_ids,
+                    )
+                except Exception as exc:  # noqa: BLE001 — bookkeeping, never the transport
+                    logger.warning(
+                        f"event_queue.delivery_observer failed for {requesting_node}: {exc}"
+                    )
 
             return events
 

@@ -757,6 +757,24 @@ class FactRetractRequest(BaseModel):
     )
 
 
+class FactRetractDelivery(BaseModel):
+    """One peer's obligation, as recorded in the retraction transaction (#67)."""
+    target_node: str
+    state: str               # queued | unauthorized (later states arrive via confirm)
+    event_id: Optional[str] = None
+    attempt: int = 0
+    reason: Optional[str] = None
+
+
+class FactRetractFederation(BaseModel):
+    enabled: bool            # KOI_FEDERATE_KNOWLEDGE and a configured event queue
+    node_rid: Optional[str] = None
+    deliveries: List[FactRetractDelivery] = Field(default_factory=list)
+    # True when federation is on but no APPROVED outbound edge admits
+    # knowledge_fact — the retraction was recorded but reaches no peer.
+    no_admitting_peers: bool = False
+
+
 class FactRetractResponse(BaseModel):
     fact_id: str
     retracted: bool          # True if THIS call set valid_to
@@ -766,6 +784,10 @@ class FactRetractResponse(BaseModel):
     predicate: Optional[str] = None
     object_uri: Optional[str] = None
     reason: Optional[str] = None
+    # #67: the ledger row this call wrote (None on the idempotent no-op) and the
+    # per-peer obligations queued in the SAME transaction as valid_to.
+    retraction_id: Optional[int] = None
+    federation: Optional[FactRetractFederation] = None
 
 
 def create_router(
@@ -802,7 +824,13 @@ def create_router(
     # Federation Phase 1 step 2e: knowledge_episode emit. emit_domain_event is
     # internally gated by KOI_FEDERATE_KNOWLEDGE — a no-op when the flag is off,
     # so the call site below is unconditional (no caller-side double-gate).
-    from api.federation_events import emit_domain_event
+    from api.federation_events import emit_domain_event, _knowledge_federation_enabled
+    from api import fact_retraction
+
+    def _fed_queue_now():
+        """The federation EventQueue as wired NOW (set at startup; None if absent)."""
+        from api import federation_events as _fe
+        return _fe._event_queue
 
     # Service-token gate for mutating endpoints (retract). Accepts the
     # KOI_CLAIMS_SERVICE_TOKEN service token OR a valid session token; see
@@ -1109,14 +1137,32 @@ def create_router(
                                 if (row['predicate'] == predicate_upper
                                         and row['object_uri'] != object_uri
                                         and sim > 0.5):
-                                    await conn.execute("""
-                                        UPDATE knowledge_facts
-                                        SET valid_to = NOW()
-                                        WHERE id = $1
-                                    """, row['id'])
+                                    # Issue #67 (review finding 3): this
+                                    # auto-retire is a retraction too, and it
+                                    # used to write valid_to with no
+                                    # federation obligation — the superseded
+                                    # fact stayed live on peers. Same
+                                    # transaction, same helper as /retract.
+                                    # on_missing_ledger="skip": a publisher
+                                    # without migration 127 still ingests
+                                    # (warned once; the audit finds the gap).
+                                    sup = await fact_retraction.retract_fact_transactional(
+                                        conn,
+                                        fact_id=row['id'],
+                                        event_queue=_fed_queue_now(),
+                                        federation_enabled=_knowledge_federation_enabled(),
+                                        reason=(
+                                            f"superseded_by:{predicate_upper} "
+                                            f"{(object_uri or fact.object_literal or '')[:120]}"
+                                        ),
+                                        retracted_by=_identity,
+                                        on_missing_ledger="skip",
+                                    )
                                     logger.info(
                                         f"Superseded fact {row['id']}: "
-                                        f"{row['fact_text']} → {fact.fact_text}")
+                                        f"{row['fact_text']} → {fact.fact_text} "
+                                        f"(retraction_id={sup.retraction_id if sup else None} "
+                                        f"deliveries={len(sup.deliveries) if sup else 0})")
                                     facts_superseded += 1
 
                     # Wave A A2 (2026-05-01): silent-fail surface for NULL-embed
@@ -2907,6 +2953,17 @@ def create_router(
     # undo). Unlike the supersede path it needs neither a replacement fact nor
     # a SUPERSEDE-class predicate, so it can retire facts that path structurally
     # cannot — e.g. a null-object AUTHORED fact.
+    #
+    # Issue #67. Before 2026-09-15 this endpoint wrote valid_to and emitted
+    # nothing, so every fact ever retracted here stayed live on peers. It now
+    # runs ONE transaction — fact lock, valid_to write, tombstone-ledger row,
+    # one unicast koi_net_events row per authorized recipient, one deliveries
+    # row per peer — through api/fact_retraction.retract_fact_transactional.
+    # It does NOT use emit_domain_event: that helper is post-commit and
+    # swallows queue failures, which is the right contract for a create and
+    # the wrong one for an obligation. If migration 127 is absent the call is
+    # refused (503) BEFORE any write; a retraction whose federation obligation
+    # cannot be recorded is exactly the silent loss #67 names.
     @router.post("/facts/{fact_id}/retract", response_model=FactRetractResponse)
     async def retract_fact(
         fact_id: str,
@@ -2923,60 +2980,76 @@ def create_router(
 
         reason = body.reason if body else None
 
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                SELECT id, valid_to, subject_uri, predicate, object_uri, fact_text
-                FROM knowledge_facts
-                WHERE id = $1
-            """, fid)
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    result = await fact_retraction.retract_fact_transactional(
+                        conn,
+                        fact_id=fid,
+                        event_queue=_fed_queue_now(),
+                        federation_enabled=_knowledge_federation_enabled(),
+                        reason=reason,
+                        retracted_by=_identity,
+                    )
+        except fact_retraction.LedgerUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except fact_retraction.RetractionError as exc:
+            raise HTTPException(status_code=500, detail=f"retraction not recorded: {exc}")
 
-            if row is None:
-                raise HTTPException(status_code=404, detail=f"Fact not found: {fact_id}")
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Fact not found: {fact_id}")
 
-            # Idempotent: already expired → 200 no-op, report current valid_to.
-            if row["valid_to"] is not None:
-                logger.info(
-                    "retract_fact no-op (already expired) fact=%s valid_to=%s by=%s",
-                    fact_id, row["valid_to"], _identity,
-                )
-                return FactRetractResponse(
-                    fact_id=fact_id, retracted=False, already_retracted=True,
-                    valid_to=row["valid_to"].isoformat(),
-                    subject_uri=row["subject_uri"], predicate=row["predicate"],
-                    object_uri=row["object_uri"], reason=reason,
-                )
+        federation = FactRetractFederation(
+            enabled=result.federation_enabled and result.node_rid is not None,
+            node_rid=result.node_rid,
+            deliveries=[FactRetractDelivery(**d) for d in result.deliveries],
+            no_admitting_peers=result.no_admitting_peers,
+        )
 
-            updated = await conn.fetchrow("""
-                UPDATE knowledge_facts
-                SET valid_to = NOW()
-                WHERE id = $1 AND valid_to IS NULL
-                RETURNING valid_to
-            """, fid)
-
-            # A concurrent retract could have set valid_to between SELECT and
-            # UPDATE; treat the empty RETURNING as already-done (still 200).
-            if updated is None:
-                refetched = await conn.fetchval(
-                    "SELECT valid_to FROM knowledge_facts WHERE id = $1", fid)
-                return FactRetractResponse(
-                    fact_id=fact_id, retracted=False, already_retracted=True,
-                    valid_to=refetched.isoformat() if refetched else None,
-                    subject_uri=row["subject_uri"], predicate=row["predicate"],
-                    object_uri=row["object_uri"], reason=reason,
-                )
-
+        if result.already_retracted:
+            logger.info(
+                "retract_fact no-op (already expired) fact=%s valid_to=%s by=%s",
+                fact_id, result.valid_to, _identity,
+            )
+        else:
             logger.info(
                 "retract_fact fact=%s subject=%s predicate=%s object=%s "
-                "valid_to=%s reason=%r by=%s text=%r",
-                fact_id, row["subject_uri"], row["predicate"], row["object_uri"],
-                updated["valid_to"], reason, _identity, row["fact_text"],
+                "valid_to=%s retraction_id=%s deliveries=%d reason=%r by=%s",
+                fact_id, result.subject_uri, result.predicate, result.object_uri,
+                result.valid_to, result.retraction_id, len(result.deliveries),
+                reason, _identity,
             )
-            return FactRetractResponse(
-                fact_id=fact_id, retracted=True, already_retracted=False,
-                valid_to=updated["valid_to"].isoformat(),
-                subject_uri=row["subject_uri"], predicate=row["predicate"],
-                object_uri=row["object_uri"], reason=reason,
+        return FactRetractResponse(
+            fact_id=fact_id, retracted=result.retracted,
+            already_retracted=result.already_retracted,
+            valid_to=result.valid_to, subject_uri=result.subject_uri,
+            predicate=result.predicate, object_uri=result.object_uri, reason=reason,
+            retraction_id=result.retraction_id, federation=federation,
+        )
+
+    # -------------------------------------------------------------------
+    # GET /facts/{fact_id}/tombstone — authorized UUID lookup incl. tombstone
+    # -------------------------------------------------------------------
+    # Issue #67 AC: "an authorized UUID lookup proves tombstone application
+    # while ordinary retrieval keeps hiding retracted facts". Every read
+    # surface in this router filters `valid_to IS NULL` by default; this one
+    # is the deliberate exception, and it is service-token gated for that
+    # reason. On the publisher it also returns each peer's delivery state; on
+    # a recipient it shows the applied or PENDING tombstone.
+    @router.get("/facts/{fact_id}/tombstone")
+    async def fact_tombstone(
+        fact_id: str,
+        _identity: str = Depends(require_service_auth),
+    ):
+        try:
+            fid = UUID(fact_id)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"fact_id is not a valid UUID: {fact_id!r}",
             )
+        async with pool.acquire() as conn:
+            return await fact_retraction.tombstone_status(conn, fid)
 
     # -------------------------------------------------------------------
     # GET /discourse-search — lexical search over scientific discourse moves
