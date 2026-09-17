@@ -1,5 +1,34 @@
 # Project handoff
 
+> ## #67 SECOND REVIEW ROUND APPLIED — 2026-09-17, session `86419f51`
+>
+> Bounded source-fix round on `fix/federated-fact-retractions` from reviewed head `6905f4f`,
+> using session `b35cb9db`'s 16-finding review as the finding set. Code round = commit
+> `433b167`; the docs/handoff commit follows it (read `git rev-parse HEAD`). **Nothing
+> deployed, 127 NOT applied live, no restart, no peer contacted, no historical re-emission, no
+> live writes** (live `personal_koi`: SELECTs + the read-only audit only; tripwire OK on every
+> run). The one unintended write was to the SCRATCH DB: a `psql -c BEGIN -f 127.sql -c ROLLBACK`
+> wrapper did nothing because the file carries its own `BEGIN/COMMIT` — that became the real
+> up/up/down (below); the scratch DB was returned to its pre-state.
+>
+> | done | detail |
+> |---|---|
+> | PR body | reworded — no closing keyword adjacent to the issue number anywhere (the old "does not close …" was linked for auto-close); `closingIssuesReferences` re-checked after the edit |
+> | `pending` state | 10th delivery state (127 CHECK + `_report_to_state` + audit class `pending`): no `applied_at`, non-terminal, not outstanding, `application_proven` False, sweep leaves it |
+> | `received` preserved | never `failed` by a later edge narrowing; wait / `unverifiable` after expiry; the peer's later report lands |
+> | signed-only retraction transport | `EventQueue.poll(authenticated=signed)` withholds retraction events from unsigned polls (not served, not marked, count logged); unsigned confirm writes neither receipt nor application to the ledger. Independent of `KOI_REQUIRE_SIGNED_ENVELOPES`. Safe: 8/8 `koi_net_nodes` hold keys; the poller signs whenever it has one (NUC `aa4be29` included) |
+> | audit floor | `--scope-enforced-since ISO\|auto` (auto = `2c497f0` must be an ancestor of HEAD in the running checkout, else exit 3); absent = `scope_excluded` disabled. Live with `auto`: numbers identical to 09-16 (4,188/4,063/3,847/196/26/729/3/plan 4,043); without: 729 → `unauthorized` (732) |
+> | terminal visibility | `failed` (exhausted) + non-reopenable `rejected` OUTSTANDING + listed under "terminal failures"; WARNING per failed/rejected, INFO per retry/unverifiable, sweep summary |
+> | 127 assertion | exact state set (no extras), both unique keys' columns in order, all columns; 5 drifted-table negative controls; real up/up/down on scratch: exit 0/0/0, `INSERT 0 0` on the second up, post-state == pre-state; checksum label `v2_retraction_ledger_pending_state` |
+> | doc | `/recall-walk shape=relationship` = third unauthenticated expired-fact surface; `…/tombstone` exact field list (triple yes, `retracted_by` no — removed from the response); trust model rewritten (LEAST + no originator check = permanent tombstone authority for any admitting edge; NOT "unchanged"); counts; §5.1 deferred table |
+> | tests | **155** in the six files (7/61/28/3/20/36); 19 new, each red first; 7 revert-proof mutants each red. Full suite, same flags both sides (base **54F / 10E / 1,832 passed**, branch **54F / 10E / 1,987 passed** (+155 = the six #67 files); FAILED/ERROR node-id sets **identical** (64 = 64, no id only on either side)). |
+> | deferred, tracked | personal-koi tasks (`source_type=github-issue`) with AC in `context`: `koi-67-signed-envelopes-general-stream` (deploy gate: general-stream unsigned poll), `koi-67-multi-origin-application-proof-drift`, `koi-67-origin-authority`, `koi-67-payload-minimization`, `koi-67-unauthenticated-expired-fact-surfaces`. Each visibly unmet in doc §5.1, the PR body, and the #67 AC comment |
+>
+> **Next:** re-review PR #70 at the new head; then the deploy order in the PR body (127 → code
+> to both checkouts → restart → `ps -o lstart=` → `KOI_FACT_RETRACTION_SWEEP=true` → gate
+> `koi-67-signed-envelopes-general-stream` → NUC by hand → canary). Leftovers unchanged: two
+> un-obligated scripts, repair application, NUC proof, #69.
+>
 > ## #67 FEDERATED FACT RETRACTIONS — BUILT IN BRANCH 2026-09-15/16, session `272b40d9`
 >
 > Branch `fix/federated-fact-retractions` (worktree `koi-federated-retractions-20260915`),
