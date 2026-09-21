@@ -29,6 +29,7 @@ the scratch DSN (read-only) and against an unreachable DSN (exit 3).
 from __future__ import annotations
 
 import json
+import pathlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
@@ -854,9 +855,9 @@ async def test_r2_scope_excluded_needs_an_explicit_enforcement_floor(conn):
 
 def test_r2_scope_floor_resolution_is_explicit_or_verified(tmp_path):
     """`--scope-enforced-since` takes an ISO instant (operator asserts it), `auto`
-    (verified: the checkout the audit runs from must contain 2c497f0, and the
-    floor is that commit's time), or is absent (no floor). `auto` in a
-    checkout without the commit is a misconfiguration, not a silent default."""
+    (verified against the SERVING process — third round, see test_r3 below), or
+    is absent (no floor). `auto` against a checkout without the commit is a
+    misconfiguration, not a silent default."""
     none = audit_mod.resolve_scope_floor(None)
     assert none == (None, "not given: scope_excluded classification disabled")
     explicit, how = audit_mod.resolve_scope_floor("2026-08-26T02:50:25+00:00")
@@ -864,19 +865,213 @@ def test_r2_scope_floor_resolution_is_explicit_or_verified(tmp_path):
     assert how.startswith("given on the command line")
     with pytest.raises(audit_mod.ScopeFloorError):
         audit_mod.resolve_scope_floor("not-a-timestamp")
-    # auto, verified against THIS repo (positive control: 2c497f0 is an ancestor of HEAD here)
-    auto, how = audit_mod.resolve_scope_floor("auto", repo_root=audit_mod.REPO_ROOT)
+    now = datetime.now(timezone.utc)
+    # auto, verified against a serving process whose cwd is THIS repo (positive
+    # control: 2c497f0 is an ancestor of HEAD here)
+    serving = audit_mod.ServingProcess(cwd=audit_mod.REPO_ROOT, pid=4242, started=now)
+    auto, how = audit_mod.resolve_scope_floor("auto", dsn=DB_URL, serving=serving)
     assert auto == datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
     assert "2c497f0" in how and "ancestor" in how
-    # auto in a directory that is not that repo → refused, never defaulted
+    # auto against a serving checkout that is not that repo → refused, never defaulted
     with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
-        audit_mod.resolve_scope_floor("auto", repo_root=tmp_path)
+        audit_mod.resolve_scope_floor(
+            "auto", dsn=DB_URL, serving=audit_mod.ServingProcess(cwd=tmp_path, pid=1, started=now))
     assert "2c497f0" in str(exc_info.value)
 
 
-def test_r2_cli_auto_floor_outside_the_repo_is_exit_3(capsys, tmp_path, monkeypatch):
-    monkeypatch.setattr(audit_mod, "REPO_ROOT", tmp_path)
-    rc = audit_mod.main(["--dsn", DB_URL, "--node-rid", NODE_A, "--scope-enforced-since", "auto",
-                         "--limit", "1"])
+def test_r3_auto_floor_is_bound_to_the_serving_process_not_the_script_checkout(tmp_path):
+    """Re-review finding N2 (third round). At c41fa77 `auto` verified the checkout
+    containing the script FILE, so running the worktree's copy against any
+    database — a remote node's, or a node whose serving process never enforced
+    scoping — reported the floor as 'verified'. `auto` may vouch only for the
+    SERVING process on THIS host: the DSN must be local, the process's cwd must
+    contain 2c497f0, and the process must have started after the commit.
+    Anything else is a refusal that tells the operator to give the instant
+    explicitly. The script's own checkout is never consulted."""
+    now = datetime.now(timezone.utc)
+    good = audit_mod.ServingProcess(cwd=audit_mod.REPO_ROOT, pid=4242, started=now)
+    # (1) the script checkout contains the commit, the serving checkout does not → refused
+    with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
+        audit_mod.resolve_scope_floor(
+            "auto", dsn=DB_URL, serving=audit_mod.ServingProcess(cwd=tmp_path, pid=1, started=now))
+    assert "2c497f0" in str(exc_info.value) and str(tmp_path) in str(exc_info.value)
+    # (2) a REMOTE database cannot be vouched for by a local process, whatever it runs
+    with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
+        audit_mod.resolve_scope_floor(
+            "auto", dsn="postgresql://dobby@192.168.1.69:5432/personal_koi", serving=good)
+    assert "remote" in str(exc_info.value).lower() and "ISO" in str(exc_info.value)
+    # (3) a serving process that started BEFORE the commit cannot be running it
+    with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
+        audit_mod.resolve_scope_floor(
+            "auto", dsn=DB_URL,
+            serving=audit_mod.ServingProcess(cwd=audit_mod.REPO_ROOT, pid=7,
+                                             started=datetime(2026, 8, 1, tzinfo=timezone.utc)))
+    assert "started" in str(exc_info.value)
+    # (4) an unknown start time is not evidence
+    with pytest.raises(audit_mod.ScopeFloorError):
+        audit_mod.resolve_scope_floor(
+            "auto", dsn=DB_URL, serving=audit_mod.ServingProcess(cwd=audit_mod.REPO_ROOT, pid=7, started=None))
+    # (5) no serving process handed in at all → refused
+    with pytest.raises(audit_mod.ScopeFloorError):
+        audit_mod.resolve_scope_floor("auto", dsn=DB_URL, serving=None)
+    # (6) the checkout's HEAD moved AFTER the process started (a pull or switch with no
+    # restart): today's HEAD says nothing about the running code → refused (verifier A4)
+    moved_after = audit_mod.ServingProcess(
+        cwd=audit_mod.REPO_ROOT, pid=9,
+        started=audit_mod.SCOPE_ENFORCEMENT_COMMIT_TIME + timedelta(minutes=1))
+    assert audit_mod._git_head_moved_at(audit_mod.REPO_ROOT) > moved_after.started, "test premise"
+    with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
+        audit_mod.resolve_scope_floor("auto", dsn=DB_URL, serving=moved_after)
+    assert "moved" in str(exc_info.value) and "restart" in str(exc_info.value)
+    # positive control: local DSN + serving cwd containing the commit + started after it
+    # (and after the checkout's HEAD last moved)
+    floor, how = audit_mod.resolve_scope_floor("auto", dsn=DB_URL, serving=good)
+    assert floor == audit_mod.SCOPE_ENFORCEMENT_COMMIT_TIME
+    assert "serving" in how.lower() and "pid 4242" in how and str(audit_mod.REPO_ROOT) in how
+    assert "lower bound" in how.lower() and "HEAD unchanged since" in how
+
+
+def test_r3_cli_auto_floor_asks_the_serving_process(capsys, tmp_path, monkeypatch):
+    """The CLI resolves `auto` through find_serving_process(port), never through
+    the script's directory. A serving process whose cwd lacks the commit → exit
+    3 naming 2c497f0; no serving process → exit 3 telling the operator to give
+    the instant; a serving checkout with the commit → the run proceeds and the
+    header credits the serving cwd. REPO_ROOT is irrelevant throughout."""
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(audit_mod, "REPO_ROOT", tmp_path)   # must not matter either way
+    monkeypatch.setattr(audit_mod, "find_serving_process",
+                        lambda port: audit_mod.ServingProcess(cwd=tmp_path, pid=1, started=now))
+    rc = audit_mod.main(["--dsn", DB_URL, "--node-rid", NODE_A, "--scope-enforced-since", "auto", "--limit", "1"])
     assert rc == audit_mod.EXIT_MISCONFIGURED
     assert "2c497f0" in capsys.readouterr().err
+
+    def _none(port):
+        raise audit_mod.ScopeFloorError(f"no process is listening on :{port}")
+    monkeypatch.setattr(audit_mod, "find_serving_process", _none)
+    rc = audit_mod.main(["--dsn", DB_URL, "--node-rid", NODE_A, "--scope-enforced-since", "auto", "--limit", "1"])
+    assert rc == audit_mod.EXIT_MISCONFIGURED
+    assert "explicit" in capsys.readouterr().err.lower()
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    monkeypatch.setattr(audit_mod, "find_serving_process",
+                        lambda port: audit_mod.ServingProcess(cwd=repo, pid=4242, started=now))
+    rc = audit_mod.main(["--dsn", DB_URL, "--node-rid", NODE_A, "--scope-enforced-since", "auto", "--limit", "1"])
+    out = capsys.readouterr().out
+    assert rc in (audit_mod.EXIT_OK, audit_mod.EXIT_OUTSTANDING)
+    assert "scope enforced since: 2026-08-26T02:50:25+00:00" in out and str(repo) in out and "pid 4242" in out
+
+
+def test_r3_cli_auto_refuses_a_remote_dsn_before_looking_for_any_process(capsys, monkeypatch):
+    """Verifier T4. `auto` against a database on another host is refused in _run
+    BEFORE find_serving_process runs and before any connection attempt — a local
+    process cannot vouch for another node."""
+    def _must_not_be_called(port):
+        raise AssertionError("find_serving_process must not run for a remote DSN")
+    monkeypatch.setattr(audit_mod, "find_serving_process", _must_not_be_called)
+    rc = audit_mod.main(["--dsn", "postgresql://x@192.0.2.1:5432/db", "--node-rid", NODE_A,
+                         "--scope-enforced-since", "auto"])
+    err = capsys.readouterr().err
+    assert rc == audit_mod.EXIT_MISCONFIGURED
+    assert "remote" in err.lower() and "ISO" in err
+
+
+def test_r3_find_serving_process_parses_the_host_tools_and_refuses_ambiguity(monkeypatch, tmp_path):
+    """Verifier T3. The only code that touches the host — lsof / ps parsing — under
+    canned outputs: one listener (IPv4 + IPv6 rows of the SAME pid) resolves cwd
+    (from `lsof -Fn`, the macOS path) and start time; two distinct pids are
+    refused as ambiguous (the documented duplicate-backend hazard); no listener
+    is refused."""
+    import subprocess as sp
+    class _P:
+        def __init__(self, out, rc=0): self.stdout, self.stderr, self.returncode = out, "", rc
+    def fake_run(argv, timeout=30):
+        if argv[:2] == ["lsof", "-nP"]:
+            return _P(fake_run.listeners)
+        if argv[:3] == ["lsof", "-a", "-p"]:
+            return _P("p4440\nfcwd\nn" + str(tmp_path) + "\n")
+        if argv[:2] == ["ps", "-p"]:
+            return _P("Tue Sep 15 22:29:16 2026\n")
+        raise AssertionError(argv)
+    monkeypatch.setattr(audit_mod, "_run_cmd", fake_run)
+    monkeypatch.setattr(audit_mod.pathlib.Path, "exists", lambda self: False)   # no /proc on macOS
+    fake_run.listeners = "4440\n4440\n"          # IPv4 + IPv6 listeners of one process
+    sp_ = audit_mod.find_serving_process(8351)
+    assert sp_.pid == 4440 and sp_.cwd == tmp_path
+    assert sp_.started is not None and sp_.started.astimezone().replace(tzinfo=None) == datetime(2026, 9, 15, 22, 29, 16)
+    fake_run.listeners = "4440\n5151\n"
+    with pytest.raises(audit_mod.ScopeFloorError) as exc_info:
+        audit_mod.find_serving_process(8351)
+    assert "ambiguous" in str(exc_info.value) and "4440" in str(exc_info.value) and "5151" in str(exc_info.value)
+    fake_run.listeners = ""
+    with pytest.raises(audit_mod.ScopeFloorError):
+        audit_mod.find_serving_process(8351)
+
+
+@pytest.mark.parametrize("dsn,env,expected", [
+    ("postgresql://darrenzal:@localhost:5432/personal_koi", {}, True),
+    ("postgres://u@127.0.0.1/db", {}, True),
+    ("postgresql://u@[::1]:5432/db", {}, True),
+    ("host=localhost dbname=x", {}, True),
+    ("personal_koi", {}, True),                                  # no host anywhere: Unix socket
+    ("postgresql:///db?host=/tmp", {}, True),                    # socket directory
+    ("postgresql://x@192.0.2.1:5432/db", {}, False),
+    ("host=192.168.1.69 dbname=x", {}, False),
+    ("postgresql:///personal_koi?host=192.168.1.69", {}, False),  # libpq query-param host (verifier A2)
+    ("postgresql:///personal_koi?hostaddr=192.168.1.69", {}, False),
+    ("postgresql:///personal_koi", {"PGHOST": "nuc.local"}, False),  # PGHOST (verifier A2)
+    ("postgresql:///personal_koi", {"PGHOST": "localhost"}, True),
+    ("postgresql://u@localhost/db?host=192.168.1.69", {}, False),    # any remote candidate → remote
+])
+def test_r3_dsn_is_local_considers_every_host_libpq_would(dsn, env, expected):
+    assert audit_mod.dsn_is_local(dsn, env=env) is expected
+
+
+@pytest.mark.anyio
+async def test_r3_mismatch_rejection_stays_terminal_when_the_edge_no_longer_admits(conn):
+    """Verifier A1. The same `rejected: peer_holds_different_valid_to` on a peer
+    whose edge has since been narrowed classifies `unauthorized` (evidence
+    tombstone_valid_to_mismatch). It must STILL be listed under terminal
+    failures — widening the edge could not help, so filing it only under
+    blocked as a policy decision would mislead."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_NARROW, "rejected", "peer_holds_different_valid_to")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_NARROW)
+    assert row["classification"] == "unauthorized" and row["evidence_class"] == "tombstone_valid_to_mismatch"
+    assert row["terminal"] is True
+    terminal = report["summary"]["terminal_failures"]
+    assert [(t["peer"], t["state"], t["ledger_state"]) for t in terminal] == [
+        (PEER_NARROW, "unauthorized", "rejected")]
+    assert report["summary"]["outstanding"] is True
+
+
+@pytest.mark.anyio
+async def test_r3_ledger_mismatch_rejection_is_surfaced_in_terminal_accounting(conn):
+    """Re-review finding N4 (third round). A ledger delivery `rejected:
+    peer_holds_different_valid_to` — the recipient keeps an EARLIER tombstone,
+    re-sending is futile — was outstanding (exit 1) yet appeared in none of the
+    three action sections (plan: futile; blocked: not unauthorized; terminal
+    failures: classified tombstone_valid_to_mismatch, not `rejected`). It must be
+    listed under terminal failures with its ledger state and reason, while its
+    classification stays tombstone_valid_to_mismatch and the plan stays empty."""
+    await apply_ledger_migration(conn)
+    await seed_edges(conn)
+    ep, fid, db_valid_to = await seed_retracted_fact(conn)
+    await _seed_ledger_delivery(conn, fid, db_valid_to, PEER_AUTH, "rejected", "peer_holds_different_valid_to")
+    report = await audit_mod.audit(conn, NODE_A, fact_ids=[fid])
+    row = peer_row(report, fid, PEER_AUTH)
+    assert row["classification"] == "tombstone_valid_to_mismatch" and row["plan_futile"] is True
+    assert plan_for(report, fid, PEER_AUTH) == []
+    assert report["blocked"] == []
+    assert report["summary"]["outstanding"] is True and report["summary"]["exit_code"] == 1
+    terminal = report["summary"]["terminal_failures"]
+    assert [(t["fact_id"], t["peer"], t["state"], t["ledger_state"]) for t in terminal] == [
+        (fid, PEER_AUTH, "tombstone_valid_to_mismatch", "rejected")]
+    assert "peer_holds_different_valid_to" in terminal[0]["state_reason"]
+    text = audit_mod.render_human(report)
+    section = text[text.index("terminal failures"):text.index("summary:")]
+    assert "peer_holds_different_valid_to" in section and fid in section
+    # and the count in the summary line agrees
+    assert "terminal failures=1" in text

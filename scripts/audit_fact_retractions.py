@@ -78,8 +78,13 @@ EXIT CODES
   1  outstanding obligations (plan non-empty, or possibly_live / unverifiable
      / unauthorized / tombstone_valid_to_mismatch / history_unknown /
      peer_unmigrated / scope_failed_reopenable present, or a TERMINAL failure
-     — `failed` with attempts exhausted, or a non-reopenable `rejected` —
-     present; those are listed under "terminal failures")
+     present. Terminal = any ledger `failed` that is not currently reopenable
+     (attempts exhausted, or a scope failure while the edge is still narrow)
+     and any non-reopenable ledger `rejected` — INCLUDING
+     `peer_holds_different_valid_to`, which keeps its classification
+     tombstone_valid_to_mismatch but is listed under "terminal failures" with
+     its ledger state, so it cannot vanish between plan (futile), blocked
+     (not unauthorized) and terminal (third review, finding N4))
   2  --apply refused
   3  misconfigured (cannot connect, node RID undeterminable, read-only
      mode not in effect, `--scope-enforced-since auto` unverifiable)
@@ -95,18 +100,34 @@ USAGE
 
 SCOPE ENFORCEMENT FLOOR (`scope_excluded`)
   A delivered_to mark is a PROVABLE poll-filter exclusion only if the event
-  was queued after this node's service began enforcing per-edge scoping
-  (commit 2c497f0, 2026-08-25 19:50:25 -0700). That instant is a property of
-  the node running the audit, not of the code in this file: on a checkout
-  that does not contain the commit (the NUC's aa4be29) every such mark is a
-  possible hand-over. So the floor is never assumed:
-    --scope-enforced-since <ISO>   the operator asserts the instant
-    --scope-enforced-since auto    verified: the checkout this file runs from
-                                   must contain 2c497f0 (git merge-base); the
-                                   floor is that commit's committer time
+  was queued after this node's SERVICE began enforcing per-edge scoping
+  (commit 2c497f0, 2026-08-25 19:50:25 -0700, first served by whichever
+  process restart loaded it). That instant is a property of the serving
+  process of the audited node — not of this file, not of the checkout this
+  file happens to sit in (third review, finding N2: at c41fa77 `auto` verified
+  the SCRIPT's checkout, so the worktree's copy vouched for any database).
+    --scope-enforced-since <ISO>   PREFERRED. The operator asserts the instant
+                                   (the first enforcing start of the audited
+                                   node's service; read `ps -o lstart=` of the
+                                   process that served the marks, or the
+                                   deploy log). Naive values are read as UTC.
+    --scope-enforced-since auto    only for a LOCAL database, and only when the
+                                   serving process can actually be verified:
+                                   the DSN host must be local; the process
+                                   listening on --koi-port (default $KOI_PORT
+                                   or 8351) is located, its cwd read from the
+                                   process (/proc/<pid>/cwd, else lsof), that
+                                   checkout must contain 2c497f0, and the
+                                   process must have started after the commit.
+                                   The floor is the commit time — a LOWER bound
+                                   on enforcement: events queued between the
+                                   commit and the first enforcing restart are
+                                   classified as exclusions. Anything not
+                                   verifiable → exit 3 with "give the instant".
     (absent)                       no floor; the class is disabled and such
                                    marks stay `unverifiable` (→ unauthorized)
-  The floor used, and where it came from, is printed in the report header.
+  The floor used, where it came from (pid, start time, cwd), is printed in
+  the report header. `auto` never consults this file's own checkout.
 
 COST: one pass over every knowledge-carrying koi_net_events row (their
 `contents` hold the fact ids and, for episodes, the embeddings — ~1.4 GB on
@@ -121,11 +142,14 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlparse
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from uuid import UUID
 
@@ -178,29 +202,179 @@ C_SCOPE_FAILED_REOPENABLE = "scope_failed_reopenable"
 # Per-edge scoping of domain events was introduced by commit 2c497f0
 # (2026-08-25 19:50:25 -0700). Before it every APPROVED edge received every
 # domain event regardless of scope, so a delivered_to mark from before that
-# instant can be a real hand-over. The instant is a property of the NODE
-# running the audit (when did ITS service start enforcing), so it is never
-# assumed here: `resolve_scope_floor` takes it from the operator, or verifies
-# `auto` against the checkout this file runs from (second review, finding 7 —
-# the NUC's aa4be29 does not contain the commit). With no floor the
-# `scope_excluded` class is disabled.
+# instant can be a real hand-over. The instant is a property of the SERVING
+# PROCESS of the audited node (when did ITS service start enforcing), so it is
+# never assumed here: `resolve_scope_floor` takes it from the operator, or —
+# `auto`, local databases only — verifies it against the process actually
+# listening on the KOI port (third review, finding N2: the second-round `auto`
+# verified the checkout this FILE sits in, which vouches for nothing). With no
+# floor the `scope_excluded` class is disabled. SCOPE_ENFORCEMENT_COMMIT_TIME
+# is the committer time, kept for tests and messages; `auto` reads it from git.
 SCOPE_ENFORCEMENT_COMMIT = "2c497f0"
 SCOPE_ENFORCEMENT_COMMIT_TIME = datetime(2026, 8, 26, 2, 50, 25, tzinfo=timezone.utc)
+def _default_koi_port() -> int:
+    """The service's own variable is KOI_API_PORT (~/.config/personal-koi/start.sh);
+    KOI_PORT is accepted as an alias. Non-numeric values fall back to 8351."""
+    for var in ("KOI_API_PORT", "KOI_PORT"):
+        raw = (os.getenv(var) or "").strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+    return 8351
+
+
+DEFAULT_KOI_PORT = _default_koi_port()
+_LOCAL_DB_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "[::1]"})
 
 
 class ScopeFloorError(ValueError):
     """`--scope-enforced-since` could not be resolved to a verified instant."""
 
 
+@dataclass(frozen=True)
+class ServingProcess:
+    """What `auto` verifies: the process serving the audited node's KOI API."""
+    cwd: pathlib.Path
+    pid: int
+    started: Optional[datetime]   # aware; None when it could not be read
+
+
+def _dsn_hosts(dsn: Optional[str], env: Optional[Dict[str, str]] = None) -> List[str]:
+    """Every host libpq/asyncpg would consult for `dsn`, lowercased: the URI
+    authority, `host=`/`hostaddr=` in the URI query string or in a keyword
+    string, and — when the DSN names none — PGHOST / PGHOSTADDR from the
+    environment. (asyncpg honours `postgresql:///db?host=…` and PGHOST; the
+    earlier version read only the authority and called both 'local' — third
+    review A2.) A host beginning with '/' is a Unix-socket directory."""
+    env = os.environ if env is None else env
+    hosts: List[str] = []
+    text = dsn or ""
+    parsed = None
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.scheme and parsed.netloc:
+        hosts.append((parsed.hostname or "").lower())
+    if parsed is not None and parsed.scheme and parsed.query:
+        for key, val in parse_qsl(parsed.query, keep_blank_values=True):
+            if key in ("host", "hostaddr"):
+                hosts.extend(h.strip().lower() for h in val.split(","))
+    for m in re.finditer(r"(?:^|\s)(host|hostaddr)=([^\s]+)", text):
+        hosts.extend(h.strip().lower() for h in m.group(2).split(","))
+    if not any(h for h in hosts):
+        for var in ("PGHOSTADDR", "PGHOST"):
+            val = (env.get(var) or "").strip()
+            if val:
+                hosts.extend(h.strip().lower() for h in val.split(","))
+                break
+    return hosts
+
+
+def _dsn_host(dsn: Optional[str]) -> str:
+    hosts = [h for h in _dsn_hosts(dsn) if h]
+    return hosts[0] if hosts else ""
+
+
+def dsn_is_local(dsn: Optional[str], env: Optional[Dict[str, str]] = None) -> bool:
+    """True only when EVERY host the DSN (or, absent one, PGHOST/PGHOSTADDR)
+    would reach is this host or a Unix-socket directory."""
+    hosts = _dsn_hosts(dsn, env)
+    if not hosts:
+        return True   # no host anywhere: libpq's default Unix socket
+    return all(h in _LOCAL_DB_HOSTS or h.startswith("/") for h in hosts)
+
+
+def _run_cmd(argv: List[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def find_serving_process(port: int) -> ServingProcess:
+    """Locate the process listening on `port` and read its cwd and start time
+    FROM THE PROCESS (never from a directory layout): /proc/<pid>/cwd on Linux,
+    `lsof -d cwd` on macOS; start time from `ps -o lstart=`. Raises
+    ScopeFloorError when any step cannot be established."""
+    try:
+        listeners = _run_cmd(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"])
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ScopeFloorError(f"cannot run lsof to find the process on :{port}: {exc}") from exc
+    pids = sorted({int(x) for x in listeners.stdout.split() if x.strip().isdigit()})
+    if not pids:
+        raise ScopeFloorError(f"no process is listening on :{port} on this host")
+    if len(pids) > 1:
+        # Two distinct processes on one port is the documented hazard of a
+        # second, launchd-untracked backend racing the service (CLAUDE.md);
+        # `auto` cannot know which one served the marks.
+        raise ScopeFloorError(
+            f"{len(pids)} distinct processes listen on :{port} ({', '.join(map(str, pids))}); "
+            f"ambiguous — resolve the duplicate service first")
+    pid = pids[0]
+    cwd: Optional[pathlib.Path] = None
+    proc_cwd = pathlib.Path(f"/proc/{pid}/cwd")
+    if proc_cwd.exists():
+        try:
+            cwd = pathlib.Path(os.readlink(proc_cwd))
+        except OSError:
+            cwd = None
+    if cwd is None:
+        try:
+            out = _run_cmd(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ScopeFloorError(f"cannot read the cwd of pid {pid}: {exc}") from exc
+        names = [ln[1:] for ln in out.stdout.splitlines() if ln.startswith("n")]
+        if not names:
+            raise ScopeFloorError(f"cannot read the cwd of pid {pid} (lsof returned nothing)")
+        cwd = pathlib.Path(names[-1])
+    started: Optional[datetime] = None
+    try:
+        ps = _run_cmd(["ps", "-p", str(pid), "-o", "lstart="])
+        text = ps.stdout.strip()
+        if text:
+            started = datetime.strptime(text, "%a %b %d %H:%M:%S %Y").astimezone()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        started = None
+    return ServingProcess(cwd=cwd, pid=pid, started=started)
+
+
+def _git_head_moved_at(root: pathlib.Path) -> Optional[datetime]:
+    """When the checkout's HEAD last MOVED: the mtime of the reflog file
+    `logs/HEAD`, which git appends to on every checkout, commit, pull, merge or
+    reset (the `HEAD` file itself is rewritten only on a branch switch, so a
+    fast-forward pull would not show there). Resolved with
+    `git rev-parse --git-path`, so linked worktrees read their own reflog.
+    Falls back to the `HEAD` file; None if neither is readable."""
+    for rel in ("logs/HEAD", "HEAD"):
+        try:
+            gp = _run_cmd(["git", "-C", str(root), "rev-parse", "--git-path", rel])
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if gp.returncode != 0 or not gp.stdout.strip():
+            continue
+        path = pathlib.Path(gp.stdout.strip())
+        if not path.is_absolute():
+            path = root / path
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+    return None
+
+
 def resolve_scope_floor(
     raw: Optional[str],
     *,
-    repo_root: Optional[pathlib.Path] = None,
+    dsn: Optional[str] = None,
+    serving: Optional[ServingProcess] = None,
 ) -> tuple[Optional[datetime], str]:
-    """(floor, how). None → no floor. An ISO instant → as given. `auto` → the
-    checkout at `repo_root` (default: this file's repo) must contain
-    SCOPE_ENFORCEMENT_COMMIT as an ancestor of HEAD; the floor is that commit's
-    committer time read from git. Anything else raises ScopeFloorError."""
+    """(floor, how). None → no floor. An ISO instant → as given (preferred).
+    `auto` → vouched for ONLY by the serving process of a LOCAL database: `dsn`
+    must name this host, `serving` (from `find_serving_process`) must be a
+    process whose cwd contains SCOPE_ENFORCEMENT_COMMIT as an ancestor of HEAD
+    and whose start time is after the commit; the floor is the commit's
+    committer time — a lower bound on enforcement. This file's own checkout is
+    never consulted. Anything else raises ScopeFloorError."""
     if raw is None or str(raw).strip() == "":
         return None, "not given: scope_excluded classification disabled"
     text = str(raw).strip()
@@ -209,24 +383,29 @@ def resolve_scope_floor(
         if parsed is None:
             raise ScopeFloorError(f"--scope-enforced-since {raw!r} is neither an ISO timestamp nor 'auto'")
         return parsed, f"given on the command line ({parsed.isoformat()})"
-    root = pathlib.Path(repo_root) if repo_root is not None else REPO_ROOT
+    hint = ("give the instant explicitly: --scope-enforced-since <ISO> = the first enforcing "
+            "start of the audited node's service (ps -o lstart= of the serving process, or the "
+            "deploy log)")
+    if not dsn_is_local(dsn):
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: the database host {_dsn_host(dsn)!r} is remote; a local "
+            f"process cannot vouch for another node's enforcement — {hint}")
+    if serving is None:
+        raise ScopeFloorError(f"--scope-enforced-since auto: no serving process to verify — {hint}")
+    root = pathlib.Path(serving.cwd)
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", SCOPE_ENFORCEMENT_COMMIT, "HEAD"],
-            capture_output=True, text=True, timeout=30)
+        proc = _run_cmd(["git", "-C", str(root), "merge-base", "--is-ancestor", SCOPE_ENFORCEMENT_COMMIT, "HEAD"])
     except (OSError, subprocess.SubprocessError) as exc:
         raise ScopeFloorError(
-            f"--scope-enforced-since auto: cannot run git in {root}: {exc}; commit "
-            f"{SCOPE_ENFORCEMENT_COMMIT} unverifiable") from exc
+            f"--scope-enforced-since auto: cannot run git in the serving checkout {root} (pid "
+            f"{serving.pid}): {exc}; commit {SCOPE_ENFORCEMENT_COMMIT} unverifiable — {hint}") from exc
     if proc.returncode != 0:
         raise ScopeFloorError(
             f"--scope-enforced-since auto: commit {SCOPE_ENFORCEMENT_COMMIT} is not an ancestor of "
-            f"HEAD in {root} (git exit {proc.returncode}: {proc.stderr.strip() or 'no output'}); "
-            f"this node may never have enforced per-edge scoping — give the instant explicitly "
-            f"or omit the flag")
-    shown = subprocess.run(
-        ["git", "-C", str(root), "show", "-s", "--format=%cI %H", SCOPE_ENFORCEMENT_COMMIT],
-        capture_output=True, text=True, timeout=30)
+            f"HEAD in the SERVING checkout {root} (pid {serving.pid}; git exit {proc.returncode}: "
+            f"{proc.stderr.strip() or 'no output'}); this node may never have enforced per-edge "
+            f"scoping — {hint}, or omit the flag")
+    shown = _run_cmd(["git", "-C", str(root), "show", "-s", "--format=%cI %H", SCOPE_ENFORCEMENT_COMMIT])
     if shown.returncode != 0 or not shown.stdout.strip():
         raise ScopeFloorError(
             f"--scope-enforced-since auto: cannot read commit {SCOPE_ENFORCEMENT_COMMIT} in {root}")
@@ -234,8 +413,38 @@ def resolve_scope_floor(
     when = _parse_carried(when_s)
     if when is None:
         raise ScopeFloorError(f"--scope-enforced-since auto: unparseable commit time {when_s!r}")
-    return when, (f"auto: {SCOPE_ENFORCEMENT_COMMIT} ({full_sha[:12]}, committed {when.isoformat()}) "
-                  f"is an ancestor of HEAD in {root}")
+    when = when.astimezone(timezone.utc)   # one rendering (UTC) whatever the committer's offset
+    if serving.started is None:
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: the start time of the serving process (pid {serving.pid}) "
+            f"could not be read, so it cannot be shown to postdate the commit — {hint}")
+    if serving.started < when:
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: the serving process (pid {serving.pid}) started "
+            f"{serving.started.isoformat()}, BEFORE commit {SCOPE_ENFORCEMENT_COMMIT} was made "
+            f"({when.isoformat()}); it cannot be running that code — {hint}")
+    # The checkout's HEAD is what is on disk NOW; the process loaded what was
+    # there when it STARTED. If HEAD moved after the start (a branch switch or
+    # pull with no restart — the repo's documented 24-hour incident shape), the
+    # ancestry of today's HEAD says nothing about the running code (A4).
+    head_moved = _git_head_moved_at(root)
+    if head_moved is None:
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: cannot read when HEAD of the serving checkout {root} "
+            f"last moved, so it cannot be shown to predate the process start — {hint}")
+    if head_moved > serving.started:
+        raise ScopeFloorError(
+            f"--scope-enforced-since auto: HEAD of the serving checkout {root} moved at "
+            f"{head_moved.isoformat()}, AFTER the serving process (pid {serving.pid}) started "
+            f"{serving.started.isoformat()}; the running code is not what is on disk — restart "
+            f"the service or {hint}")
+    return when, (
+        f"auto: {SCOPE_ENFORCEMENT_COMMIT} ({full_sha}, committed {when.isoformat()}) is an ancestor "
+        f"of HEAD in the SERVING checkout {root} (pid {serving.pid}, started "
+        f"{serving.started.isoformat()}; HEAD unchanged since {head_moved.isoformat()}); the "
+        f"floor is the commit time — a lower bound on "
+        f"enforcement (events queued between the commit and the first enforcing restart are "
+        f"classified as exclusions); prefer an explicit ISO instant")
 
 # Classes that carry an obligation a repair could discharge — IF scope admits.
 SENDABLE = frozenset({
@@ -251,6 +460,9 @@ OUTSTANDING = frozenset({
     C_POSSIBLY_LIVE, C_UNVERIFIABLE, C_UNAUTHORIZED, C_TOMBSTONE_MISMATCH, C_HISTORY_UNKNOWN,
     C_PEER_UNMIGRATED, C_SCOPE_FAILED_REOPENABLE, C_FAILED, C_REJECTED,
 })
+# Classifications whose rows are always terminal. A ledger `rejected` that
+# classifies as tombstone_valid_to_mismatch is terminal too — decided per row in
+# _classify_peer (`row["terminal"]`), which is what audit() lists.
 TERMINAL = frozenset({C_FAILED, C_REJECTED})
 
 EXIT_OK = 0
@@ -626,6 +838,13 @@ def _classify_peer(
         "evidence_class": None,
         "application_proven": False,
         "plan_futile": False,
+        # True when the ledger holds a verdict the transport cannot move past on
+        # its own: `failed`, a non-reopenable `rejected` (any reason, INCLUDING
+        # peer_holds_different_valid_to, whose classification stays
+        # tombstone_valid_to_mismatch). Every such row is listed under "terminal
+        # failures" so it cannot vanish between plan, blocked and terminal
+        # (third review, finding N4).
+        "terminal": False,
         "note": None,
     }
 
@@ -758,6 +977,21 @@ def _classify_peer(
     row["classification"] = cls
     row["application_proven"] = cls == C_APPLIED
     row["note"] = note
+    # Decided from the LEDGER verdict, not from the (possibly rewritten)
+    # classification: a `rejected: peer_holds_different_valid_to` on a peer whose
+    # edge has since been narrowed classifies `unauthorized` (evidence_class
+    # tombstone_valid_to_mismatch) and must still be listed as terminal, not
+    # filed under blocked as a widen-the-edge decision that could not help
+    # (third review A1).
+    ledger_state = ledger_row["state"] if ledger_row is not None else None
+    ledger_reason = (ledger_row["state_reason"] or "") if ledger_row is not None else ""
+    row["terminal"] = (
+        cls in TERMINAL
+        or (ledger_state == fact_retraction.STATE_REJECTED
+            and not ledger_reason.startswith(fact_retraction.REOPENABLE_REJECT_PREFIX))
+        or (ledger_state == fact_retraction.STATE_FAILED
+            and not (ledger_reason in fact_retraction.SCOPE_FAIL_REASONS and scope_now))
+    )
     return row
 
 
@@ -859,14 +1093,16 @@ async def audit(
                 ledger_row=ledger_row, now=now, scope_floor=scope_enforced_since)
             peer_rows.append(row)
             by_class[row["classification"]] += 1
-            if row["classification"] in TERMINAL:
+            if row["terminal"]:
+                ledger_state = (row["ledger"] or {}).get("state")
                 terminal.append({
                     "fact_id": fid, "peer": peer, "state": row["classification"],
+                    "ledger_state": ledger_state,
                     "state_reason": (row["ledger"] or {}).get("state_reason"),
                     "attempt": (row["ledger"] or {}).get("attempt"),
                     "valid_to": local_iso,
-                    "text": (f"terminal {row['classification']}: {peer} for fact {fid} "
-                             f"({(row['ledger'] or {}).get('state_reason')}; "
+                    "text": (f"terminal {row['classification']} (ledger {ledger_state}): {peer} "
+                             f"for fact {fid} ({(row['ledger'] or {}).get('state_reason')}; "
                              f"attempt {(row['ledger'] or {}).get('attempt')})"),
                 })
 
@@ -1051,7 +1287,8 @@ def render_human(report: Dict[str, Any]) -> str:
             w(f"  {b['text']}")
     else:
         w("  (none)")
-    w("terminal failures (the transport gave up; outstanding, no plan line):")
+    w("terminal failures (the transport gave up, or the recipient refused by design — "
+      "incl. rejected: peer_holds_different_valid_to; outstanding, no plan line):")
     if s.get("terminal_failures"):
         for tf in s["terminal_failures"]:
             w(f"  {tf['text']}")
@@ -1089,9 +1326,14 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                    help="only facts with valid_to >= this timestamp")
     p.add_argument("--limit", type=int, default=None, help="at most N facts (newest valid_to first)")
     p.add_argument("--scope-enforced-since", default=None, metavar="ISO|auto",
-                   help=("enable the scope_excluded class: the instant this node's service began "
-                         "enforcing per-edge scoping (ISO), or 'auto' to verify commit 2c497f0 is in "
-                         "this checkout and use its time; absent = class disabled"))
+                   help=("enable the scope_excluded class: the instant this node's SERVICE began "
+                         "enforcing per-edge scoping (ISO, preferred — naive values are read as UTC), "
+                         "or 'auto' (local database only) to verify that the process listening on "
+                         "--koi-port runs a checkout containing commit 2c497f0 and started after it, "
+                         "using the commit time as a lower bound; absent = class disabled"))
+    p.add_argument("--koi-port", type=int, default=DEFAULT_KOI_PORT,
+                   help=("port of this host's KOI API, used by --scope-enforced-since auto to find "
+                         f"the serving process (default $KOI_PORT or 8351; now {DEFAULT_KOI_PORT})"))
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--apply", action="store_true",
                    help="REFUSED: repair application is a #67 follow-up, not implemented here")
@@ -1113,7 +1355,20 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"error: --fact-id {raw!r} is not a UUID", file=sys.stderr)
                 return EXIT_MISCONFIGURED
     try:
-        floor, floor_how = resolve_scope_floor(args.scope_enforced_since)
+        serving: Optional[ServingProcess] = None
+        if (args.scope_enforced_since or "").strip().lower() == "auto":
+            if not dsn_is_local(args.dsn):
+                raise ScopeFloorError(
+                    f"--scope-enforced-since auto: the database host {_dsn_host(args.dsn)!r} is remote; "
+                    f"a local process cannot vouch for another node's enforcement — give the instant "
+                    f"explicitly (--scope-enforced-since <ISO>)")
+            try:
+                serving = find_serving_process(args.koi_port)
+            except ScopeFloorError as exc:
+                raise ScopeFloorError(
+                    f"--scope-enforced-since auto: {exc}; the serving process could not be verified — "
+                    f"give the instant explicitly (--scope-enforced-since <ISO>)") from exc
+        floor, floor_how = resolve_scope_floor(args.scope_enforced_since, dsn=args.dsn, serving=serving)
     except ScopeFloorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_MISCONFIGURED

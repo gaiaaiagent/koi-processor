@@ -1247,3 +1247,320 @@ async def test_r2_unsigned_confirm_records_no_receipt_for_a_retraction_delivery(
     resp = await client.post("/koi-net/events/confirm", json=env)
     assert resp.status_code == 200, resp.text
     assert (await _state(conn, fid))["state"] == "received"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. Third review round (session b35cb9db re-review of c41fa77, 2026-09-20) —
+#    each written red first against c41fa77
+# ═══════════════════════════════════════════════════════════════════════════
+
+# The event shapes an UNSIGNED poll must still be served. The first, second and
+# fourth were DROPPED at c41fa77 because the retraction predicate was
+# three-valued under SQL NULL semantics (`NULL->>'x' = 'y'` is NULL,
+# `FALSE OR NOT NULL` is NULL, and a NULL WHERE term filters the row): re-review
+# finding N1. The other three evaluated FALSE (not NULL) at c41fa77 and were
+# served; they are positive controls for "ordinary".
+_ORDINARY_SHAPES = {
+    "contents_null_forget": dict(event_type="FORGET", rid="orn:koi-net.vault-file:{}", contents=None),
+    "vault_file_no_domain_no_payload": dict(
+        event_type="NEW", rid="orn:koi-net.vault-file:{}",
+        contents={"_vault_sync": True, "relative_path": "x.md", "content_hash": "abc"}),
+    "domain_event_payload_json_null": dict(
+        event_type="NEW", rid="orn:koi-net.entity:{}",
+        contents={"_koi_domain": "entity", "payload": None}),
+    "knowledge_fact_without_payload_key": dict(
+        event_type="UPDATE", rid="orn:personal-koi.knowledge-fact:{}",
+        contents={"_koi_domain": "knowledge_fact"}),
+    "knowledge_fact_payload_without_retraction": dict(
+        event_type="UPDATE", rid="orn:personal-koi.knowledge-fact:{}",
+        contents={"_koi_domain": "knowledge_fact", "payload": {"id": "x"}}),
+    # `retraction` present but not an object: the recipient's is_retraction_payload
+    # treats this as an ordinary upsert, so the transport must too.
+    "knowledge_fact_retraction_key_null": dict(
+        event_type="UPDATE", rid="orn:personal-koi.knowledge-fact:{}",
+        contents={"_koi_domain": "knowledge_fact", "payload": {"id": "x", "retraction": None}}),
+    "ordinary_domain_event": dict(
+        event_type="NEW", rid="orn:koi-net.entity:{}",
+        contents={"_koi_domain": "entity", "payload": {"uri": "x"}}),
+}
+
+
+@pytest.mark.anyio
+async def test_r3_unsigned_poll_predicate_is_total_under_sql_null_semantics(conn, eq):
+    """Finding N1 (third round). Only a fact-retraction event — domain
+    knowledge_fact AND a `retraction` key in its payload — is withheld from an
+    unsigned poll. Every other shape, including NULL contents, contents without
+    `_koi_domain`/`payload`, a JSON-null payload and a knowledge_fact event with
+    no payload key, is an ORDINARY event: served and delivered_to-marked. (Three
+    of these shapes were dropped at c41fa77; the others are controls.) The
+    retraction stays withheld and unmarked."""
+    ids = {}
+    for name, kw in _ORDINARY_SHAPES.items():
+        kw = dict(kw); kw["rid"] = kw["rid"].format(uuid.uuid4())
+        ids[name] = await eq.add(target_node=PEER_AUTH, event_id=str(uuid.uuid4()), **kw)
+    retraction = await eq.add(
+        event_type="UPDATE", rid=FACT_RID(uuid.uuid4()), target_node=PEER_AUTH, event_id=str(uuid.uuid4()),
+        contents={"_koi_domain": "knowledge_fact", "payload": {"id": "x", "retraction": {"valid_to": "t"}}})
+
+    served = {e["event_id"] for e in await eq.poll(PEER_AUTH, authenticated=False)}
+    for name, eid in ids.items():
+        assert eid in served, f"unsigned poll dropped an ordinary event: {name}"
+        marked = await conn.fetchval(
+            "SELECT $2 = ANY(delivered_to) FROM koi_net_events WHERE event_id = $1::uuid", eid, PEER_AUTH)
+        assert marked is True, f"ordinary event not delivered_to-marked: {name}"
+    assert retraction not in served
+    assert await conn.fetchval(
+        "SELECT $2 = ANY(delivered_to) FROM koi_net_events WHERE event_id = $1::uuid",
+        retraction, PEER_AUTH) is False, "the retraction must stay unmarked for the real peer"
+
+    # positive control: the signed poll is handed the retraction
+    signed = {e["event_id"] for e in await eq.poll(PEER_AUTH, authenticated=True)}
+    assert signed == {retraction}
+
+
+@pytest.mark.anyio
+async def test_r3_unsigned_poll_through_the_router_serves_vault_sync_shapes(conn, eq, koi_net_client):
+    """The same rule through the real /koi-net/events/poll handler with an edge
+    that declares no scope (rid_types NULL, so poll() applies no type filter):
+    a vault-file NEW and a NULL-contents FORGET reach an unsigned poller, the
+    retraction does not."""
+    client, priv = koi_net_client
+    await seed_edge(conn, NODE_A, PEER_AUTH, "APPROVED", None)
+    vault_new = await eq.add(event_type="NEW", rid=f"orn:koi-net.vault-file:{uuid.uuid4()}",
+                             contents={"_vault_sync": True, "relative_path": "n.md"}, event_id=str(uuid.uuid4()))
+    vault_forget = await eq.add(event_type="FORGET", rid=f"orn:koi-net.vault-file:{uuid.uuid4()}",
+                                contents=None, event_id=str(uuid.uuid4()))
+    ep, fid = await seed_fact(conn)
+    r = await _retract(conn, eq, fid)
+    retraction = r.deliveries[0]["event_id"]
+
+    resp = await client.post("/koi-net/events/poll", json={"node_id": PEER_AUTH, "limit": 50})
+    assert resp.status_code == 200, resp.text
+    got = {e["event_id"] for e in resp.json()["events"]}
+    assert {vault_new, vault_forget} <= got, got
+    assert retraction not in got
+    assert (await _state(conn, fid))["state"] == "queued"
+
+
+@pytest.mark.anyio
+async def test_r3_sweep_mutations_are_state_qualified(conn, eq):
+    """Finding N3 (third round). plan_requeue is a plain read; apply_requeue used
+    to write failed/unverifiable/retrying with `WHERE id = $1`, so a confirm or
+    application report that COMMITTED between planning and mutation (another
+    connection, READ COMMITTED) was overwritten — applied became failed,
+    received became retrying. Every sweep mutation must be qualified on the
+    state the plan observed, and a moved row must be skipped, counted and left
+    exactly as the later writer left it."""
+    # (a) planned RETRY of an expired queued row; an `applied` report lands in between
+    ep1, fid1, r1, ev1 = await _setup_queued(conn, eq)
+    await _expire(conn, ev1)
+    plan1 = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid1]
+    assert plan1 and plan1[0]["action"] == "retry"
+    await fr.record_applications(conn, PEER_AUTH, [{"event_id": ev1, "status": "applied"}])
+    events_before = len(await _events_for(conn, fid1))
+    # (b) planned FAIL (edge revoked) of a queued row; a signed receipt lands in between
+    await seed_edge(conn, NODE_A, PEER_AUTH, "APPROVED", ["knowledge_fact"])
+    ep2, fid2, r2, ev2 = await _setup_queued(conn, eq)
+    await seed_edge(conn, NODE_A, PEER_AUTH, "REVOKED", ["knowledge_fact"])
+    plan2 = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid2]
+    assert plan2 and plan2[0]["action"] == "fail"
+    await fr.record_receipts(conn, PEER_AUTH, [ev2])
+    assert (await _state(conn, fid2))["state"] == "received"
+    # (c) planned UNVERIFIABLE of an expired received row; an `applied` report lands in between
+    await seed_edge(conn, NODE_A, PEER_AUTH, "APPROVED", ["knowledge_fact"])
+    ep3, fid3, r3, ev3 = await _setup_queued(conn, eq)
+    await eq.poll(PEER_AUTH, rid_types=["knowledge_fact"])
+    await fr.record_receipts(conn, PEER_AUTH, [ev3])
+    await _expire(conn, ev3)
+    plan3 = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid3]
+    assert plan3 and plan3[0]["action"] == "unverifiable"
+    await fr.record_applications(conn, PEER_AUTH, [{"event_id": ev3, "status": "applied"}])
+
+    # (d) in-call POSITIVE CONTROL: an expired queued row nobody touched → retried
+    ep4, fid4, r4, ev4 = await _setup_queued(conn, eq)
+    await _expire(conn, ev4)
+    plan4 = [p for p in await fr.plan_requeue(conn, node_rid=NODE_A) if p["fact_id"] == fid4]
+    assert plan4 and plan4[0]["action"] == "retry"
+
+    async with conn.transaction():
+        summary = await fr.apply_requeue(conn, plan1 + plan2 + plan3 + plan4, event_queue=eq, node_rid=NODE_A)
+
+    assert summary["skipped_state_changed"] == 3, summary
+    assert summary["retried"] == 1 and summary["failed"] == 0 and summary["unverifiable"] == 0
+    s1 = await _state(conn, fid1)
+    assert s1["state"] == "applied" and s1["event_id"] == ev1 and s1["attempt"] == 1
+    assert len(await _events_for(conn, fid1)) == events_before, "no retry event may be queued for a moved row"
+    assert (await _state(conn, fid2))["state"] == "received"
+    assert (await _state(conn, fid3))["state"] == "applied"
+    s4 = await _state(conn, fid4)
+    assert s4["state"] == "retrying" and s4["attempt"] == 2 and s4["event_id"] != ev4
+
+    # (e) the SAME stale plan applied again (two sweeps planning from one snapshot —
+    # retrying → retrying is state-idempotent, so the qualification must include
+    # the attempt): skipped, and exactly one retry event exists for fid4
+    async with conn.transaction():
+        again = await fr.apply_requeue(conn, plan4, event_queue=eq, node_rid=NODE_A)
+    assert again["skipped_state_changed"] == 1 and again["retried"] == 0
+    s4b = await _state(conn, fid4)
+    assert s4b["attempt"] == 2 and s4b["event_id"] == s4["event_id"]
+    assert len(await _events_for(conn, fid4)) == 2   # the original + one retry, not two
+
+    # (f) a plan item without the observed state/attempt is a caller error, not a "moved row"
+    bad = dict(plan4[0]); bad.pop("state")
+    with pytest.raises(ValueError):
+        async with conn.transaction():
+            await fr.apply_requeue(conn, [bad], event_queue=eq, node_rid=NODE_A)
+
+
+class _InterposeAfterSelect:
+    """Wraps a connection; after the first fetchrow that reads the deliveries
+    row, runs `hook` (the 'other connection' committing in between) before
+    returning the — now stale — row to the caller."""
+
+    def __init__(self, conn, hook, marker):
+        self._c, self._hook, self._marker, self.fired = conn, hook, marker, False
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    async def fetchrow(self, sql, *args):
+        row = await self._c.fetchrow(sql, *args)
+        if self._marker in sql and not self.fired:
+            self.fired = True
+            await self._hook()
+        return row
+
+
+@pytest.mark.anyio
+async def test_r3_record_applications_does_not_overwrite_a_verdict_that_landed_after_its_read(conn, eq):
+    """Verifier EQ-1 (third round). record_applications was check-then-write: it
+    read d.state, checked TERMINAL_STATES, then UPDATEd `WHERE id = $1`. A sweep
+    writing `failed` on another connection between the read and the write was
+    overwritten by the report. The UPDATE is now qualified on the state that
+    was read; the moved row is left alone and accounted as already_terminal."""
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+
+    async def sweep_lands_failed():
+        await conn.execute(
+            "UPDATE knowledge_fact_retraction_deliveries SET state='failed', "
+            "state_reason='attempts_exhausted:5', state_changed_at=NOW() WHERE event_id=$1::uuid", ev)
+
+    proxy = _InterposeAfterSelect(conn, sweep_lands_failed, "FROM knowledge_fact_retraction_deliveries d")
+    summary = await fr.record_applications(proxy, PEER_AUTH, [{"event_id": ev, "status": "applied"}])
+    assert proxy.fired
+    assert summary["already_terminal"] == 1 and summary["applied"] == 0, summary
+    s = await _state(conn, fid)
+    assert s["state"] == "failed" and s["application"] is None and s["applied_at"] is None
+
+
+@pytest.mark.anyio
+async def test_r3_observer_path_scope_failure_is_logged(conn, eq, caplog):
+    """Finding N5 (third round). `record_deliveries` closed an obligation as
+    `failed: edge_scope_excluded_at_poll` with no log line, so 'every failed is
+    a WARNING' held for the sweep path only. The observer path must name the
+    fact, the peer and the reason at WARNING too."""
+    import logging
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    with caplog.at_level(logging.WARNING, logger="api.fact_retraction"):
+        got = await eq.poll(PEER_AUTH, rid_types=["Person"])   # narrowed → excluded at poll
+    assert got == []
+    assert (await _state(conn, fid))["state"] == "failed"
+    msgs = [rec.getMessage() for rec in caplog.records if "delivery_failed" in rec.getMessage()]
+    assert msgs, [rec.getMessage() for rec in caplog.records]
+    assert fid in msgs[0] and PEER_AUTH in msgs[0] and "edge_scope_excluded_at_poll" in msgs[0]
+
+
+_HttpxAsyncClient = AsyncClient   # the real httpx client; the stand-in below shadows the name
+
+
+class _AsgiHttpx:
+    """Stands in for `httpx` inside api.koi_poller: every POST goes to the real
+    router app over ASGI, so KOIPoller's own signing and payload construction
+    are exercised end to end."""
+
+    class ConnectError(Exception):
+        pass
+
+    def __init__(self, app):
+        self.app = app
+        self.posts = []
+        outer = self
+
+        class _Resp:
+            def __init__(self, resp):
+                self.status_code = resp.status_code
+                self.text = resp.text
+                self._resp = resp
+
+            def json(self):
+                return self._resp.json()
+
+        class AsyncClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def post(self, url, json=None):
+                outer.posts.append((url, json))
+                path = url.split("://", 1)[-1].split("/", 1)[1]
+                async with _HttpxAsyncClient(transport=ASGITransport(app=outer.app), base_url="http://pub") as c:
+                    return _Resp(await c.post("/" + path, json=json))
+
+        self.AsyncClient = AsyncClient
+
+
+@pytest.mark.anyio
+async def test_r3_signed_pending_confirmation_crosses_the_real_endpoint(conn, eq, koi_net_client, monkeypatch):
+    """Seam test (re-review critic gap G1). The recipient's `pending` report —
+    produced by the real handler for a fact it does not hold — travels inside
+    the REAL KOIPoller confirm (signed with the peer's real private key) into
+    the REAL /koi-net/events/confirm handler, and lands on the publisher as
+    deliveries.state='pending' with applied_at NULL: non-terminal, never
+    represented as applied. A later signed already_tombstoned report with the
+    same valid_to then advances it to applied through the same endpoint."""
+    import api.koi_poller as koi_poller_module
+    from api.koi_poller import KOIPoller
+    client, priv = koi_net_client
+    ep, fid, r, ev = await _setup_queued(conn, eq)
+    # Model the RECIPIENT as not holding the fact (one database, two roles).
+    await conn.execute("DELETE FROM knowledge_facts WHERE id = $1::uuid", fid)
+
+    app = FastAPI()
+    app.include_router(knr.koi_net_router, prefix="/koi-net")
+    fake = _AsgiHttpx(app)
+    monkeypatch.setattr(koi_poller_module, "httpx", fake)
+    monkeypatch.setattr(koi_poller_module, "REQUIRE_SIGNED_RESPONSES", False)
+    monkeypatch.setenv("KOI_FEDERATE_KNOWLEDGE", "true")
+
+    poller = KOIPoller(SingleConnPool(conn), PEER_AUTH, private_key=priv)
+    await poller._poll_peer(source_node=NODE_A, base_url="http://pub", rid_types=None)
+
+    confirms = [body for url, body in fake.posts if url.endswith("/events/confirm")]
+    assert len(confirms) == 1, fake.posts
+    env = confirms[0]
+    assert env.get("signature") and env["source_node"] == PEER_AUTH, "the poller must sign the confirm"
+    apps = env["payload"]["applications"]
+    assert len(apps) == 1 and apps[0]["event_id"] == ev and apps[0]["status"] == "pending"
+
+    s = await _state(conn, fid)
+    assert s["state"] == "pending", s
+    assert s["applied_at"] is None and s["received_at"] is not None
+    assert s["state_reason"] == "peer_recorded_pending_tombstone_fact_absent"
+    status = await fr.tombstone_status(conn, uuid.UUID(fid))
+    d = [d for d in status["deliveries"] if d["target_node"] == PEER_AUTH][0]
+    assert d["state"] == "pending" and d["applied_at"] is None
+
+    # non-terminal: a later genuine report through the same signed endpoint advances it
+    late = sign_envelope({"type": "confirm_events", "event_ids": [ev],
+                          "applications": [{"event_id": ev, "status": "already_tombstoned",
+                                            "valid_to": r.valid_to, "valid_to_matches": True}]},
+                         PEER_AUTH, NODE_A, priv)
+    resp = await client.post("/koi-net/events/confirm", json=late)
+    assert resp.status_code == 200, resp.text
+    s = await _state(conn, fid)
+    assert s["state"] == "applied" and s["applied_at"] is not None

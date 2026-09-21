@@ -31,8 +31,24 @@ DeliveryObserver = Callable[
 
 # A fact-retraction event (issue #67): domain `knowledge_fact` whose payload
 # carries a `retraction` block. Withheld from unauthenticated polls — see poll().
+#
+# TOTAL under SQL NULL semantics, deliberately. `contents->>'_koi_domain'` is
+# NULL when contents is NULL or lacks the key, `(contents->'payload') ? 'x'` is
+# NULL when the payload key is absent, and `NULL = 'knowledge_fact'` is NULL —
+# so without COALESCE the predicate is three-valued and `NOT (NULL)` in a WHERE
+# clause DROPS the row. At c41fa77 that silently withheld every vault-file
+# NEW/UPDATE/FORGET, every NULL-contents event and every knowledge_fact event
+# without a payload key from unsigned polls (third review, finding N1). Only a
+# row for which the predicate is TRUE is a retraction; everything else — absent
+# payload, JSON-null payload, absent domain key, NULL contents — is an ordinary
+# event and is served exactly as before.
+# `jsonb_typeof(... -> 'retraction') = 'object'` mirrors
+# api.fact_retraction.is_retraction_payload (payload dict whose `retraction` is
+# a dict): a payload with `"retraction": null`, a string or an array is an
+# ordinary knowledge_fact upsert on the recipient, so it is ordinary here too.
 RETRACTION_EVENT_SQL = (
-    "contents->>'_koi_domain' = 'knowledge_fact' AND (contents->'payload') ? 'retraction'"
+    "COALESCE(contents->>'_koi_domain' = 'knowledge_fact' "
+    "AND jsonb_typeof(contents->'payload'->'retraction') = 'object', false)"
 )
 
 
@@ -170,8 +186,12 @@ class EventQueue:
         name was used still receives them on its own signed poll. This is
         independent of KOI_REQUIRE_SIGNED_ENVELOPES: an unsigned caller naming
         a peer used to be handed that peer's unicast retractions (fact text and
-        triple) and to consume them. Everything else keeps the pre-existing,
-        policy-governed behaviour.
+        triple) and to consume them. Every other event — including events with
+        NULL contents, no `_koi_domain`, no `payload` key or a JSON-null payload
+        (the vault-sync stream) — keeps the pre-existing, policy-governed
+        behaviour: the predicate is total (`RETRACTION_EVENT_SQL` COALESCEs to
+        false), pinned by
+        tests/test_fact_retraction_outbox.py::test_r3_unsigned_poll_predicate_is_total_under_sql_null_semantics.
         """
         async with self.pool.acquire() as conn:
             # Fetch events not yet delivered to this node and not expired.

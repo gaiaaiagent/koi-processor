@@ -676,18 +676,33 @@ async def record_deliveries(
         )
         delivered = int(status.split()[-1])
     if excluded_ids:
-        status = await conn.execute(
+        # RETURNING so that each closed obligation is named in the log: this is
+        # the second writer of `failed` (the sweep is the other), and until the
+        # third review it wrote the row silently — "every failed is a WARNING
+        # line" held for the sweep path only (finding N5).
+        closed = await conn.fetch(
             f"""
-            UPDATE knowledge_fact_retraction_deliveries
-            SET state = '{STATE_FAILED}', state_changed_at = NOW(),
-                state_reason = 'edge_scope_excluded_at_poll'
-            WHERE target_node = $1
-              AND event_id = ANY($2::uuid[])
-              AND state IN ('{STATE_QUEUED}', '{STATE_RETRYING}', '{STATE_DELIVERED}')
+            WITH upd AS (
+                UPDATE knowledge_fact_retraction_deliveries d
+                SET state = '{STATE_FAILED}', state_changed_at = NOW(),
+                    state_reason = 'edge_scope_excluded_at_poll'
+                WHERE d.target_node = $1
+                  AND d.event_id = ANY($2::uuid[])
+                  AND d.state IN ('{STATE_QUEUED}', '{STATE_RETRYING}', '{STATE_DELIVERED}')
+                RETURNING d.id, d.retraction_id, d.attempt
+            )
+            SELECT upd.id, upd.attempt, r.fact_id::TEXT AS fact_id
+            FROM upd JOIN knowledge_fact_retractions r ON r.id = upd.retraction_id
             """,
             requesting_node, list(excluded_ids),
         )
-        failed = int(status.split()[-1])
+        failed = len(closed)
+        for row in closed:
+            logger.warning(
+                "fact_retraction.delivery_failed delivery=%s fact=%s peer=%s attempt=%s "
+                "reason=edge_scope_excluded_at_poll (poll() excluded the unicast event: the edge "
+                "no longer admits knowledge_fact; the sweep reopens it if the edge admits again)",
+                row["id"], row["fact_id"], requesting_node, row["attempt"])
     return {"delivered": delivered, "failed": failed}
 
 
@@ -837,17 +852,33 @@ async def record_applications(
                     "later_report=%s (kept first verdict)",
                     eid, confirming_node, row["state"], json.dumps(report, default=_jsonable)[:500])
             continue
-        await conn.execute(
+        # Qualified on the state this call READ: the sweep writes on another
+        # connection, and a terminal `failed` committed between the SELECT above
+        # and this UPDATE must not be overwritten (the same read-check-write
+        # class the sweep was fixed for; third review EQ-1). A zero-row update
+        # means the row moved; re-read it and account for it as already_terminal
+        # when it is, else as ignored.
+        status = await conn.execute(
             """
             UPDATE knowledge_fact_retraction_deliveries
             SET state = $2, state_reason = $3, application = $4::jsonb,
                 applied_at = CASE WHEN $2 = 'applied' THEN NOW() ELSE applied_at END,
                 received_at = COALESCE(received_at, NOW()),
                 state_changed_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND state = $5
             """,
-            row["id"], state, why, json.dumps(report, default=_jsonable),
+            row["id"], state, why, json.dumps(report, default=_jsonable), row["state"],
         )
+        if int(status.split()[-1]) == 0:
+            now_state = await conn.fetchval(
+                "SELECT state FROM knowledge_fact_retraction_deliveries WHERE id = $1", row["id"])
+            logger.warning(
+                "fact_retraction.application_raced_row_moved event=%s node=%s read_state=%s "
+                "now_state=%s report=%s (not stored)",
+                eid, confirming_node, row["state"], now_state,
+                json.dumps(report, default=_jsonable)[:300])
+            summary["already_terminal" if now_state in TERMINAL_STATES else "ignored"] += 1
+            continue
         summary[state] += 1
         if state == STATE_REJECTED:
             logger.warning(
@@ -962,24 +993,57 @@ async def apply_requeue(
     event_queue: Any,
     node_rid: str,
 ) -> Dict[str, int]:
-    """Execute a plan from `plan_requeue` on `conn` (caller holds the transaction)."""
+    """Execute a plan from `plan_requeue` on `conn` (caller holds the transaction).
+
+    EVERY mutation is qualified on the state the plan observed (`item["state"]`).
+    `plan_requeue` is a plain read and the confirm endpoint writes on another
+    connection, so a receipt or application report can COMMIT between planning
+    and mutation; under READ COMMITTED an unqualified `UPDATE ... WHERE id = $1`
+    then overwrote it — applied became failed, received became retrying (third
+    review, finding N3). A row that moved is skipped, counted under
+    `skipped_state_changed`, logged at INFO, and left exactly as the later
+    writer left it; the next sweep re-plans it from its real state.
+    """
     await require_ledger(conn)
-    summary = {"retried": 0, "failed": 0, "unverifiable": 0, "waited": 0}
+    summary = {"retried": 0, "failed": 0, "unverifiable": 0, "waited": 0, "skipped_state_changed": 0}
+
+    def _skipped(item: Dict[str, Any], planned_action: str) -> None:
+        summary["skipped_state_changed"] += 1
+        logger.info(
+            "fact_retraction.sweep_skipped_state_changed delivery=%s fact=%s peer=%s "
+            "planned_action=%s planned_state=%s planned_attempt=%s "
+            "(row moved between plan and apply; left as is)",
+            item.get("delivery_id"), item.get("fact_id"), item.get("target_node"),
+            planned_action, item.get("state"), item.get("attempt"))
+
     for item in plan:
         action = item.get("action")
         if action == "wait":
             summary["waited"] += 1
             continue
+        if action not in ("fail", "unverifiable", "retry"):
+            continue
+        # A plan item is a snapshot: it must say what it saw. Qualifying on a
+        # missing value would bind NULL, match nothing and be reported as "the
+        # row moved", which is false — refuse the caller instead.
+        if item.get("state") is None or item.get("attempt") is None:
+            raise ValueError(
+                f"apply_requeue: plan item for delivery {item.get('delivery_id')} lacks the "
+                f"observed state/attempt (got state={item.get('state')!r}, "
+                f"attempt={item.get('attempt')!r}); plan items come from plan_requeue")
         if action in ("fail", "unverifiable"):
             state = STATE_FAILED if action == "fail" else STATE_UNVERIFIABLE
-            await conn.execute(
+            status = await conn.execute(
                 """
                 UPDATE knowledge_fact_retraction_deliveries
                 SET state = $2, state_reason = $3, state_changed_at = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND state = $4 AND attempt = $5
                 """,
-                item["delivery_id"], state, item.get("reason"),
+                item["delivery_id"], state, item.get("reason"), item["state"], item["attempt"],
             )
+            if int(status.split()[-1]) == 0:
+                _skipped(item, action)
+                continue
             summary["failed" if action == "fail" else "unverifiable"] += 1
             # Visible in the aggregate (review finding 8): a terminal failure
             # used to be findable only by reading this row's UUID.
@@ -989,19 +1053,26 @@ async def apply_requeue(
                 item["delivery_id"], item.get("fact_id"), item.get("target_node"),
                 item.get("attempt"), item.get("reason"))
             continue
-        if action != "retry":
-            continue
+        # FOR UPDATE re-reads the latest committed version of the row and
+        # re-evaluates `d.state = $2 AND d.attempt = $3` against it, so a row
+        # that a concurrent confirm/report moved after planning — or that
+        # ANOTHER sweep already re-queued (retrying → retrying is state-idempotent;
+        # the attempt is what changes) — comes back as None and is skipped
+        # BEFORE any event is queued.
         ret = await conn.fetchrow(
             """
             SELECT r.id, r.fact_id, r.valid_to, r.reason, r.retracted_by, r.source_document,
                    r.fact_snapshot, d.attempt, d.attempt_history
             FROM knowledge_fact_retractions r
             JOIN knowledge_fact_retraction_deliveries d ON d.retraction_id = r.id
-            WHERE d.id = $1
+            WHERE d.id = $1 AND d.state = $2 AND d.attempt = $3
             FOR UPDATE OF d
             """,
-            item["delivery_id"],
+            item["delivery_id"], item["state"], item["attempt"],
         )
+        if ret is None:
+            _skipped(item, "retry")
+            continue
         snapshot = ret["fact_snapshot"]
         if isinstance(snapshot, str):
             snapshot = json.loads(snapshot)
@@ -1031,16 +1102,24 @@ async def apply_requeue(
         if queued is None:
             raise RetractionError(f"requeue event {event_id} reported duplicate")
         history = history + [{"attempt": attempt, "event_id": event_id}]
-        await conn.execute(
+        status = await conn.execute(
             """
             UPDATE knowledge_fact_retraction_deliveries
             SET event_id = $2::uuid, attempt = $3, attempt_history = $4::jsonb,
                 state = 'retrying', state_reason = $5, queued_at = NOW(),
                 state_changed_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND state = $6 AND attempt = $7
             """,
             item["delivery_id"], event_id, attempt, json.dumps(history), item.get("reason"),
+            item["state"], item["attempt"],
         )
+        if int(status.split()[-1]) != 1:
+            # The FOR UPDATE above holds the row for this transaction, so this
+            # cannot happen in practice; if it does, the queued event must not
+            # outlive a ledger row that does not name it.
+            raise RetractionError(
+                f"requeue of delivery {item['delivery_id']} lost its state qualification "
+                f"({item.get('state')}) between lock and update")
         summary["retried"] += 1
         logger.info("fact_retraction.delivery_retrying delivery=%s fact=%s peer=%s attempt=%s reason=%s",
                     item["delivery_id"], item.get("fact_id"), item["target_node"], attempt,
@@ -1056,18 +1135,20 @@ async def sweep_once(
 ) -> Dict[str, int]:
     """plan + apply in one transaction. For the poller loop / CLI."""
     node_rid = getattr(event_queue, "node_rid", None)
+    zero = {"retried": 0, "failed": 0, "unverifiable": 0, "waited": 0, "skipped_state_changed": 0}
     if not node_rid:
-        return {"retried": 0, "failed": 0, "unverifiable": 0, "waited": 0}
+        return dict(zero)
     async with pool.acquire() as conn:
         if not await ledger_available(conn):
-            return {"retried": 0, "failed": 0, "unverifiable": 0, "waited": 0}
+            return dict(zero)
         async with conn.transaction():
             plan = await plan_requeue(conn, node_rid=node_rid, max_attempts=max_attempts)
             summary = await apply_requeue(conn, plan, event_queue=event_queue, node_rid=node_rid)
-    if summary["retried"] or summary["failed"] or summary["unverifiable"]:
-        logger.info("fact_retraction.sweep node=%s retried=%d failed=%d unverifiable=%d waited=%d",
+    if summary["retried"] or summary["failed"] or summary["unverifiable"] or summary["skipped_state_changed"]:
+        logger.info("fact_retraction.sweep node=%s retried=%d failed=%d unverifiable=%d waited=%d "
+                    "skipped_state_changed=%d",
                     node_rid, summary["retried"], summary["failed"], summary["unverifiable"],
-                    summary["waited"])
+                    summary["waited"], summary["skipped_state_changed"])
     return summary
 
 
