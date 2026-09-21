@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -59,7 +60,8 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 CHUNK_SIZE, CHUNK_OVERLAP = 500, 50
 SOURCE_SENSOR = "substack-corpus-backfill"  # continuity with the 2026-05-18 indyjohar backfill
-ACCESS_SOURCE = "substack-public"
+PUBLIC_ACCESS_SOURCE = "substack-public"
+SUBSCRIBER_ACCESS_SOURCE = "substack-subscriber-session"
 UA = {"User-Agent": "Mozilla/5.0 (personal-koi substack sensor)"}
 
 # Optional Substack session cookie (paid-subscriber auth). When set, the sensor
@@ -78,6 +80,48 @@ from substack_config import load_publications  # noqa: E402
 
 def rid_for(feed_slug: str, post_slug: str) -> str:
     return f"substack-corpus:{feed_slug}:{post_slug}"
+
+
+def access_policy_for_audience(audience: Optional[str]) -> Dict[str, Any]:
+    """Map Substack's audience label to durable access provenance.
+
+    Missing audience is treated as unknown/private rather than being silently
+    published. In normal API responses the archive or detail payload supplies
+    ``everyone``, ``only_paid``, or ``founding``.
+    """
+    normalized = str(audience).strip().lower() if audience else "unknown"
+    is_private = normalized != "everyone"
+    return {
+        "audience": normalized,
+        "is_private": is_private,
+        "access_source": SUBSCRIBER_ACCESS_SOURCE if is_private else PUBLIC_ACCESS_SOURCE,
+        "source_provenance": (
+            "substack-api-subscriber-session" if is_private else "substack-api-public"
+        ),
+    }
+
+
+def resolved_audience(archive_meta: Dict[str, Any], detail: Dict[str, Any]) -> Optional[str]:
+    """Prefer the per-post response and fall back to the archive listing."""
+    return detail.get("audience") or archive_meta.get("audience")
+
+
+def parse_post_date(raw: Optional[str]) -> Optional[datetime]:
+    """Substack's archive `post_date` (ISO-8601, e.g. 2026-09-09T13:28:38.796Z)
+    -> aware datetime for the koi_memories.published_at COLUMN.
+
+    Writing it only into metadata (as this sensor did until 2026-09-09) leaves
+    the column NULL, so anything that filters or orders substack docs by
+    publication date at the column level silently matches nothing. Returns None
+    on an unparseable value rather than failing the post's ingest.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        logger.warning("unparseable post_date %r", raw)
+        return None
 
 
 def html_to_text(body_html: Optional[str]) -> str:
@@ -138,12 +182,14 @@ async def upsert_post(pool: asyncpg.Pool, embedder: OpenAIEmbeddingProvider, chu
 
     doc_content = {"title": meta.get("title"), "subtitle": meta.get("subtitle"),
                    "text": body_text, "url": url}
+    access = access_policy_for_audience(meta.get("audience"))
     doc_meta = {
         "url": url, "repo": "substack-backfill", "tags": pub["tags"],
         "title": meta.get("title"), "author": pub["author"], "domain": pub["domain"],
         "feed_slug": pub["feed_slug"], "source_type": "substack_corpus",
         "canonical_slug": slug, "published_at": meta.get("post_date"),
         "content_hash": content_hash,
+        **access,
     }
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -152,21 +198,33 @@ async def upsert_post(pool: asyncpg.Pool, embedder: OpenAIEmbeddingProvider, chu
             await conn.execute(
                 """
                 INSERT INTO koi_memories
-                    (id, rid, event_type, source_sensor, content, metadata, is_private, access_source)
-                VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb, FALSE, $6)
+                    (id, rid, event_type, source_sensor, content, metadata, is_private, access_source,
+                     published_at, content_hash)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9)
                 ON CONFLICT (rid) DO UPDATE SET
                     event_type = EXCLUDED.event_type,
                     content = EXCLUDED.content,
                     metadata = EXCLUDED.metadata,
+                    is_private = EXCLUDED.is_private,
+                    access_source = EXCLUDED.access_source,
+                    published_at = COALESCE(EXCLUDED.published_at, koi_memories.published_at),
+                    content_hash = EXCLUDED.content_hash,
                     updated_at = NOW()
                 """,
                 rid, event_type, SOURCE_SENSOR,
-                json.dumps(doc_content), json.dumps(doc_meta), ACCESS_SOURCE,
+                json.dumps(doc_content), json.dumps(doc_meta), access["is_private"],
+                access["access_source"],
+                parse_post_date(meta.get("post_date")), content_hash,
             )
             await conn.execute("DELETE FROM koi_memory_chunks WHERE document_rid=$1", rid)
             total = len(chunks)
             for i, (c, emb) in enumerate(zip(chunks, embeddings)):
-                chunk_meta = {"slug": slug, "feed_slug": pub["feed_slug"], "source_sensor": SOURCE_SENSOR}
+                chunk_meta = {
+                    "slug": slug,
+                    "feed_slug": pub["feed_slug"],
+                    "source_sensor": SOURCE_SENSOR,
+                    **access,
+                }
                 if emb is None:
                     chunk_meta["embedding_failed"] = True
                 await conn.execute(
@@ -231,16 +289,18 @@ async def run(args) -> None:
                     meta = dict(archive[slug])
                     try:
                         detail = await fetch_body(http, pub["base"], slug)
+                        effective_audience = resolved_audience(meta, detail)
                         # Paid posts: skip only when we have no subscriber cookie.
                         # With SUBSTACK_SID set the API returns full body_html for
                         # paid posts; the <200-char gate below still catches any
                         # that come back paywalled (e.g. an expired cookie).
-                        if detail.get("audience") not in (None, "everyone") and not SUBSTACK_COOKIES:
-                            logger.info("skip non-free %s (audience=%s)", slug, detail.get("audience"))
+                        if effective_audience not in (None, "everyone") and not SUBSTACK_COOKIES:
+                            logger.info("skip non-free %s (audience=%s)", slug, effective_audience)
                             totals["skipped"] += 1
                             continue
                         body_text = html_to_text(detail.get("body_html"))
                         meta["subtitle"] = detail.get("subtitle") or meta.get("subtitle")
+                        meta["audience"] = effective_audience
                         if len(body_text) < 200:
                             logger.info("skip short/empty body %s (%d chars)", slug, len(body_text))
                             totals["skipped"] += 1
