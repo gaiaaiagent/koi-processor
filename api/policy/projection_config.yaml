@@ -1,0 +1,28 @@
+# Visibility / projection config for the read-path audience gate (policy/visibility.py).
+#
+# LOCAL COPY (do NOT cross-import the IndigenomicsAI otter_notion copy). Kept in
+# sync by hand and reviewed like code. Seeded from the KG→Notion projection spec
+# §6.4 denylist + Phase-2 concept allowlist.
+#
+# entity_denylist          — entities that must NEVER reach a team/public surface,
+#                            matched case-insensitively against entity_text + aliases.
+# concept_projection_allowlist — the only Concepts that may ever be visible (a Concept
+#                            not on this list is fail-closed to invisible).
+#
+# Override the path with PROJECTION_CONFIG_PATH; a missing/empty file → empty sets
+# (which, for concepts, means NO concept is ever visible — fail-closed).
+
+entity_denylist:
+  - "Hydro One"
+  - "Layer B"
+  - "Layer B Expansion Opportunity"
+
+concept_projection_allowlist:
+  - "Living Library Model"
+  - "regenerative bonds"
+  - "relational infrastructure"
+  - "bioregional nervous system"
+  - "IP for nature"
+  - "commons pool"
+  - "reserved compute credits"
+  - "data sovereignty"
