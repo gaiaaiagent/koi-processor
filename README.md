@@ -111,7 +111,12 @@ pytest tests/                                                             # unit
 
 ## License
 
-MIT — see `LICENSE`.
+No licence is granted. This repository has never carried a `LICENSE` file, so
+default copyright applies and all rights are reserved.
+
+An earlier version of this section said MIT and pointed at a `LICENSE` file that
+does not exist. That was incorrect and is withdrawn. Licensing is being scoped
+separately.
 
 ---
 
