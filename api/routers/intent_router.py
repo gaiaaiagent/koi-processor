@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api.utils import validity_filter_clause
+from api.optional_federation import optional_federation_attr
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +189,7 @@ def create_router(pool) -> APIRouter:
     """
     router = APIRouter(tags=["intents"])
 
-    from api.federation_events import emit_domain_event
+    emit_domain_event = optional_federation_attr("api.federation_events", "emit_domain_event")
 
     async def _emit_intent_discovery(row_dict: Dict[str, Any]):
         """Emit federation event with discovery-projection fields only.

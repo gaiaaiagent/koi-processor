@@ -181,38 +181,10 @@ from api.resolver_decisions_log import log_decision as _log_resolver_decision
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-async def _federation_unavailable(*_args, **_kwargs):
-    """No-op stand-in used when the federation modules are not installed."""
-    return None
-
-
-_federation_absent_logged = False
-
-
-def _optional_federation_attr(module_name: str, attr: str):
-    """Return ``module_name.attr``, or an async no-op when that module is absent.
-
-    The Regen-scoped deployment of this service ships without the KOI-net
-    federation and vault-sync modules. Only the case where the named module
-    itself is missing is treated as "no federation". Any other import failure,
-    including a missing dependency inside a federation module that is present,
-    propagates, so a broken federation install cannot be silently swallowed.
-    """
-    global _federation_absent_logged
-    try:
-        module = importlib.import_module(module_name)
-    except ModuleNotFoundError as exc:
-        if exc.name != module_name:
-            raise
-        if not _federation_absent_logged:
-            logger.info(
-                "Federation module %s is not installed; federation events are disabled in this deployment",
-                module_name,
-            )
-            _federation_absent_logged = True
-        return _federation_unavailable
-    return getattr(module, attr)
+from api.optional_federation import (  # noqa: E402
+    federation_unavailable as _federation_unavailable,
+    optional_federation_attr as _optional_federation_attr,
+)
 
 # FastAPI app
 app = FastAPI(
