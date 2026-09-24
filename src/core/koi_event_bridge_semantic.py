@@ -73,7 +73,9 @@ app.add_middleware(
 )
 
 # Configuration
-DB_URL = os.getenv('POSTGRES_URL', 'postgresql://postgres:postgres@localhost:5433/eliza')
+DB_URL = os.getenv('POSTGRES_URL')
+if not DB_URL:
+    raise RuntimeError("POSTGRES_URL is not set; the semantic event bridge reads its database connection from the environment")
 BGE_API_URL = os.getenv('BGE_API_URL', 'http://localhost:8090/encode')
 USE_ISOLATED_TABLES = os.getenv('USE_ISOLATED_TABLES', 'true').lower() == 'true'
 ENABLE_LLM_EXTRACTION = os.getenv('ENABLE_LLM_EXTRACTION', 'true').lower() == 'true'
@@ -98,15 +100,7 @@ kg_integrator = KnowledgeGraphIntegrator(
     }
 )
 
-cat_chain = CATReceiptChain(
-    db_config={
-        "host": "localhost",
-        "port": 5433,
-        "database": "eliza",
-        "user": "postgres",
-        "password": "postgres"
-    }
-)
+cat_chain = CATReceiptChain(db_config={"dsn": DB_URL})
 
 # Initialize CAT chain on startup
 @app.on_event("startup")

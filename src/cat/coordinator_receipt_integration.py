@@ -7,23 +7,26 @@ Adds CAT receipt creation when the coordinator receives sensor data
 import asyncpg
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
+def _postgres_dsn() -> Dict[str, Any]:
+    """Connection settings from the environment; there is no built-in default."""
+    url = os.environ.get("POSTGRES_URL")
+    if not url:
+        raise RuntimeError("POSTGRES_URL is not set and no db_config was passed")
+    return {"dsn": url}
+
+
 class CoordinatorReceiptManager:
     """Manages CAT receipt creation at the coordinator level"""
 
     def __init__(self, db_config: Dict[str, Any] = None):
-        self.db_config = db_config or {
-            "host": "localhost",
-            "port": 5433,
-            "database": "eliza",
-            "user": "postgres",
-            "password": "postgres"
-        }
+        self.db_config = db_config or _postgres_dsn()
         self.conn = None
 
     async def connect(self):
