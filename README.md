@@ -1178,7 +1178,12 @@ python -c "from koi_event_bridge_v2 import test_connection; test_connection()"
 
 ## License
 
-MIT License - see LICENSE file for details
+No licence is granted. This repository has never carried a `LICENSE` file, so
+default copyright applies and all rights are reserved.
+
+An earlier version of this section said MIT and pointed at a `LICENSE` file that
+does not exist. That was incorrect and is withdrawn. Licensing is being scoped
+separately.
 
 ---
 
