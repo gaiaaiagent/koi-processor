@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from api.optional_federation import optional_federation_attr
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ def create_router(pool, caps=None):
     """Return an APIRouter for commitment pooling endpoints."""
     router = APIRouter(prefix="/commitments", tags=["commitments"])
 
-    from api.federation_events import emit_domain_event
+    emit_domain_event = optional_federation_attr("api.federation_events", "emit_domain_event")
 
     # ------------------------------------------------------------------ #
     # Commitment CRUD                                                       #
@@ -695,7 +696,7 @@ def create_pool_router(pool, caps=None):
     """Return an APIRouter for CommitmentPool endpoints."""
     router = APIRouter(prefix="/pools", tags=["commitment-pools"])
 
-    from api.federation_events import emit_domain_event
+    emit_domain_event = optional_federation_attr("api.federation_events", "emit_domain_event")
 
     @router.get("/", response_model=List[PoolResponse])
     async def list_pools(
