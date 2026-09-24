@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
 from api.utils import parse_ts, validity_filter_clause
+from api.optional_federation import optional_federation_attr
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ def create_router(pool, caps) -> APIRouter:
     """
     router = APIRouter(tags=["tasks"])
 
-    from api.federation_events import emit_domain_event
+    emit_domain_event = optional_federation_attr("api.federation_events", "emit_domain_event")
 
     # -----------------------------------------------------------------------
     # Helpers
