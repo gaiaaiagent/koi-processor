@@ -23,6 +23,11 @@ from rdflib import Graph, Namespace, URIRef, Literal, RDF, RDFS
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Database connection: read from the environment (.env via the systemd unit)
+POSTGRES_URL = os.environ.get("POSTGRES_URL")
+if not POSTGRES_URL:
+    raise RuntimeError("POSTGRES_URL is not set; pipeline_metadata_api reads its database connection from the environment")
+
 # FastAPI app
 app = FastAPI(title="Pipeline Metadata API", version="1.0.0")
 
@@ -417,10 +422,7 @@ async def get_optional_user_email(authorization: Optional[str] = Header(None)) -
         return None
     token_hash = hashlib.sha256(parts[1].encode()).hexdigest()
     try:
-        conn = await asyncpg.connect(
-            host='localhost', port=5433, database='eliza',
-            user='postgres', password='postgres'
-        )
+        conn = await asyncpg.connect(POSTGRES_URL)
         try:
             row = await conn.fetchrow(
                 """
@@ -556,13 +558,7 @@ async def get_document_provenance(rid: str):
 
     try:
         # Connect to database
-        conn = await asyncpg.connect(
-            host='localhost',
-            port=5433,
-            database='eliza',
-            user='postgres',
-            password='postgres'
-        )
+        conn = await asyncpg.connect(POSTGRES_URL)
 
         try:
             # Fetch source URL using our reconstruction logic
@@ -803,13 +799,7 @@ async def list_available_rids(
 
     try:
         # Connect to database
-        conn = await asyncpg.connect(
-            host='localhost',
-            port=5433,
-            database='eliza',
-            user='postgres',
-            password='postgres'
-        )
+        conn = await asyncpg.connect(POSTGRES_URL)
 
         try:
             # Build WHERE clause for filters
@@ -964,13 +954,7 @@ async def rid_lookup(
     rid = unquote(rid)
 
     try:
-        conn = await asyncpg.connect(
-            host='localhost',
-            port=5433,
-            database='eliza',
-            user='postgres',
-            password='postgres'
-        )
+        conn = await asyncpg.connect(POSTGRES_URL)
 
         try:
             # Build query - search for exact RID or RID with chunk suffix

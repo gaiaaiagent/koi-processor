@@ -33,18 +33,14 @@ app.add_middleware(
 # Include Auth Router
 app.include_router(auth_router, prefix="/api/koi")
 
-# Database connection
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5433,
-    "database": "eliza",
-    "user": "postgres",
-    "password": "postgres"
-}
+# Database connection: read from the environment (.env via the systemd unit)
+POSTGRES_URL = os.environ.get("POSTGRES_URL")
+if not POSTGRES_URL:
+    raise RuntimeError("POSTGRES_URL is not set; koi_content_api reads its database connection from the environment")
 
 def get_db_connection():
     """Create database connection"""
-    return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
+    return psycopg2.connect(POSTGRES_URL, cursor_factory=RealDictCursor)
 
 @app.get("/health")
 async def health():
