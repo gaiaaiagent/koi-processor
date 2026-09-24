@@ -4,6 +4,7 @@ Tracks all transformations and provenance in the KOI pipeline
 """
 
 import json
+import os
 import hashlib
 import logging
 from typing import Dict, List, Any, Optional
@@ -11,6 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 import asyncpg
 from dataclasses import dataclass, asdict
+
+def _postgres_dsn() -> Dict[str, Any]:
+    """Connection settings from the environment; there is no built-in default."""
+    url = os.environ.get("POSTGRES_URL")
+    if not url:
+        raise RuntimeError("POSTGRES_URL is not set and no db_config was passed")
+    return {"dsn": url}
 
 
 @dataclass
@@ -41,13 +49,7 @@ class CATReceiptChain:
 
     def __init__(self, db_config: Dict[str, Any] = None):
         self.logger = logging.getLogger(__name__)
-        self.db_config = db_config or {
-            "host": "localhost",
-            "port": 5433,
-            "database": "eliza",
-            "user": "postgres",
-            "password": "postgres"
-        }
+        self.db_config = db_config or _postgres_dsn()
         self.db_pool = None
 
     async def initialize(self):

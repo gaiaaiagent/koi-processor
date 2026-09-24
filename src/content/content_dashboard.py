@@ -54,12 +54,14 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Configuration
 CONFIG_PATH = Path(__file__).parent / "config" / "dashboard_config.yaml"
+if not os.environ.get('DB_PASSWORD'):
+    raise RuntimeError("DB_PASSWORD is not set; the content dashboard reads its database password from the environment")
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': int(os.environ.get('DB_PORT', '5433')),
     'database': os.environ.get('DB_NAME', 'eliza'),
     'user': os.environ.get('DB_USER', 'postgres'),
-    'password': os.environ.get('DB_PASSWORD', 'postgres')
+    'password': os.environ['DB_PASSWORD']
 }
 
 # Load configuration
