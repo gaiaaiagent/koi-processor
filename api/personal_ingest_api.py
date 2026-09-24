@@ -181,6 +181,39 @@ from api.resolver_decisions_log import log_decision as _log_resolver_decision
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+async def _federation_unavailable(*_args, **_kwargs):
+    """No-op stand-in used when the federation modules are not installed."""
+    return None
+
+
+_federation_absent_logged = False
+
+
+def _optional_federation_attr(module_name: str, attr: str):
+    """Return ``module_name.attr``, or an async no-op when that module is absent.
+
+    The Regen-scoped deployment of this service ships without the KOI-net
+    federation and vault-sync modules. Only the case where the named module
+    itself is missing is treated as "no federation". Any other import failure,
+    including a missing dependency inside a federation module that is present,
+    propagates, so a broken federation install cannot be silently swallowed.
+    """
+    global _federation_absent_logged
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise
+        if not _federation_absent_logged:
+            logger.info(
+                "Federation module %s is not installed; federation events are disabled in this deployment",
+                module_name,
+            )
+            _federation_absent_logged = True
+        return _federation_unavailable
+    return getattr(module, attr)
+
 # FastAPI app
 app = FastAPI(
     title="Personal KOI Ingest API",
@@ -2281,7 +2314,7 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     """Stop background tasks and close database connection pool"""
-    from api.koi_net_router import shutdown_koi_net
+    shutdown_koi_net = _optional_federation_attr("api.koi_net_router", "shutdown_koi_net")
     await shutdown_koi_net()
     try:
         from api.crawl_worker import stop_crawl_worker
@@ -3199,7 +3232,7 @@ async def ingest_extraction(request: IngestRequest):
                             logger.info(f"Resolved to existing: {canonical.uri}")
 
                         # Emit federation event for entity replication
-                        from api.federation_events import emit_domain_event
+                        emit_domain_event = _optional_federation_attr("api.federation_events", "emit_domain_event")
                         await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
                             "fuseki_uri": canonical.uri,
                             "entity_text": canonical.name,
@@ -3301,7 +3334,7 @@ async def ingest_extraction(request: IngestRequest):
     # Emit doclink federation events AFTER the transaction above commits (2e
     # rule — emitting inside the txn would queue events for rows a rollback
     # could remove). Group A site → mention_delta=1 per successful upsert.
-    from api.federation_events import emit_doclink_event
+    emit_doclink_event = _optional_federation_attr("api.federation_events", "emit_doclink_event")
     for document_rid, entity_uri, ctx in doclink_emits:
         await emit_doclink_event(document_rid, entity_uri, 1, context=ctx)
 
@@ -4673,7 +4706,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
             )
 
             # Emit federation event for entity replication
-            from api.federation_events import emit_domain_event
+            emit_domain_event = _optional_federation_attr("api.federation_events", "emit_domain_event")
             await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
                 "fuseki_uri": canonical.uri,
                 "entity_text": request.name,
