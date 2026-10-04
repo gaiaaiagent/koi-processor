@@ -41,7 +41,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
 import httpx
@@ -145,6 +145,13 @@ async def upsert_document_memory(
     - ``access_source`` → the `koi_memories.access_source` COLUMN, same
       unspecified-preserves semantics.
     - ``source_sensor`` → provenance stamp, default ``document-ingest``.
+    - ``staged``        → the `koi_memories.superseded_at` COLUMN on the INSERT
+      arm only: a document-history successor is born invisible and
+      `POST /history/apply` reveals it. On conflict the row's pre-state decides:
+      a staged re-ingest of an already-hidden row keeps its stamp, and every
+      other re-ingest reveals the row. A re-ingest can never hide a live row.
+      Whenever the row is live after the write, its discourse moves are
+      un-stamped too (see `_unstamp_discourse_moves`).
     """
     doc_content = {
         "title": source_meta.get("name") or source_meta.get("slug") or document_rid,
@@ -175,30 +182,70 @@ async def upsert_document_memory(
         is_private = bool(is_private)
     access_source = source_meta.get("access_source")
     source_sensor = source_meta.get("source_sensor") or SOURCE_SENSOR
+    # FLAT key — the same one _write_document reads. A nested
+    # source_meta["history"]["staged"] would be invisible here, the successor would
+    # never be born staged, and every apply would refuse SUCCESSOR_NOT_STAGED.
+    staged = bool(source_meta.get("staged"))
 
     existing = await conn.fetchrow("SELECT id FROM koi_memories WHERE rid = $1", document_rid)
     event_type = "NEW" if existing is None else "UPDATE"
 
-    memory_id = await conn.fetchval(
+    # superseded_at on conflict: `THEN koi_memories.superseded_at`, not now(), because
+    # the stamp records when this version stopped being live and a retried staged
+    # ingest must be idempotent. Keeping the existing value is also what stops a
+    # staged re-ingest from hiding a live row (its NULL stays NULL). The
+    # `IS NOT NULL` conjunct is redundant with that THEN today (mutation-tested: an
+    # equivalent mutant); it is kept so the guarantee survives if THEN ever stamps.
+    row = await conn.fetchrow(
         """
         INSERT INTO koi_memories
-            (id, rid, event_type, source_sensor, content, metadata, is_private, access_source)
+            (id, rid, event_type, source_sensor, content, metadata, is_private,
+             access_source, superseded_at)
         VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb,
-                COALESCE($6::boolean, false), $7)
+                COALESCE($6::boolean, false), $7,
+                CASE WHEN $8::boolean THEN now() ELSE NULL END)
         ON CONFLICT (rid) DO UPDATE SET
             event_type = EXCLUDED.event_type,
             content = EXCLUDED.content,
             metadata = EXCLUDED.metadata,
             is_private = COALESCE($6::boolean, koi_memories.is_private),
             access_source = COALESCE($7, koi_memories.access_source),
+            superseded_at = CASE
+                WHEN $8::boolean AND koi_memories.superseded_at IS NOT NULL
+                    THEN koi_memories.superseded_at
+                    ELSE NULL
+            END,
             updated_at = NOW()
-        RETURNING id
+        RETURNING id, superseded_at
         """,
         document_rid, event_type, source_sensor,
         json.dumps(doc_content), json.dumps(doc_metadata),
-        is_private, access_source,
+        is_private, access_source, staged,
     )
-    return str(memory_id)
+    if row["superseded_at"] is None:
+        await _unstamp_discourse_moves(conn, document_rid)
+    return str(row["id"])
+
+
+async def _unstamp_discourse_moves(conn: asyncpg.Connection, document_rid: str) -> None:
+    """The reveal and the un-stamp travel together (apply_transaction.md step 12b).
+
+    A live document must not carry stamped discourse moves (invariant I11). Keyed on
+    the row's state after the upsert, so it also heals drift on an already-live row.
+    The column exists only where migration 123 is applied; elsewhere (the NUC, the
+    test database outside a fixture) a bare UPDATE would raise 42703 and abort the
+    caller's transaction, so the catalog is asked first, per call — a process-level
+    cache would be wrong across databases and rolled-back fixtures.
+    """
+    has_column = await conn.fetchval(
+        """SELECT EXISTS (SELECT 1 FROM pg_attribute
+                           WHERE attrelid = to_regclass('session_discourse_moves')
+                             AND attname = 'superseded_at' AND NOT attisdropped)""")
+    if has_column:
+        await conn.execute(
+            """UPDATE session_discourse_moves SET superseded_at = NULL
+                WHERE source_type = 'document' AND source_rid = $1
+                  AND superseded_at IS NOT NULL""", document_rid)
 
 
 async def upsert_document_chunks(
@@ -345,6 +392,209 @@ async def _chunk_and_embed(
     return chunks, embeddings, null_embeds
 
 
+# ── Document history: the ingest-side pair (migration 123) ───────────────────────
+#
+# Spec: ~/.claude/plans/history-preserving-website-sensor-artifacts/q1_fixed_pair.md
+# (CANONICAL) with CLAIM_CUTOVER_SQL from ingest_side_pair.md. History keys in
+# source_meta are FLAT: `staged`, `history_journal_id`,
+# `history_source_kind|_id|_url`, `history_policy`.
+
+class StagedWriteViolation(RuntimeError):
+    """A --staged ingest reached the claim cutover. /history/apply is the sole writer."""
+
+
+class EmptyContentClaim(RuntimeError):
+    """document_rid is content-addressed, so every empty extraction collapses onto ONE rid."""
+
+
+class JournalSuccessorConflict(RuntimeError):
+    """The journal row already names a DIFFERENT successor, or is no longer open."""
+
+
+class StagedJournalMisuse(RuntimeError):
+    """--history-journal-id on a non-staged ingest. The two travel together or not at all."""
+
+
+class HistoryClaimRequired(RuntimeError):
+    """--history-journal-id without the claim triple: the PATCH's 4th conjunct has no operands."""
+
+
+class StagedTierMisuse(RuntimeError):
+    """--staged with a tier deeper than rag: Stage 2 would run on a hidden successor."""
+
+
+class HistoryPolicyMisuse(RuntimeError):
+    """--history-policy on a run where nothing would compare it: staged, or no claim triple."""
+
+
+JOURNAL_SUCCESSOR_PATCH_SQL = """
+UPDATE document_supersession
+   SET successor_rid = $2
+ WHERE id = $1
+   AND state IN ('pending','failed')
+   AND (successor_rid IS NULL OR successor_rid = $2)
+   AND (source_kind, source_id, source_url) = ($3, $4, $5)
+RETURNING id, state, successor_rid
+"""
+
+# history_policy is absent from DO UPDATE SET: that absence IS the stickiness, and
+# the RETURNING value is the enforcement point. claim_state, retired_at and
+# released_at move together as literals (chk_dsc_state is a three-arm disjunction
+# over exactly those columns, so any two-of-three write raises 23514).
+CLAIM_CUTOVER_SQL = """
+WITH prior AS (
+    SELECT c.claim_state, c.retired_at, c.released_at, c.document_rid
+      FROM document_source_claim c
+     WHERE (c.source_kind, c.source_id, c.source_url) = ($1, $2, $3)
+)
+INSERT INTO document_source_claim
+    (source_kind, source_id, source_url, document_rid, content_hash,
+     history_policy, claim_state, retired_at, released_at, last_seen_at)
+VALUES ($1, $2, $3, $4, $5, COALESCE($6,'keep'), 'live', NULL, NULL, now())
+ON CONFLICT (source_kind, source_id, source_url) DO UPDATE
+   SET document_rid = EXCLUDED.document_rid,
+       content_hash = EXCLUDED.content_hash,
+       last_seen_at = now(),
+       claim_state  = 'live',
+       retired_at   = NULL,
+       released_at  = NULL
+RETURNING history_policy, document_rid, claim_state, retired_at, released_at,
+          (xmax = 0) AS created,
+          (SELECT p.claim_state  FROM prior p) AS prior_claim_state,
+          (SELECT p.document_rid FROM prior p) AS prior_rid
+"""
+
+
+async def _patch_journal_successor(conn, *, journal_id: int, document_rid: str,
+                                   source_kind: str, source_id: str, source_url: str) -> str:
+    """Fill in the successor the intent row was born without.
+
+    The intent is written BEFORE this ingest spawns and `POST /history/intent`
+    refuses a caller-supplied successor_rid, so this statement is the ONLY writer of
+    successor_rid on a non-legacy edge.
+
+    FOUR conjuncts, each required:
+      id = $1                              -- the edge this run was told to fill
+      state IN ('pending','failed')        -- an applied or refused edge is history
+      successor_rid IS NULL OR = $2        -- idempotent on replay, a hard stop when
+                                              the journal already names someone else
+      (source_kind, source_id, source_url)
+          = ($3, $4, $5)                   -- the edge must belong to THE PAGE THIS
+                                              INGEST IS. `id` alone is a global key,
+                                              and a wrong --history-journal-id
+                                              otherwise patches another page's edge
+                                              (measured: UPDATE 1).
+    0 rows is never silence: a terminal edge, a conflicting successor and a foreign
+    edge all need a human. A successor equal to the predecessor (the bytes did not
+    change) trips chk_dsup_selfedge and is reported the same way.
+    """
+    try:
+        row = await conn.fetchrow(JOURNAL_SUCCESSOR_PATCH_SQL, journal_id, document_rid,
+                                  source_kind, source_id, source_url)
+    except asyncpg.exceptions.CheckViolationError as e:
+        if e.constraint_name != "chk_dsup_selfedge":
+            raise
+        raise JournalSuccessorConflict(
+            f"SELF_SUPERSESSION: journal row {journal_id}'s predecessor is {document_rid}, "
+            f"the rid this ingest produced, so the bytes did not change. Resolve the intent "
+            f"with POST /history/resolve, never by re-running this ingest.") from e
+    if row is None:
+        raise JournalSuccessorConflict(
+            f"journal row {journal_id} did not accept successor_rid={document_rid} for "
+            f"({source_kind}, {source_id}, {source_url}): it is terminal (not "
+            f"pending/failed), already names a different successor, or belongs to a "
+            f"DIFFERENT page. Resolve with POST /history/resolve, never by re-running "
+            f"this ingest.")
+    return row["successor_rid"]
+
+
+def _history_claim_triple(source_meta: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    """This ingest's own claim triple, read FLAT. All three or none."""
+    t = (source_meta.get("history_source_kind"),
+         source_meta.get("history_source_id"),
+         source_meta.get("history_source_url"))
+    if all(t):
+        return t
+    if any(t):
+        raise HistoryClaimRequired(
+            f"--history-claim must supply all three of kind|id|url, got {t!r}")
+    return None
+
+
+def _assert_history_flags(*, staged: bool, journal_id: Optional[int],
+                          claim: Optional[Tuple[str, str, str]],
+                          policy: Optional[str] = None) -> None:
+    """REFUSE, never imply.
+
+    Making --history-journal-id imply --staged would silently change what the run
+    writes for a caller that meant the non-staged path. Refusing costs one loud
+    non-zero exit and writes nothing. The same rule covers the reverse pairing and a
+    policy assertion that nothing would ever compare.
+    """
+    if policy is not None and (staged or claim is None):
+        raise HistoryPolicyMisuse(
+            f"--history-policy {policy!r} would never be checked: it is compared only by "
+            f"the claim cutover, which runs on a non-staged ingest with --history-claim. "
+            f"Drop --history-policy, or pass --history-claim without --staged.")
+    if staged and journal_id is None:
+        raise StagedJournalMisuse(
+            "--staged was given without --history-journal-id. A staged row is born hidden "
+            "and only POST /history/apply, through the journal edge this run fills, can "
+            "reveal it; without one the row is hidden with no edge naming it. Pass "
+            "--history-journal-id and --history-claim, or drop --staged.")
+    if journal_id is None:
+        return
+    if not staged:
+        raise StagedJournalMisuse(
+            "--history-journal-id was given without --staged. A non-staged ingest that "
+            "patches a journal edge ALSO advances the claim, so POST /history/apply then "
+            "reads a claim that no longer names the predecessor and refuses STALE_INTENT "
+            "— reveal-unsafe, so the successor stays hidden permanently and the "
+            "predecessor is left live with no live claim (INV-1/I18). Pass --staged, or "
+            "drop --history-journal-id.")
+    if claim is None:
+        raise HistoryClaimRequired(
+            "--history-journal-id requires --history-claim: the PATCH is keyed on "
+            "(id, source_kind, source_id, source_url) and without the triple a wrong "
+            "journal id silently patches another page's edge.")
+
+
+async def _claim_cutover(conn, *, staged: bool, markdown: str, source_kind: str,
+                         source_id: str, source_url: str, document_rid: str,
+                         content_hash: Optional[str], history_policy: Optional[str]):
+    """Advance (or mint) this source's claim to the bytes this ingest just committed.
+
+    `staged` is keyword-only and REQUIRED: any future call site must state which kind
+    of ingest it is, and stating `True` is refused rather than obeyed.
+    """
+    if staged:
+        raise StagedWriteViolation(
+            f"--staged ingest tried to advance the claim for "
+            f"({source_kind}, {source_id}, {source_url}) to {document_rid}. "
+            f"POST /history/apply is the sole writer of a claim advance.")
+    if not (markdown or "").strip():
+        # Belt and braces, not the enforcement: both call sites return on
+        # `if not chunks` before _write_document, and the chunker returns [] for
+        # whitespace-only text, so markdown reaching here is non-empty.
+        raise EmptyContentClaim(
+            f"refusing to claim {document_rid}: converted markdown is empty, and the rid "
+            f"is content-addressed, so every empty extraction in the corpus shares this "
+            f"one rid")
+    row = await conn.fetchrow(CLAIM_CUTOVER_SQL, source_kind, source_id, source_url,
+                              document_rid, content_hash, history_policy)
+    if history_policy and row["history_policy"] != history_policy:
+        raise RuntimeError(
+            f"POLICY_ASSERTION_MISMATCH: claim holds {row['history_policy']!r}, "
+            f"this run asserted {history_policy!r}; history_policy is sticky and only "
+            f"POST /history/policy may change it")
+    if row["prior_claim_state"] in ("retired", "released"):
+        logger.warning(
+            "claim (%s,%s,%s) revived from %s by a fresh ingest: the source was observed "
+            "serving content, so the claim is live again (prior rid %s)",
+            source_kind, source_id, source_url, row["prior_claim_state"], row["prior_rid"])
+    return row
+
+
 async def _write_document(
     conn: asyncpg.Connection,
     document_rid: str,
@@ -353,12 +603,65 @@ async def _write_document(
     embeddings: List[Optional[List[float]]],
     source_meta: Dict[str, Any],
 ) -> int:
-    """Transactionally upsert the parent row, the chunk set and field membership."""
+    """Transactionally upsert the parent row, the chunk set, field membership, and
+    — when this ingest is under document-history management — the ingest-side pair.
+
+    The pair is INSIDE the existing transaction on purpose: a claim naming bytes that
+    were not committed, or a journal edge naming a successor that does not exist, is
+    the invisible inconsistency the write-ahead journal exists to prevent. A
+    JournalSuccessorConflict therefore discards this ingest's bytes, chunks and field
+    membership as well.
+
+    Not reached at all when both callers return early (`if not chunks`, `if dry_run`):
+    a history-managed run that takes either exits 0 reporting `chunks_written: 0` and
+    leaves the journal row `pending` with `successor_rid` NULL, which /history/apply
+    refuses as SUCCESSOR_NOT_CHUNKED (retryable).
+    """
+    staged     = bool(source_meta.get("staged"))
+    journal_id = source_meta.get("history_journal_id")
+    claim      = _history_claim_triple(source_meta)
+
+    # Restated here as well as at flag-parse time, because the koi-net federation
+    # handler (via ingest_document_rag_conn) and any direct importer of
+    # ingest_document_rag or _write_document build their own source_meta and never
+    # pass through ingest_path's validation.
+    _assert_history_flags(staged=staged, journal_id=journal_id, claim=claim,
+                          policy=source_meta.get("history_policy"))
+
     async with conn.transaction():
         await upsert_document_memory(conn, document_rid, markdown, source_meta)
         written = await upsert_document_chunks(conn, document_rid, chunks, embeddings, source_meta)
         # Additive field membership (Option B): never deletes other fields' rows.
         await upsert_field_membership(conn, document_rid, source_meta)
+
+        # (1) journal successor PATCH — only a --staged run may carry a journal id.
+        if journal_id is not None:
+            await _patch_journal_successor(
+                conn, journal_id=int(journal_id), document_rid=document_rid,
+                source_kind=claim[0], source_id=claim[1], source_url=claim[2])
+
+        # (2) claim cutover — NEVER when staged.
+        if staged:
+            hidden = await conn.fetchval(
+                "SELECT superseded_at IS NOT NULL FROM koi_memories WHERE rid = $1",
+                document_rid)
+            if hidden:
+                logger.info(
+                    "--staged %s: hidden, journal successor PATCH written; claim advance "
+                    "is POST /history/apply's to make, not this ingest's", document_rid)
+            else:
+                # The rid already existed live (bytes shared with another claim), and a
+                # re-ingest never hides a live row. Apply will refuse SUCCESSOR_NOT_STAGED.
+                logger.warning(
+                    "--staged %s: NOT hidden — this rid was already live (shared bytes), "
+                    "so POST /history/apply will refuse SUCCESSOR_NOT_STAGED for journal "
+                    "row %s", document_rid, journal_id)
+        elif claim is not None:
+            await _claim_cutover(
+                conn, staged=staged, markdown=markdown, document_rid=document_rid,
+                content_hash=source_meta.get("content_hash"),
+                source_kind=claim[0], source_id=claim[1], source_url=claim[2],
+                history_policy=source_meta.get("history_policy"))
     return written
 
 
@@ -627,6 +930,36 @@ def build_gate_evidence(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _history_source_meta(*, staged: bool, journal_id: Optional[int],
+                         claim: Optional[str], policy: Optional[str]) -> Dict[str, Any]:
+    """Flatten the four --history flags into source_meta and refuse the two misuses
+    BEFORE any embedding spend or DB work.
+
+    Absent every flag this returns {} and source_meta is byte-identical to today's,
+    which keeps every ingest_path caller (the CLI, the documents router, the
+    research-paper wrapper) unchanged. The federation handler never reaches here.
+    """
+    if not (staged or journal_id is not None or claim or policy):
+        return {}
+    meta: Dict[str, Any] = {"staged": bool(staged)}
+    if journal_id is not None:
+        meta["history_journal_id"] = int(journal_id)
+    if policy:
+        meta["history_policy"] = policy
+    if claim:
+        parts = claim.split("|")
+        if len(parts) != 3 or not all(p.strip() for p in parts):
+            raise ValueError(
+                f"--history-claim must be 'source_kind|source_id|source_url', got {claim!r}")
+        (meta["history_source_kind"], meta["history_source_id"],
+         meta["history_source_url"]) = (p.strip() for p in parts)
+    _assert_history_flags(staged=meta["staged"],
+                          journal_id=meta.get("history_journal_id"),
+                          claim=_history_claim_triple(meta),
+                          policy=meta.get("history_policy"))
+    return meta
+
+
 async def ingest_path(
     *,
     source_path: str,
@@ -640,6 +973,10 @@ async def ingest_path(
     claims: bool = True,
     force: bool = False,
     dry_run: bool = False,
+    staged: bool = False,
+    history_journal_id: Optional[int] = None,
+    history_claim: Optional[str] = None,
+    history_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Unified document-ingest orchestrator: rag -> (standard/thorough) extract -> claims.
 
@@ -649,6 +986,13 @@ async def ingest_path(
     """
     if tier not in VALID_TIERS:
         raise ValueError(f"--tier must be one of {VALID_TIERS}, got {tier!r}")
+    if staged and tier != "rag":
+        # A staged successor is hidden until POST /history/apply reveals it. A deeper
+        # tier would run Stage 2 and Stage 3 on it before the swap, leaving facts and
+        # claims live for a document a terminal refusal keeps hidden for good.
+        raise StagedTierMisuse(
+            f"--staged requires --tier rag (got {tier!r}). Stage with --tier rag, apply, "
+            f"then re-ingest at the real tier.")
 
     path = resolve_allowed_source_path(source_path)
     markdown = path.read_text(encoding="utf-8", errors="replace")
@@ -663,6 +1007,9 @@ async def ingest_path(
         "content_hash": content_hash, "group_id": group_id,
         "fields": list(fields) if fields else [],
         "source_path": str(path), "tier": tier,
+        # document-history keys, FLAT, following this file's own convention:
+        **_history_source_meta(staged=staged, journal_id=history_journal_id,
+                               claim=history_claim, policy=history_policy),
     }
     source_document = source_url or document_rid
 
@@ -728,6 +1075,23 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Chunk + report without writing/embedding")
     parser.add_argument("--gate-evidence-out",
                         help="Write the flat gate-evidence JSON (response_summary) to this path for the gate")
+    parser.add_argument("--staged", action="store_true",
+                        help="Document-history staging: the successor is born with "
+                             "superseded_at set (invisible) and POST /history/apply reveals "
+                             "it. Travels with --history-journal-id (each requires the "
+                             "other) and requires --tier rag.")
+    parser.add_argument("--history-journal-id", type=int,
+                        help="document_supersession.id whose successor_rid this run fills "
+                             "in. Implies nothing: it REQUIRES --staged and --history-claim.")
+    parser.add_argument("--history-claim", metavar="KIND|ID|URL",
+                        help="This ingest's own claim triple, 'source_kind|source_id|"
+                             "source_url'. Keys BOTH the journal PATCH and the cutover.")
+    parser.add_argument("--history-policy", choices=("keep", "drop"),
+                        help="Asserted retention policy, non-staged runs with "
+                             "--history-claim only. Stored once, when this ingest mints the "
+                             "source's first claim (default keep); never updated by an ingest "
+                             "after that. On an existing claim it is compared with the sticky "
+                             "value and refused on mismatch.")
     args = parser.parse_args()
 
     claims = (args.tier != "rag") and not args.no_claims
@@ -737,6 +1101,8 @@ def main():
             source_path=args.source_path, tier=args.tier, slug=args.slug, name=args.name,
             source_url=args.source_url, retrieval_method=args.retrieval_method,
             group_id=args.group_id, fields=fields, claims=claims, force=args.force, dry_run=args.dry_run,
+            staged=args.staged, history_journal_id=args.history_journal_id,
+            history_claim=args.history_claim, history_policy=args.history_policy,
         ))
     except (ValueError, NotImplementedError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
