@@ -1,5 +1,6 @@
 """Configuration and optional local login shared by the content dashboards."""
 
+import hashlib
 import os
 import re
 import secrets
@@ -62,11 +63,18 @@ def configure_dashboard_auth(app, config):
             if (
                 method.split(":")[0] not in ("scrypt", "pbkdf2")
                 or not salt
-                or not re.fullmatch(r"[0-9a-f]{64,}", digest)
+                or not re.fullmatch(r"[0-9a-f]+", digest)
             ):
                 raise ValueError("Invalid password hash")
             # Validate the selected Werkzeug method before accepting requests.
             check_password_hash(password_hash, "dashboard-configuration-check")
+            parts = method.split(":")
+            expected_length = (
+                128 if parts[0] == "scrypt"
+                else hashlib.new(parts[1] if len(parts) > 1 else "sha256").digest_size * 2
+            )
+            if len(digest) != expected_length:
+                raise ValueError("Invalid password hash digest length")
         except (ValueError, TypeError, OverflowError):
             raise RuntimeError("DASHBOARD_ADMIN_PASSWORD_HASH must be a valid Werkzeug scrypt or pbkdf2 hash") from None
 

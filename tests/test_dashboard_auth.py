@@ -124,7 +124,13 @@ def test_auth_enabled_refuses_public_or_short_secret(dashboard_loader, secret):
         dashboard_loader(overrides={"FLASK_SECRET_KEY": secret})
 
 
-@pytest.mark.parametrize("password_hash", ["plaintext-password", "scrypt:invalid$salt$abcd", "sha256$salt$abcd"])
+@pytest.mark.parametrize("password_hash", [
+    "plaintext-password", "scrypt:invalid$salt$abcd", "sha256$salt$abcd",
+    "scrypt:32768:8:1$salt$" + "a" * 64,
+    "scrypt:32768:8:1$salt$" + "a" * 126,
+    "pbkdf2:sha256:600000$salt$" + "a" * 65,
+    "pbkdf2:sha256:600000$salt$" + "a" * 66,
+])
 def test_auth_enabled_refuses_invalid_hash(dashboard_loader, password_hash):
     with pytest.raises(RuntimeError, match="DASHBOARD_ADMIN_PASSWORD_HASH"):
         dashboard_loader(overrides={"DASHBOARD_ADMIN_PASSWORD_HASH": password_hash})
