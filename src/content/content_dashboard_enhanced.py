@@ -4,7 +4,7 @@ Enhanced Milestone B Content Operations Dashboard
 Web-based interface with manual digest generation capabilities
 """
 
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for
+from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import psycopg2
@@ -12,7 +12,6 @@ from psycopg2.extras import RealDictCursor
 import os
 import sys
 import json
-import yaml
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -22,6 +21,11 @@ import asyncio
 from functools import wraps
 from loguru import logger
 
+try:
+    from src.content.dashboard_auth import load_dashboard_config, configure_dashboard_auth, dashboard_authenticated
+except ImportError:
+    from dashboard_auth import load_dashboard_config, configure_dashboard_auth, dashboard_authenticated
+
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "koi-processor"))
@@ -30,37 +34,33 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "koi-processor"))
 app = Flask(__name__,
             template_folder='../../templates',
             static_folder='../../static')
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-milestone-b')
 CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Configuration
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "dashboard_config.yaml"
+if not os.environ.get('DB_PASSWORD'):
+    raise RuntimeError("DB_PASSWORD is not set; the content dashboard reads its database password from the environment")
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': int(os.environ.get('DB_PORT', '5433')),
     'database': os.environ.get('DB_NAME', 'eliza'),
     'user': os.environ.get('DB_USER', 'postgres'),
-    'password': os.environ.get('DB_PASSWORD', 'postgres')
+    'password': os.environ['DB_PASSWORD']
 }
 
 # Load configuration
 def load_config():
     """Load dashboard configuration"""
-    config_file = Path(__file__).parent.parent / "config" / "dashboard_config.yaml"
-    if config_file.exists():
-        with open(config_file, 'r') as f:
-            return yaml.safe_load(f)
-    else:
-        return {
+    return load_dashboard_config({
             'dashboard': {
                 'port': 8400,
                 'refresh_interval': 30,
                 'auth_enabled': False
             }
-        }
+        })
 
 config = load_config()
+configure_dashboard_auth(app, config)
 
 # Database connection
 def get_db_connection():
@@ -71,9 +71,8 @@ def get_db_connection():
 def require_auth(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if config['dashboard'].get('auth_enabled', False):
-            if 'user' not in session:
-                return jsonify({'error': 'Authentication required'}), 401
+        if not dashboard_authenticated(app):
+            return jsonify({'error': 'Authentication required'}), 401
         return f(*args, **kwargs)
     return decorated_function
 

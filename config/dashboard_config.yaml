@@ -8,7 +8,9 @@ dashboard:
   # Auto-refresh interval in seconds
   refresh_interval: 30
   
-  # Enable authentication (set to true in production)
+  # Enable local login unless authentication is provided by a trusted proxy.
+  # DASHBOARD_AUTH_ENABLED overrides this setting; enabling it requires the
+  # admin username, password hash and session secret documented in .env.example.
   auth_enabled: false
   
   # Session timeout in minutes
@@ -100,7 +102,7 @@ database:
   port: ${DB_PORT:-5433}
   name: ${DB_NAME:-eliza}
   user: ${DB_USER:-postgres}
-  password: ${DB_PASSWORD:-postgres}
+  password: ${DB_PASSWORD}
   
   # Connection pool settings
   pool_size: 5
@@ -197,8 +199,8 @@ logging:
 
 # Security settings
 security:
-  # Secret key for sessions (override in production!)
-  secret_key: ${FLASK_SECRET_KEY:-dev-secret-key-change-in-production}
+  # Session signing key is read only from FLASK_SECRET_KEY in the environment.
+  # Do not store credentials or signing secrets in this file.
   
   # CORS settings
   cors_enabled: true
