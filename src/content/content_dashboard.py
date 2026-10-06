@@ -4,7 +4,7 @@ Milestone B Content Operations Dashboard
 Web-based monitoring interface for Daily Bot and Weekly Digest operations
 """
 
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for
+from flask import Flask, render_template, jsonify, request, redirect, url_for
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from flask_compress import Compress
@@ -14,7 +14,6 @@ import os
 import time
 import hashlib
 import json
-import yaml
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -34,8 +33,10 @@ from openai import OpenAI
 # Handle imports whether run as module or script
 try:
     from src.content.podcast_job_queue import get_job_queue
+    from src.content.dashboard_auth import load_dashboard_config, configure_dashboard_auth, dashboard_authenticated
 except ImportError:
     from podcast_job_queue import get_job_queue
+    from dashboard_auth import load_dashboard_config, configure_dashboard_auth, dashboard_authenticated
 
 # Load environment variables from .env file
 load_dotenv()
@@ -44,7 +45,6 @@ load_dotenv()
 app = Flask(__name__,
             template_folder='../../templates',
             static_folder='../../static')
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['COMPRESS_MIMETYPES'] = ['application/json', 'text/html', 'text/css', 'application/javascript']
 app.config['COMPRESS_LEVEL'] = 6
 app.config['COMPRESS_MIN_SIZE'] = 500
@@ -53,7 +53,6 @@ Compress(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Configuration
-CONFIG_PATH = Path(__file__).parent / "config" / "dashboard_config.yaml"
 if not os.environ.get('DB_PASSWORD'):
     raise RuntimeError("DB_PASSWORD is not set; the content dashboard reads its database password from the environment")
 DB_CONFIG = {
@@ -67,12 +66,7 @@ DB_CONFIG = {
 # Load configuration
 def load_config():
     """Load dashboard configuration"""
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, 'r') as f:
-            return yaml.safe_load(f)
-    else:
-        # Default configuration
-        return {
+    return load_dashboard_config({
             'dashboard': {
                 'port': 8400,
                 'refresh_interval': 30,
@@ -94,9 +88,10 @@ def load_config():
                 'email_enabled': False,
                 'slack_enabled': False
             }
-        }
+        })
 
 config = load_config()
+configure_dashboard_auth(app, config)
 
 # Database connection
 def get_db_connection():
@@ -107,9 +102,8 @@ def get_db_connection():
 def require_auth(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if config['dashboard'].get('auth_enabled', False):
-            if 'user' not in session:
-                return redirect(url_for('login'))
+        if not dashboard_authenticated(app):
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -2289,30 +2283,6 @@ def notify_update():
     except Exception as e:
         logger.error(f"Error handling notification: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
-# Login route (simple for now)
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Simple login page"""
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        # Simple hardcoded auth for now
-        # In production, use proper authentication
-        if username == 'admin' and password == 'regen2025':
-            session['user'] = username
-            return redirect(url_for('index'))
-        else:
-            return render_template('login.html', error='Invalid credentials')
-    
-    return render_template('login.html')
-
-@app.route('/logout')
-def logout():
-    """Logout user"""
-    session.pop('user', None)
-    return redirect(url_for('login'))
 
 @app.route('/api/dashboard/generate/daily', methods=['POST'])
 @require_auth
