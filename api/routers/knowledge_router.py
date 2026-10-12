@@ -1400,16 +1400,22 @@ def create_router(
             rows_affected = 1  # unexpected tag shape — don't misreport a real insert as a conflict
 
         if rows_affected == 0:
+            # The row holding this URI may be a tombstone: the deterministic URI of a
+            # merged-away entity is still taken, and every tier above skips it because
+            # they match live rows only. Follow it like _accept does, or the fact is
+            # bound to a dead URI (Phase 1b, 2026-10-12).
+            live_uri = await resolve_to_live_uri(conn, new_uri)
             existing = await conn.fetchrow(
-                "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1", new_uri
+                "SELECT entity_type FROM entity_registry WHERE fuseki_uri = $1", live_uri
             )
             actual_type = existing["entity_type"] if existing else entity_type
-            seen[normalized] = new_uri
+            seen[normalized] = live_uri
             logger.warning(
-                f"Tier-3 create for {name!r} conflicted on {new_uri} (already exists as "
+                f"Tier-3 create for {name!r} conflicted on {new_uri} (already exists"
+                f"{'' if live_uri == new_uri else f', merged into {live_uri}'} as "
                 f"{actual_type!r}); reporting is_new=False instead of a silent re-create"
             )
-            return new_uri, False, actual_type
+            return live_uri, False, actual_type
 
         seen[normalized] = new_uri
         logger.info(f"Created new entity: {name} -> {new_uri}")

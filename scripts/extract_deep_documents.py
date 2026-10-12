@@ -111,6 +111,38 @@ MAX_WINDOWS_EXPLICIT = "DOC_MAX_WINDOWS" in os.environ
 # false-retracting genuinely-distinct facts.
 SEMANTIC_DEDUP_THRESHOLD = float(os.getenv("DOC_SEMANTIC_DEDUP_THRESHOLD", "0.95"))
 
+# Flag 2 doc->entity links (see the call site). Each uri is resolved to its live
+# survivor BEFORE the GROUP BY, with the same rule as migration 132's trigger (follow
+# merged_into up to 10 hops; a broken or over-long chain keeps the original). Otherwise
+# two fact URIs that share a survivor become two rows the trigger folds onto one key, and
+# Postgres rejects the statement ("ON CONFLICT DO UPDATE command cannot affect row a
+# second time"). Episodes are reused, so a re-extraction re-reads old tombstone facts.
+# $1 episode_id, $2 document_rid, $3 context.
+FLAG2_DOC_ENTITY_LINKS_SQL = """
+WITH RECURSIVE u AS (
+  SELECT subject_uri AS uri, count(*) n FROM knowledge_facts
+    WHERE episode_id = $1 AND valid_to IS NULL GROUP BY subject_uri
+  UNION ALL
+  SELECT object_uri, count(*) FROM knowledge_facts
+    WHERE episode_id = $1 AND object_uri IS NOT NULL AND valid_to IS NULL GROUP BY object_uri
+), chain AS (
+  SELECT d.uri AS orig, d.uri AS cur, er.merged_into AS nxt, 0 AS hops
+    FROM (SELECT DISTINCT uri FROM u WHERE uri IS NOT NULL) d
+    JOIN entity_registry er ON er.fuseki_uri = d.uri
+  UNION ALL
+  SELECT c.orig, c.nxt, er.merged_into, c.hops + 1
+    FROM chain c JOIN entity_registry er ON er.fuseki_uri = c.nxt
+    WHERE c.nxt IS NOT NULL AND c.hops < 10
+), live AS (
+  SELECT orig, cur FROM chain WHERE nxt IS NULL
+)
+INSERT INTO document_entity_links (document_rid, entity_uri, mention_count, context)
+SELECT $2, COALESCE(live.cur, u.uri), sum(u.n)::int, $3
+  FROM u LEFT JOIN live ON live.orig = u.uri
+ WHERE u.uri IS NOT NULL GROUP BY COALESCE(live.cur, u.uri)
+ON CONFLICT (document_rid, entity_uri) DO UPDATE SET mention_count = EXCLUDED.mention_count
+"""
+
 # Per-window extraction transport — selected by DOC_EXTRACTOR_TRANSPORT:
 #   'claude_p' (DEFAULT): run each window through the `claude -p` CLI on the Claude Code
 #       SUBSCRIPTION — zero pay-per-token cost. Slower (harness startup, no server-side
@@ -1289,18 +1321,8 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             # Flag 2: populate the doc→entity bridge from the episode's resolved entity
             # URIs — /episodes writes facts but never document_entity_links, so
             # mentioned-in / get_entity_documents wouldn't surface this doc's entities.
-            await conn.execute(
-                """
-                INSERT INTO document_entity_links (document_rid, entity_uri, mention_count, context)
-                SELECT $2, uri, sum(n)::int, $3 FROM (
-                  SELECT subject_uri AS uri, count(*) n FROM knowledge_facts
-                    WHERE episode_id = $1 AND valid_to IS NULL GROUP BY subject_uri
-                  UNION ALL
-                  SELECT object_uri, count(*) FROM knowledge_facts
-                    WHERE episode_id = $1 AND object_uri IS NOT NULL AND valid_to IS NULL GROUP BY object_uri
-                ) u WHERE uri IS NOT NULL GROUP BY uri
-                ON CONFLICT (document_rid, entity_uri) DO UPDATE SET mention_count = EXCLUDED.mention_count
-                """, episode_id, document_rid, doc_title)
+            # Live-survivor resolution happens inside the statement; see FLAG2_DOC_ENTITY_LINKS_SQL.
+            await conn.execute(FLAG2_DOC_ENTITY_LINKS_SQL, episode_id, document_rid, doc_title)
             entity_links = await conn.fetchval(
                 "SELECT count(*) FROM document_entity_links WHERE document_rid = $1", document_rid)
 

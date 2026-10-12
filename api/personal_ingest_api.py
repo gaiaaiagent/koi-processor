@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 import logging
 import time
 import uuid
@@ -372,6 +372,28 @@ class IngestRequest(BaseModel):
     # receipt step (store-after-commit, not single-transaction) because the CAT
     # receipt is created outside the main write transaction — see the endpoint.
     request_id: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _log_dropped_fields(cls, data: Any) -> Any:
+        """Make pydantic's silent drop of unknown request keys visible.
+
+        The default extra='ignore' discards keys this model does not declare.
+        The claude-sessions sensor has sent `link_existing_only` and
+        `replace_existing` on every call, and /ingest has never implemented
+        either, so sessions created entities and never cleared stale links while
+        the sensor believed otherwise. extra='forbid' would 422 every sensor call,
+        and declaring the fields would change the /ingest OpenAPI schema (plan
+        AC7), so this only logs. Implementing either field is a separate change.
+        """
+        if isinstance(data, dict):
+            dropped = sorted(k for k in data if k not in cls.model_fields)
+            if dropped:
+                logger.warning(
+                    "/ingest ignored unknown request field(s) %s (document_rid=%r, "
+                    "source=%r); they are not implemented",
+                    dropped, data.get("document_rid"), data.get("source"))
+        return data
 
 
 class CanonicalEntity(BaseModel):
@@ -1094,6 +1116,75 @@ async def is_vetoed_match(
     return f"{row['reason']} [asserted_by: {row['asserted_by']}]"
 
 
+class GeneratedUriHeldError(Exception):
+    """A force_type create whose deterministic URI is held by an entity of another type.
+
+    force_type exists to create a same-named entity of THIS type, but the URI is a
+    pure hash of (type, name), so when it belongs to a tombstone merged into a
+    different-type survivor no create of this type is possible. Returning the
+    survivor would silently break that contract, so register-entity reports a 409.
+    """
+
+    def __init__(self, entity: ExtractedEntity, new_uri: str, holder: "CanonicalEntity"):
+        self.new_uri = new_uri
+        self.holder = holder
+        super().__init__(
+            f"'{entity.name}' cannot be registered as {entity.type}: its URI {new_uri} "
+            f"was merged into {holder.uri} ({holder.type}). force_type cannot create "
+            f"a second {entity.type} with this name. Unmerge {new_uri}, or register "
+            f"without force_type to link to {holder.uri}."
+        )
+
+
+async def _existing_holder_of_generated_uri(
+    conn: asyncpg.Connection, entity: ExtractedEntity, new_uri: str,
+    skip_cross_type: bool = False,
+) -> Optional[CanonicalEntity]:
+    """The live entity that already holds a create's deterministic URI, or None.
+
+    generate_entity_uri is a pure hash of (type, normalized name), so a merged-away
+    row keeps its URI forever. Every tier above matches live rows only, so a name
+    whose own URI is a tombstone falls through to create, store_new_entity's
+    ON CONFLICT (fuseki_uri) DO NOTHING no-ops, and /ingest then linked the document
+    to the tombstone and emitted a NEW event for it (81 links repointed by SQL on
+    2026-10-12; "KOI" as Concept while concept-koi was merged away). The collision is
+    evidence the name belongs to the survivor, so return the survivor, not a create.
+
+    With skip_cross_type (register-entity force_type) a survivor of another type
+    raises GeneratedUriHeldError instead of being returned.
+    """
+    row = await conn.fetchrow(
+        "SELECT entity_text, entity_type, merged_into FROM entity_registry WHERE fuseki_uri = $1",
+        new_uri,
+    )
+    if row is None:
+        return None
+    uri = new_uri
+    if row["merged_into"]:
+        uri = await resolve_to_live_uri(conn, new_uri)
+        row = await conn.fetchrow(
+            "SELECT entity_text, entity_type, merged_into FROM entity_registry WHERE fuseki_uri = $1",
+            uri,
+        )
+        if row is None or row["merged_into"]:
+            # Broken chain or cycle: resolve_to_live_uri stopped short. Still not a
+            # create (the URI is taken); report what it reached and say so.
+            logger.warning("generated URI %s is a tombstone whose chain ends at %s, "
+                           "which is not a live row", new_uri, uri)
+    name = row["entity_text"] if row else entity.name
+    holder = CanonicalEntity(
+        name=name,
+        uri=uri,
+        type=(row["entity_type"] if row else None) or entity.type,
+        is_new=False,
+        merged_with=entity.name if name != entity.name else None,
+        confidence=1.0,
+    )
+    if skip_cross_type and holder.type != entity.type:
+        raise GeneratedUriHeldError(entity, new_uri, holder)
+    return holder
+
+
 async def resolve_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,
@@ -1189,6 +1280,19 @@ async def resolve_entity(
     if skip_fuzzy:
         logger.info("Exact-only resolution miss for '%s' (%s); creating new entity", entity.name, entity.type)
         new_uri = generate_entity_uri(entity.name, entity.type)
+        holder = await _existing_holder_of_generated_uri(
+            conn, entity, new_uri, skip_cross_type=skip_cross_type)
+        if holder:
+            logger.info("Exact-only create for '%s' collides with %s; using %s",
+                        entity.name, new_uri, holder.uri)
+            _log_resolver_decision(
+                db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+                entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+                tier="tier3_create", decision="accepted",
+                candidate_uri=holder.uri, candidate_text=holder.name,
+                score=1.0, reason=f"generated URI already held ({new_uri})",
+            )
+            return holder, False
         _log_resolver_decision(
             db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
             entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
@@ -1685,6 +1789,28 @@ async def resolve_entity(
     # Tier 3: Create new entity
     new_uri = generate_entity_uri(entity.name, entity.type)
     create_outcome = f"create:{new_uri}"
+    # Check the holder before the shadow record is finished, so a collision is not
+    # recorded as a create of the tombstone URI. Both policies reach the same holder.
+    holder = await _existing_holder_of_generated_uri(
+        conn, entity, new_uri, skip_cross_type=skip_cross_type)
+    if holder:
+        held_outcome = f"uri_held:{holder.uri}"
+        shadow.finish(
+            active_uri=holder.uri,
+            active_outcome="uri_held",
+            legacy_fallback=held_outcome,
+            strict_fallback=held_outcome,
+        )
+        logger.info("Tier 3 create for '%s' collides with %s; using %s",
+                    entity.name, new_uri, holder.uri)
+        _log_resolver_decision(
+            db_pool, attempt_id=resolver_attempt_id, caller=resolution_caller,
+            entity_type=entity.type, query_text=entity.name, query_normalized=normalized,
+            tier="tier3_create", decision="accepted",
+            candidate_uri=holder.uri, candidate_text=holder.name,
+            score=1.0, reason=f"generated URI already held ({new_uri})",
+        )
+        return holder, False
     shadow.finish(
         active_uri=new_uri,
         active_outcome="create",
@@ -1727,8 +1853,14 @@ async def store_new_entity(
     document_rid: str,
     source: str = 'personal-vault',
     origin: Optional[str] = None,
-) -> None:
+) -> bool:
     """Store a new entity in the registry with embedding and phonetic code.
+
+    Returns True when a row was inserted, False when ON CONFLICT (fuseki_uri)
+    DO NOTHING no-op'd because the URI was already taken (a concurrent create of
+    the same name, or a merged-away row that resolve_entity did not catch). On a
+    no-op nothing was created, so the caller must not report or emit NEW, and the
+    TerminusDB outbox is not written for it.
 
     `origin` sets entity_registry.resolution_tier (migration 111). Precedence:
     if supplied it is used verbatim and the local classification below is
@@ -1804,7 +1936,7 @@ async def store_new_entity(
         # Writes to embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration).
         # Legacy embedding (1024) column is no longer populated for new rows;
         # existing 1024 vectors remain for back-compat reads but are not authoritative.
-        await conn.execute("""
+        insert_tag = await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
                 source, first_seen_rid, metadata, embedding_3072, phonetic_code,
@@ -1824,7 +1956,7 @@ async def store_new_entity(
             resolution_tier
         )
     else:
-        await conn.execute("""
+        insert_tag = await conn.execute("""
             INSERT INTO entity_registry (
                 fuseki_uri, entity_text, entity_type, normalized_text,
                 source, first_seen_rid, metadata, phonetic_code,
@@ -1843,6 +1975,18 @@ async def store_new_entity(
             resolution_tier
         )
 
+    # asyncpg's status tag is "INSERT 0 1" on a real insert, "INSERT 0 0" when
+    # ON CONFLICT DO NOTHING no-op'd (same parse as knowledge_router._resolve_or_create).
+    try:
+        inserted = int(insert_tag.split()[-1]) > 0
+    except (ValueError, IndexError, AttributeError):
+        inserted = True  # unexpected tag shape: don't misreport a real insert as a no-op
+    if not inserted:
+        logger.warning(
+            "store_new_entity: %s already exists (ON CONFLICT no-op); not created, "
+            "no outbox write", canonical.uri)
+        return False
+
     # Enqueue entity to TerminusDB outbox (same transaction as PG write)
     await enqueue_outbox(conn, "entity_upsert", {
         "fuseki_uri": canonical.uri,
@@ -1857,6 +2001,7 @@ async def store_new_entity(
         "source": source,
         "first_seen_rid": document_rid,
     }, rid=canonical.uri, source_rid=document_rid)
+    return True
 
 
 # =============================================================================
@@ -3183,9 +3328,27 @@ async def ingest_extraction(request: IngestRequest):
                         canonical_entities.append(canonical)
                         entity_uri_map[normalize_entity_text(entity.name)] = canonical.uri
 
+                        if is_new and not await store_new_entity(
+                                conn, entity, canonical, request.document_rid, source=request.source):
+                            # The URI was taken between resolve and insert (a concurrent
+                            # create, or a merge). Nothing was created: link to the live
+                            # holder and report it as resolved, not NEW (Phase 1b).
+                            live_uri = await resolve_to_live_uri(conn, canonical.uri)
+                            if live_uri != canonical.uri:
+                                live = await conn.fetchrow(
+                                    "SELECT entity_text, entity_type FROM entity_registry "
+                                    "WHERE fuseki_uri = $1", live_uri)
+                                if live:
+                                    canonical.name = live["entity_text"]
+                                    canonical.type = live["entity_type"] or canonical.type
+                                    canonical.merged_with = (
+                                        entity.name if live["entity_text"] != entity.name else None)
+                                canonical.uri = live_uri
+                                entity_uri_map[normalize_entity_text(entity.name)] = live_uri
+                            canonical.is_new = False
+                            is_new = False
                         if is_new:
                             new_count += 1
-                            await store_new_entity(conn, entity, canonical, request.document_rid, source=request.source)
                             logger.info(f"Stored new entity: {canonical.uri}")
                         else:
                             resolved_count += 1
@@ -3198,12 +3361,15 @@ async def ingest_extraction(request: IngestRequest):
                             )
                             logger.info(f"Resolved to existing: {canonical.uri}")
 
-                        # Emit federation event for entity replication
+                        # Emit federation event for entity replication. The type is the
+                        # resolved row's: a peer's apply overwrites entity_type, and a
+                        # cross-type match (Tier 1.1b, or a create collision followed to
+                        # its survivor) would otherwise retype the survivor on every peer.
                         from api.federation_events import emit_domain_event
                         await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
                             "fuseki_uri": canonical.uri,
                             "entity_text": canonical.name,
-                            "entity_type": entity.type,
+                            "entity_type": canonical.type or entity.type,
                             "normalized_text": canonical.name.lower().strip(),
                             "aliases": [],
                             "metadata": {},
@@ -4363,13 +4529,16 @@ async def register_vault_entity(request: RegisterEntityRequest):
             # Resolve against existing entities. force_type suppresses only the
             # Tier 1.1b cross-type dedup fallback (advisory cross_type_warning
             # below still fires).
-            canonical, is_new = await resolve_entity(
-                conn,
-                entity,
-                skip_fuzzy=request.exact_only,
-                skip_cross_type=request.force_type,
-                resolution_caller="personal_ingest_api.register_vault_entity",
-            )
+            try:
+                canonical, is_new = await resolve_entity(
+                    conn,
+                    entity,
+                    skip_fuzzy=request.exact_only,
+                    skip_cross_type=request.force_type,
+                    resolution_caller="personal_ingest_api.register_vault_entity",
+                )
+            except GeneratedUriHeldError as e:
+                raise HTTPException(status_code=409, detail=str(e))
 
             # Backfill vault_rid / vault_path for alias-only updates.
             # When the caller omits them (e.g. alias auto-learning), reuse the
@@ -4408,7 +4577,9 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     )
                     logger.warning(collision_warning)
 
-            # Check for same name registered under a different entity type
+            # Check for same name registered under a different entity type.
+            # Live rows only: a merged-away row has already been deduplicated, so
+            # it is not a possible duplicate to merge or cross-link.
             cross_type_warning = None
             if not is_suppressed:
                 normalized_name = normalize_entity_text(request.name)
@@ -4417,6 +4588,7 @@ async def register_vault_entity(request: RegisterEntityRequest):
                     FROM entity_registry er
                     LEFT JOIN entity_rid_mappings erm ON erm.canonical_uri = er.fuseki_uri
                     WHERE er.normalized_text = $1 AND er.entity_type != $2
+                      AND er.merged_into IS NULL
                     LIMIT 3
                 """, normalized_name, request.entity_type)
                 if cross_type_rows:
@@ -4672,12 +4844,14 @@ async def register_vault_entity(request: RegisterEntityRequest):
                 relationship_sync_error=relationship_sync_error,
             )
 
-            # Emit federation event for entity replication
+            # Emit federation event for entity replication. Name and type are the
+            # resolved row's, which register-entity does not change: a peer's apply
+            # overwrites both, so the request's would rename or retype the survivor.
             from api.federation_events import emit_domain_event
             await emit_domain_event("entity", "NEW" if is_new else "UPDATE", canonical.uri, {
                 "fuseki_uri": canonical.uri,
-                "entity_text": request.name,
-                "entity_type": request.entity_type,
+                "entity_text": canonical.name or request.name,
+                "entity_type": canonical.type or request.entity_type,
                 "normalized_text": canonical.name.lower().strip() if canonical.name else request.name.lower().strip(),
                 "aliases": [],
                 "metadata": {},
@@ -4983,7 +5157,10 @@ async def get_contextual_candidates_internal(
     if document_rid and document_rid in related_docs:
         related_docs.discard(document_rid)
 
-    # Get entities of requested types from related documents
+    # Get entities of requested types from related documents. Tombstones are
+    # excluded rather than followed: a merge rewires the loser's links to the
+    # survivor, so the survivor is already a candidate from the same documents,
+    # and Tier 1.5 returns the candidate URI as-is (Phase 1b, 2026-10-12).
     if related_docs:
         related_docs_list = list(related_docs)
         entities = await conn.fetch("""
@@ -4993,6 +5170,7 @@ async def get_contextual_candidates_internal(
             JOIN document_entity_links del ON er.fuseki_uri = del.entity_uri
             WHERE er.entity_type = ANY($1)
               AND NOT er.node_private
+              AND er.merged_into IS NULL
               AND del.document_rid = ANY($2)
         """, entity_types, related_docs_list)
 
@@ -5019,6 +5197,7 @@ async def get_contextual_candidates_internal(
             LEFT JOIN entity_rid_mappings erm ON er.fuseki_uri = erm.canonical_uri
             WHERE er.entity_type = 'Person'
               AND NOT er.node_private
+              AND er.merged_into IS NULL
               AND erm.vault_path IS NOT NULL
               AND er.fuseki_uri NOT IN (
                   SELECT entity_uri FROM document_entity_links
