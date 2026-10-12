@@ -1190,6 +1190,84 @@ async def _existing_holder_of_generated_uri(
     return holder
 
 
+async def _fetchrow_hnsw(conn: asyncpg.Connection, sql: str, *args):
+    """Run one filtered HNSW query with pgvector iterative scan, leaking no settings.
+
+    A filtered HNSW scan without hnsw.iterative_scan stops after ef_search (40)
+    candidates and returns zero rows when none of them pass the WHERE filters
+    (migration 109 measured this). personal_koi sets relaxed_order per database,
+    but personal_koi_test and a fresh node do not, so the query must not depend on
+    that. SET LOCAL lasts until the end of the enclosing transaction, and inside a
+    savepoint it survives RELEASE, so the read runs in its own transaction or
+    savepoint which is then rolled back: that undoes the SET in every caller
+    context (bare pooled connection, /ingest's per-entity savepoint, a caller's
+    transaction). The statement is read-only, so the rollback discards nothing.
+
+    plan_cache_mode = force_custom_plan: asyncpg caches the prepared statement per
+    pooled connection, and after 5 executions PostgreSQL may switch to a generic
+    plan that cannot see the entity_type value. That plan is always the HNSW scan
+    with `entity_type = $2` as a post-filter, so a rare type walks up to
+    max_scan_tuples (~18k) index tuples: 8-43 s under load on personal_koi, where
+    the custom plan picks a btree, bitmap or seq scan plus exact sort in
+    milliseconds. Custom planning per call costs a few ms and keeps that choice.
+    """
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+        await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+        return await conn.fetchrow(sql, *args)
+    finally:
+        await tx.rollback()
+
+
+# Tier 2b semantic match: the single most similar live row (of the type, or of any
+# type) whose cosine similarity exceeds the threshold, or none. Reads embedding_3072
+# (post-2026-04-23 OpenAI 3072-dim migration); the halfvec cast is required because
+# pgvector full-precision vector ANN caps at 2000 dims.
+#
+# Only the inner ORDER BY <raw distance> LIMIT can use
+# idx_entity_registry_embedding_3072_hnsw. The previous form ordered by the computed
+# similarity with the threshold in WHERE, which the planner cannot serve from the
+# index: it sorted every live row of the type (2-58 s under load, the whole table
+# without a type) and /ingest of an unmatched name hit the pool's 60 s
+# command_timeout. iterative_scan relaxed_order returns rows only approximately
+# sorted, so the outer ORDER BY re-sorts the candidates (the knowledge_router
+# convention), and 10 candidates rather than 1 leave room for that mis-ranking.
+# Recall against the exact form: tests/test_tier2b_semantic_hnsw.py docstring.
+_TIER2B_SQL_TYPED = """
+    WITH hits AS (
+        SELECT id, fuseki_uri, entity_text, entity_type,
+               1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
+        FROM entity_registry
+        WHERE embedding_3072 IS NOT NULL
+          AND entity_type = $2
+          AND merged_into IS NULL
+        ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+        LIMIT 10
+    )
+    SELECT * FROM hits
+    WHERE similarity > $3
+    ORDER BY similarity DESC
+    LIMIT 1
+"""
+_TIER2B_SQL_ANY_TYPE = """
+    WITH hits AS (
+        SELECT id, fuseki_uri, entity_text, entity_type,
+               1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
+        FROM entity_registry
+        WHERE embedding_3072 IS NOT NULL
+          AND merged_into IS NULL
+        ORDER BY embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+        LIMIT 10
+    )
+    SELECT * FROM hits
+    WHERE similarity > $2
+    ORDER BY similarity DESC
+    LIMIT 1
+"""
+
+
 async def resolve_entity(
     conn: asyncpg.Connection,
     entity: ExtractedEntity,
@@ -1672,37 +1750,12 @@ async def resolve_entity(
         if embedding:
             semantic_threshold = schema.semantic_threshold
 
-            # Query for semantic matches using pgvector cosine similarity.
-            # Reads from embedding_3072 (post-2026-04-23 OpenAI 3072-dim migration);
-            # halfvec cast required because pgvector full-precision vector ANN caps
-            # at 2000 dims. Uses idx_entity_registry_embedding_3072_hnsw.
             if entity.type:
-                semantic_match = await conn.fetchrow("""
-                    SELECT id, fuseki_uri, entity_text, entity_type,
-                           1 - (embedding_3072::halfvec(3072)
-                                <=> $1::halfvec(3072)) AS similarity
-                    FROM entity_registry
-                    WHERE embedding_3072 IS NOT NULL
-                      AND entity_type = $2
-                      AND merged_into IS NULL
-                      AND 1 - (embedding_3072::halfvec(3072)
-                               <=> $1::halfvec(3072)) > $3
-                    ORDER BY similarity DESC
-                    LIMIT 1
-                """, str(embedding), entity.type, semantic_threshold)
+                semantic_match = await _fetchrow_hnsw(
+                    conn, _TIER2B_SQL_TYPED, str(embedding), entity.type, semantic_threshold)
             else:
-                semantic_match = await conn.fetchrow("""
-                    SELECT id, fuseki_uri, entity_text, entity_type,
-                           1 - (embedding_3072::halfvec(3072)
-                                <=> $1::halfvec(3072)) AS similarity
-                    FROM entity_registry
-                    WHERE embedding_3072 IS NOT NULL
-                      AND merged_into IS NULL
-                      AND 1 - (embedding_3072::halfvec(3072)
-                               <=> $1::halfvec(3072)) > $2
-                    ORDER BY similarity DESC
-                    LIMIT 1
-                """, str(embedding), semantic_threshold)
+                semantic_match = await _fetchrow_hnsw(
+                    conn, _TIER2B_SQL_ANY_TYPE, str(embedding), semantic_threshold)
 
             if semantic_match:
                 # Name-shape guard: embedding proximity alone conflates
