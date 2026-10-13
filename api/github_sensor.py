@@ -845,9 +845,13 @@ class GitHubSensor:
         if len(content) < 50:
             return []
 
-        # Get all entities for word-boundary matching
+        # Get all live entities for word-boundary matching. A merged-away row is not a
+        # match target: its link would name a tombstone (or, under migration 132's
+        # trigger, be stored on the survivor while the emit below names the tombstone).
         rows = await conn.fetch(
-            "SELECT entity_text, fuseki_uri, entity_type FROM entity_registry WHERE LENGTH(entity_text) >= 3 ORDER BY LENGTH(entity_text) DESC"
+            "SELECT entity_text, fuseki_uri, entity_type FROM entity_registry "
+            "WHERE LENGTH(entity_text) >= 3 AND merged_into IS NULL "
+            "ORDER BY LENGTH(entity_text) DESC"
         )
 
         document_rid = f"github:{repo_name}:{fr['rel_path']}"
@@ -858,18 +862,21 @@ class GitHubSensor:
             pattern = re.compile(r"\b" + re.escape(name.lower()) + r"\b", re.IGNORECASE)
             if pattern.search(content):
                 try:
-                    await conn.execute(
+                    # RETURNING the stored entity_uri so the emit names the row as
+                    # written, even if a trigger rewrote it.
+                    stored_uri = await conn.fetchval(
                         """INSERT INTO document_entity_links (document_rid, entity_uri, mention_count)
                            VALUES ($1, $2, 1)
                            ON CONFLICT (document_rid, entity_uri) DO UPDATE
-                           SET mention_count = document_entity_links.mention_count + 1""",
+                           SET mention_count = document_entity_links.mention_count + 1
+                           RETURNING entity_uri""",
                         document_rid,
                         row["fuseki_uri"],
                     )
                     # Record the successful upsert for post-commit emit. Only a
                     # list append — must NOT be the emit itself (an emit failure
                     # inside this swallow-all try would vanish silently).
-                    doclink_emits.append((document_rid, row["fuseki_uri"]))
+                    doclink_emits.append((document_rid, stored_uri))
                 except Exception:
                     pass
 
