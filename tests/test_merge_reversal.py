@@ -516,7 +516,7 @@ async def test_retype_resurrected_round_trip_moves_post_retype_links(
     assert result["restored"]["document_entity_links.entity_uri"] == 2
     # d_new, plus d_redirect when 132 put it on the survivor (without 132 it was
     # stored on the loser, which step 1 made live again).
-    assert result["restored"]["post_retype_links_moved"] == (2 if with_trigger else 1)
+    assert result["restored"]["links_moved_to_live_end"] == (2 if with_trigger else 1)
 
     if with_trigger:
         # Positive twin for the trigger: a later write naming the tombstone still
@@ -562,7 +562,114 @@ async def test_retype_resurrected_undo_folds_a_colliding_link(conn):
     result = await unmerge(conn, mid_id)
 
     assert await _doc_links(conn, doc) == {doc: (proj, 5)}
-    assert result["restored"]["post_retype_links_moved"] == 1
+    assert result["restored"]["links_moved_to_live_end"] == 1
+
+
+async def _resurrect_setup(conn, label, two_hop=False):
+    """Concept tombstone (optionally via a mid hop) -> Project; return the URIs."""
+    import uuid
+
+    from api.personal_ingest_api import generate_entity_uri
+
+    tag = uuid.uuid4().hex[:8]
+    text = f"Zz Retype Resurrect {label} {tag}"
+    proj = generate_entity_uri(text, "Project")
+    concept = generate_entity_uri(text, "Concept")
+    await _mk_typed(conn, proj, text, "Project")
+    await _mk_typed(conn, concept, text, "Concept")
+    mid = None
+    target = proj
+    if two_hop:
+        mid = f"orn:personal-koi.entity:organization-zz-resurrect-{label.lower()}-mid-{tag}"
+        await _mk_typed(conn, mid, f"Zz Resurrect {label} Mid {tag}", "Organization")
+        await conn.execute(
+            "UPDATE entity_registry SET merged_into=$2, merged_at=NOW() WHERE fuseki_uri=$1",
+            mid, proj)
+        target = mid
+    await conn.execute(
+        "UPDATE entity_registry SET merged_into=$2, merged_at=NOW() WHERE fuseki_uri=$1",
+        concept, target)
+    return tag, proj, concept, mid
+
+
+@pytest.mark.parametrize("with_trigger", [True, False])
+async def test_retype_resurrected_undo_moves_a_pre_retype_tombstone_link(conn, with_trigger):
+    """A link the tombstone already held BEFORE the retype also moves to the live end.
+
+    This is the pre-132 state (81 such rows existed on 2026-10-12, and 132 does not
+    repair existing rows). The retype revives the tombstone, so the link becomes
+    live and uncaptured; the undo moves it to the live end, which is the repair 132's
+    rollback file applies. The counter therefore counts it too.
+    """
+    do_retype = _do_retype_fn()
+    tag, proj, concept, _ = await _resurrect_setup(conn, "Stale")
+    d_stale = f"orn:test.doc:resurrect-stale-{tag}"
+    await conn.execute(
+        "INSERT INTO document_entity_links (document_rid, entity_uri, mention_count) "
+        "VALUES ($1,$2,4)", d_stale, concept)
+    if with_trigger:
+        await conn.execute(MIGRATION_132.read_text())
+        assert (await _doc_links(conn, d_stale))[d_stale] == (concept, 4), \
+            "132 must not have repaired the pre-existing row (it only guards writes)"
+
+    new_uri, _, rewired, reversal = await do_retype(conn, proj, "Project", "Concept", "test")
+    assert new_uri == concept and reversal["retype"]["survivor_resurrected"] is True
+    result = await unmerge(conn, await _log(conn, new_uri, proj, rewired, reversal))
+
+    assert await _doc_links(conn, d_stale) == {d_stale: (proj, 4)}
+    assert result["restored"]["links_moved_to_live_end"] == 1
+
+
+@pytest.mark.parametrize("break_how", ["over_long", "cycle"])
+async def test_retype_resurrected_undo_refuses_a_chain_with_no_live_end(conn, break_how):
+    """If the restored merged_into chain has no live end, the unmerge refuses and rolls back.
+
+    over_long: after the retype the mid hop was re-pointed through more tombstones
+    than MAX_MERGE_CHAIN allows. cycle: after the retype the mid hop was re-pointed
+    at the revived survivor, so re-tombstoning it closes concept -> mid -> concept.
+    A chain stopping at a URI with no registry row is not tested: the
+    entity_registry_merged_into_fkey (NO ACTION) makes it unreachable, in this DB
+    and in personal_koi.
+    """
+    from api.resolution_primitives import MAX_MERGE_CHAIN
+
+    do_retype = _do_retype_fn()
+    tag, proj, concept, mid = await _resurrect_setup(conn, "Refuse", two_hop=True)
+
+    new_uri, _, rewired, reversal = await do_retype(conn, proj, "Project", "Concept", "test")
+    assert new_uri == concept and reversal["retype"]["survivor_resurrected"] is True
+    mid_id = await _log(conn, new_uri, proj, rewired, reversal)
+
+    d_new = f"orn:test.doc:resurrect-refuse-{tag}"
+    await conn.execute(
+        "INSERT INTO document_entity_links (document_rid, entity_uri) VALUES ($1,$2)",
+        d_new, concept)
+    if break_how == "over_long":
+        hops = [f"orn:personal-koi.entity:concept-zz-resurrect-hop{i}-{tag}"
+                for i in range(MAX_MERGE_CHAIN + 1)]
+        for i, h in enumerate(hops):
+            await _mk_typed(conn, h, f"Zz Resurrect Hop {i} {tag}", "Concept")
+        for a, b in zip(hops, hops[1:] + [proj]):
+            await conn.execute(
+                "UPDATE entity_registry SET merged_into=$2 WHERE fuseki_uri=$1", a, b)
+        await conn.execute(
+            "UPDATE entity_registry SET merged_into=$2 WHERE fuseki_uri=$1", mid, hops[0])
+    else:
+        await conn.execute(
+            "UPDATE entity_registry SET merged_into=$2 WHERE fuseki_uri=$1", mid, concept)
+
+    with pytest.raises(ValueError, match="no live end"):
+        async with conn.transaction():   # savepoint: the caller's rollback
+            await unmerge(conn, mid_id)
+
+    # Rolled back whole: the retype's state is intact and the merge is not reverted.
+    assert await conn.fetchval(
+        "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1", concept) is None
+    assert await conn.fetchval(
+        "SELECT merged_into FROM entity_registry WHERE fuseki_uri = $1", proj) == concept
+    assert await conn.fetchval(
+        "SELECT reverted_at FROM entity_merge_log WHERE id = $1", mid_id) is None
+    assert (await _doc_links(conn, d_new))[d_new] == (concept, 1)
 
 
 async def test_schema_1_reversals_are_still_accepted(conn):

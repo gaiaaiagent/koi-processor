@@ -230,8 +230,12 @@ async def _move_links_to_live_end(conn, tomb: str, merge_log_id: int) -> int:
     Same fold as _do_merge step 2: UNIQUE(document_rid, entity_uri) holds and
     mention_count is additive, so a document already linked to the live entity
     keeps one row carrying both counts. Returns the number of rows that left
-    `tomb`. Refuses (ValueError, so the caller rolls back) on a broken or cyclic
-    chain rather than guess a destination.
+    `tomb`. That count is every uncaptured row on `tomb`, not only rows written
+    after the retype: a link the tombstone already held before the retype (the
+    pre-132 defect class) also moves, the same repair 132's rollback file applies.
+    Refuses (ValueError, so the caller rolls back) on a broken or cyclic chain, or
+    when `tomb` has no registry row (the re-tombstone matched nothing), rather
+    than guess a destination.
     """
     from api.resolution_primitives import resolve_to_live_uri
 
@@ -464,8 +468,10 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
             # naming a tombstone, and 132 cannot catch it: it fires on
             # document_entity_links writes, not on entity_registry.merged_into.
             # They go where the restored merged_into chain says, which is where
-            # 132 sends any later write naming this URI.
-            restored["post_retype_links_moved"] = await _move_links_to_live_end(
+            # 132 sends any later write naming this URI. Links the tombstone held
+            # before the retype (written before 132 existed) go the same way, so
+            # the count is not limited to post-retype rows.
+            restored["links_moved_to_live_end"] = await _move_links_to_live_end(
                 conn, survivor, merge_log_id)
 
     await conn.execute(
