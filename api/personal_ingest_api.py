@@ -1222,6 +1222,19 @@ async def _fetchrow_hnsw(conn: asyncpg.Connection, sql: str, *args,
         await tx.rollback()
 
 
+async def _fetch_hnsw(conn: asyncpg.Connection, sql: str, *args):
+    """_fetchrow_hnsw for a query that returns several rows: same settings, same
+    own transaction or savepoint, rolled back, so nothing leaks."""
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+        await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+        return await conn.fetch(sql, *args)
+    finally:
+        await tx.rollback()
+
+
 # Tier 2b semantic match: the single most similar live row (of the type, or of any
 # type) whose cosine similarity exceeds the threshold, or none. Reads embedding_3072
 # (post-2026-04-23 OpenAI 3072-dim migration); the halfvec cast is required because
@@ -6197,6 +6210,42 @@ async def get_bge_embedding(text: str) -> Optional[List[float]]:
         return None
 
 
+# /search include_chunks fill: the best chunk per document, for the documents the main
+# query did not return ($3), most similar first. The same pipeline as the main query:
+# HNSW candidates by raw distance, dedup to the best chunk per document, re-sort.
+# The exclusion sits inside the candidate scan, so it needs hnsw.iterative_scan
+# (_fetch_hnsw): without it the scan stops after ef_search chunks, which mostly belong
+# to the excluded documents. The previous form ordered by document_rid before the
+# LIMIT and so returned the alphabetically first documents: on personal_koi
+# (2026-10-12, read-only, 3 sampled queries) its overlap with the exact best-chunk
+# ranking was 0.0. This form's was 1.0 on the same queries, unfiltered and with the
+# email filter, in 0.46-9.3 s at load average 14-21. Not yet re-measured at low load.
+_SEARCH_CHUNK_FILL_SQL = """
+    SELECT * FROM (
+        SELECT DISTINCT ON (document_rid)
+            document_rid as rid, title, content_preview,
+            similarity, source_sensor, metadata
+        FROM (
+            SELECT c.document_rid,
+                   m.content->>'title' as title,
+                   LEFT(c.content->>'text', 500) as content_preview,
+                   1 - (c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) as similarity,
+                   m.source_sensor, m.metadata
+            FROM koi_memory_chunks c
+            JOIN koi_memories m ON m.rid = c.document_rid
+            WHERE c.embedding_3072 IS NOT NULL
+              AND c.document_rid <> ALL($3::text[])
+            {source_filter}
+            ORDER BY c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+            LIMIT 200
+        ) cand
+        ORDER BY document_rid, similarity DESC
+    ) ded
+    ORDER BY similarity DESC
+    LIMIT $2
+"""
+
+
 @app.post("/search")
 async def search_knowledge_base(request: SearchRequest):
     """
@@ -6312,26 +6361,10 @@ async def search_knowledge_base(request: SearchRequest):
 
             # Optionally search chunks for more coverage
             if request.include_chunks and len(results) < request.limit:
-                chunk_query = f"""
-                    SELECT DISTINCT ON (c.document_rid)
-                        c.document_rid as rid,
-                        m.content->>'title' as title,
-                        LEFT(c.content->>'text', 500) as content_preview,
-                        1 - (c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) as similarity,
-                        m.source_sensor,
-                        m.metadata
-                    FROM koi_memory_chunks c
-                    JOIN koi_memories m ON m.rid = c.document_rid
-                    WHERE c.embedding_3072 IS NOT NULL
-                      AND c.document_rid NOT IN (SELECT rid FROM unnest($3::text[]) as rid)
-                    {source_filter.replace('m.source_sensor', 'm.source_sensor')}
-                    ORDER BY c.document_rid, c.embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
-                    LIMIT $2
-                """
-
                 existing_rids = [r['rid'] for r in results]
-                chunk_rows = await conn.fetch(
-                    chunk_query,
+                chunk_rows = await _fetch_hnsw(
+                    conn,
+                    _SEARCH_CHUNK_FILL_SQL.format(source_filter=source_filter),
                     embedding_str,
                     request.limit - len(results),
                     existing_rids

@@ -725,6 +725,125 @@ class FactRetractResponse(BaseModel):
     reason: Optional[str] = None
 
 
+# /recall-walk seeds: the RECALL_SEED_K episodes with the smallest best-fact distance
+# to the query, over live facts (valid_to IS NULL) with an episode and an embedding.
+# Ties at the cut-off are returned in any order: the exact form breaks them by plan
+# order too, and on personal_koi one query had 200 facts at distance 0 (one repeated
+# fact text across 200 episodes), so any 12 of those episodes are correct.
+#
+# The exact GROUP BY reads every embedded live fact. On personal_koi (2026-10-12,
+# read-only, 8 sampled queries, load average 31-180) it took 133-300 s, past the pool's
+# 60 s command_timeout, and one query hit the 300 s statement_timeout. The previous
+# code caught only DataError, so /recall-walk returned 500. The ANN form takes the
+# nearest facts from idx_knowledge_facts_embedding_3072_hnsw and groups those: 1.5-15 s
+# at N=200 under the same load, and the exact 12 episodes on each of the 7 queries
+# whose exact form finished, counting the tied query as equal. Not yet re-measured
+# at low load.
+#
+# Fallbacks, in order: when all N candidates came back but cover fewer than K
+# episodes (a few episodes own the nearest facts), retry with the next N. When fewer
+# than N came back, the filtered set ran out or hnsw.max_scan_tuples stopped the walk,
+# and the candidates may miss a nearer episode, so run the exact form; likewise when
+# the largest N is still short. A timeout or cancel returns the best seeds so far,
+# marked partial, instead of failing the request. All stages share one deadline,
+# RECALL_SEED_BUDGET_S, below the pool's 60 s command_timeout, so the seed step
+# cannot hold a pooled connection for three timeouts in a row.
+RECALL_SEED_K = 12
+RECALL_SEED_ANN_LIMITS = (200, 1000)
+RECALL_SEED_BUDGET_S = 45.0
+
+
+def _recall_seed_ann_sql(n: int, group_filter: str) -> str:
+    return f"""
+        WITH cand AS (
+            SELECT f.episode_id,
+                   f.fact_embedding_3072::halfvec(3072) <=> $1::halfvec(3072) AS dist
+            FROM knowledge_facts f
+            WHERE f.episode_id IS NOT NULL
+              AND f.fact_embedding_3072 IS NOT NULL
+              AND f.valid_to IS NULL
+              {group_filter}
+            ORDER BY f.fact_embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+            LIMIT {int(n)}
+        )
+        SELECT episode_id, MIN(dist) AS dist,
+               (SELECT count(*) FROM cand) AS n_cand
+        FROM cand
+        GROUP BY episode_id
+        ORDER BY dist
+        LIMIT {RECALL_SEED_K}
+    """
+
+
+def _recall_seed_exact_sql(group_filter: str) -> str:
+    return f"""
+        SELECT DISTINCT f.episode_id,
+               MIN(f.fact_embedding_3072::halfvec(3072)
+                   <=> $1::halfvec(3072)) AS dist
+        FROM knowledge_facts f
+        WHERE f.episode_id IS NOT NULL
+          AND f.fact_embedding_3072 IS NOT NULL
+          AND f.valid_to IS NULL
+          {group_filter}
+        GROUP BY f.episode_id
+        ORDER BY dist
+        LIMIT {RECALL_SEED_K}
+    """
+
+
+async def _recall_walk_seeds(conn, emb_str: str, group_id: Optional[str] = None):
+    """Return (seed rows, method, partial) for /recall-walk; see RECALL_SEED_K.
+
+    Each query runs in its own transaction or savepoint, rolled back: SET LOCAL
+    hnsw.iterative_scan = relaxed_order lets the filtered ANN scan go past ef_search
+    (personal_koi sets it per database, a fresh node does not), and the rollback
+    undoes the SET and clears an aborted state after a timeout. method is the stage
+    whose rows are returned: "ann<N>", "exact", or "none" when the first ANN query
+    timed out. DataError (a query embedding of the wrong dimension) propagates.
+    """
+    group_filter = "AND f.group_id = $2" if group_id else ""
+    params: list = [emb_str] + ([group_id] if group_id else [])
+    best: list = []
+    method = "none"
+    stage = "none"
+    deadline = time.monotonic() + RECALL_SEED_BUDGET_S
+
+    async def run(sql: str, ann: bool):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            if ann:
+                await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+                await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+            return await conn.fetch(sql, *params, timeout=remaining)
+        finally:
+            try:
+                await tx.rollback()
+            except Exception as e:  # connection broken by the cancel: nothing to undo
+                logger.warning("recall-walk seed rollback failed: %s", e)
+
+    try:
+        for n in RECALL_SEED_ANN_LIMITS:
+            stage = f"ann{n}"
+            rows = await run(_recall_seed_ann_sql(n, group_filter), ann=True)
+            best, method = rows, f"ann{n}"
+            n_cand = rows[0]["n_cand"] if rows else 0
+            if n_cand < n:
+                break
+            if len(rows) >= RECALL_SEED_K:
+                return rows, method, False
+        stage = "exact"
+        rows = await run(_recall_seed_exact_sql(group_filter), ann=False)
+        return rows, "exact", False
+    except (asyncio.TimeoutError, asyncpg.exceptions.QueryCanceledError) as e:
+        logger.warning("recall-walk seed query (%s stage) timed out; returning %d "
+                       "partial seeds from %s: %r", stage, len(best), method, e)
+        return best, method, True
+
+
 def create_router(
     pool,
     generate_embedding: Optional[EmbedFn] = None,
@@ -2552,37 +2671,24 @@ def create_router(
         async with pool.acquire() as conn:
             # 2a. Seed episodes via vector similarity over fact_embedding_3072
             #     (find episodes whose facts semantically match the query).
-            #     Then also try matching against episode names/content via
-            #     fact text join. Group_id filter is optional.
-            group_filter = "AND f.group_id = $2" if body.group_id else ""
-            seed_params: list = [emb_str]
-            if body.group_id:
-                seed_params.append(body.group_id)
+            #     Group_id filter is optional. Contract, ANN form and fallbacks:
+            #     RECALL_SEED_K and _recall_walk_seeds above create_router.
+            seed_method, seed_partial = "none", False
             try:
-                seed_rows = await conn.fetch(
-                    f"""
-                    SELECT DISTINCT f.episode_id,
-                           MIN(f.fact_embedding_3072::halfvec(3072)
-                               <=> $1::halfvec(3072)) AS dist
-                    FROM knowledge_facts f
-                    WHERE f.episode_id IS NOT NULL
-                      AND f.fact_embedding_3072 IS NOT NULL
-                      AND f.valid_to IS NULL
-                      {group_filter}
-                    GROUP BY f.episode_id
-                    ORDER BY dist
-                    LIMIT 12
-                    """,
-                    *seed_params,
-                )
+                seed_rows, seed_method, seed_partial = await _recall_walk_seeds(
+                    conn, emb_str, body.group_id)
             except asyncpg.exceptions.DataError as e:
                 logger.warning("recall-walk seed query skipped: %s", e)
                 seed_rows = []
 
             seed_episode_ids = [str(r["episode_id"]) for r in seed_rows]
-            walk_path.append(
-                {"phase": "seed", "n_episodes": len(seed_episode_ids)}
-            )
+            seed_step = {"phase": "seed", "n_episodes": len(seed_episode_ids),
+                         "method": seed_method}
+            if seed_partial:
+                # A seed query timed out: these are the nearest episodes an earlier
+                # ANN query found (possibly none), not a verified top 12.
+                seed_step["seed_partial"] = True
+            walk_path.append(seed_step)
 
             if not seed_episode_ids:
                 latency_walk_ms = round((time.monotonic() - t_walk_start) * 1000, 1)
