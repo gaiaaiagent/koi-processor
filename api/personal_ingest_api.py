@@ -1185,7 +1185,8 @@ async def _existing_holder_of_generated_uri(
     return holder
 
 
-async def _fetchrow_hnsw(conn: asyncpg.Connection, sql: str, *args):
+async def _fetchrow_hnsw(conn: asyncpg.Connection, sql: str, *args,
+                         statement_timeout_ms: Optional[int] = None):
     """Run one filtered HNSW query with pgvector iterative scan, leaking no settings.
 
     A filtered HNSW scan without hnsw.iterative_scan stops after ef_search (40)
@@ -1205,12 +1206,17 @@ async def _fetchrow_hnsw(conn: asyncpg.Connection, sql: str, *args):
     max_scan_tuples (~18k) index tuples: 8-43 s under load on personal_koi, where
     the custom plan picks a btree, bitmap or seq scan plus exact sort in
     milliseconds. Custom planning per call costs a few ms and keeps that choice.
+
+    statement_timeout_ms, when given, caps this one statement server-side (SET LOCAL,
+    undone by the same rollback).
     """
     tx = conn.transaction()
     await tx.start()
     try:
         await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
         await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+        if statement_timeout_ms is not None:
+            await conn.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
         return await conn.fetchrow(sql, *args)
     finally:
         await tx.rollback()
@@ -1261,6 +1267,93 @@ _TIER2B_SQL_ANY_TYPE = """
     ORDER BY similarity DESC
     LIMIT 1
 """
+
+# The exact typed form: identical to _TIER2B_SQL_TYPED except the inner ORDER BY is
+# the computed similarity, which the HNSW opclass cannot serve, so the planner uses a
+# btree, bitmap or seq scan of the type plus an exact sort. resolve_entity picks it
+# for types with at most _TIER2B_EXACT_MAX_ROWS live embedded rows.
+#
+# Why (personal_koi, 2026-10-12, read-only, load average 15-23): the HNSW form
+# post-filters entity_type, so for a mid-size type a query far from it walks
+# thousands of index tuples before it collects 10 rows of the type: CaseStudy (374
+# rows) 5.8 s, Incident (414) 3.1 s, Claim (2582) 1.6 s with a wrong nearest row,
+# Component 1.4 s, Location 1.2 s. The exact form was faster than that worst case for
+# every type up to Claim; HNSW was faster from Organization (4490) up.
+_TIER2B_SQL_TYPED_EXACT = """
+    WITH hits AS (
+        SELECT id, fuseki_uri, entity_text, entity_type,
+               1 - (embedding_3072::halfvec(3072) <=> $1::halfvec(3072)) AS similarity
+        FROM entity_registry
+        WHERE embedding_3072 IS NOT NULL
+          AND entity_type = $2
+          AND merged_into IS NULL
+        ORDER BY similarity DESC
+        LIMIT 10
+    )
+    SELECT * FROM hits
+    WHERE similarity > $3
+    ORDER BY similarity DESC
+    LIMIT 1
+"""
+# Measured exact/HNSW crossover lies between 2,582 (Claim) and 4,490 (Organization) rows.
+_TIER2B_EXACT_MAX_ROWS = 4000
+_TIER2B_COUNT_TTL_S = 600.0
+_TIER2B_COUNT_RETRY_S = 60.0
+_TIER2B_COUNT_TIMEOUT_MS = 5000
+# Heap-only GROUP BY (it never reads the TOASTed vectors): 155 ms at load average 23.
+# One row, so it can run through _fetchrow_hnsw and its savepoint. It counts the
+# refreshing caller's own uncommitted rows too, which is immaterial at this threshold.
+_TIER2B_TYPE_COUNTS_SQL = """
+    SELECT array_agg(entity_type) AS types, array_agg(n) AS counts
+    FROM (
+        SELECT entity_type, count(*) AS n
+        FROM entity_registry
+        WHERE embedding_3072 IS NOT NULL
+          AND merged_into IS NULL
+          AND entity_type IS NOT NULL
+        GROUP BY entity_type
+    ) s
+"""
+_tier2b_type_counts: Dict[str, int] = {}
+_tier2b_counts_expire_at = 0.0
+_tier2b_counts_failing = False
+_tier2b_counts_lock = asyncio.Lock()
+
+
+async def _tier2b_live_count(conn: asyncpg.Connection, entity_type: str) -> int:
+    """Cached count of live embedded entity_registry rows of entity_type.
+
+    Refreshed at most every _TIER2B_COUNT_TTL_S, by one caller at a time: while a
+    refresh is in flight other callers use the current counts rather than wait. A type
+    the cache does not know, and every type before the first successful refresh,
+    count as 0, which selects the exact form: always correct, at worst slower. A
+    failed refresh keeps the last good counts (types grow by tens of rows a day, and
+    the count query fails mostly when the database is overloaded, which is when
+    sending Concept and Person to the exact sort would cost most), is logged once per
+    failing streak, and is retried after _TIER2B_COUNT_RETRY_S. It runs through
+    _fetchrow_hnsw with its own statement timeout, so a failure is rolled back in its
+    own savepoint and leaves the caller's transaction usable.
+    """
+    global _tier2b_type_counts, _tier2b_counts_expire_at, _tier2b_counts_failing
+    if time.monotonic() >= _tier2b_counts_expire_at and not _tier2b_counts_lock.locked():
+        async with _tier2b_counts_lock:
+            try:
+                row = await _fetchrow_hnsw(conn, _TIER2B_TYPE_COUNTS_SQL,
+                                           statement_timeout_ms=_TIER2B_COUNT_TIMEOUT_MS)
+            except Exception as e:
+                _tier2b_counts_expire_at = time.monotonic() + _TIER2B_COUNT_RETRY_S
+                if not _tier2b_counts_failing:
+                    logger.warning("Tier 2b type-count refresh failed; keeping the last "
+                                   "counts (%d types) until it succeeds: %s",
+                                   len(_tier2b_type_counts), e)
+                _tier2b_counts_failing = True
+            else:
+                _tier2b_type_counts = dict(zip(row["types"] or [], row["counts"] or []))
+                _tier2b_counts_expire_at = time.monotonic() + _TIER2B_COUNT_TTL_S
+                if _tier2b_counts_failing:
+                    logger.info("Tier 2b type-count refresh recovered")
+                _tier2b_counts_failing = False
+    return _tier2b_type_counts.get(entity_type, 0)
 
 
 async def resolve_entity(
@@ -1746,8 +1839,13 @@ async def resolve_entity(
             semantic_threshold = schema.semantic_threshold
 
             if entity.type:
+                typed_sql = (
+                    _TIER2B_SQL_TYPED
+                    if await _tier2b_live_count(conn, entity.type) > _TIER2B_EXACT_MAX_ROWS
+                    else _TIER2B_SQL_TYPED_EXACT
+                )
                 semantic_match = await _fetchrow_hnsw(
-                    conn, _TIER2B_SQL_TYPED, str(embedding), entity.type, semantic_threshold)
+                    conn, typed_sql, str(embedding), entity.type, semantic_threshold)
             else:
                 semantic_match = await _fetchrow_hnsw(
                     conn, _TIER2B_SQL_ANY_TYPE, str(embedding), semantic_threshold)

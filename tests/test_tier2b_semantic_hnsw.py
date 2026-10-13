@@ -377,7 +377,13 @@ async def test_resolve_entity_tier2b_runs_the_index_query(conn, monkeypatch):
     async def fake_embedding(_text, *_a, **_kw):
         return [float(x) for x in q]
 
+    async def large_type(_conn, _typ):
+        return pia._TIER2B_EXACT_MAX_ROWS + 1
+
     monkeypatch.setattr(pia, "_fetchrow_hnsw", spy)
+    # Route this 1-row type to the HNSW form; the size routing itself is tested in
+    # tests/test_tier2b_plan_choice.py.
+    monkeypatch.setattr(pia, "_tier2b_live_count", large_type)
     monkeypatch.setattr(pia, "generate_query_embedding", fake_embedding)
     monkeypatch.setattr(pia, "embedding_provider", object(), raising=False)
     monkeypatch.setattr(pia, "ENABLE_SEMANTIC_MATCHING", True, raising=False)
