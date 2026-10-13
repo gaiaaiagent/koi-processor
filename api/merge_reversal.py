@@ -224,6 +224,49 @@ async def capture_reversal(conn, loser: str, survivor: str) -> Dict[str, Any]:
     }
 
 
+async def _move_links_to_live_end(conn, tomb: str, merge_log_id: int) -> int:
+    """Move every document link on `tomb` to the live end of its merged_into chain.
+
+    Same fold as _do_merge step 2: UNIQUE(document_rid, entity_uri) holds and
+    mention_count is additive, so a document already linked to the live entity
+    keeps one row carrying both counts. Returns the number of rows that left
+    `tomb`. Refuses (ValueError, so the caller rolls back) on a broken or cyclic
+    chain rather than guess a destination.
+    """
+    from api.resolution_primitives import resolve_to_live_uri
+
+    live = await resolve_to_live_uri(conn, tomb)
+    # None when the chain stops at a URI with no registry row.
+    live_ok = await conn.fetchval(
+        "SELECT merged_into IS NULL FROM entity_registry WHERE fuseki_uri = $1", live)
+    if live == tomb and live_ok:
+        return 0   # not tombstoned after all: its links already name a live entity
+    if not live_ok:
+        raise ValueError(
+            f"merge {merge_log_id}: the re-tombstoned survivor {tomb} has no live end "
+            f"to its merged_into chain (stopped at {live}: broken, cyclic or longer "
+            f"than the hop limit), so its post-retype links have no destination. "
+            f"Rolling back."
+        )
+    await conn.execute(
+        """
+        UPDATE document_entity_links s
+        SET mention_count = COALESCE(s.mention_count, 0) + COALESCE(l.mention_count, 0)
+        FROM document_entity_links l
+        WHERE l.entity_uri = $1 AND s.entity_uri = $2 AND s.document_rid = l.document_rid
+        """, tomb, live)
+    folded = _n(await conn.execute(
+        """
+        DELETE FROM document_entity_links l
+        WHERE l.entity_uri = $1
+          AND EXISTS (SELECT 1 FROM document_entity_links s
+                      WHERE s.entity_uri = $2 AND s.document_rid = l.document_rid)
+        """, tomb, live))
+    moved = _n(await conn.execute(
+        "UPDATE document_entity_links SET entity_uri = $2 WHERE entity_uri = $1", tomb, live))
+    return folded + moved
+
+
 async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dict[str, Any]:
     """Reverse one merge. Refuses anything it cannot reverse exactly.
 
@@ -413,6 +456,17 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
                 retype.get("resurrected_phonetic_code"),
                 survivor,
             ))
+
+            # Step 2 moved back only the link ids captured at retype time. While
+            # the survivor was live it gained links of its own: new documents,
+            # upserts that folded into it, and writes naming the tombstoned loser
+            # that migration 132 redirected onto it. Re-tombstoning leaves those
+            # naming a tombstone, and 132 cannot catch it: it fires on
+            # document_entity_links writes, not on entity_registry.merged_into.
+            # They go where the restored merged_into chain says, which is where
+            # 132 sends any later write naming this URI.
+            restored["post_retype_links_moved"] = await _move_links_to_live_end(
+                conn, survivor, merge_log_id)
 
     await conn.execute(
         "UPDATE entity_merge_log SET reverted_at = NOW() WHERE id = $1", merge_log_id

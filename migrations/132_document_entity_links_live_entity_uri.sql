@@ -29,10 +29,11 @@
 --     (/ingest, register-entity, knowledge-add) or emit the RETURNING value (github).
 --   * Links that were live when written and whose entity is tombstoned LATER. The
 --     trigger fires on document_entity_links writes only, not on
---     entity_registry.merged_into. /entities/merge rewires at merge time; the
---     resurrected-survivor branch of merge_reversal.unmerge re-tombstones a row
---     without moving links it gained after the retype. Those remain a repair query
---     (see the rollback file).
+--     entity_registry.merged_into. /entities/merge rewires at merge time, and the
+--     resurrected-survivor branch of merge_reversal.unmerge, which re-tombstones a
+--     row, moves the links that row gained after the retype to its live end
+--     (fixed 2026-10-13). Any other writer of merged_into must do the same; the
+--     repair query is in the rollback file.
 --   * A multi-row INSERT ... ON CONFLICT DO UPDATE whose source names two URIs with
 --     one survivor: the trigger folds both onto one key and Postgres rejects the
 --     statement. Such writers must resolve before grouping (deep extraction Flag 2).

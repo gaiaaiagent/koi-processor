@@ -414,6 +414,157 @@ async def test_retype_in_place_round_trip(conn):
     assert after == before, f"before={before} after={after}"
 
 
+# ---------------------------------------------------------------------------
+# Resurrected-tombstone retype: links written AFTER the retype (2026-10-13)
+#
+# The resurrected branch revives a tombstone as the survivor, and its undo
+# re-tombstones it. Step 2 of unmerge moves back only the link ids captured at
+# retype time, so a link written to the revived survivor afterwards (a new
+# /ingest, an upsert that folded into it, or a write naming the tombstoned
+# loser that migration 132 redirected onto it) was left naming a tombstone:
+# the 81-row defect class 132 exists for, created by the undo itself, which 132
+# cannot see because it fires on document_entity_links writes, not on
+# entity_registry.merged_into.
+# ---------------------------------------------------------------------------
+
+MIGRATION_132 = (
+    __import__("pathlib").Path(__file__).resolve().parents[1]
+    / "migrations" / "132_document_entity_links_live_entity_uri.sql")
+
+
+async def _doc_links(conn, *docs):
+    rows = await conn.fetch(
+        "SELECT document_rid, entity_uri, mention_count FROM document_entity_links "
+        "WHERE document_rid = ANY($1::text[])", list(docs))
+    return {r["document_rid"]: (r["entity_uri"], r["mention_count"]) for r in rows}
+
+
+@pytest.mark.parametrize("with_trigger", [True, False])
+@pytest.mark.parametrize("two_hop", [False, True])
+async def test_retype_resurrected_round_trip_moves_post_retype_links(
+        conn, with_trigger, two_hop):
+    import uuid
+
+    from api.personal_ingest_api import generate_entity_uri
+
+    do_retype = _do_retype_fn()
+    tag = uuid.uuid4().hex[:8]
+    text = f"Zz Retype Resurrect Probe {tag}"
+    norm = text.lower()
+    proj = generate_entity_uri(text, "Project")
+    concept = generate_entity_uri(text, "Concept")
+    await _mk_typed(conn, proj, text, "Project")
+    await _mk_typed(conn, concept, text, "Concept")
+    if two_hop:
+        # concept -> mid -> proj: the retype's chain check walks both hops.
+        mid = f"orn:personal-koi.entity:organization-zz-resurrect-mid-{tag}"
+        await _mk_typed(conn, mid, f"Zz Resurrect Mid {tag}", "Organization")
+        await conn.execute(
+            "UPDATE entity_registry SET merged_into=$2, merged_at=NOW(), merged_by='historical' "
+            "WHERE fuseki_uri=$1", mid, proj)
+        tomb_target = mid
+    else:
+        tomb_target = proj
+    # The historical wrong-direction merge: Concept was merged INTO Project.
+    await conn.execute(
+        "UPDATE entity_registry SET merged_into=$2, merged_at=NOW(), merged_by='historical' "
+        "WHERE fuseki_uri=$1", concept, tomb_target)
+
+    d_old, d_new, d_fold, d_redirect = (f"orn:test.doc:resurrect-{k}-{tag}"
+                                        for k in ("old", "new", "fold", "redirect"))
+    for d in (d_old, d_fold):   # linked before the retype: captured, restored by step 2
+        await conn.execute(
+            "INSERT INTO document_entity_links (document_rid, entity_uri) VALUES ($1,$2)",
+            d, proj)
+    if with_trigger:
+        await conn.execute(MIGRATION_132.read_text())
+
+    new_uri, _, rewired, reversal = await do_retype(conn, proj, "Project", "Concept", "test")
+    assert new_uri == concept and reversal["retype"]["survivor_resurrected"] is True, \
+        "expected the resurrected-tombstone branch"
+    mid_id = await _log(conn, new_uri, proj, rewired, reversal)
+
+    upsert = """
+        INSERT INTO document_entity_links (document_rid, entity_uri) VALUES ($1, $2)
+        ON CONFLICT (document_rid, entity_uri)
+        DO UPDATE SET mention_count = document_entity_links.mention_count + 1
+    """
+    await conn.execute(upsert, d_new, concept)    # a new document, after the retype
+    await conn.execute(upsert, d_fold, concept)   # folds into a captured row
+    # Names the tombstoned loser. With 132 it lands on the revived survivor; without
+    # it this is a tombstone link from the start, which the undo un-tombstones.
+    await conn.execute(upsert, d_redirect, proj)
+    if with_trigger:
+        assert (await _doc_links(conn, d_redirect))[d_redirect][0] == concept
+
+    result = await unmerge(conn, mid_id)
+
+    reg = {r["fuseki_uri"]: (r["entity_type"], r["merged_into"]) for r in await conn.fetch(
+        "SELECT fuseki_uri, entity_type, merged_into FROM entity_registry "
+        "WHERE fuseki_uri = ANY($1::text[])", [proj, concept])}
+    assert reg == {proj: ("Project", None), concept: ("Concept", tomb_target)}, \
+        "registry was not restored to its pre-retype state"
+    assert await _live(conn, norm) == [(proj, "Project")]
+
+    # Every link ends on the one live entity; the doc whose upsert folded into a
+    # captured row keeps both mentions; nothing names the re-tombstoned survivor.
+    assert await _doc_links(conn, d_old, d_new, d_fold, d_redirect) == {
+        d_old: (proj, 1), d_new: (proj, 1), d_fold: (proj, 2), d_redirect: (proj, 1)}
+    assert not await conn.fetchval(
+        "SELECT count(*) FROM document_entity_links WHERE entity_uri = $1", concept), \
+        "unmerge left document links on the entity it re-tombstoned"
+    assert result["restored"]["document_entity_links.entity_uri"] == 2
+    # d_new, plus d_redirect when 132 put it on the survivor (without 132 it was
+    # stored on the loser, which step 1 made live again).
+    assert result["restored"]["post_retype_links_moved"] == (2 if with_trigger else 1)
+
+    if with_trigger:
+        # Positive twin for the trigger: a later write naming the tombstone still
+        # lands on the same live entity the undo chose.
+        d_late = f"orn:test.doc:resurrect-late-{tag}"
+        await conn.execute(upsert, d_late, concept)
+        assert (await _doc_links(conn, d_late))[d_late] == (proj, 1)
+
+
+async def test_retype_resurrected_undo_folds_a_colliding_link(conn):
+    """One document links both the revived survivor and the loser after the retype.
+
+    Reachable without migration 132: a writer naming the tombstoned loser stores a
+    tombstone link, which the undo makes live again, while another write on the same
+    document named the revived survivor. Moving the survivor's row must fold its count
+    into the loser's row, as _do_merge does, not fail on UNIQUE(document_rid,
+    entity_uri) and not leave the row on the re-tombstoned survivor.
+    """
+    import uuid
+
+    from api.personal_ingest_api import generate_entity_uri
+
+    do_retype = _do_retype_fn()
+    tag = uuid.uuid4().hex[:8]
+    text = f"Zz Retype Resurrect Fold {tag}"
+    proj = generate_entity_uri(text, "Project")
+    concept = generate_entity_uri(text, "Concept")
+    await _mk_typed(conn, proj, text, "Project")
+    await _mk_typed(conn, concept, text, "Concept")
+    await conn.execute(
+        "UPDATE entity_registry SET merged_into=$2, merged_at=NOW() WHERE fuseki_uri=$1",
+        concept, proj)
+
+    new_uri, _, rewired, reversal = await do_retype(conn, proj, "Project", "Concept", "test")
+    assert new_uri == concept
+    mid_id = await _log(conn, new_uri, proj, rewired, reversal)
+
+    doc = f"orn:test.doc:resurrect-collide-{tag}"
+    await conn.execute(
+        "INSERT INTO document_entity_links (document_rid, entity_uri, mention_count) "
+        "VALUES ($1,$2,3), ($1,$3,2)", doc, concept, proj)
+
+    result = await unmerge(conn, mid_id)
+
+    assert await _doc_links(conn, doc) == {doc: (proj, 5)}
+    assert result["restored"]["post_retype_links_moved"] == 1
+
+
 async def test_schema_1_reversals_are_still_accepted(conn):
     """Bumping REVERSAL_SCHEMA must not orphan the 57 captures written 2026-09-02."""
     from api.merge_reversal import REVERSAL_SCHEMA, _SUPPORTED_SCHEMAS
