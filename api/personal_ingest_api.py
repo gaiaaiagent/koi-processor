@@ -5117,6 +5117,10 @@ class ContextualCandidatesRequest(BaseModel):
     entity_types: List[str] = Field(default_factory=lambda: ["Person"])  # Entity types to return
 
 
+# Max documents an attendee name may match before it is skipped as context.
+ATTENDEE_DOC_CAP = 1000
+
+
 async def get_contextual_candidates_internal(
     conn: asyncpg.Connection,
     project: Optional[str] = None,
@@ -5169,6 +5173,7 @@ async def get_contextual_candidates_internal(
             context_types.append("attendee_uris")
 
     # Strategy 2b: Find meetings with common attendees (by name)
+    skipped_attendees = []
     if attendees:
         for attendee in attendees:
             attendee_normalized = attendee.lower().strip()
@@ -5181,6 +5186,14 @@ async def get_contextual_candidates_internal(
                   AND (LOWER(er.entity_text) LIKE $1
                        OR LOWER(er.normalized_text) LIKE $1)
             """, f"%{attendee_normalized}%")
+
+            # A name in more than ATTENDEE_DOC_CAP documents carries no
+            # disambiguation signal. The operator is linked to ~4,800 of ~28,500
+            # documents, so including that name pulled ~1,080 candidates into
+            # every meeting's context. Skip it and report it.
+            if len(attendee_docs) > ATTENDEE_DOC_CAP:
+                skipped_attendees.append(attendee)
+                continue
 
             for row in attendee_docs:
                 related_docs.add(row['document_rid'])
@@ -5252,8 +5265,12 @@ async def get_contextual_candidates_internal(
               AND NOT er.node_private
               AND er.merged_into IS NULL
               AND erm.vault_path IS NOT NULL
-              AND er.fuseki_uri NOT IN (
-                  SELECT entity_uri FROM document_entity_links
+              -- NOT EXISTS, not NOT IN: NOT IN over the whole document_entity_links
+              -- table re-scanned it per registry row (~76s on the live DB, 2026-10-13).
+              -- NOT EXISTS is an index anti-join on idx_del_entity_uri (~15-100ms).
+              AND NOT EXISTS (
+                  SELECT 1 FROM document_entity_links del
+                  WHERE del.entity_uri = er.fuseki_uri
               )
             LIMIT 50
         """)
@@ -5274,7 +5291,8 @@ async def get_contextual_candidates_internal(
     return {
         "candidates": list(candidates.values()),
         "related_documents": list(related_docs),
-        "context_types": context_types
+        "context_types": context_types,
+        "skipped_attendees": skipped_attendees
     }
 
 
