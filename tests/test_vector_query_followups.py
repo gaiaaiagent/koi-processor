@@ -11,7 +11,10 @@ R2c: the /recall-walk seed query was an exact GROUP BY over every embedded live 
 caught, so the endpoint returned 500. It now groups the nearest facts from the HNSW
 index, retries with more candidates or runs the exact form when those may be
 incomplete, and returns partial seeds, flagged, when a query times out
-(_recall_walk_seeds).
+(_recall_walk_seeds). The walk after the seeds had no timeout handling and still
+ended in a 500 under load; it now runs under the request deadline
+RECALL_REQUEST_BUDGET_S and, cut short, returns 200 with walk_partial, the reason
+and the seed ids in walk_path (_recall_walk_facts).
 
 Every test runs against personal_koi_test inside a transaction that is rolled back.
 """
@@ -695,4 +698,185 @@ async def test_endpoint_still_skips_a_wrong_dimension_embedding(conn, kr):
     resp = await _recall_walk(conn, kr, np.ones(10) / np.sqrt(10))
     assert resp.status_code == 200
     assert resp.json()["walk_path"] == [{"phase": "seed", "n_episodes": 0, "method": "none"}]
+    assert await conn.fetchval("SELECT 1") == 1
+
+
+# ---------------------------------------------------------------------------
+# R2c: the walk stage
+# ---------------------------------------------------------------------------
+
+# The walk query before 2026-10-13, verbatim apart from the validity filter, which
+# the semantic shape fills with "AND f.valid_to IS NULL".
+OLD_WALK_SQL = """
+                WITH RECURSIVE
+                seed AS (
+                    SELECT DISTINCT subject_uri AS uri
+                    FROM knowledge_facts
+                    WHERE episode_id = ANY($1::uuid[])
+                ),
+                walk(uri, depth) AS (
+                    SELECT uri, 0 FROM seed
+                    UNION
+                    SELECT
+                        CASE WHEN f.subject_uri = w.uri
+                             THEN COALESCE(f.object_uri, f.object_literal)
+                             ELSE f.subject_uri END,
+                        w.depth + 1
+                    FROM walk w
+                    JOIN knowledge_facts f
+                      ON (f.subject_uri = w.uri OR f.object_uri = w.uri)
+                    WHERE w.depth < $2
+                      AND f.predicate = ANY($3::text[])
+                      AND f.valid_to IS NULL
+                )
+                SELECT
+                    f.id, f.episode_id, f.subject_uri, f.predicate,
+                    f.object_uri, f.object_literal, f.fact_text,
+                    f.valid_from, f.valid_to, f.created_at,
+                    e.name AS episode_name, e.source_document, e.metadata AS ep_metadata
+                FROM knowledge_facts f
+                LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
+                WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
+                       OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
+                  AND f.predicate = ANY($5::text[])
+                  AND f.valid_to IS NULL
+                ORDER BY f.created_at DESC
+                LIMIT $4
+                """
+
+# Takes the walk's five parameters and sleeps; it never returns a row in time.
+_SLEEPING_WALK_SQL = (
+    "SELECT NULL::uuid AS id FROM pg_sleep(60) "
+    "WHERE $1::uuid[] IS NOT NULL AND $2::int IS NOT NULL AND $3::text[] IS NOT NULL "
+    "AND $4::int IS NOT NULL AND $5::text[] IS NOT NULL")
+
+
+def _fixed_seeds(kr, monkeypatch, ids, partial=False):
+    """Replace the seed stage with the given episodes, so the walk is the only
+    query that touches the deadline."""
+    async def seeds(_conn, _emb, _group=None):
+        return [{"episode_id": i, "dist": 0.1} for i in ids], "ann200", partial
+
+    monkeypatch.setattr(kr, "_recall_walk_seeds", seeds)
+
+
+def _sleeping_walk(kr, monkeypatch):
+    monkeypatch.setattr(kr, "_recall_walk_sql", lambda vf: _SLEEPING_WALK_SQL)
+
+
+async def test_walk_timeout_returns_200_with_the_seeds_marked_partial(conn, kr, monkeypatch):
+    """A walk that would run for a minute is cut at the request deadline client-side:
+    200, no facts, the walk step marked partial with the reason and the seed ids, and
+    the connection still usable."""
+    rng = _rng()
+    t = _tag()
+    q = _unit(rng)
+    ids = await _episodes(conn, t, q, rng, _others(rng, 2, 1))
+    _fixed_seeds(kr, monkeypatch, ids)
+    _sleeping_walk(kr, monkeypatch)
+    monkeypatch.setattr(kr, "RECALL_REQUEST_BUDGET_S", 3.0)
+
+    t0 = time.monotonic()
+    resp = await _recall_walk(conn, kr, q)
+    assert time.monotonic() - t0 < 30
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["results"] == [] and body["session_ids"] == []
+    assert body["walk_path"] == [
+        {"phase": "seed", "n_episodes": 2, "method": "ann200"},
+        {"phase": "walk", "max_hops": 3, "n_facts": 0, "predicate_filter": None,
+         "walk_partial": True, "walk_partial_reason": "timeout",
+         "seed_episode_ids": [str(i) for i in ids]},
+    ]
+    assert "null_answer" not in body
+    assert await conn.fetchval("SELECT 1") == 1
+
+
+async def test_walk_statement_timeout_returns_200_marked_canceled(conn, kr, monkeypatch):
+    """A server-side cancel inside the walk's savepoint: 200 marked partial, and the
+    caller's transaction and its settings survive."""
+    rng = _rng()
+    t = _tag()
+    q = _unit(rng)
+    ids = await _episodes(conn, t, q, rng, _others(rng, 2, 1))
+    _fixed_seeds(kr, monkeypatch, ids, partial=True)
+    _sleeping_walk(kr, monkeypatch)
+    await conn.execute("SET LOCAL statement_timeout = '2s'")
+
+    resp = await _recall_walk(conn, kr, q)
+    assert resp.status_code == 200
+    seed, walk = resp.json()["walk_path"]
+    assert seed["seed_partial"] is True
+    assert walk["walk_partial"] is True and walk["walk_partial_reason"] == "canceled"
+    assert walk["seed_episode_ids"] == [str(i) for i in ids]
+    assert await conn.fetchval("SELECT 1") == 1
+    assert await _setting(conn, "statement_timeout") == "2s"
+
+
+async def test_spent_request_budget_skips_the_walk(conn, kr, monkeypatch):
+    """No budget left after the seeds: the walk query never runs."""
+    rng = _rng()
+    t = _tag()
+    q = _unit(rng)
+    ids = await _episodes(conn, t, q, rng, _others(rng, 2, 1))
+    _fixed_seeds(kr, monkeypatch, ids)
+    monkeypatch.setattr(kr, "RECALL_REQUEST_BUDGET_S", 0.0)
+    proxy = _Recording(conn)
+
+    resp = await _recall_walk(proxy, kr, q)
+    assert resp.status_code == 200
+    walk = resp.json()["walk_path"][1]
+    assert walk["walk_partial"] is True and walk["walk_partial_reason"] == "budget_spent"
+    assert walk["n_facts"] == 0
+    assert proxy.fetched == []
+
+
+async def test_partial_walk_does_not_assert_a_null_answer(conn, kr, monkeypatch):
+    """With predicate_filter set, an empty walk asserts "no edge found"; a walk cut
+    short must not, since it never looked."""
+    rng = _rng()
+    t = _tag()
+    q = _unit(rng)
+    ids = await _episodes(conn, t, q, rng, _others(rng, 2, 1))
+    _fixed_seeds(kr, monkeypatch, ids)
+    body = {"query": "anything", "predicate_filter": ["SUPERSEDED_BY"]}
+
+    # Positive twin: the finished walk finds no SUPERSEDED_BY edge and says so.
+    done = (await _recall_walk(conn, kr, q, body)).json()
+    assert done["null_answer"]["asserted"] == "no edge found"
+    assert "walk_partial" not in done["walk_path"][1]
+
+    _sleeping_walk(kr, monkeypatch)
+    monkeypatch.setattr(kr, "RECALL_REQUEST_BUDGET_S", 3.0)
+    resp = await _recall_walk(conn, kr, q, body)
+    assert resp.status_code == 200
+    cut = resp.json()
+    assert cut["walk_path"][1]["walk_partial_reason"] == "timeout"
+    assert "null_answer" not in cut
+
+
+async def test_walk_without_a_timeout_is_unchanged(conn, kr, monkeypatch):
+    """Nothing times out: the walk step has its old four keys, the response its old
+    keys, and the facts are the old inline query's rows."""
+    rng = _rng()
+    t = _tag()
+    q = _unit(rng)
+    ids = await _episodes(conn, t, q, rng, _others(rng, 3, 1))   # 6 facts, one subject
+    _fixed_seeds(kr, monkeypatch, ids)
+
+    resp = await _recall_walk(conn, kr, q, {"query": "anything", "limit": 20})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"results", "walk_path", "session_ids", "routing", "latency_ms"}
+    assert body["walk_path"][1] == {"phase": "walk", "max_hops": 3, "n_facts": 6,
+                                    "predicate_filter": None}
+
+    walk_predicates = ["AUTHORED_WITHIN", "RELATES_TO", "RELATED_TO"]
+    old = await conn.fetch(OLD_WALK_SQL, [str(i) for i in ids], 3, walk_predicates,
+                           80, walk_predicates)
+    assert len(old) == 6
+    facts = [r for r in body["results"] if r["metadata"]["source"] == "fact"]
+    # As sets: the fixture's facts share one created_at (one transaction), so the
+    # ORDER BY leaves their order to the plan.
+    assert sorted(r["id"] for r in facts) == sorted(str(r["id"]) for r in old)
     assert await conn.fetchval("SELECT 1") == 1

@@ -844,6 +844,85 @@ async def _recall_walk_seeds(conn, emb_str: str, group_id: Optional[str] = None)
         return best, method, True
 
 
+# The walk after the seeds had no timeout handling: under load it ran into the pool's
+# 60 s command_timeout and /recall-walk returned 500. Seeds and walk now share one
+# request deadline, RECALL_REQUEST_BUDGET_S from before the pool acquire, also below
+# the 60 s command_timeout. The seed stage keeps its own RECALL_SEED_BUDGET_S inside
+# it, so the walk gets at least the difference unless the acquire waited. A walk that
+# times out, is cancelled server-side, or finds the budget spent returns no facts and
+# is marked walk_partial in walk_path, with the reason and the seed episode ids.
+RECALL_REQUEST_BUDGET_S = 55.0
+
+
+def _recall_walk_sql(validity_filter: str) -> str:
+    return f"""
+                WITH RECURSIVE
+                seed AS (
+                    SELECT DISTINCT subject_uri AS uri
+                    FROM knowledge_facts
+                    WHERE episode_id = ANY($1::uuid[])
+                ),
+                walk(uri, depth) AS (
+                    SELECT uri, 0 FROM seed
+                    UNION
+                    SELECT
+                        CASE WHEN f.subject_uri = w.uri
+                             THEN COALESCE(f.object_uri, f.object_literal)
+                             ELSE f.subject_uri END,
+                        w.depth + 1
+                    FROM walk w
+                    JOIN knowledge_facts f
+                      ON (f.subject_uri = w.uri OR f.object_uri = w.uri)
+                    WHERE w.depth < $2
+                      AND f.predicate = ANY($3::text[])
+                      {validity_filter}
+                )
+                SELECT
+                    f.id, f.episode_id, f.subject_uri, f.predicate,
+                    f.object_uri, f.object_literal, f.fact_text,
+                    f.valid_from, f.valid_to, f.created_at,
+                    e.name AS episode_name, e.source_document, e.metadata AS ep_metadata
+                FROM knowledge_facts f
+                LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
+                WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
+                       OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
+                  AND f.predicate = ANY($5::text[])
+                  {validity_filter}
+                ORDER BY f.created_at DESC
+                LIMIT $4
+                """
+
+
+async def _recall_walk_facts(conn, sql: str, args: list, deadline: float):
+    """Return (walk rows, partial reason) for /recall-walk; see RECALL_REQUEST_BUDGET_S.
+
+    reason is None when the walk finished, else "budget_spent" (no query ran),
+    "timeout" (the client-side deadline cancelled it) or "canceled" (the server
+    cancelled it, e.g. statement_timeout). The query runs in its own transaction or
+    savepoint, rolled back, so a cancel leaves the caller's transaction usable, as in
+    _recall_walk_seeds.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        logger.warning("recall-walk walk query skipped: request budget spent")
+        return [], "budget_spent"
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        return await conn.fetch(sql, *args, timeout=remaining), None
+    except asyncio.TimeoutError as e:
+        logger.warning("recall-walk walk query timed out after %.1f s: %r", remaining, e)
+        return [], "timeout"
+    except asyncpg.exceptions.QueryCanceledError as e:
+        logger.warning("recall-walk walk query cancelled by the server: %s", e)
+        return [], "canceled"
+    finally:
+        try:
+            await tx.rollback()
+        except Exception as e:  # connection broken by the cancel: nothing to undo
+            logger.warning("recall-walk walk rollback failed: %s", e)
+
+
 def create_router(
     pool,
     generate_embedding: Optional[EmbedFn] = None,
@@ -2660,6 +2739,7 @@ def create_router(
 
         # Phase 2: walk in SQL.
         t_walk_start = time.monotonic()
+        request_deadline = t_walk_start + RECALL_REQUEST_BUDGET_S
         results: list[dict] = []
         walk_path: list[dict] = []
         seed_episode_ids: list[str] = []
@@ -2723,58 +2803,32 @@ def create_router(
                 if body.predicate_filter
                 else list(walk_predicates)
             )
-            walk_rows = await conn.fetch(
-                f"""
-                WITH RECURSIVE
-                seed AS (
-                    SELECT DISTINCT subject_uri AS uri
-                    FROM knowledge_facts
-                    WHERE episode_id = ANY($1::uuid[])
-                ),
-                walk(uri, depth) AS (
-                    SELECT uri, 0 FROM seed
-                    UNION
-                    SELECT
-                        CASE WHEN f.subject_uri = w.uri
-                             THEN COALESCE(f.object_uri, f.object_literal)
-                             ELSE f.subject_uri END,
-                        w.depth + 1
-                    FROM walk w
-                    JOIN knowledge_facts f
-                      ON (f.subject_uri = w.uri OR f.object_uri = w.uri)
-                    WHERE w.depth < $2
-                      AND f.predicate = ANY($3::text[])
-                      {validity_filter}
-                )
-                SELECT
-                    f.id, f.episode_id, f.subject_uri, f.predicate,
-                    f.object_uri, f.object_literal, f.fact_text,
-                    f.valid_from, f.valid_to, f.created_at,
-                    e.name AS episode_name, e.source_document, e.metadata AS ep_metadata
-                FROM knowledge_facts f
-                LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
-                WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
-                       OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
-                  AND f.predicate = ANY($5::text[])
-                  {validity_filter}
-                ORDER BY f.created_at DESC
-                LIMIT $4
-                """,
-                seed_episode_ids,
-                body.max_hops,
-                list(walk_predicates),
-                max(body.limit * 4, 20),
-                emit_predicates,
+            walk_rows, walk_partial_reason = await _recall_walk_facts(
+                conn,
+                _recall_walk_sql(validity_filter),
+                [
+                    seed_episode_ids,
+                    body.max_hops,
+                    list(walk_predicates),
+                    max(body.limit * 4, 20),
+                    emit_predicates,
+                ],
+                request_deadline,
             )
 
-            walk_path.append(
-                {
-                    "phase": "walk",
-                    "max_hops": body.max_hops,
-                    "n_facts": len(walk_rows),
-                    "predicate_filter": body.predicate_filter,
-                }
-            )
+            walk_step = {
+                "phase": "walk",
+                "max_hops": body.max_hops,
+                "n_facts": len(walk_rows),
+                "predicate_filter": body.predicate_filter,
+            }
+            if walk_partial_reason is not None:
+                # The walk did not finish within the request budget: no facts
+                # came back, so return the seeds it started from.
+                walk_step["walk_partial"] = True
+                walk_step["walk_partial_reason"] = walk_partial_reason
+                walk_step["seed_episode_ids"] = seed_episode_ids
+            walk_path.append(walk_step)
 
             # 2c. Project facts → result items with session-uuid extraction.
             seen_session_ids: set[str] = set()
@@ -2850,7 +2904,9 @@ def create_router(
         # we just didn't return any." Subject anchor optional but recommended
         # for assertion shape.
         null_answer: Optional[dict] = None
-        if body.predicate_filter and len(walk_rows) == 0:
+        # Not when the walk was cut short: an unfinished walk asserts nothing.
+        if (body.predicate_filter and len(walk_rows) == 0
+                and walk_partial_reason is None):
             null_answer = {
                 "predicate": body.predicate_filter,
                 "subject": body.subject_uri,
