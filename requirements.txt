@@ -96,6 +96,13 @@ rid-lib==3.3.0
 pyld>=2.0.4
 
 # =============================================================================
+# Code graph: GitHub sensor imports api/tree_sitter_extractor.py
+# =============================================================================
+tree_sitter==0.26.0
+tree_sitter_python==0.25.0
+tree_sitter_typescript==0.23.2
+
+# =============================================================================
 # TerminusDB Graph Storage (Phase 1) — removed, unused and blocks Python 3.13+
 beautifulsoup4==4.13.5
 # trafilatura>=2.0.0
