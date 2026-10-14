@@ -725,6 +725,204 @@ class FactRetractResponse(BaseModel):
     reason: Optional[str] = None
 
 
+# /recall-walk seeds: the RECALL_SEED_K episodes with the smallest best-fact distance
+# to the query, over live facts (valid_to IS NULL) with an episode and an embedding.
+# Ties at the cut-off are returned in any order: the exact form breaks them by plan
+# order too, and on personal_koi one query had 200 facts at distance 0 (one repeated
+# fact text across 200 episodes), so any 12 of those episodes are correct.
+#
+# The exact GROUP BY reads every embedded live fact. On personal_koi (2026-10-12,
+# read-only, 8 sampled queries, load average 31-180) it took 133-300 s, past the pool's
+# 60 s command_timeout, and one query hit the 300 s statement_timeout. The previous
+# code caught only DataError, so /recall-walk returned 500. The ANN form takes the
+# nearest facts from idx_knowledge_facts_embedding_3072_hnsw and groups those: 1.5-15 s
+# at N=200 under the same load, and the exact 12 episodes on each of the 7 queries
+# whose exact form finished, counting the tied query as equal. Not yet re-measured
+# at low load.
+#
+# Fallbacks, in order: when all N candidates came back but cover fewer than K
+# episodes (a few episodes own the nearest facts), retry with the next N. When fewer
+# than N came back, the filtered set ran out or hnsw.max_scan_tuples stopped the walk,
+# and the candidates may miss a nearer episode, so run the exact form; likewise when
+# the largest N is still short. A timeout or cancel returns the best seeds so far,
+# marked partial, instead of failing the request. All stages share one deadline,
+# RECALL_SEED_BUDGET_S, below the pool's 60 s command_timeout, so the seed step
+# cannot hold a pooled connection for three timeouts in a row.
+RECALL_SEED_K = 12
+RECALL_SEED_ANN_LIMITS = (200, 1000)
+RECALL_SEED_BUDGET_S = 45.0
+
+
+def _recall_seed_ann_sql(n: int, group_filter: str) -> str:
+    return f"""
+        WITH cand AS (
+            SELECT f.episode_id,
+                   f.fact_embedding_3072::halfvec(3072) <=> $1::halfvec(3072) AS dist
+            FROM knowledge_facts f
+            WHERE f.episode_id IS NOT NULL
+              AND f.fact_embedding_3072 IS NOT NULL
+              AND f.valid_to IS NULL
+              {group_filter}
+            ORDER BY f.fact_embedding_3072::halfvec(3072) <=> $1::halfvec(3072)
+            LIMIT {int(n)}
+        )
+        SELECT episode_id, MIN(dist) AS dist,
+               (SELECT count(*) FROM cand) AS n_cand
+        FROM cand
+        GROUP BY episode_id
+        ORDER BY dist
+        LIMIT {RECALL_SEED_K}
+    """
+
+
+def _recall_seed_exact_sql(group_filter: str) -> str:
+    return f"""
+        SELECT DISTINCT f.episode_id,
+               MIN(f.fact_embedding_3072::halfvec(3072)
+                   <=> $1::halfvec(3072)) AS dist
+        FROM knowledge_facts f
+        WHERE f.episode_id IS NOT NULL
+          AND f.fact_embedding_3072 IS NOT NULL
+          AND f.valid_to IS NULL
+          {group_filter}
+        GROUP BY f.episode_id
+        ORDER BY dist
+        LIMIT {RECALL_SEED_K}
+    """
+
+
+async def _recall_walk_seeds(conn, emb_str: str, group_id: Optional[str] = None):
+    """Return (seed rows, method, partial) for /recall-walk; see RECALL_SEED_K.
+
+    Each query runs in its own transaction or savepoint, rolled back: SET LOCAL
+    hnsw.iterative_scan = relaxed_order lets the filtered ANN scan go past ef_search
+    (personal_koi sets it per database, a fresh node does not), and the rollback
+    undoes the SET and clears an aborted state after a timeout. method is the stage
+    whose rows are returned: "ann<N>", "exact", or "none" when the first ANN query
+    timed out. DataError (a query embedding of the wrong dimension) propagates.
+    """
+    group_filter = "AND f.group_id = $2" if group_id else ""
+    params: list = [emb_str] + ([group_id] if group_id else [])
+    best: list = []
+    method = "none"
+    stage = "none"
+    deadline = time.monotonic() + RECALL_SEED_BUDGET_S
+
+    async def run(sql: str, ann: bool):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            if ann:
+                await conn.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+                await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+            return await conn.fetch(sql, *params, timeout=remaining)
+        finally:
+            try:
+                await tx.rollback()
+            except Exception as e:  # connection broken by the cancel: nothing to undo
+                logger.warning("recall-walk seed rollback failed: %s", e)
+
+    try:
+        for n in RECALL_SEED_ANN_LIMITS:
+            stage = f"ann{n}"
+            rows = await run(_recall_seed_ann_sql(n, group_filter), ann=True)
+            best, method = rows, f"ann{n}"
+            n_cand = rows[0]["n_cand"] if rows else 0
+            if n_cand < n:
+                break
+            if len(rows) >= RECALL_SEED_K:
+                return rows, method, False
+        stage = "exact"
+        rows = await run(_recall_seed_exact_sql(group_filter), ann=False)
+        return rows, "exact", False
+    except (asyncio.TimeoutError, asyncpg.exceptions.QueryCanceledError) as e:
+        logger.warning("recall-walk seed query (%s stage) timed out; returning %d "
+                       "partial seeds from %s: %r", stage, len(best), method, e)
+        return best, method, True
+
+
+# The walk after the seeds had no timeout handling: under load it ran into the pool's
+# 60 s command_timeout and /recall-walk returned 500. Seeds and walk now share one
+# request deadline, RECALL_REQUEST_BUDGET_S from before the pool acquire, also below
+# the 60 s command_timeout. The seed stage keeps its own RECALL_SEED_BUDGET_S inside
+# it, so the walk gets at least the difference unless the acquire waited. A walk that
+# times out, is cancelled server-side, or finds the budget spent returns no facts and
+# is marked walk_partial in walk_path, with the reason and the seed episode ids.
+RECALL_REQUEST_BUDGET_S = 55.0
+
+
+def _recall_walk_sql(validity_filter: str) -> str:
+    return f"""
+                WITH RECURSIVE
+                seed AS (
+                    SELECT DISTINCT subject_uri AS uri
+                    FROM knowledge_facts
+                    WHERE episode_id = ANY($1::uuid[])
+                ),
+                walk(uri, depth) AS (
+                    SELECT uri, 0 FROM seed
+                    UNION
+                    SELECT
+                        CASE WHEN f.subject_uri = w.uri
+                             THEN COALESCE(f.object_uri, f.object_literal)
+                             ELSE f.subject_uri END,
+                        w.depth + 1
+                    FROM walk w
+                    JOIN knowledge_facts f
+                      ON (f.subject_uri = w.uri OR f.object_uri = w.uri)
+                    WHERE w.depth < $2
+                      AND f.predicate = ANY($3::text[])
+                      {validity_filter}
+                )
+                SELECT
+                    f.id, f.episode_id, f.subject_uri, f.predicate,
+                    f.object_uri, f.object_literal, f.fact_text,
+                    f.valid_from, f.valid_to, f.created_at,
+                    e.name AS episode_name, e.source_document, e.metadata AS ep_metadata
+                FROM knowledge_facts f
+                LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
+                WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
+                       OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
+                  AND f.predicate = ANY($5::text[])
+                  {validity_filter}
+                ORDER BY f.created_at DESC
+                LIMIT $4
+                """
+
+
+async def _recall_walk_facts(conn, sql: str, args: list, deadline: float):
+    """Return (walk rows, partial reason) for /recall-walk; see RECALL_REQUEST_BUDGET_S.
+
+    reason is None when the walk finished, else "budget_spent" (no query ran),
+    "timeout" (the client-side deadline cancelled it) or "canceled" (the server
+    cancelled it, e.g. statement_timeout). The query runs in its own transaction or
+    savepoint, rolled back, so a cancel leaves the caller's transaction usable, as in
+    _recall_walk_seeds.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        logger.warning("recall-walk walk query skipped: request budget spent")
+        return [], "budget_spent"
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        return await conn.fetch(sql, *args, timeout=remaining), None
+    except asyncio.TimeoutError as e:
+        logger.warning("recall-walk walk query timed out after %.1f s: %r", remaining, e)
+        return [], "timeout"
+    except asyncpg.exceptions.QueryCanceledError as e:
+        logger.warning("recall-walk walk query cancelled by the server: %s", e)
+        return [], "canceled"
+    finally:
+        try:
+            await tx.rollback()
+        except Exception as e:  # connection broken by the cancel: nothing to undo
+            logger.warning("recall-walk walk rollback failed: %s", e)
+
+
 def create_router(
     pool,
     generate_embedding: Optional[EmbedFn] = None,
@@ -2541,6 +2739,7 @@ def create_router(
 
         # Phase 2: walk in SQL.
         t_walk_start = time.monotonic()
+        request_deadline = t_walk_start + RECALL_REQUEST_BUDGET_S
         results: list[dict] = []
         walk_path: list[dict] = []
         seed_episode_ids: list[str] = []
@@ -2552,37 +2751,24 @@ def create_router(
         async with pool.acquire() as conn:
             # 2a. Seed episodes via vector similarity over fact_embedding_3072
             #     (find episodes whose facts semantically match the query).
-            #     Then also try matching against episode names/content via
-            #     fact text join. Group_id filter is optional.
-            group_filter = "AND f.group_id = $2" if body.group_id else ""
-            seed_params: list = [emb_str]
-            if body.group_id:
-                seed_params.append(body.group_id)
+            #     Group_id filter is optional. Contract, ANN form and fallbacks:
+            #     RECALL_SEED_K and _recall_walk_seeds above create_router.
+            seed_method, seed_partial = "none", False
             try:
-                seed_rows = await conn.fetch(
-                    f"""
-                    SELECT DISTINCT f.episode_id,
-                           MIN(f.fact_embedding_3072::halfvec(3072)
-                               <=> $1::halfvec(3072)) AS dist
-                    FROM knowledge_facts f
-                    WHERE f.episode_id IS NOT NULL
-                      AND f.fact_embedding_3072 IS NOT NULL
-                      AND f.valid_to IS NULL
-                      {group_filter}
-                    GROUP BY f.episode_id
-                    ORDER BY dist
-                    LIMIT 12
-                    """,
-                    *seed_params,
-                )
+                seed_rows, seed_method, seed_partial = await _recall_walk_seeds(
+                    conn, emb_str, body.group_id)
             except asyncpg.exceptions.DataError as e:
                 logger.warning("recall-walk seed query skipped: %s", e)
                 seed_rows = []
 
             seed_episode_ids = [str(r["episode_id"]) for r in seed_rows]
-            walk_path.append(
-                {"phase": "seed", "n_episodes": len(seed_episode_ids)}
-            )
+            seed_step = {"phase": "seed", "n_episodes": len(seed_episode_ids),
+                         "method": seed_method}
+            if seed_partial:
+                # A seed query timed out: these are the nearest episodes an earlier
+                # ANN query found (possibly none), not a verified top 12.
+                seed_step["seed_partial"] = True
+            walk_path.append(seed_step)
 
             if not seed_episode_ids:
                 latency_walk_ms = round((time.monotonic() - t_walk_start) * 1000, 1)
@@ -2617,58 +2803,32 @@ def create_router(
                 if body.predicate_filter
                 else list(walk_predicates)
             )
-            walk_rows = await conn.fetch(
-                f"""
-                WITH RECURSIVE
-                seed AS (
-                    SELECT DISTINCT subject_uri AS uri
-                    FROM knowledge_facts
-                    WHERE episode_id = ANY($1::uuid[])
-                ),
-                walk(uri, depth) AS (
-                    SELECT uri, 0 FROM seed
-                    UNION
-                    SELECT
-                        CASE WHEN f.subject_uri = w.uri
-                             THEN COALESCE(f.object_uri, f.object_literal)
-                             ELSE f.subject_uri END,
-                        w.depth + 1
-                    FROM walk w
-                    JOIN knowledge_facts f
-                      ON (f.subject_uri = w.uri OR f.object_uri = w.uri)
-                    WHERE w.depth < $2
-                      AND f.predicate = ANY($3::text[])
-                      {validity_filter}
-                )
-                SELECT
-                    f.id, f.episode_id, f.subject_uri, f.predicate,
-                    f.object_uri, f.object_literal, f.fact_text,
-                    f.valid_from, f.valid_to, f.created_at,
-                    e.name AS episode_name, e.source_document, e.metadata AS ep_metadata
-                FROM knowledge_facts f
-                LEFT JOIN knowledge_episodes e ON e.id = f.episode_id
-                WHERE (f.subject_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL)
-                       OR f.object_uri IN (SELECT uri FROM walk WHERE uri IS NOT NULL))
-                  AND f.predicate = ANY($5::text[])
-                  {validity_filter}
-                ORDER BY f.created_at DESC
-                LIMIT $4
-                """,
-                seed_episode_ids,
-                body.max_hops,
-                list(walk_predicates),
-                max(body.limit * 4, 20),
-                emit_predicates,
+            walk_rows, walk_partial_reason = await _recall_walk_facts(
+                conn,
+                _recall_walk_sql(validity_filter),
+                [
+                    seed_episode_ids,
+                    body.max_hops,
+                    list(walk_predicates),
+                    max(body.limit * 4, 20),
+                    emit_predicates,
+                ],
+                request_deadline,
             )
 
-            walk_path.append(
-                {
-                    "phase": "walk",
-                    "max_hops": body.max_hops,
-                    "n_facts": len(walk_rows),
-                    "predicate_filter": body.predicate_filter,
-                }
-            )
+            walk_step = {
+                "phase": "walk",
+                "max_hops": body.max_hops,
+                "n_facts": len(walk_rows),
+                "predicate_filter": body.predicate_filter,
+            }
+            if walk_partial_reason is not None:
+                # The walk did not finish within the request budget: no facts
+                # came back, so return the seeds it started from.
+                walk_step["walk_partial"] = True
+                walk_step["walk_partial_reason"] = walk_partial_reason
+                walk_step["seed_episode_ids"] = seed_episode_ids
+            walk_path.append(walk_step)
 
             # 2c. Project facts → result items with session-uuid extraction.
             seen_session_ids: set[str] = set()
@@ -2744,7 +2904,9 @@ def create_router(
         # we just didn't return any." Subject anchor optional but recommended
         # for assertion shape.
         null_answer: Optional[dict] = None
-        if body.predicate_filter and len(walk_rows) == 0:
+        # Not when the walk was cut short: an unfinished walk asserts nothing.
+        if (body.predicate_filter and len(walk_rows) == 0
+                and walk_partial_reason is None):
             null_answer = {
                 "predicate": body.predicate_filter,
                 "subject": body.subject_uri,
