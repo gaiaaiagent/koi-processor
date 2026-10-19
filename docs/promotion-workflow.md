@@ -10,6 +10,17 @@ This repo uses a two-branch topology:
 
 **Do not merge `regen-prod` into `stable` in bulk.** Promotion is explicit per-commit.
 
+**Remote name.** Promotion fetches from and pushes to the `gaiaaiagent/koi-processor` remote. A
+plain clone calls it `origin`, but a clone may name it differently, so each block below first sets
+`PUB` to whichever remote points there and stops if none does:
+
+```bash
+PUB=$(git remote -v | awk '/gaiaaiagent\/koi-processor(\.git)? \(push\)$/ {print $1; exit}')
+: "${PUB:?no remote points at gaiaaiagent/koi-processor}"
+```
+
+On the production host `origin` is that remote, so the deploy lines keep `git pull origin stable`.
+
 ---
 
 ## Primary workflow — cherry-pick
@@ -18,12 +29,14 @@ Promote one (or a range) of validated commits from `regen-prod` into `stable`:
 
 ```bash
 cd ~/projects/regenai/koi-processor
+PUB=$(git remote -v | awk '/gaiaaiagent\/koi-processor(\.git)? \(push\)$/ {print $1; exit}')
+: "${PUB:?no remote points at gaiaaiagent/koi-processor}"
 
 # 1. On a validated commit <sha>, cherry-pick onto stable:
 git checkout stable
-git fetch origin
+git fetch "$PUB"
 git cherry-pick <sha>               # or a range: git cherry-pick <from>..<to>
-git push origin stable
+git push "$PUB" stable
 
 # 2. Deploy to production:
 ssh darren@202.61.196.119 "cd /opt/projects/koi-processor && \
@@ -43,10 +56,12 @@ If `stable` is an ancestor of the target commit (no divergence has accumulated),
 cheaper and preserves linear history:
 
 ```bash
+PUB=$(git remote -v | awk '/gaiaaiagent\/koi-processor(\.git)? \(push\)$/ {print $1; exit}')
+: "${PUB:?no remote points at gaiaaiagent/koi-processor}"
 git checkout stable
-git fetch origin
+git fetch "$PUB"
 git merge --ff-only <sha>           # errors out if stable has diverged — safe to attempt
-git push origin stable
+git push "$PUB" stable
 ```
 
 Attempting `--ff-only` and falling back to cherry-pick on error is a reasonable default for
@@ -85,7 +100,7 @@ NUC before promoting.
 ## Operational guardrail
 
 **Do not run the production deploy sequence** (`git pull origin stable && bash scripts/setup.sh`)
-between a `git push origin stable` and the intended deploy. The push makes the commit available;
+between a `git push "$PUB" stable` and the intended deploy. The push makes the commit available;
 the deploy applies it. Running the deploy between them could pick up a commit you didn't intend —
 or worse, the wrong commit if someone else pushed in the interim.
 
@@ -100,11 +115,13 @@ To roll a production deploy back to a prior `stable` commit:
 ```bash
 # Find the target commit
 cd ~/projects/regenai/koi-processor
+PUB=$(git remote -v | awk '/gaiaaiagent\/koi-processor(\.git)? \(push\)$/ {print $1; exit}')
+: "${PUB:?no remote points at gaiaaiagent/koi-processor}"
 git log stable --oneline -10
 
 # Reset stable (requires push --force, only for rollback)
 git reset --hard <target-sha>
-git push --force-with-lease origin stable
+git push --force-with-lease "$PUB" stable
 
 # Deploy
 ssh darren@202.61.196.119 "cd /opt/projects/koi-processor && \
