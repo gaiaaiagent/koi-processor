@@ -728,7 +728,19 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Chunk + report without writing/embedding")
     parser.add_argument("--gate-evidence-out",
                         help="Write the flat gate-evidence JSON (response_summary) to this path for the gate")
+    parser.add_argument("--discourse-discovery", action="store_true",
+                        help="Thorough tier only: record each discourse move's extraction binding and queue "
+                             "cross-source discovery for this source (issue #60). Sets KOI_DISCOURSE_BINDINGS and "
+                             "KOI_DISCOURSE_INGEST_DISCOVERY for this process only. Retrieval runs later, in "
+                             "scripts/discourse_discovery_worker.py; this run only inserts the job.")
     args = parser.parse_args()
+    if args.discourse_discovery:
+        if args.tier != "thorough":
+            parser.error("--discourse-discovery needs --tier thorough (only thorough writes discourse moves)")
+        if args.dry_run:
+            parser.error("--discourse-discovery cannot be combined with --dry-run")
+        os.environ["KOI_DISCOURSE_BINDINGS"] = "1"
+        os.environ["KOI_DISCOURSE_INGEST_DISCOVERY"] = "1"
 
     claims = (args.tier != "rag") and not args.no_claims
     fields = [t.strip() for t in (args.fields or "").split(",") if t.strip()]
@@ -757,6 +769,8 @@ def main():
         print(f"  type_mismatch:  {ext.get('type_mismatches')}  | windows {ext.get('windows_processed')}/{ext.get('windows_total')}")
         if result.get("tier") == "thorough":
             print(f"  discourse_moves:{ext.get('discourse_moves_created')}")
+            if ext.get("discourse_discovery") is not None:
+                print(f"  discovery job:  {ext.get('discourse_discovery')}")
     if cl:
         print(f"  claims_created: {cl.get('claims_created')}")
     if args.gate_evidence_out:

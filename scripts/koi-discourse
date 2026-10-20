@@ -1,0 +1,40 @@
+#!/bin/bash
+# Read-only query surface for cross-source discourse candidates (issue #60), for
+# Claude Code, Codex and people. Install once:
+#   ln -sfn ~/projects/koi-processor-runtime/scripts/koi-discourse ~/.local/bin/koi-discourse
+#
+#   koi-discourse candidates [--query TEXT | --move-id UUID] [--run-id RUN] [--limit N]
+#   koi-discourse jobs [--source-rid RID]
+#
+# Both commands run in one READ ONLY transaction and print JSON.
+#   candidates  moves that have open candidates, each with its own source (rid,
+#               title, URL) and every candidate's other end and source. Candidates
+#               are labelled "candidate (unreviewed)": text similarity only, not
+#               identity, support, contradiction or corroboration. Admitted
+#               (reviewed) judgments, if any exist, are listed separately under
+#               admitted_relations.
+#   jobs        discovery jobs (pending, running, completed, failed, stale) with
+#               their errors, runs and candidate counts, and bound extractions
+#               that have no job.
+# Nothing here writes; anything else is refused.
+#
+# Overrides: KOI_DISCOURSE_REPO_DIR, KOI_DISCOURSE_PYTHON, KOI_DISCOURSE_DSN.
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_DIR="${KOI_DISCOURSE_REPO_DIR:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+PY="${KOI_DISCOURSE_PYTHON:-$REPO_DIR/venv/bin/python}"
+DSN="${KOI_DISCOURSE_DSN:-postgresql://darrenzal:@localhost:5432/personal_koi?application_name=koi-discourse-read}"
+
+usage() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+[ -x "$PY" ] || { echo "koi-discourse: missing interpreter $PY" >&2; exit 3; }
+case "$cmd" in
+    candidates) exec "$PY" -B "$REPO_DIR/scripts/discourse_links_canary.py" candidates --dsn "$DSN" "$@" ;;
+    jobs)       exec "$PY" -B "$REPO_DIR/scripts/discourse_discovery_worker.py" status --dsn "$DSN" "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) echo "koi-discourse: unknown command '$cmd' (read-only: candidates | jobs)" >&2; exit 2 ;;
+esac
