@@ -783,7 +783,8 @@ merge_discourse = _merge.merge_discourse
 
 
 async def write_discourse_moves(conn, *, document_rid: str, episode_id,
-                                moves: List[Dict[str, Any]]) -> int:
+                                moves: List[Dict[str, Any]],
+                                written_ids: Optional[List[Any]] = None) -> int:
     """Write document discourse moves into the generalized session_discourse_moves
     table (source_type='document', migration 103). Deterministic uuid5 ids →
     idempotent upsert. Two passes: insert all moves, then link argument edges
@@ -828,6 +829,8 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
             mid, episode_id, document_rid, mt, title, m.get("detail"), status, a, b)
         title_to_id[_norm(title)] = mid
         inserted += 1
+        if written_ids is not None:
+            written_ids.append(mid)
 
     # Second pass: link argument edges — a premise/evidence/counterpoint `supports`
     # the claim/thesis whose title it names → resolves_move_id self-FK.
@@ -848,6 +851,62 @@ async def write_discourse_moves(conn, *, document_rid: str, episode_id,
                 "WHERE id=$1 AND source_rid=$3",
                 move_id(mt, title, cs), target, document_rid)
     return inserted
+
+
+async def read_rag_input(conn, document_rid: str):
+    """fetch_rag_chunks, plus (only when KOI_DISCOURSE_BINDINGS=1) the source
+    version observed before and after the read, for the discourse-link binding
+    (issue #60, A2). Returns (chunks, extraction_input or None)."""
+    if os.getenv("KOI_DISCOURSE_BINDINGS") != "1":
+        return await fetch_rag_chunks(conn, document_rid), None
+    from api.discourse_links import capture_extraction_input
+    return await capture_extraction_input(conn, source_rid=document_rid,
+                                          read_chunks=lambda: fetch_rag_chunks(conn, document_rid))
+
+
+async def record_discourse_bindings(conn, *, document_rid: str, extraction_input, move_ids: List[Any],
+                                    run_id: str) -> int:
+    """Record which source version and exact chunk input this run's moves came
+    from, using the association captured when the input was read. A source that
+    changed since then is recorded as such and cannot be admitted. Off unless
+    KOI_DISCOURSE_BINDINGS=1 (read_rag_input then returns no captured input).
+    Without the draft table it logs and records nothing: a move without a
+    recorded binding cannot be admitted, so skipping is the conservative side."""
+    if extraction_input is None or not move_ids:
+        return 0
+    if not await conn.fetchval("SELECT to_regclass('discourse_move_extraction_bindings') IS NOT NULL"):
+        logger.error("KOI_DISCOURSE_BINDINGS=1 but discourse_move_extraction_bindings does not exist; "
+                     "%d move(s) of %s left without a recorded binding", len(move_ids), document_rid)
+        return 0
+    from api.discourse_links import record_extraction_bindings
+    recorded = await record_extraction_bindings(
+        conn, source_rid=document_rid, move_ids=move_ids, extraction_input=extraction_input,
+        run_id=run_id, recorded_by="extract_deep_documents")
+    logger.info("discourse: recorded extraction bindings for %d move(s) (%s)", recorded,
+                extraction_input.association)
+    return recorded
+
+
+async def schedule_discourse_discovery(conn, *, document_rid: str, move_ids: List[Any], run_id: str):
+    """After a COMPLETE extraction whose bindings were recorded, queue cross-source
+    discourse discovery for this run's moves (issue #60). Off unless
+    KOI_DISCOURSE_INGEST_DISCOVERY=1, and then a no-op for moves this run did not
+    bind with its input (KOI_DISCOURSE_BINDINGS=1). It only inserts a job row:
+    scripts/discourse_discovery_worker.py does the retrieval later. It never fails
+    the extraction; an error is logged and visible as an unscheduled extraction in
+    `discourse_discovery_worker.py status`."""
+    if os.getenv("KOI_DISCOURSE_INGEST_DISCOVERY") != "1" or not move_ids:
+        return None
+    try:
+        from api.discourse_discovery import enqueue_for_extraction
+        async with conn.transaction():
+            result = await enqueue_for_extraction(conn, source_rid=document_rid, extraction_run_id=run_id,
+                                                  move_ids=move_ids)
+    except Exception as exc:  # noqa: BLE001 - discovery must never fail an ingested document
+        logger.error("discourse discovery for %s not scheduled: %s: %s", document_rid, type(exc).__name__, exc)
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    logger.info("discourse discovery for %s: %s", document_rid, result)
+    return result
 
 
 def facts_to_episode_payload(merged: dict, *, name: str, summary: str, source_document: str,
@@ -1429,7 +1488,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             source_document = mem["url"] or document_rid
             doc_title = mem["title"] or mem["slug"] or document_rid
 
-            chunks = await fetch_rag_chunks(conn, document_rid)
+            chunks, extraction_input = await read_rag_input(conn, document_rid)
             windows = build_windows(chunks, WINDOW_CHARS, WINDOW_OVERLAP_CHUNKS)
             budget_exhausted = len(windows) > MAX_WINDOWS
             if budget_exhausted and not MAX_WINDOWS_EXPLICIT:
@@ -1782,10 +1841,16 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
             # Discourse (argument) layer — thorough tier only. Writes moves into the
             # generalized session_discourse_moves table (source_type='document').
             discourse_created = 0
+            discourse_discovery = None
             if want_discourse:
                 merged_moves = merge_discourse([d for d in per_window if d])
+                written_move_ids: List[Any] = []
                 discourse_created = await write_discourse_moves(
-                    conn, document_rid=document_rid, episode_id=episode_id, moves=merged_moves)
+                    conn, document_rid=document_rid, episode_id=episode_id, moves=merged_moves,
+                    written_ids=written_move_ids)
+                await record_discourse_bindings(conn, document_rid=document_rid,
+                                                extraction_input=extraction_input,
+                                                move_ids=written_move_ids, run_id=run_id)
                 logger.info("discourse: merged %d move(s) → wrote %d (source_type=document)",
                             len(merged_moves), discourse_created)
 
@@ -1877,6 +1942,9 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                        deep_extraction_attempts = 0, deep_extraction_last_error = $3
                    WHERE document_rid = $1""",
                 document_rid, incomplete, ("; ".join(_err_parts) if _err_parts else None))
+            if want_discourse and not incomplete:
+                discourse_discovery = await schedule_discourse_discovery(
+                    conn, document_rid=document_rid, move_ids=written_move_ids, run_id=run_id)
 
             return {
                 "status": "ok", "document_rid": document_rid, "group_id": group_id,
@@ -1887,7 +1955,7 @@ async def extract_deep_document(pool: asyncpg.Pool, http: httpx.AsyncClient, *,
                 "semantic_dups_retracted": sem_retracted, "no_residual_dups": no_residual_dups,
                 "entity_links": entity_links,
                 "entities_created": ep.get("entities_created"), "entities_resolved": ep.get("entities_resolved"),
-                "discourse_moves_created": discourse_created,
+                "discourse_moves_created": discourse_created, "discourse_discovery": discourse_discovery,
                 "type_mismatches": len(mismatches), "budget_exhausted": budget_exhausted,
                 "windows_failed": len(windows_failed), "windows_failed_idx": windows_failed,
                 "episode_id": ep.get("episode_id"),

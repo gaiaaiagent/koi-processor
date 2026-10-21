@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/darrenzal</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<!-- One worker pass every 15 minutes: at most one queued discovery job.
+	     DELIBERATELY NO KeepAlive (see com.personal-koi.embedding-repair):
+	     StartInterval alone gives a fixed cadence whatever the exit code, and
+	     ThrottleInterval equals it in case KeepAlive is ever re-added.
+	     No KOI_DISCOURSE_* here: run_discourse_discovery.sh sets the discovery
+	     flag for its own process, and only ingestions run with the
+	     ingest_document.py discourse-discovery option queue jobs. -->
+	<key>Label</key>
+	<string>com.personal-koi.discourse-discovery</string>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/darrenzal/projects/koi-processor-runtime/scripts/run_discourse_discovery.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime/logs/discourse-discovery.error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime/logs/discourse-discovery.log</string>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>ThrottleInterval</key>
+	<integer>900</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/darrenzal/projects/koi-processor-runtime</string>
+</dict>
+</plist>
