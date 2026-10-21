@@ -78,6 +78,25 @@ koi-discourse jobs --source-rid document:<sha256>
 - **Each candidate:** `label: candidate (unreviewed)`, the legs that found it, scores, `other` (the other claim and its source), `admissible_now` and its blockers.
 - **Reporting:** quote both sources and the label when reporting a candidate. Do not report it as support or agreement.
 
+## Local review (I1)
+
+`koi-discourse queue | batch | show | annotate | review | annotations` (`scripts/discourse_review.py`, `api/discourse_review.py`) puts stored candidates in front of a person. Database reads run in one READ ONLY transaction. Nothing changes a candidate, a judgment, a retrieval limit or the database.
+
+- **Lanes:** `cross_source`, `same_work_mapped` (from a mapping file) and `same_work_suggested` (from `same_work_signals`, labelled unverified). Every stored candidate stays listed.
+- **Order:** `source_diverse` (round-robin over source pairs, the default) or `fused`.
+- **Cues:** shared listed author, same publication feed, or the other source's listed surname in the claim text. Each is shown as unverified and is never a dependence or restatement verdict. Unmapped authors show as unknown.
+- **Batches:** blind by default, with no scores, ranks or run ids. A batch records the exact claim texts, versions and the mapping file's sha256.
+- **Annotations:** one question, "Is B useful to someone studying A?" (`useful | marginal | not_useful | needs_context`, optional reason).
+  - Appended to a JSONL file you name, never edited. A correction supersedes an earlier line.
+  - Each line is bound to the candidate id and key, both texts' representation hashes, the source and bound versions, and the declared reviewer.
+  - Refused when the text or version changed after the batch was made.
+
+```bash
+koi-discourse queue --mappings mapping.json --limit 10
+koi-discourse batch --from-queue 12 --mappings mapping.json --out batch.json
+koi-discourse review --batch batch.json --reviewer <name> --annotations annotations.jsonl
+```
+
 ## Backout
 
 - **Supported backout:** operational rollback of one run. It undoes the run's owned outputs (candidates, vectors, unreferenced claim texts), keeps the job, run and effect rows as history (run status `rolled_back`), and never touches the ingested document or its bindings.
