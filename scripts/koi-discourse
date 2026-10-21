@@ -6,10 +6,10 @@
 #   koi-discourse candidates [--query TEXT | --move-id UUID] [--run-id RUN] [--limit N]
 #   koi-discourse jobs [--source-rid RID]
 #   koi-discourse queue [--run-id RUN] [--seen-in-run RUN] [--tier TIER] [--order ORDER] [--lane LANE] [--limit N]
-#   koi-discourse batch (--candidate-id ID ... | --from-queue N) [--run-id RUN] [--seen-in-run RUN] [--tier TIER] --out FILE
-#   koi-discourse show --batch FILE [--item N] [--verify]
-#   koi-discourse annotate --batch FILE --item N --answer A --reviewer NAME --annotations FILE [--reason TEXT]
-#   koi-discourse review --batch FILE --reviewer NAME --annotations FILE
+#   koi-discourse batch (--candidate-id ID ... | --from-queue N) [--run-id RUN] [--seen-in-run RUN] [--tier TIER] --out FILE [--binding-out FILE]
+#   koi-discourse show --batch FILE [--binding FILE] [--item N] [--verify]
+#   koi-discourse annotate --batch FILE --item N --answer A --reviewer NAME --annotations FILE [--binding FILE] [--reason TEXT]
+#   koi-discourse review --batch FILE --reviewer NAME --annotations FILE [--binding FILE]
 #   koi-discourse annotations --annotations FILE [--batch FILE]
 #
 # Every database read runs in one READ ONLY transaction.
@@ -26,7 +26,7 @@
 #               local review (scripts/discourse_review.py). --run-id: first
 #               discovered by RUN. --seen-in-run: each sighting by RUN, reviewed
 #               from its own query. Answers "Is B useful to someone studying A?".
-# Nothing here writes to the database. batch writes the batch file you name;
+# Nothing here writes to the database. batch writes the file(s) you name;
 # annotate and review append to the annotation file you name.
 #
 # Overrides: KOI_DISCOURSE_REPO_DIR, KOI_DISCOURSE_PYTHON, KOI_DISCOURSE_DSN,

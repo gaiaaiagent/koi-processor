@@ -2973,6 +2973,107 @@ def test_move_cap_a_sighting_from_the_other_end_is_reviewed_from_its_own_query(c
     asyncio.run(scenario())
 
 
+def _keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _keys(v)
+
+
+def test_reviewer_file_cli_flow_reversed_sighting_binding_controls_and_rollback(committed_dsn, ingestion, monkeypatch,
+                                                                                tmp_path):
+    """S1 end to end through koi-discourse on a throwaway database. Y's run finds Y->X first; X extracted again
+    at limit 10 meets that pair from X's side and others at picks 1-10, so its sightings span both tiers.
+    `batch --seen-in-run` writes a reviewer file with no run, tier, pick, anchor or candidate id, and a binding
+    file with them. annotate refuses without the binding file, with another batch's and with an edited one, and
+    records with the right one, reviewed from X's side. Once X's run is rolled back the sighting no longer binds."""
+    env = dict(os.environ, KOI_DISCOURSE_DSN=committed_dsn, KOI_DISCOURSE_PYTHON=sys.executable)
+    env.pop("KOI_DISCOURSE_REVIEW_MAPPINGS", None)
+
+    def koi(*args):
+        return subprocess.run([str(REPO / "scripts/koi-discourse"), *map(str, args)], env=env, capture_output=True,
+                              text=True, timeout=120)
+
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            x, y = _new_source(1), _new_source(2)
+            xs, _ = await _ingest(conn, x)
+            await _work(committed_dsn)
+            rx1 = (await _job(conn, x["rid"]))["run_id"]
+            monkeypatch.setenv(dd.CAP_ENV, "10")
+            ys, _ = await _ingest(conn, y)
+            await _work(committed_dsn)
+            ry = (await _job(conn, y["rid"]))["run_id"]
+            await _ingest(conn, x, run_id="extract-new-2")
+            await _work(committed_dsn)
+            rx2 = (await _job(conn, x["rid"]))["run_id"]
+        finally:
+            await conn.close()
+        rows = await _rows(committed_dsn, seen_in_runs=[rx2])
+        items, _ = dr.review_items(list(rows.values()), seen_in_runs=[rx2])
+        rev = next(it for it in items if it["anchor"]["stored_end"] == "b")
+        others = [it for it in items if it["candidate_id"] != rev["candidate_id"]]
+        five = next(it for it in others if it["tier"] == "first_five")
+        extra = next(it for it in others if it["tier"] == "additional")
+        chosen = [rev["candidate_id"], five["candidate_id"], extra["candidate_id"]]
+        trial = tmp_path / "trial"
+        trial.mkdir()
+        rfile, bfile = trial / "batch.json", trial / "batch.binding.json"
+        made = koi("batch", "--seen-in-run", rx2, *[a for c in chosen for a in ("--candidate-id", c)], "--out", rfile,
+                   "--binding-out", bfile)
+        assert made.returncode == 0, made.stderr
+        raw, binding = rfile.read_bytes(), json.loads(bfile.read_text())
+        text = raw.decode()
+        assert not set(_keys(json.loads(raw))) & {"candidate_id", "candidate_key", "scores", "run_id", "pick", "tier",
+                                                   "anchor", "sighting", "stored_end", "selection", "occurrences"}
+        for s in (rx1, rx2, ry, "first_five", "additional", *rows):
+            assert s not in text, s
+        assert {b["tier"] for b in binding["items"]} == {"first_five", "additional"}      # a mixed-tier batch
+        assert binding["selection"] == {"run_ids": None, "seen_in_runs": [rx2], "tier": None}
+        bound = next(b for b in binding["items"] if b["candidate_id"] == rev["candidate_id"])
+        shown = next(i for i in json.loads(raw)["items"] if i["position"] == bound["position"])
+        assert bound["anchor"] == {"move_id": rev["a"]["move_id"], "stored_end": "b"}
+        assert shown["a"]["move_id"] == rev["a"]["move_id"] and shown["a"]["move_id"] in xs   # reviewed from X's side
+        assert shown["b"]["move_id"] == rows[rev["candidate_id"]]["a"]["move_id"] and shown["b"]["move_id"] in ys
+        blind = koi("show", "--batch", rfile)
+        assert blind.returncode == 0 and rx2 not in blind.stdout and "first_five" not in blind.stdout
+        ann = tmp_path / "annotations.jsonl"
+        args = ("annotate", "--batch", rfile, "--item", bound["position"], "--answer", "useful",
+                "--reviewer", "agent:a", "--annotations", ann)
+        missing = koi(*args)
+        assert missing.returncode != 0 and "needs its binding file" in missing.stderr
+        assert koi("batch", "--seen-in-run", ry, "--candidate-id", rev["candidate_id"],
+                   "--out", tmp_path / "other.json").returncode == 0
+        wrong = koi(*args, "--binding", tmp_path / "other.binding.json")
+        assert wrong.returncode != 0 and "belongs to another reviewer file" in wrong.stderr
+        edited = json.loads(bfile.read_text())
+        edited["items"][0]["tier"] = {"first_five": "additional", "additional": "first_five"}[edited["items"][0]["tier"]]
+        (tmp_path / "edited.binding.json").write_text(json.dumps(edited))
+        tampered = koi(*args, "--binding", tmp_path / "edited.binding.json")
+        assert tampered.returncode != 0 and "binding file does not match its own id" in tampered.stderr
+        assert not ann.exists()                                                       # nothing recorded so far
+        ok = koi(*args, "--binding", bfile)
+        assert ok.returncode == 0, ok.stderr
+        (rec,) = dr.read_annotations(str(ann))
+        assert rec["schema"] == dr.SPLIT_ANNOTATION_SCHEMA and rec["shown"]["orientation"] == dr.SIGHTING_ORIENTATION
+        assert (rec["candidate"]["id"], rec["shown"]["a"]["move_id"], rec["anchor"], rec["sighting"]) == (
+            rev["candidate_id"], rev["a"]["move_id"], bound["anchor"], {"run_id": rx2, "query_move_id": rev["a"]["move_id"]})
+        assert (rec["binding_id"], rec["item_id"], rec["batch_id"]) == (
+            binding["binding_id"], bound["item_id"], binding["reviewer_batch_id"])
+        verified = koi("show", "--batch", rfile, "--binding", bfile, "--verify")
+        assert verified.returncode == 0 and verified.stdout.count("unchanged since the batch was made") == 3
+        await canary.run_rollback(committed_dsn, rx2)
+        after = koi(*args[:-4], "--reviewer", "agent:b", "--annotations", ann, "--binding", bfile)
+        assert after.returncode != 0 and "selected sighting is no longer current" in after.stderr
+        assert len(dr.read_annotations(str(ann))) == 1                                # the earlier line is kept
+    asyncio.run(scenario())
+
+
 def test_move_cap_sightings_recorded_before_picks_are_first_five_only_when_their_run_kept_five(committed_dsn,
                                                                                               ingestion, monkeypatch):
     async def scenario():

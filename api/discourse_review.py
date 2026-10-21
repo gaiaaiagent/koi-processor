@@ -31,6 +31,12 @@ rows. Picks 1-5 are the first five (what the default per-claim limit keeps);
 first five when its run kept at most five per claim, and unknown otherwise:
 never guessed. The same pair can be first five in one run and additional in
 another.
+
+A batch chosen by a filter or made of sightings is written as two files
+(make_split_batch): a reviewer file, which is all a reviewer receives, and an
+operator binding file, which holds the candidate ids, runs, anchors, tiers and
+the selection. Annotation needs both and checks them against each other
+(bind_split). A plain batch stays one file, exactly as before (make_batch).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +58,10 @@ QUESTION_TEXT = "Is B useful to someone studying A?"
 ANSWERS = ("useful", "marginal", "not_useful", "needs_context")
 ANNOTATION_SCHEMA = "koi-discourse-annotation/v1"
 BATCH_SCHEMA = "koi-discourse-review-batch/v1"
+REVIEWER_SCHEMA = "koi-discourse-review-batch/v2-reviewer"
+BINDING_SCHEMA = "koi-discourse-review-binding/v1"
+SPLIT_ANNOTATION_SCHEMA = "koi-discourse-annotation/v2"
+REVIEWER_ORIENTATION = "A is the claim being studied; B is the claim to judge"
 ORDERS = ("source_diverse", "fused")
 LANES = ("cross_source", "same_work_mapped", "same_work_suggested")
 MAX_REASON_CHARS = 2000
@@ -398,7 +409,8 @@ def _end_lines(tag: str, end: Dict[str, Any], authors: Optional[Dict[str, Any]] 
 def render(item: Dict[str, Any], *, position: Optional[int] = None, total: Optional[int] = None,
            blind: bool = True) -> str:
     head = f"[{position}/{total}] " if position else ""
-    lines = [f"{head}candidate {item['candidate_id'][:8]}  lane: {item.get('lane', 'cross_source')}"
+    label = f"item {item['item_id'][:8]}" if item.get("item_id") else f"candidate {item['candidate_id'][:8]}"
+    lines = [f"{head}{label}  lane: {item.get('lane', 'cross_source')}"
              + ("  (blind: retrieval scores and run hidden)" if blind else "")]
     authors = item.get("authors") or {}
     lines += _end_lines("A", item["a"], authors.get("a")) + _end_lines("B", item["b"], authors.get("b"))
@@ -454,7 +466,9 @@ def make_batch(items: Sequence[Dict[str, Any]], *, database: str, blind: bool = 
     sighting (review_items with seen_in_runs) also carries its anchor and that sighting
     (run and query), which its annotations are bound to. `selection` (the filters the
     items were chosen by) is recorded for the operator and is part of batch_id. A batch
-    made without either is exactly what it was before."""
+    made without either is exactly what it was before. A file with either is for the
+    operator only: `batch` writes those as a reviewer file and a binding file
+    (make_split_batch), and make_batch stays so existing batches rebuild to their ids."""
     entries = []
     for i, it in enumerate(items, start=1):
         entry = {"position": i, "candidate_id": it["candidate_id"], "candidate_key": it["candidate_key"],
@@ -500,6 +514,125 @@ def binding_problems(current: Optional[Dict[str, Any]], item: Dict[str, Any]) ->
     return problems
 
 
+# ---------------------------------------------------------------------------
+# Split batches: a reviewer file and an operator binding file
+# ---------------------------------------------------------------------------
+
+def needs_split(items: Sequence[Dict[str, Any]], selection: Optional[Dict[str, Any]]) -> bool:
+    """A batch chosen by a filter, or holding a sighting, carries retrieval metadata a
+    reviewer must not see, so it is written as a reviewer file plus a binding file."""
+    return selection is not None or any(it.get("anchor") for it in items)
+
+
+def item_id(salt: str, *, candidate_id: str, candidate_key: str, a_move_id: str, b_move_id: str,
+            anchor: Optional[Dict[str, Any]], sighting: Optional[Dict[str, Any]]) -> str:
+    """The identity a reviewer file and its binding file share for one item. Salted, so
+    a reviewer cannot recover the candidate, run or anchor from it."""
+    return _sha({"salt": salt, "candidate_id": candidate_id, "candidate_key": candidate_key,
+                 "a": a_move_id, "b": b_move_id, "anchor": anchor, "sighting": sighting})
+
+
+def reviewer_file_bytes(reviewer: Dict[str, Any]) -> bytes:
+    return (json.dumps(reviewer, indent=1, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def make_split_batch(items: Sequence[Dict[str, Any]], *, database: str,
+                     mappings: Optional[Dict[str, Any]] = None, note: Optional[str] = None,
+                     created_at: Optional[str] = None, selection: Optional[Dict[str, Any]] = None,
+                     salt: Optional[str] = None) -> Tuple[bytes, Dict[str, Any]]:
+    """The reviewer file's exact bytes, and the binding file that belongs to them.
+
+    The reviewer file holds the question, the orientation and, per item, A and B as
+    make_batch shows them (claim text, source and binding provenance), the lane, the
+    listed authors and the cues. It holds no candidate id or key, score, rank, run,
+    pick, tier, anchor, selection, note, database or time, and its positions follow
+    the salted item ids, not the queue's (score) order. Everything else goes in the
+    binding file: per item the candidate, its queue position, anchor, sighting and
+    tier, and for the batch the salt, selection, note, mapping file and database."""
+    salt = salt or secrets.token_hex(32)
+    entries = []
+    for queue_position, it in enumerate(items, start=1):
+        anchor = dict(it["anchor"]) if it.get("anchor") else None
+        sighting = dict(it["sighting"]) if it.get("sighting") else None
+        iid = item_id(salt, candidate_id=it["candidate_id"], candidate_key=it["candidate_key"],
+                      a_move_id=it["a"]["move_id"], b_move_id=it["b"]["move_id"], anchor=anchor, sighting=sighting)
+        entries.append((iid, queue_position, it, anchor, sighting))
+    if len({e[0] for e in entries}) != len(entries):
+        raise ReviewError("the same item is listed twice")
+    entries.sort(key=lambda e: e[0])
+    shown, bound = [], []
+    for position, (iid, queue_position, it, anchor, sighting) in enumerate(entries, start=1):
+        shown.append({"position": position, "item_id": iid, "lane": it.get("lane", "cross_source"),
+                      "authors": it.get("authors", {}), "cues": it.get("cues", []),
+                      "a": _shown_end(it["a"]), "b": _shown_end(it["b"])})
+        bound.append({"position": position, "item_id": iid, "queue_position": queue_position,
+                      "candidate_id": it["candidate_id"], "candidate_key": it["candidate_key"],
+                      "anchor": anchor, "sighting": sighting, "tier": it.get("tier")})
+    body = {"schema": REVIEWER_SCHEMA, "question": QUESTION, "question_text": QUESTION_TEXT, "answers": list(ANSWERS),
+            "blind": True, "orientation": REVIEWER_ORIENTATION, "items": shown}
+    raw = reviewer_file_bytes({**body, "reviewer_batch_id": _sha(body)})
+    binding = {"schema": BINDING_SCHEMA, "reviewer_batch_id": _sha(body),
+               "reviewer_file_sha256": hashlib.sha256(raw).hexdigest(), "salt": salt, "database": database,
+               "note": note, "selection": selection,
+               "mappings": {k: (mappings or {}).get(k) for k in ("path", "sha256", "prepared_by")},
+               "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+               "items": bound}
+    return raw, {**binding, "binding_id": _sha(binding)}
+
+
+def read_reviewer_file(raw: bytes) -> Dict[str, Any]:
+    """A reviewer file, checked against its own id."""
+    try:
+        reviewer = json.loads(raw)
+    except ValueError:
+        raise ReviewError("the reviewer file is not JSON")
+    if not isinstance(reviewer, dict) or reviewer.get("schema") != REVIEWER_SCHEMA:
+        raise ReviewError(f"not a {REVIEWER_SCHEMA} file")
+    if reviewer.get("reviewer_batch_id") != _sha({k: v for k, v in reviewer.items() if k != "reviewer_batch_id"}):
+        raise ReviewError("the reviewer file does not match its own id: it was edited")
+    return reviewer
+
+
+def bind_split(raw: bytes, binding: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The reviewer file and its binding file as one batch that annotation() and
+    binding_problems() accept, after these checks, each of which refuses:
+      1. the reviewer file matches its own id (reviewer_batch_id);
+      2. a binding file is given, and matches its own id (binding_id);
+      3. it names this reviewer file, by id and by the sha256 of its exact bytes;
+      4. both list the same positions, each with the same item id, and that id is the
+         one the binding's salt and candidate give for the A and B the reviewer saw."""
+    reviewer = read_reviewer_file(raw)
+    if binding is None:
+        raise ReviewError("this reviewer file needs its binding file (--binding); nothing is recorded without it")
+    if not isinstance(binding, dict) or binding.get("schema") != BINDING_SCHEMA:
+        raise ReviewError(f"not a {BINDING_SCHEMA} file")
+    if binding.get("binding_id") != _sha({k: v for k, v in binding.items() if k != "binding_id"}):
+        raise ReviewError("the binding file does not match its own id: it was edited")
+    if binding["reviewer_batch_id"] != reviewer["reviewer_batch_id"]:
+        raise ReviewError("the binding file belongs to another reviewer file")
+    if binding["reviewer_file_sha256"] != hashlib.sha256(raw).hexdigest():
+        raise ReviewError("the reviewer file's bytes are not the ones its binding file was made for")
+    shown = {it["position"]: it for it in reviewer["items"]}
+    bound = {it["position"]: it for it in binding["items"]}
+    if len(shown) != len(reviewer["items"]) or len(bound) != len(binding["items"]) or set(shown) != set(bound):
+        raise ReviewError("the reviewer file and the binding file list different items")
+    items = []
+    for position in sorted(shown):
+        s, b = shown[position], bound[position]
+        expected = item_id(binding["salt"], candidate_id=b["candidate_id"], candidate_key=b["candidate_key"],
+                           a_move_id=s["a"]["move_id"], b_move_id=s["b"]["move_id"],
+                           anchor=b["anchor"], sighting=b["sighting"])
+        if not s["item_id"] == b["item_id"] == expected:
+            raise ReviewError(f"item {position}: the two files do not describe the same item")
+        merged = {**s, "candidate_id": b["candidate_id"], "candidate_key": b["candidate_key"]}
+        if b["anchor"]:
+            merged["anchor"], merged["sighting"] = dict(b["anchor"]), dict(b["sighting"])
+        items.append(merged)
+    return {"schema": REVIEWER_SCHEMA, "format": "split", "batch_id": reviewer["reviewer_batch_id"],
+            "binding_id": binding["binding_id"], "blind": True, "database": binding["database"],
+            "question_text": reviewer["question_text"], "items": items}
+
+
 def annotation(batch: Dict[str, Any], position: int, *, reviewer: str, answer: str, reason: Optional[str] = None,
                supersedes: Optional[str] = None, os_user: Optional[str] = None, tool_version: Optional[str] = None,
                created_at: Optional[str] = None) -> Dict[str, Any]:
@@ -520,7 +653,9 @@ def annotation(batch: Dict[str, Any], position: int, *, reviewer: str, answer: s
         return {"move_id": end["move_id"], "representation_sha256": end["representation_sha256"],
                 "source_rid": end["source"]["rid"], "source_version": end["source"]["version"],
                 "bound_version": end["binding"]["bound_version"], "binding_kind": end["binding"]["kind"]}
-    rec = {"schema": ANNOTATION_SCHEMA, "question": QUESTION, "answer": answer, "reason": reason,
+    split = batch.get("format") == "split"
+    rec = {"schema": SPLIT_ANNOTATION_SCHEMA if split else ANNOTATION_SCHEMA, "question": QUESTION,
+           "answer": answer, "reason": reason,
            "reviewer": reviewer, "os_user": os_user,
            "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds"),
            "batch_id": batch["batch_id"], "position": position, "blind": batch["blind"], "database": batch["database"],
@@ -530,6 +665,8 @@ def annotation(batch: Dict[str, Any], position: int, *, reviewer: str, answer: s
            "tool": {"name": "koi-discourse review", "version": tool_version}, "supersedes": supersedes}
     if it.get("anchor"):
         rec["anchor"], rec["sighting"] = dict(it["anchor"]), dict(it["sighting"])
+    if split:
+        rec["binding_id"], rec["item_id"] = batch["binding_id"], it["item_id"]
     return {**rec, "annotation_id": _sha(rec)}
 
 

@@ -61,6 +61,7 @@ Every sighting of a pair records which claim's search found it and its pick, mea
 ```bash
 koi-discourse queue --seen-in-run ingest:<job>:<attempt> --tier additional --show-scores   # picks 6-10 of one run
 koi-discourse batch --seen-in-run ingest:<job>:<attempt> --from-queue 40 --out batch.json      # both tiers, blind
+# writes batch.json (give reviewers only this) and batch.binding.json (operator only)
 ```
 
 The two run filters, with the same meaning in `queue`, `batch` and `candidates`:
@@ -77,11 +78,11 @@ The two run filters, with the same meaning in `queue`, `batch` and `candidates`:
 What a sighting review records:
 
 - **The anchor:** the sighting's query, `anchor.move_id`, and which stored end it is, `anchor.stored_end`.
-- **The sighting itself:** run and query, in the batch item and its annotations. The annotation's orientation reads `A=query of the selected sighting, B=the claim it picked`.
-- **What changes nothing:** the candidate's stored first sighting. A batch made without `--seen-in-run` and its annotations are exactly as before (`A=query, B=target`).
+- **The sighting itself:** run and query, in the binding file and the annotations, never in the reviewer file. The annotation's orientation reads `A=query of the selected sighting, B=the claim it picked`.
+- **What changes nothing:** the candidate's stored first sighting. A batch made without filters and its annotations are exactly as before (`A=query, B=target`).
 - **Supersession:** a later answer can supersede an earlier one only for the same reviewer, candidate, question and claim A.
-- **Blind views** show no pick, tier, run or anchor.
-- **The batch's selection:** a batch records its filters there, as part of `batch_id`.
+- **Blind views and the reviewer file** show no pick, tier, run or anchor.
+- **The batch's selection:** the filters are recorded in the binding file.
 
 ## The worker
 
@@ -134,6 +135,9 @@ koi-discourse jobs --source-rid document:<sha256>
 - **Order:** `source_diverse` (round-robin over source pairs, the default) or `fused`.
 - **Cues:** shared listed author, same publication feed, or the other source's listed surname in the claim text. Each is shown as unverified and is never a dependence or restatement verdict. Unmapped authors show as unknown.
 - **Batches:** blind by default, with no scores, ranks or run ids. A batch records the exact claim texts, versions and the mapping file's sha256.
+  - **Without filters:** one file (`koi-discourse-review-batch/v1`), exactly as before. Existing batches keep their ids.
+  - **With `--run-id`, `--seen-in-run` or `--tier`:** two files. See [Reviewer and binding files](#reviewer-and-binding-files).
+  - **One-file batches made by I2 with a selection or sightings** still load, show and annotate. `show` warns that they are for the operator only.
 - **Annotations:** one question, "Is B useful to someone studying A?" (`useful | marginal | not_useful | needs_context`, optional reason).
   - Appended to a JSONL file you name, never edited. A correction supersedes an earlier line.
   - Each line is bound to the candidate id and key, both texts' representation hashes, the source and bound versions, and the declared reviewer.
@@ -143,6 +147,33 @@ koi-discourse jobs --source-rid document:<sha256>
 koi-discourse queue --mappings mapping.json --limit 10
 koi-discourse batch --from-queue 12 --mappings mapping.json --out batch.json
 koi-discourse review --batch batch.json --reviewer <name> --annotations annotations.jsonl
+```
+
+### Reviewer and binding files
+
+A filtered batch is written as `--out` (the reviewer file, `koi-discourse-review-batch/v2-reviewer`) and `--binding-out` (default `<out>.binding.json`, the binding file, `koi-discourse-review-binding/v1`).
+
+- **The reviewer file is all a reviewer receives.** Hand it over in a directory that holds nothing else.
+  - **It holds:** the question and answers, the orientation ("A is the claim being studied; B is the claim to judge"), and per item a position, an opaque item id, the lane, listed authors, cues, and A and B: claim text, move id, source (rid, title, URL, version) and binding provenance.
+  - **It holds none of:** candidate ids or keys, scores, ranks, runs, picks, tiers, anchors, stored ends, the selection, the note, the database or a time.
+  - **Positions** follow the salted item ids, not the queue's score order, so position carries no rank.
+  - **Direction:** a sighting item is shown from its own query (A is the claim whose search found B), as in the queue.
+- **The binding file is the operator's.** Reviewers must not see it.
+  - **It holds:** per item the position, item id, queue position, candidate id and key, anchor, sighting and tier (the tier key), and for the batch the salt, selection, note, mapping file, database and creation time.
+- **Integrity checks.** `annotate`, `review` and `show --verify` need `--binding` for a reviewer file and refuse, recording nothing, unless all of these hold:
+  1. the reviewer file matches its own `reviewer_batch_id` (the sha256 of its canonical body), so an edited reviewer file is refused;
+  2. a binding file is given, and it matches its own `binding_id` (the sha256 of its canonical body), so an edited binding file is refused;
+  3. the binding file names this reviewer file, by `reviewer_batch_id` and by `reviewer_file_sha256`, the sha256 of the reviewer file's exact bytes, so another batch's binding file, or a re-serialised copy of the reviewer file, is refused;
+  4. both files list the same positions with the same item ids, and each item id equals `sha256(salt, candidate id and key, the A and B move ids the reviewer saw, anchor, sighting)`. A binding file rewritten with its id recomputed, but pointing an item at another candidate, end order or sighting, is therefore refused.
+
+  The candidate checks then apply as for every batch: both ends end for end, text and version unchanged, and the selected sighting still current, so a rolled-back run refuses.
+- **Annotations of a reviewer file** use `koi-discourse-annotation/v2`. That is v1 plus `binding_id` and `item_id`, with `batch_id` set to the reviewer file's `reviewer_batch_id`. Annotations of one-file batches are unchanged v1.
+
+```bash
+koi-discourse batch --seen-in-run ingest:<job>:<attempt> --from-queue 40 --out trial/batch.json   # also trial/batch.binding.json
+koi-discourse show --batch trial/batch.json                                                         # what reviewers see
+koi-discourse annotate --batch trial/batch.json --binding trial/batch.binding.json --item 3 --answer useful \
+  --reviewer agent:a --annotations trial/annotations.jsonl
 ```
 
 ## Backout
