@@ -1,12 +1,18 @@
 #!/bin/bash
-# Read-only query surface for cross-source discourse candidates (issue #60), for
-# Claude Code, Codex and people. Install once:
+# Query and local review surface for cross-source discourse candidates (issue #60),
+# for Claude Code, Codex and people. Install once:
 #   ln -sfn ~/projects/koi-processor-runtime/scripts/koi-discourse ~/.local/bin/koi-discourse
 #
 #   koi-discourse candidates [--query TEXT | --move-id UUID] [--run-id RUN] [--limit N]
 #   koi-discourse jobs [--source-rid RID]
+#   koi-discourse queue [--order source_diverse|fused] [--lane LANE] [--mappings FILE] [--limit N]
+#   koi-discourse batch (--candidate-id ID ... | --from-queue N) --out FILE [--mappings FILE]
+#   koi-discourse show --batch FILE [--item N] [--verify]
+#   koi-discourse annotate --batch FILE --item N --answer A --reviewer NAME --annotations FILE [--reason TEXT]
+#   koi-discourse review --batch FILE --reviewer NAME --annotations FILE
+#   koi-discourse annotations --annotations FILE [--batch FILE]
 #
-# Both commands run in one READ ONLY transaction and print JSON.
+# Every database read runs in one READ ONLY transaction.
 #   candidates  moves that have open candidates, each with its own source (rid,
 #               title, URL) and every candidate's other end and source. Candidates
 #               are labelled "candidate (unreviewed)": text similarity only, not
@@ -16,9 +22,15 @@
 #   jobs        discovery jobs (pending, running, completed, failed, stale) with
 #               their errors, runs and candidate counts, and bound extractions
 #               that have no job.
-# Nothing here writes; anything else is refused.
+#   queue, batch, show, annotate, review, annotations
+#               local review (scripts/discourse_review.py): candidates in lanes and
+#               a source-diverse order, blind batches, and answers to "Is B useful
+#               to someone studying A?" appended to an annotation file you name.
+# Nothing here writes to the database. batch writes the batch file you name;
+# annotate and review append to the annotation file you name.
 #
-# Overrides: KOI_DISCOURSE_REPO_DIR, KOI_DISCOURSE_PYTHON, KOI_DISCOURSE_DSN.
+# Overrides: KOI_DISCOURSE_REPO_DIR, KOI_DISCOURSE_PYTHON, KOI_DISCOURSE_DSN,
+# KOI_DISCOURSE_REVIEW_MAPPINGS.
 
 set -euo pipefail
 
@@ -27,7 +39,7 @@ REPO_DIR="${KOI_DISCOURSE_REPO_DIR:-$(cd "$(dirname "$SELF")/.." && pwd)}"
 PY="${KOI_DISCOURSE_PYTHON:-$REPO_DIR/venv/bin/python}"
 DSN="${KOI_DISCOURSE_DSN:-postgresql://darrenzal:@localhost:5432/personal_koi?application_name=koi-discourse-read}"
 
-usage() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,33p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
@@ -35,6 +47,8 @@ cmd="${1:-}"
 case "$cmd" in
     candidates) exec "$PY" -B "$REPO_DIR/scripts/discourse_links_canary.py" candidates --dsn "$DSN" "$@" ;;
     jobs)       exec "$PY" -B "$REPO_DIR/scripts/discourse_discovery_worker.py" status --dsn "$DSN" "$@" ;;
+    queue|batch|show|annotate|review|annotations)
+                exec "$PY" -B "$REPO_DIR/scripts/discourse_review.py" "$cmd" --dsn "$DSN" "$@" ;;
     ""|-h|--help|help) usage ;;
-    *) echo "koi-discourse: unknown command '$cmd' (read-only: candidates | jobs)" >&2; exit 2 ;;
+    *) echo "koi-discourse: unknown command '$cmd' (candidates | jobs | queue | batch | show | annotate | review | annotations)" >&2; exit 2 ;;
 esac
