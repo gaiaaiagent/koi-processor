@@ -293,7 +293,25 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
         return {"merge_log_id": merge_log_id, "loser": loser, "survivor": survivor,
                 "restored": restored}
 
-    # 1. Repoint exactly the captured rows back to the loser. The `= survivor`
+    # 1. Un-tombstone the loser. FIRST, before any link is repointed at it:
+    #    migration 132's trigger on document_entity_links rewrites a link that
+    #    names a merged-away URI to its survivor, so repointing while the loser
+    #    is still tombstoned would send every link straight back to the survivor
+    #    and report it restored.
+    result = await conn.execute(
+        "UPDATE entity_registry SET merged_into = NULL, merged_at = NULL, merged_by = NULL "
+        "WHERE fuseki_uri = $1 AND merged_into = $2",
+        loser, survivor,
+    )
+    restored["loser_restored"] = int(result.split()[-1]) if result else 0
+    if restored["loser_restored"] != 1:
+        raise ValueError(
+            f"merge {merge_log_id}: expected to un-tombstone exactly 1 loser row, "
+            f"affected {restored['loser_restored']}. The loser may have been merged "
+            f"onward into a third entity. Rolling back."
+        )
+
+    # 2. Repoint exactly the captured rows back to the loser. The `= survivor`
     #    guard means a row someone has since moved elsewhere is left alone
     #    rather than yanked back -- and the count difference makes that visible.
     for key, ids in (rev.get("refs") or {}).items():
@@ -314,7 +332,7 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
                 merge_log_id, key, n, len(ids),
             )
 
-    # 2. Remove only the aliases this merge added.
+    # 3. Remove only the aliases this merge added.
     added = rev.get("aliases_added") or []
     if added:
         await conn.execute(
@@ -327,20 +345,6 @@ async def unmerge(conn, merge_log_id: int, unmerged_by: str = "operator") -> Dic
             survivor, added,
         )
     restored["aliases_removed"] = len(added)
-
-    # 3. Un-tombstone the loser.
-    result = await conn.execute(
-        "UPDATE entity_registry SET merged_into = NULL, merged_at = NULL, merged_by = NULL "
-        "WHERE fuseki_uri = $1 AND merged_into = $2",
-        loser, survivor,
-    )
-    restored["loser_restored"] = int(result.split()[-1]) if result else 0
-    if restored["loser_restored"] != 1:
-        raise ValueError(
-            f"merge {merge_log_id}: expected to un-tombstone exactly 1 loser row, "
-            f"affected {restored['loser_restored']}. The loser may have been merged "
-            f"onward into a third entity. Rolling back."
-        )
 
     # 4. Retype-specific restoration. A retype is a merge whose survivor URI
     #    encodes the NEW type, so undoing the rewiring is necessary but not

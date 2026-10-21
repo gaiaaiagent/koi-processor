@@ -6,15 +6,23 @@ All task writers (meeting-notes, task-agent, /tasks skill) converge here.
 Routes are prefix-relative — prefix "/tasks" is applied at mount in personal_ingest_api.py.
 """
 
+import json
+import logging
 import re
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from api.utils import parse_ts, validity_filter_clause
 from api.optional_federation import optional_federation_attr
+
+logger = logging.getLogger(__name__)
+
+# Longest free-text note kept per PATCH. Longer text is truncated, not rejected,
+# so callers that previously had `notes` silently dropped do not start to 422.
+MAX_NOTE_CHARS = 4000
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +55,12 @@ def _normalize_priority(v: Optional[str]) -> Optional[str]:
     return v2
 
 class TaskIngestRequest(BaseModel):
+    # Unknown keys are still ignored (they never reach the INSERT), but they are
+    # kept on the model so ingest_task can log their NAMES. That is how callers
+    # that send fields this API does not know are found before the model is
+    # tightened to extra="forbid".
+    model_config = ConfigDict(extra="allow")
+
     taskKey: str = Field(..., description="Idempotency key (e.g. 'meeting-2026-02-27-slug')")
     uuid: Optional[str] = None
     title: str
@@ -114,9 +128,17 @@ class TaskRecord(BaseModel):
     triaged_at: Optional[str] = None
     validity_start: Optional[str] = None
     validity_end: Optional[str] = None
+    # Append-only log written by PATCH {"notes": ...}, stored in task_registry.metadata->'notes'.
+    notes: List[Dict[str, Any]] = []
 
 
 class TaskPatchRequest(BaseModel):
+    # Unknown keys are tolerated for now but reported: patch_task logs their names
+    # and returns them as `ignored_fields`, so a field that is silently dropped is
+    # visible to the caller. Switch to extra="forbid" once the known offenders
+    # (completedAt from triage_close.py, taskKey from gate_helpers.py) are fixed.
+    model_config = ConfigDict(extra="allow")
+
     # Fix 3: all fields default to None; model_fields_set distinguishes
     # "not provided" from "explicitly null" for date clearing.
     title: Optional[str] = None
@@ -134,6 +156,9 @@ class TaskPatchRequest(BaseModel):
     collaboratorWikilinks: Optional[List[str]] = None
     blockedBy: Optional[List[str]] = None
     tags: Optional[List[str]] = None
+    # Free-text rationale for this change (for example why a task was closed).
+    # Appended to metadata->'notes' as {at, status, text}; never overwrites.
+    notes: Optional[str] = None
 
     @field_validator("status")
     @classmethod
@@ -270,6 +295,16 @@ def create_router(pool, caps) -> APIRouter:
         for k, v in d.items():
             if isinstance(v, (date, datetime)):
                 d[k] = v.isoformat()
+        # metadata is jsonb, which asyncpg returns as str here (no codec registered).
+        # Surface only the notes log; the rest of metadata stays internal.
+        meta = d.pop("metadata", None)
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                meta = None
+        notes = meta.get("notes") if isinstance(meta, dict) else None
+        d["notes"] = notes if isinstance(notes, list) else []
         return d
 
     def _parse_date(s: Optional[str]) -> Optional[date]:
@@ -311,6 +346,9 @@ def create_router(pool, caps) -> APIRouter:
         Partial payloads are safe: existing status/priority/dates are preserved
         via COALESCE on conflict. Only title is always overwritten.
         """
+        extras = sorted((req.model_extra or {}).keys())
+        if extras:
+            logger.warning("POST /tasks/ingest %s: ignored unknown field(s): %s", req.taskKey, ", ".join(extras))
         async with pool.acquire() as conn:
             owner_uri = await _resolve_entity(conn, req.ownerWikilink, "Person") if req.ownerWikilink else None
             project_uri = await _resolve_entity(conn, req.projectWikilink, "Project") if req.projectWikilink else None
@@ -603,7 +641,14 @@ def create_router(pool, caps) -> APIRouter:
 
         Fix 3: Date fields use model_fields_set to distinguish "not provided"
         from "explicitly null" (which clears the date).
+
+        `notes` appends to metadata->'notes'. Unknown keys are ignored but returned
+        as `ignored_fields` and logged by name. A non-empty owner/project link that
+        does not resolve is left unchanged and returned as `unresolved`.
         """
+        extras = sorted((req.model_extra or {}).keys())
+        if extras:
+            logger.warning("PATCH /tasks/%s: ignored unknown field(s): %s", task_key, ", ".join(extras))
         async with pool.acquire() as conn:
             existing = await conn.fetchrow(
                 "SELECT * FROM task_registry WHERE task_key = $1", task_key
@@ -657,11 +702,27 @@ def create_router(pool, caps) -> APIRouter:
                             updates[col] = parsed    # valid timestamp
                         # else: malformed string — leave unchanged
 
-            # Resolve owner / project / collaborators
-            if req.ownerWikilink is not None:
-                updates["owner_uri"] = await _resolve_entity(conn, req.ownerWikilink, "Person")
-            if req.projectWikilink is not None:
-                updates["project_uri"] = await _resolve_entity(conn, req.projectWikilink, "Project")
+            # Resolve owner / project / collaborators.
+            # A non-empty value that does not resolve leaves the stored link alone and is
+            # reported in the response. It used to write NULL, which silently wiped a good
+            # owner or project whenever a caller sent a spelling the resolver could not match.
+            # An explicit empty string still clears the field.
+            unresolved: List[str] = []
+            for field, col, etype in (
+                ("ownerWikilink", "owner_uri", "Person"),
+                ("projectWikilink", "project_uri", "Project"),
+            ):
+                raw = getattr(req, field)
+                if raw is None:
+                    continue
+                if not raw.strip():
+                    updates[col] = None
+                    continue
+                uri = await _resolve_entity(conn, raw, etype)
+                if uri is not None:
+                    updates[col] = uri
+                else:
+                    unresolved.append(field)
             if req.collaboratorWikilinks is not None:
                 uris = []
                 for c in req.collaboratorWikilinks:
@@ -686,6 +747,17 @@ def create_router(pool, caps) -> APIRouter:
                 vals.append(val)
                 set_clauses.append(f"{col} = ${len(vals)}")
 
+            # Append a note to metadata->'notes' (a jsonb array; created if absent or not an array).
+            note_text = (req.notes or "").strip()
+            if note_text:
+                entry = {"at": now.isoformat() + "Z", "status": new_status, "text": note_text[:MAX_NOTE_CHARS]}
+                vals.append(json.dumps([entry]))
+                set_clauses.append(
+                    "metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notes}', "
+                    "CASE WHEN jsonb_typeof(metadata->'notes') = 'array' THEN metadata->'notes' "
+                    f"ELSE '[]'::jsonb END || ${len(vals)}::jsonb)"
+                )
+
             vals.append(task_key)
             await conn.execute(
                 f"UPDATE task_registry SET {', '.join(set_clauses)} WHERE task_key = ${len(vals)}",
@@ -696,7 +768,12 @@ def create_router(pool, caps) -> APIRouter:
             "task_key": task_key, "title": updates.get("title", existing["title"]),
             "status": new_status, "priority": updates.get("priority", existing["priority"]),
         })
-        return {"task_key": task_key, "action": "updated"}
+        result: Dict[str, Any] = {"task_key": task_key, "action": "updated"}
+        if unresolved:
+            result["unresolved"] = unresolved
+        if extras:
+            result["ignored_fields"] = extras
+        return result
 
     # -----------------------------------------------------------------------
     # GET /stats — aggregate counts
