@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.embedding_provider import OpenAIEmbeddingProvider  # noqa: E402
 from api.chunker import TextChunker  # noqa: E402
 from api.provider_http import provider_async_client  # noqa: E402
+from api.discourse_discovery import CAP_ENV as DISCOURSE_CAP_ENV, PER_MOVE_CAPS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -733,7 +734,16 @@ def main():
                              "cross-source discovery for this source (issue #60). Sets KOI_DISCOURSE_BINDINGS and "
                              "KOI_DISCOURSE_INGEST_DISCOVERY for this process only. Retrieval runs later, in "
                              "scripts/discourse_discovery_worker.py; this run only inserts the job.")
+    parser.add_argument("--discourse-move-cap", type=int, choices=PER_MOVE_CAPS,
+                        help="With --discourse-discovery: keep at most this many candidates per new claim, "
+                             f"one of {', '.join(map(str, PER_MOVE_CAPS))}. Omitted: the default (5). Bound into "
+                             "this source's job and recorded in its plan and run; at most 2 per other source "
+                             f"either way. Sets {DISCOURSE_CAP_ENV} for this process only.")
     args = parser.parse_args()
+    if args.discourse_move_cap is not None and not args.discourse_discovery:
+        parser.error("--discourse-move-cap needs --discourse-discovery")
+    # No option means the default: an inherited value must not choose a limit for this run.
+    os.environ.pop(DISCOURSE_CAP_ENV, None)
     if args.discourse_discovery:
         if args.tier != "thorough":
             parser.error("--discourse-discovery needs --tier thorough (only thorough writes discourse moves)")
@@ -741,6 +751,8 @@ def main():
             parser.error("--discourse-discovery cannot be combined with --dry-run")
         os.environ["KOI_DISCOURSE_BINDINGS"] = "1"
         os.environ["KOI_DISCOURSE_INGEST_DISCOVERY"] = "1"
+        if args.discourse_move_cap is not None:
+            os.environ[DISCOURSE_CAP_ENV] = str(args.discourse_move_cap)
 
     claims = (args.tier != "rag") and not args.no_claims
     fields = [t.strip() for t in (args.fields or "").split(",") if t.strip()]
@@ -771,6 +783,8 @@ def main():
             print(f"  discourse_moves:{ext.get('discourse_moves_created')}")
             if ext.get("discourse_discovery") is not None:
                 print(f"  discovery job:  {ext.get('discourse_discovery')}")
+            elif args.discourse_move_cap is not None:
+                print(f"  discovery job:  none queued; the per-claim limit {args.discourse_move_cap} was not applied")
     if cl:
         print(f"  claims_created: {cl.get('claims_created')}")
     if args.gate_evidence_out:

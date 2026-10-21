@@ -891,17 +891,19 @@ async def schedule_discourse_discovery(conn, *, document_rid: str, move_ids: Lis
     """After a COMPLETE extraction whose bindings were recorded, queue cross-source
     discourse discovery for this run's moves (issue #60). Off unless
     KOI_DISCOURSE_INGEST_DISCOVERY=1, and then a no-op for moves this run did not
-    bind with its input (KOI_DISCOURSE_BINDINGS=1). It only inserts a job row:
-    scripts/discourse_discovery_worker.py does the retrieval later. It never fails
-    the extraction; an error is logged and visible as an unscheduled extraction in
-    `discourse_discovery_worker.py status`."""
+    bind with its input (KOI_DISCOURSE_BINDINGS=1). The job's per-claim limit is
+    the default unless KOI_DISCOURSE_DISCOVERY_PER_MOVE_CAP holds one of the
+    allowed values (ingest_document.py --discourse-move-cap). It only inserts a
+    job row: scripts/discourse_discovery_worker.py does the retrieval later. It
+    never fails the extraction; an error (an invalid limit included) is logged and
+    visible as an unscheduled extraction in `discourse_discovery_worker.py status`."""
     if os.getenv("KOI_DISCOURSE_INGEST_DISCOVERY") != "1" or not move_ids:
         return None
     try:
-        from api.discourse_discovery import enqueue_for_extraction
+        from api.discourse_discovery import enqueue_for_extraction, requested_per_move_cap
         async with conn.transaction():
             result = await enqueue_for_extraction(conn, source_rid=document_rid, extraction_run_id=run_id,
-                                                  move_ids=move_ids)
+                                                  move_ids=move_ids, per_move_cap=requested_per_move_cap())
     except Exception as exc:  # noqa: BLE001 - discovery must never fail an ingested document
         logger.error("discourse discovery for %s not scheduled: %s: %s", document_rid, type(exc).__name__, exc)
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

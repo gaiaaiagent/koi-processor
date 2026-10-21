@@ -1350,7 +1350,7 @@ async def _comparable(dsn):
                 "FROM discourse_move_embeddings ORDER BY move_id, model")],
             "effects": [dict(r) for r in await conn.fetch(
                 """SELECT e.effect, e.move_id, e.model, c.candidate_key, e.representation_sha256,
-                          e.after_state->'times_seen' AS times_seen
+                          e.after_state->'times_seen' AS times_seen, e.after_state->'occurrence' AS occurrence
                      FROM discourse_link_run_effects e LEFT JOIN discourse_link_candidates c ON c.id = e.candidate_id
                     ORDER BY e.id""")],
             "representations": [dict(r) for r in await conn.fetch(
@@ -1390,6 +1390,7 @@ def test_two_phase_matches_single_transaction_discovery(tmp_path, monkeypatch, m
             two_phase = await _apply(two, out, plan_sha, p2, d2)
             a, b = await _comparable(one), await _comparable(two)
             assert a == b
+            assert all(e["occurrence"] for e in a["effects"] if e["effect"].startswith("candidate_"))   # both paths record picks
             assert single["effects"] == two_phase["effects"]
             assert {k: v for k, v in two_phase["effects"].items() if k != "representation_inserted"} \
                 == plan["planned_effects"]
@@ -1980,7 +1981,8 @@ def test_ingestion_discovery_recovers_and_retries_without_duplicates(committed_d
             written, first = await _ingest(conn, src)
             again = await ex.schedule_discourse_discovery(conn, document_rid=src["rid"], move_ids=written,
                                                           run_id="extract-new-1")
-            assert again == {"status": "exists", "job_id": first["job_id"], "job_key": first["job_key"]}
+            assert again == {"status": "exists", "job_id": first["job_id"], "job_key": first["job_key"], "per_move_cap": 5,
+                             "note": "this extraction already has this job (same profile). Nothing was changed."}
             # A worker that claimed the job and died: its lease runs out and the job is reclaimed.
             await worker.claim_next(conn, "dead-worker")
             await conn.execute("UPDATE discourse_discovery_jobs SET claimed_at = now() - interval '1 hour'")
@@ -2567,3 +2569,570 @@ def test_the_query_command_is_read_only_and_keeps_candidates_apart_from_judgment
         assert "READ ONLY" in koi_discourse("--help").stdout
         assert await _state(committed_dsn) == before                 # nothing written
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Per-claim limit per job (I2): 5 unless an ingestion chooses 10
+# ---------------------------------------------------------------------------
+
+from collections import Counter  # noqa: E402
+
+from api import discourse_review as dr  # noqa: E402
+
+# Fictional targets, two claims per source, so one claim's search can fill ten picks at two per source.
+WIDE = tuple((f"fixture:wide-{i}", f"Harbour {i} records (fictional)",
+              (f"Landing records in harbour {i} name the vessel and the hour.",
+               f"Harbour {i} ledgers record the vessel, the hour and the catch.")) for i in range(1, 6))
+QUERY_CLAIM = _new_source()["moves"][0]["title"]
+
+
+async def _add_sources(conn, sources=WIDE):
+    """Target sources as the corpus holds them: a log row, document claims and their vectors. No bindings."""
+    ids = []
+    for rid, title, claims in sources:
+        await conn.execute("INSERT INTO document_ingestion_log (document_rid, title, content_hash) VALUES ($1, $2, $3)",
+                           rid, title, sha(rid))
+        for n, text in enumerate(claims):
+            ids.append(mid(f"{rid}#{n}"))
+            await conn.execute("INSERT INTO session_discourse_moves (id, source_type, source_rid, move_type, title) "
+                               "VALUES ($1, 'document', $2, 'claim', $3)", ids[-1], rid, text)
+    await dl.embed_moves(conn, ConceptEmbedder(), ids, model=MODEL)
+
+
+def _spec_key(job, profile):
+    """The job_key enqueue_for_extraction derives, from a stored job and a profile."""
+    return dd.job_key({"source_rid": job["source_rid"], "source_version": job["source_version"],
+                       "extraction_run_id": job["extraction_run_id"],
+                       "extraction_input_sha256": job["extraction_input_sha256"],
+                       "moves": json.loads(job["moves"]), "context": json.loads(job["context"]),
+                       "profile": profile, "limits": dd.LIMITS})
+
+
+def _picks(plan):
+    out = {}
+    for s in plan["sightings"]:
+        out.setdefault(s["query_move_id"], []).append((s["pick"], s["target_move_id"]))
+    return out
+
+
+async def _rows(dsn, run_ids=None, seen_in_runs=None):
+    return {r["candidate_id"]: r for r in await canary._readonly(
+        dsn, lambda c: dr.candidate_rows(c, run_ids=run_ids, seen_in_runs=seen_in_runs))}
+
+
+def test_move_cap_default_is_unchanged_and_a_chosen_ten_is_bound_into_job_plan_and_run(committed_dsn, ingestion,
+                                                                                       monkeypatch, tmp_path):
+    monkeypatch.delenv(dd.CAP_ENV, raising=False)
+    profile_before = json.loads(json.dumps(dd.PROFILE))
+
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            default_src, chosen_src = _new_source(1), _new_source(2)
+            _, default = await _ingest(conn, default_src)                     # no option
+            await _work(committed_dsn, plan_dir=tmp_path)
+            monkeypatch.setenv(dd.CAP_ENV, "10")                               # what --discourse-move-cap 10 sets
+            _, chosen = await _ingest(conn, chosen_src)
+            monkeypatch.delenv(dd.CAP_ENV)
+            assert (default["status"], default["per_move_cap"], chosen["status"], chosen["per_move_cap"]) == (
+                "enqueued", 5, "enqueued", 10)
+            j5, j10 = await _job(conn, default_src["rid"]), await _job(conn, chosen_src["rid"])
+            # No option: the profile, limits and key the code bound before this option existed.
+            assert json.loads(j5["profile"]) == dd.PROFILE and json.loads(j5["limits"]) == dd.LIMITS
+            assert j5["job_key"] == _spec_key(j5, dd.PROFILE)
+            # Chosen: only the per-claim limit differs, the per-source limit stays 2, and the key covers it.
+            p10 = json.loads(j10["profile"])
+            assert p10 == {**dd.PROFILE, "per_move_cap": 10} and p10["per_target_source_cap"] == 2
+            assert j10["job_key"] == _spec_key(j10, p10) != _spec_key(j10, dd.PROFILE)
+            assert dd.PROFILE == profile_before                                # the module profile is never changed
+            assert [j["status"] for j in (await _work(committed_dsn, plan_dir=tmp_path))["jobs"]] == ["completed"]
+            for src, cap in ((default_src, 5), (chosen_src, 10)):
+                job = await _job(conn, src["rid"])
+                assert job["status"] == "completed"
+                run = await conn.fetchrow("SELECT * FROM discourse_link_runs WHERE run_id = $1", job["run_id"])
+                scope, summary = json.loads(run["approval_scope"]), json.loads(run["summary"])
+                claims = len(json.loads(job["moves"]))
+                assert (scope["per_move_cap"], scope["per_target_source_cap"]) == (cap, 2)
+                assert scope["limits"] == {"max_embedding_writes": claims, "max_candidate_inserts": claims * cap}
+                path = tmp_path / f"{job['run_id'].replace(':', '_')}.plan.json"
+                assert hashlib.sha256(path.read_bytes()).hexdigest() == scope["plan_sha256"]
+                plan = json.loads(path.read_bytes())
+                assert plan["method_params"]["per_move_cap"] == summary["discovery"]["method_params"]["per_move_cap"] == cap
+                picks = _picks(plan)
+                assert max(len(p) for p in picks.values()) == cap               # the wide corpus fills the limit
+                assert all([n for n, _ in p] == list(range(1, len(p) + 1)) for p in picks.values())
+                cands = await conn.fetch("SELECT * FROM discourse_link_candidates WHERE run_id = $1", job["run_id"])
+                assert {json.loads(c["method_params"])["per_move_cap"] for c in cands} == {cap}
+                assert max(Counter((str(c["query_move_id"]), c["target_source_rid"]) for c in cands).values()) <= 2
+                assert all(c["status"] == "candidate" for c in cands)
+            assert await conn.fetchval("SELECT count(*) FROM discourse_relations") == 0
+            assert await conn.fetchval("SELECT count(*) FROM discourse_review_events") == 0
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_explicit_five_is_the_default_job_and_other_values_are_refused(committed_dsn, ingestion, monkeypatch):
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            src = _new_source(1)
+            monkeypatch.setenv(dd.CAP_ENV, "5")
+            written, five = await _ingest(conn, src)
+            monkeypatch.delenv(dd.CAP_ENV)
+            again = await ex.schedule_discourse_discovery(conn, document_rid=src["rid"], move_ids=written,
+                                                          run_id="extract-new-1")
+            assert again == {"status": "exists", "job_id": five["job_id"], "job_key": five["job_key"], "per_move_cap": 5,
+                             "note": "this extraction already has this job (same profile). Nothing was changed."}
+            jobs = await conn.fetchval("SELECT count(*) FROM discourse_discovery_jobs")
+            for bad in ("7", "20", "0", "ten", "", "10.0", "5 5"):
+                monkeypatch.setenv(dd.CAP_ENV, bad)
+                out = await ex.schedule_discourse_discovery(conn, document_rid=src["rid"], move_ids=written,
+                                                            run_id="extract-new-1")
+                assert out["status"] == "error" and "per-claim limit must be one of (5, 10)" in out["error"], bad
+            monkeypatch.delenv(dd.CAP_ENV)
+            for bad in (7, 20, 0, "10", 10.0, True):
+                with pytest.raises(ValueError, match="per_move_cap must be one of"):
+                    await dd.enqueue_for_extraction(conn, source_rid=src["rid"], extraction_run_id="extract-new-1",
+                                                    move_ids=written, per_move_cap=bad)
+            assert await conn.fetchval("SELECT count(*) FROM discourse_discovery_jobs") == jobs   # nothing queued
+            assert all(m["admissible"] for m in (await dl.fetch_moves(conn, written)).values())   # ingestion kept
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_never_changes_a_queued_job_or_the_module_profile(committed_dsn, ingestion, monkeypatch):
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            src = _new_source(1)
+            written, queued = await _ingest(conn, src)                          # default, pending
+            before = dict(await _job(conn, src["rid"]))
+            # The same extraction asked for again with 10 is a separate job; the queued one is untouched.
+            ten = await dd.enqueue_for_extraction(conn, source_rid=src["rid"], extraction_run_id="extract-new-1",
+                                                  move_ids=written, per_move_cap=10)
+            assert ten["status"] == "enqueued" and ten["job_key"] != queued["job_key"] and ten["per_move_cap"] == 10
+            assert ten["other_jobs_for_this_extraction"] == [{"job_id": queued["job_id"], "per_move_cap": 5,
+                                                              "status": "pending"}]
+            assert "separate job" in ten["note"] and "were not changed" in ten["note"]
+            assert dict(await conn.fetchrow("SELECT * FROM discourse_discovery_jobs WHERE id = $1",
+                                            queued["job_id"])) == before
+            # Repeating a request (same extraction, same profile) is that job again, and says so.
+            again = await dd.enqueue_for_extraction(conn, source_rid=src["rid"], extraction_run_id="extract-new-1",
+                                                    move_ids=written, per_move_cap=10)
+            assert (again["status"], again["job_id"], again["per_move_cap"]) == ("exists", ten["job_id"], 10)
+            assert "Nothing was changed" in again["note"]
+            assert again["other_jobs_for_this_extraction"] == ten["other_jobs_for_this_extraction"]
+            listed = {j["id"]: j["per_move_cap"] for j in (await dd.job_status(conn, source_rid=src["rid"]))["jobs"]}
+            assert listed == {queued["job_id"]: 5, ten["job_id"]: 10}
+            assert await conn.fetchval("SELECT count(*) FROM discourse_discovery_jobs") == 2
+            # A copy is returned: changing it changes nothing else.
+            p = dd.job_profile(10)
+            p["per_target_source_cap"] = None
+            assert dd.PROFILE["per_target_source_cap"] == 2 and dd.job_profile()["per_move_cap"] == 5
+            # A later change to the module default does not reach a queued job: it runs with its own copy.
+            monkeypatch.setitem(dd.PROFILE, "per_move_cap", 10)
+            out = await _work(committed_dsn, max_jobs=1)
+            assert [j["job_id"] for j in out["jobs"]] == [queued["job_id"]]
+            run = await conn.fetchrow("SELECT approval_scope FROM discourse_link_runs WHERE run_id = $1",
+                                      out["jobs"][0]["run_id"])
+            assert json.loads(run["approval_scope"])["per_move_cap"] == 5
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_write_budget_and_plan_shape_follow_the_jobs_own_limit(committed_dsn, ingestion, monkeypatch):
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            # A stored limit outside the allowed values (a hand-edited row) fails the job; nothing is written.
+            src = _new_source(1)
+            await _ingest(conn, src)
+            await conn.execute("UPDATE discourse_discovery_jobs SET profile = jsonb_set(profile, '{per_move_cap}', '50')")
+            out = await _work(committed_dsn)
+            job = await _job(conn, src["rid"])
+            assert (out["jobs"][0]["status"], job["status"], job["run_id"]) == ("failed", "failed", None)
+            assert job["last_error"] == "per_move_cap 50 is not one of (5, 10)"
+            assert await conn.fetchval("SELECT count(*) FROM discourse_link_runs") == 0
+            assert await conn.fetchval("SELECT count(*) FROM discourse_link_candidates") == 0
+            # The approved budget is claims x the job's own limit.
+            for n, cap in ((2, 5), (3, 10)):
+                monkeypatch.setenv(dd.CAP_ENV, str(cap))
+                await _ingest(conn, _new_source(n))
+                job = dict(await _job(conn, _new_source(n)["rid"]))
+                assert worker._scope(job, "x")["limits"]["max_candidate_inserts"] == 2 * cap
+            monkeypatch.delenv(dd.CAP_ENV)
+            # A plan must keep each claim's picks to 1..n within its limit, or apply refuses it before writing.
+            plan = await worker._plan_job(committed_dsn, job, dd.configured_context(), ConceptEmbedder(), "ingest:x:1")
+            dl._check_plan_shape(plan, "ingest:x:1")                            # control: as planned, accepted
+            q = plan["sightings"][0]["query_move_id"]
+            mine = [i for i, s in enumerate(plan["sightings"]) if s["query_move_id"] == q]
+            assert len(mine) == 10
+
+            def refused(change):
+                bad = json.loads(json.dumps(plan, default=str))
+                change(bad)
+                with pytest.raises(dl.PlanRefused, match="not 1..n within the per-claim limit"):
+                    dl._check_plan_shape(bad, "ingest:x:1")
+
+            def eleventh(p):
+                p["sightings"].insert(mine[-1] + 1, dict(p["sightings"][mine[-1]], pick=11, effect="candidate_seen"))
+                p["planned_effects"]["candidate_seen"] = p["planned_effects"].get("candidate_seen", 0) + 1
+
+            def gap(p):
+                p["sightings"][mine[3]]["pick"] = 5
+
+            def lowered(p):
+                p["method_params"]["per_move_cap"] = 5
+
+            for change in (eleventh, gap, lowered):
+                refused(change)
+            unrecorded = json.loads(json.dumps(plan, default=str))   # as a plan made before picks were recorded
+            for s in unrecorded["sightings"]:
+                s.pop("pick")
+            dl._check_plan_shape(unrecorded, "ingest:x:1")
+            unrecorded["method_params"]["per_move_cap"] = 5
+            with pytest.raises(dl.PlanRefused, match="within the per-claim limit 5"):
+                dl._check_plan_shape(unrecorded, "ingest:x:1")
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_the_first_five_picks_at_ten_are_the_picks_at_five(committed_dsn, ingestion):
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            written, _ = await _ingest(conn, _new_source(1))
+            plans = {}
+            for cap in (5, 10):
+                async with conn.transaction(isolation="repeatable_read", readonly=True):
+                    plans[cap] = await dl.plan_discovery(conn, ConceptEmbedder(), written, context=CTX,
+                                                         discovered_by="agent:test", run_id=f"plan:{cap}",
+                                                         embedding_model=MODEL, per_move_cap=cap)
+            five, ten = _picks(plans[5]), _picks(plans[10])
+            assert set(five) == set(ten) == set(written)
+            for q in written:
+                assert len(five[q]) == 5 and len(ten[q]) == 10 and ten[q][:5] == five[q]
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_rediscovery_keeps_the_first_sighting_and_each_run_has_its_own_tier(committed_dsn, ingestion,
+                                                                                     monkeypatch):
+    keep = ("run_id", "query_move_id", "target_move_id", "method_params", "lexical_rank", "lexical_score",
+            "semantic_rank", "semantic_score", "fused_score", "discovered_at", "discovered_by")
+
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            src = _new_source(1)
+            await _ingest(conn, src)                                            # the default limit
+            await _work(committed_dsn)
+            r1 = (await _job(conn, src["rid"]))["run_id"]
+            first = {str(r["id"]): dict(r) for r in await conn.fetch(
+                "SELECT * FROM discourse_link_candidates WHERE run_id = $1", r1)}
+            assert len(first) == 10                                             # two claims, five picks each
+            # The same text extracted again, now with 10: each claim meets its five again and adds five.
+            monkeypatch.setenv(dd.CAP_ENV, "10")
+            await _ingest(conn, src, run_id="extract-new-2")
+            out = await _work(committed_dsn)
+            r2 = (await _job(conn, src["rid"]))["run_id"]
+            assert (out["jobs"][0]["effects"]["candidate_seen"], out["jobs"][0]["effects"]["candidate_inserted"]) == (10, 10)
+            after = {str(r["id"]): dict(r) for r in await conn.fetch(
+                "SELECT * FROM discourse_link_candidates WHERE id = ANY($1::uuid[])", list(first))}
+            for cid, row in first.items():
+                assert {k: after[cid][k] for k in keep} == {k: row[k] for k in keep}     # first sighting kept
+                assert after[cid]["times_seen"] == 2
+            rows = await _rows(committed_dsn, seen_in_runs=[r2])
+            assert set(first) < set(rows)                                       # seen again by r2, so listed under it
+            assert set(await _rows(committed_dsn, run_ids=[r2])) == set(rows) - set(first)   # first discovered by r2
+            assert set(await _rows(committed_dsn, run_ids=[r1])) == set(first)
+            for cid in first:
+                assert [(o["run_id"], o["sighting"], o["tier"], o["query_end"]) for o in rows[cid]["occurrences"]] == [
+                    (r1, "first", "first_five", "a"), (r2, "again", "first_five", "a")]
+                assert rows[cid]["occurrences"][0]["pick"] == rows[cid]["occurrences"][1]["pick"] <= 5
+                assert rows[cid]["run_id"] == r1                                # the row still names its first run
+            new = [r for cid, r in rows.items() if cid not in first]
+            assert len(new) == 10 and all(
+                [(o["run_id"], o["sighting"], o["tier"]) for o in r["occurrences"]] == [(r2, "first", "additional")]
+                and 6 <= r["occurrences"][0]["pick"] <= 10 for r in new)
+            items, unanchored = dr.review_items(list(rows.values()), seen_in_runs=[r2])
+            assert dr.tier_counts(items) == {"first_five": 10, "additional": 10, "unknown": 0} and unanchored == 0
+            assert all(it["anchor"]["stored_end"] == "a" for it in items)     # every r2 search was the stored query's
+            # Two claims that rank above everything push earlier picks down: the same pair, first five in r1
+            # and r2, is additional in r3. A tier belongs to the occurrence, not to the candidate.
+            await _add_sources(conn, [("fixture:closer", "Closer source (fictional)",
+                                       (QUERY_CLAIM, QUERY_CLAIM.replace("it landed", "that it landed")))])
+            await _ingest(conn, src, run_id="extract-new-3")
+            await _work(committed_dsn)
+            r3 = (await _job(conn, src["rid"]))["run_id"]
+            rows = await _rows(committed_dsn, seen_in_runs=[r3])
+            items, _ = dr.review_items(list(rows.values()), seen_in_runs=[r3], tier="additional")
+            moved = [it for it in items if it["candidate_id"] in first]
+            assert moved
+            for it in moved:
+                assert {o["run_id"]: o["tier"] for o in it["occurrences"]} == {r1: "first_five", r2: "first_five",
+                                                                               r3: "additional"}
+                assert it["sighting"]["run_id"] == r3 and it["run_id"] == r1
+                assert dr.review_items([rows[it["candidate_id"]]])[0][0]["tier"] == "first_five"   # its first sighting
+            # Rolling r3 back removes its sightings from the queue and keeps the earlier ones.
+            await canary.run_rollback(committed_dsn, r3)
+            assert await _rows(committed_dsn, seen_in_runs=[r3]) == {} == await _rows(committed_dsn, run_ids=[r3])
+            rows = await _rows(committed_dsn, run_ids=[r1])
+            assert all({o["run_id"] for o in rows[cid]["occurrences"]} == {r1, r2} for cid in first)
+            assert {cid: after[cid]["times_seen"] for cid in first} == {
+                str(r["id"]): r["times_seen"] for r in await conn.fetch(
+                    "SELECT id, times_seen FROM discourse_link_candidates WHERE id = ANY($1::uuid[])", list(first))}
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_a_sighting_from_the_other_end_is_reviewed_from_its_own_query(committed_dsn, ingestion, monkeypatch,
+                                                                               tmp_path):
+    """Y's run finds Y->X first (stored A = Y's claim). X extracted again meets the pair from X's side.
+    Reviewing that sighting must study X's claim, record that orientation and bind to that sighting,
+    while the stored first sighting stays Y's. Control: a sighting from the stored query's side."""
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            x, y = _new_source(1), _new_source(2)
+            xs, _ = await _ingest(conn, x)
+            await _work(committed_dsn)
+            rx1 = (await _job(conn, x["rid"]))["run_id"]
+            monkeypatch.setenv(dd.CAP_ENV, "10")
+            ys, _ = await _ingest(conn, y)
+            await _work(committed_dsn)
+            ry = (await _job(conn, y["rid"]))["run_id"]
+            await _ingest(conn, x, run_id="extract-new-2")
+            await _work(committed_dsn)
+            rx2 = (await _job(conn, x["rid"]))["run_id"]
+            rows = await _rows(committed_dsn, seen_in_runs=[rx2])
+            items, unanchored = dr.review_items(list(rows.values()), seen_in_runs=[rx2])
+            assert unanchored == 0
+            reversed_ = [it for it in items if it["anchor"]["stored_end"] == "b"]
+            control = next(it for it in items if it["anchor"]["stored_end"] == "a" and it["run_id"] == rx1)
+            assert reversed_
+            for it in reversed_:
+                cid = it["candidate_id"]
+                stored = rows[cid]
+                assert stored["a"]["move_id"] in ys and stored["run_id"] == ry          # first discovered by Y's run
+                assert it["a"]["move_id"] in xs and it["b"]["move_id"] == stored["a"]["move_id"]
+                assert it["sighting"] == {"run_id": rx2, "query_move_id": it["a"]["move_id"]}
+                occ = json.loads(await conn.fetchval(
+                    "SELECT after_state->'occurrence' FROM discourse_link_run_effects WHERE run_id = $1 AND candidate_id = $2",
+                    rx2, cid))
+                assert occ["query_move_id"] == it["a"]["move_id"]                     # what the run actually searched
+            assert control["a"]["move_id"] in xs and rows[control["candidate_id"]]["a"]["move_id"] == control["a"]["move_id"]
+            batch = dr.make_batch([reversed_[0], control], database="scratch", created_at="t",
+                                  selection={"run_ids": None, "seen_in_runs": [rx2], "tier": None})
+            current = {r["candidate_id"]: r for r in await canary._readonly(committed_dsn, lambda c: dr.candidate_rows(
+                c, candidate_ids=[i["candidate_id"] for i in batch["items"]]))}
+            for item, source in zip(batch["items"], (reversed_[0], control)):
+                rec = dr.annotation(batch, item["position"], reviewer="agent:test", answer="useful", created_at="t1")
+                assert rec["shown"]["orientation"] == dr.SIGHTING_ORIENTATION
+                assert rec["shown"]["a"]["move_id"] == source["a"]["move_id"] == rec["anchor"]["move_id"]
+                assert rec["sighting"] == source["sighting"] and rec["anchor"] == source["anchor"]
+                assert dr.binding_problems(current[item["candidate_id"]], item) == []
+            # The same pair from both ends, in two runs: two items, two separate reviews.
+            both, _ = dr.review_items(list((await _rows(committed_dsn, seen_in_runs=[ry, rx2])).values()),
+                                      seen_in_runs=[ry, rx2])
+            pair = [it for it in both if it["candidate_id"] == reversed_[0]["candidate_id"]]
+            assert sorted((it["sighting"]["run_id"], it["anchor"]["stored_end"]) for it in pair) == sorted(
+                [(ry, "a"), (rx2, "b")])
+            two = dr.make_batch(pair, database="scratch", created_at="t")
+            path = str(tmp_path / "ann.jsonl")
+            recs = [dr.annotation(two, i, reviewer="agent:test", answer="useful", created_at="t1") for i in (1, 2)]
+            assert recs[0]["annotation_id"] != recs[1]["annotation_id"]
+            assert recs[0]["shown"]["a"]["move_id"] == recs[1]["shown"]["b"]["move_id"]
+            for rec in recs:
+                dr.append_annotation(path, rec)
+            crossed = dr.annotation(two, 2, reviewer="agent:test", answer="marginal", created_at="t2",
+                                    supersedes=recs[0]["annotation_id"])
+            with pytest.raises(dr.ReviewError, match="studying the same claim A"):
+                dr.append_annotation(path, crossed)
+            # After the run is rolled back, its sightings no longer bind an annotation.
+            await canary.run_rollback(committed_dsn, rx2)
+            current = {r["candidate_id"]: r for r in await canary._readonly(committed_dsn, lambda c: dr.candidate_rows(
+                c, candidate_ids=[i["candidate_id"] for i in batch["items"]]))}
+            for item in batch["items"]:
+                assert any("selected sighting is no longer current" in p
+                           for p in dr.binding_problems(current.get(item["candidate_id"]), item))
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def _keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _keys(v)
+
+
+def test_reviewer_file_cli_flow_reversed_sighting_binding_controls_and_rollback(committed_dsn, ingestion, monkeypatch,
+                                                                                tmp_path):
+    """S1 end to end through koi-discourse on a throwaway database. Y's run finds Y->X first; X extracted again
+    at limit 10 meets that pair from X's side and others at picks 1-10, so its sightings span both tiers.
+    `batch --seen-in-run` writes a reviewer file with no run, tier, pick, anchor or candidate id, and a binding
+    file with them. annotate refuses without the binding file, with another batch's and with an edited one, and
+    records with the right one, reviewed from X's side. Once X's run is rolled back the sighting no longer binds."""
+    env = dict(os.environ, KOI_DISCOURSE_DSN=committed_dsn, KOI_DISCOURSE_PYTHON=sys.executable)
+    env.pop("KOI_DISCOURSE_REVIEW_MAPPINGS", None)
+
+    def koi(*args):
+        return subprocess.run([str(REPO / "scripts/koi-discourse"), *map(str, args)], env=env, capture_output=True,
+                              text=True, timeout=120)
+
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            x, y = _new_source(1), _new_source(2)
+            xs, _ = await _ingest(conn, x)
+            await _work(committed_dsn)
+            rx1 = (await _job(conn, x["rid"]))["run_id"]
+            monkeypatch.setenv(dd.CAP_ENV, "10")
+            ys, _ = await _ingest(conn, y)
+            await _work(committed_dsn)
+            ry = (await _job(conn, y["rid"]))["run_id"]
+            await _ingest(conn, x, run_id="extract-new-2")
+            await _work(committed_dsn)
+            rx2 = (await _job(conn, x["rid"]))["run_id"]
+        finally:
+            await conn.close()
+        rows = await _rows(committed_dsn, seen_in_runs=[rx2])
+        items, _ = dr.review_items(list(rows.values()), seen_in_runs=[rx2])
+        rev = next(it for it in items if it["anchor"]["stored_end"] == "b")
+        others = [it for it in items if it["candidate_id"] != rev["candidate_id"]]
+        five = next(it for it in others if it["tier"] == "first_five")
+        extra = next(it for it in others if it["tier"] == "additional")
+        chosen = [rev["candidate_id"], five["candidate_id"], extra["candidate_id"]]
+        (tmp_path / "reviewer").mkdir()
+        (tmp_path / "operator").mkdir()
+        rfile, bfile = tmp_path / "reviewer" / "batch.json", tmp_path / "operator" / "batch.binding.json"
+        made = koi("batch", "--seen-in-run", rx2, *[a for c in chosen for a in ("--candidate-id", c)], "--out", rfile,
+                   "--binding-out", bfile)
+        assert made.returncode == 0, made.stderr
+        raw, binding = rfile.read_bytes(), json.loads(bfile.read_text())
+        text = raw.decode()
+        assert not set(_keys(json.loads(raw))) & {"candidate_id", "candidate_key", "scores", "run_id", "pick", "tier",
+                                                   "anchor", "sighting", "stored_end", "selection", "occurrences"}
+        for s in (rx1, rx2, ry, "first_five", "additional", *rows):
+            assert s not in text, s
+        assert {b["tier"] for b in binding["items"]} == {"first_five", "additional"}      # a mixed-tier batch
+        assert binding["selection"] == {"run_ids": None, "seen_in_runs": [rx2], "tier": None}
+        bound = next(b for b in binding["items"] if b["candidate_id"] == rev["candidate_id"])
+        shown = next(i for i in json.loads(raw)["items"] if i["position"] == bound["position"])
+        assert bound["anchor"] == {"move_id": rev["a"]["move_id"], "stored_end": "b"}
+        assert shown["a"]["move_id"] == rev["a"]["move_id"] and shown["a"]["move_id"] in xs   # reviewed from X's side
+        assert shown["b"]["move_id"] == rows[rev["candidate_id"]]["a"]["move_id"] and shown["b"]["move_id"] in ys
+        blind = koi("show", "--batch", rfile)
+        assert blind.returncode == 0 and rx2 not in blind.stdout and "first_five" not in blind.stdout
+        ann = tmp_path / "operator" / "annotations.jsonl"
+        args = ("annotate", "--batch", rfile, "--item", bound["position"], "--item-id", shown["item_id"][:10],
+                "--answer", "useful", "--reviewer", "agent:a", "--annotations", ann)
+        missing = koi(*args)
+        assert missing.returncode != 0 and "needs its binding file" in missing.stderr
+        assert koi("batch", "--seen-in-run", ry, "--candidate-id", rev["candidate_id"], "--out",
+                   tmp_path / "reviewer" / "other.json", "--binding-out", tmp_path / "operator" / "other.binding.json"
+                   ).returncode == 0
+        wrong = koi(*args, "--binding", tmp_path / "operator" / "other.binding.json")
+        assert wrong.returncode != 0 and "belongs to another reviewer file" in wrong.stderr
+        edited = json.loads(bfile.read_text())
+        edited["items"][0]["tier"] = {"first_five": "additional", "additional": "first_five"}[edited["items"][0]["tier"]]
+        (tmp_path / "operator" / "edited.binding.json").write_text(json.dumps(edited))
+        tampered = koi(*args, "--binding", tmp_path / "operator" / "edited.binding.json")
+        assert tampered.returncode != 0 and "binding file does not match its own id" in tampered.stderr
+        assert not ann.exists()                                                       # nothing recorded so far
+        ok = koi(*args, "--binding", bfile)
+        assert ok.returncode == 0, ok.stderr
+        (rec,) = dr.read_annotations(str(ann))
+        assert rec["schema"] == dr.SPLIT_ANNOTATION_SCHEMA and rec["shown"]["orientation"] == dr.SIGHTING_ORIENTATION
+        assert (rec["candidate"]["id"], rec["shown"]["a"]["move_id"], rec["anchor"], rec["sighting"]) == (
+            rev["candidate_id"], rev["a"]["move_id"], bound["anchor"], {"run_id": rx2, "query_move_id": rev["a"]["move_id"]})
+        assert (rec["binding_id"], rec["item_id"], rec["batch_id"]) == (
+            binding["binding_id"], bound["item_id"], binding["reviewer_batch_id"])
+        verified = koi("show", "--batch", rfile, "--binding", bfile, "--verify")
+        assert verified.returncode == 0 and verified.stdout.count("unchanged since the batch was made") == 3
+        await canary.run_rollback(committed_dsn, rx2)
+        after = koi(*args[:-4], "--reviewer", "agent:b", "--annotations", ann, "--binding", bfile)
+        assert after.returncode != 0 and "selected sighting is no longer current" in after.stderr
+        assert len(dr.read_annotations(str(ann))) == 1                                # the earlier line is kept
+    asyncio.run(scenario())
+
+
+def test_move_cap_sightings_recorded_before_picks_are_first_five_only_when_their_run_kept_five(committed_dsn,
+                                                                                              ingestion, monkeypatch):
+    async def scenario():
+        conn = await asyncpg.connect(committed_dsn)
+        try:
+            await _add_sources(conn)
+            five, ten = _new_source(1), _new_source(2)
+            await _ingest(conn, five)
+            await _work(committed_dsn)
+            monkeypatch.setenv(dd.CAP_ENV, "10")
+            await _ingest(conn, ten)
+            monkeypatch.delenv(dd.CAP_ENV)
+            await _work(committed_dsn)
+            r5, r10 = (await _job(conn, five["rid"]))["run_id"], (await _job(conn, ten["rid"]))["run_id"]
+            # As effect rows written before picks were recorded (the canary's and ingest:1:1's).
+            await conn.execute("UPDATE discourse_link_run_effects SET after_state = after_state - 'occurrence'")
+            rows = await _rows(committed_dsn, run_ids=[r5, r10])
+            got = {(o["run_id"], o["tier"], o["tier_basis"], o["pick"], o["query_end"])
+                   for r in rows.values() for o in r["occurrences"]}
+            items, unanchored = dr.review_items(list(rows.values()), seen_in_runs=[r5, r10])
+            assert unanchored == 0 and all(it["anchor"]["stored_end"] == "a" for it in items)   # a first sighting's
+            # query is the stored row's own
+            assert got == {(r5, "first_five", "pick not recorded; the run kept at most 5 per claim", None, "a"),
+                           (r10, "unknown", "pick not recorded", None, "a")}
+        finally:
+            await conn.close()
+    asyncio.run(scenario())
+
+
+def test_move_cap_ingest_option_is_explicit_and_needs_discovery(monkeypatch, tmp_path, capsys):
+    seen = []
+    queued = {"status": "enqueued", "job_id": 7, "per_move_cap": 10}
+    result = {"discourse_discovery": queued}
+
+    async def fake_ingest_path(**kw):
+        seen.append(os.environ.get(dd.CAP_ENV))
+        return {"document_rid": "document:x", "tier": kw["tier"], "rag": {}, "extract": dict(result)}
+    monkeypatch.setattr(ingest_cli, "ingest_path", fake_ingest_path)
+    for flag in DISCOURSE_FLAGS + (dd.CAP_ENV,):        # recorded, so teardown restores the absence
+        monkeypatch.setenv(flag, "0")
+        monkeypatch.delenv(flag)
+    src = tmp_path / "s.md"
+    src.write_text("text")
+    base = ["ingest_document.py", "--source-path", str(src), "--tier", "thorough", "--discourse-discovery"]
+    os.environ[dd.CAP_ENV] = "10"                        # inherited, not chosen: no option means the default
+    monkeypatch.setattr(sys, "argv", base)
+    ingest_cli.main()
+    assert seen == [None] and dd.CAP_ENV not in os.environ
+    monkeypatch.setattr(sys, "argv", base + ["--discourse-move-cap", "10"])
+    ingest_cli.main()
+    assert seen[-1] == "10" and str(queued) in capsys.readouterr().out
+    result["discourse_discovery"] = None                 # the extraction queued nothing
+    ingest_cli.main()
+    assert "discovery job:  none queued; the per-claim limit 10 was not applied" in capsys.readouterr().out
+    for argv in (base + ["--discourse-move-cap", "7"], base + ["--discourse-move-cap", "20"],
+                 base[:-1] + ["--discourse-move-cap", "10"]):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as refused:
+            ingest_cli.main()
+        assert refused.value.code == 2
+    assert len(seen) == 3                                # refused before anything ran

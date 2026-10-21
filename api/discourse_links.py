@@ -911,7 +911,8 @@ async def _pick_targets(conn, fused: Sequence[Dict[str, Any]], *, per_move_cap: 
 
 
 def _candidate_row(qid: str, q: Dict[str, Any], t: Dict[str, Any], f: Dict[str, Any], *,
-                   discovered_by: str, run_id: str) -> Dict[str, Any]:
+                   discovered_by: str, run_id: str, pick: int) -> Dict[str, Any]:
+    """One sighting: query qid picked target t at position `pick` (1-based) of its picks in this run."""
     qe, te = q["extraction"], t["extraction"]
     return {
         "candidate_key": candidate_key((qid, q["representation_sha256"], qe["bound_version"]),
@@ -924,13 +925,18 @@ def _candidate_row(qid: str, q: Dict[str, Any], t: Dict[str, Any], f: Dict[str, 
         "query_bound_version": qe["bound_version"], "target_bound_version": te["bound_version"],
         "lexical_rank": f["lexical_rank"], "lexical_score": f["lexical_score"],
         "semantic_rank": f["semantic_rank"], "semantic_score": f["semantic_score"],
-        "fused_score": f["fused_score"], "discovered_by": discovered_by, "run_id": run_id,
+        "fused_score": f["fused_score"], "discovered_by": discovered_by, "run_id": run_id, "pick": pick,
     }
 
 
 async def _write_candidate(conn, c: Dict[str, Any], method_params_json: str, recorder: Optional[RunRecorder]):
     """One candidate sighting, the text of both ends and its effect rows in one
-    savepoint. A changed end fails the foreign key on its representation."""
+    savepoint. A changed end fails the foreign key on its representation.
+
+    A sighting of a stored pair changes only last_seen_at and times_seen: the
+    first sighting's run, query, ranks and parameters stay on the row. Each
+    sighting's own query and pick go in its effect row (after_state.occurrence),
+    which rollback keeps as history."""
     async with conn.transaction():
         new_reps = await _capture_representations(conn, [c["query_move_id"], c["target_move_id"]])
         prior = (await conn.fetchrow(
@@ -957,6 +963,8 @@ async def _write_candidate(conn, c: Dict[str, Any], method_params_json: str, rec
             for h in new_reps:
                 await recorder.note(conn, "representation_inserted", representation_sha256=h)
             after = {"times_seen": row["times_seen"], "last_seen_at": _iso(row["last_seen_at"])}
+            if c.get("pick") is not None:
+                after["occurrence"] = {"query_move_id": str(c["query_move_id"]), "pick": c["pick"]}
             if row["inserted"]:
                 await recorder.note(conn, "candidate_inserted", candidate_id=row["id"], after_state=after)
             else:
@@ -1023,8 +1031,8 @@ async def discover_candidates(
                                                embedding_model, semantic_limit)
         picked, targets = await _pick_targets(conn, rrf_fuse(lexical, semantic), per_move_cap=per_move_cap,
                                               per_target_source_cap=per_target_source_cap, summary=summary)
-        for f in picked:
-            c = _candidate_row(qid, q, targets[f["id"]], f, discovered_by=discovered_by, run_id=run_id)
+        for pick, f in enumerate(picked, start=1):
+            c = _candidate_row(qid, q, targets[f["id"]], f, discovered_by=discovered_by, run_id=run_id, pick=pick)
             try:
                 row = await _write_candidate(conn, c, json.dumps(params), recorder)
             except asyncpg.ForeignKeyViolationError:
@@ -1148,12 +1156,12 @@ async def plan_discovery(
                                                        embedding_model, semantic_limit, embeddings)
         picked, targets = await _pick_targets(conn, rrf_fuse(lexical, semantic), per_move_cap=per_move_cap,
                                               per_target_source_cap=per_target_source_cap, summary=summary)
-        for f in picked:
+        for pick, f in enumerate(picked, start=1):
             t = targets[f["id"]]
             endpoints[t["id"]] = _endpoint_pin(t, True)          # retrieval returns visible moves only
             if f["semantic_rank"] is not None and t["id"] not in planned:
                 stored_used.add(t["id"])
-            sightings.append(_candidate_row(qid, q, t, f, discovered_by=discovered_by, run_id=run_id))
+            sightings.append(_candidate_row(qid, q, t, f, discovered_by=discovered_by, run_id=run_id, pick=pick))
     # Pin every stored vector the plan ranked with or will replace, by value. Same snapshot as the ranking.
     stamps = await _stored_vector_stamps(conn, embedding_model, stored_used | set(existing)) if embedding_model else {}
     for e in embeddings:
@@ -1222,6 +1230,14 @@ def _check_plan_shape(plan: Dict[str, Any], run_id: str) -> None:
                     (s["query_move_id"], s["query_representation_sha256"], s["query_bound_version"]),
                     (s["target_move_id"], s["target_representation_sha256"], s["target_bound_version"]))):
             raise PlanRefused(f"planned candidate {s['candidate_key'][:12]} is inconsistent with the plan")
+    # Each query's picks: at most the plan's per-claim limit, and when recorded, exactly 1..n in order.
+    cap = plan["method_params"]["per_move_cap"]
+    picks: Dict[str, List[Optional[int]]] = {}
+    for s in plan["sightings"]:
+        picks.setdefault(s["query_move_id"], []).append(s.get("pick"))
+    for qid, got in sorted(picks.items()):
+        if len(got) > cap or (any(p is not None for p in got) and got != list(range(1, len(got) + 1))):
+            raise PlanRefused(f"planned picks for query {qid} are not 1..n within the per-claim limit {cap}")
     effects = Counter([e["effect"] for e in plan["embeddings"]] + [s["effect"] for s in plan["sightings"]])
     if dict(effects) != plan["planned_effects"]:
         raise PlanRefused("the plan's effect counts do not match its embeddings and candidates")
