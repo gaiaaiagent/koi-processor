@@ -326,10 +326,207 @@ def test_cli_batch_records_the_mapping_and_refuses_to_overwrite(tmp_path, monkey
     monkeypatch.setattr(cli, "_readonly", fake_readonly)
     out = tmp_path / "batch.json"
     args = type("A", (), {"out": str(out), "mappings": str(mp), "candidate_id": None, "from_queue": 1,
-                          "order": "source_diverse", "note": "n", "dsn": "unused"})()
+                          "order": "source_diverse", "note": "n", "dsn": "unused",
+                          "run_id": None, "seen_in_run": None, "tier": "all"})()   # what argparse gives when omitted
     cli.cmd_batch(args)
     b = json.loads(out.read_text())
+    assert "selection" not in b                                        # no selection: the batch is as before
     assert b["mappings"]["sha256"] == dr.load_mappings(str(mp))["sha256"] and b["mappings"]["prepared_by"] == "test"
     assert b["items"][0]["authors"]["b"]["names"] == ["Michael Levin"]
     with pytest.raises(SystemExit, match="refusing to overwrite"):
         cli.cmd_batch(args)
+
+
+# ---- occurrence tiers (I2) ------------------------------------------------------
+
+def occ(row, run, pick, cap, *, sighting="first", end="a"):
+    """One sighting of `row`, as occurrences() reads it: `end` is the stored end whose search found it."""
+    tier, basis = dr.occurrence_tier(pick, cap)
+    return {"run_id": run, "sighting": sighting, "query_move_id": row[end]["move_id"] if end else None,
+            "query_end": end, "pick": pick, "run_per_move_cap": cap, "tier": tier, "tier_basis": basis}
+
+
+def c1_seen_from_both_ends():
+    """rows()[0]: stored A = m1 (Garfield), B = m2 (Levin). First found by A's search; later met from m2's side."""
+    r = rows()[0]
+    r["occurrences"] = [occ(r, "canary:x", 3, 5), occ(r, "ingest:9:1", 8, 10, sighting="again", end="b")]
+    return r
+
+
+def test_a_tier_comes_from_one_sightings_recorded_pick():
+    from api import discourse_discovery as dd
+    assert dr.FIRST_PICKS == dd.PROFILE["per_move_cap"] == 5                    # the default's picks are the first five
+    assert dr.occurrence_tier(1, 10) == dr.occurrence_tier(5, 10) == ("first_five", "recorded pick")
+    assert dr.occurrence_tier(6, 10) == dr.occurrence_tier(10, 10) == ("additional", "recorded pick")
+    assert dr.occurrence_tier(None, 5) == ("first_five", "pick not recorded; the run kept at most 5 per claim")
+    assert dr.occurrence_tier(None, 10) == dr.occurrence_tier(None, None) == ("unknown", "pick not recorded")
+    r = c1_seen_from_both_ends()
+    by_candidate, _ = dr.review_items([r, rows()[1]])                          # --run-id or no run filter
+    assert [(i["candidate_id"], i["tier"]) for i in by_candidate] == [("c1", "first_five"), ("c2", "unknown")]
+    assert all("anchor" not in i for i in by_candidate)
+    by_sighting, _ = dr.review_items([r], seen_in_runs=["canary:x", "ingest:9:1"])
+    assert [(i["sighting"]["run_id"], i["tier"]) for i in by_sighting] == [("canary:x", "first_five"),
+                                                                           ("ingest:9:1", "additional")]
+    assert dr.tier_counts(by_sighting) == {"first_five": 1, "additional": 1, "unknown": 0}
+    assert dr.review_items([r], seen_in_runs=["ingest:9:1"], tier="first_five")[0] == []
+    legacy = rows()[0]
+    legacy["occurrences"] = [occ(legacy, "canary:x", None, 5, sighting="again", end=None)]   # query never recorded
+    assert dr.review_items([legacy], seen_in_runs=["canary:x"]) == ([], 1)
+    with pytest.raises(dr.ReviewError):
+        dr.review_items([r], tier="picks_6_to_10")
+
+
+def test_a_sighting_from_the_stored_b_is_reviewed_with_b_as_the_anchor():
+    """Regression: a later sighting whose query was the stored B (m2) was shown and recorded as A=m1."""
+    r = c1_seen_from_both_ends()
+    items, _ = dr.review_items([r], seen_in_runs=["ingest:9:1"], tier="additional")
+    lanes = dr.queue(items, MAPPINGS)
+    picked = [i for v in lanes.values() for i in v]
+    batch = dr.make_batch(picked, database="personal_koi", mappings=MAPPINGS, created_at="x",
+                          selection={"run_ids": None, "seen_in_runs": ["ingest:9:1"], "tier": "additional"})
+    it = batch["items"][0]
+    assert (it["a"]["move_id"], it["b"]["move_id"]) == ("m2", "m1")             # the sighting's query is A
+    assert it["anchor"] == {"move_id": "m2", "stored_end": "b"}
+    assert it["sighting"] == {"run_id": "ingest:9:1", "query_move_id": "m2"}
+    assert [(c["kind"], c["side"]) for c in it["cues"]] == [("names_other_source_author", "b")]   # cue follows its text
+    text = dr.render(it, position=1, total=1, blind=True)
+    assert text.index(r["b"]["title"]) < text.index(r["a"]["title"])           # m2's claim is shown as A
+    assert "B's text contains 'Levin'" in text
+    for hidden in ("pick", "additional", "first_five", "ingest:9:1", "anchor", "tier"):
+        assert hidden not in text
+    for hidden in ("pick", "additional", "first_five", "tier"):
+        assert hidden not in json.dumps(batch["items"])
+    rec = dr.annotation(batch, 1, reviewer="agent:test", answer="useful", created_at="t1")
+    assert rec["shown"]["orientation"] == dr.SIGHTING_ORIENTATION == "A=query of the selected sighting, B=the claim it picked"
+    assert (rec["shown"]["a"]["move_id"], rec["shown"]["b"]["move_id"]) == ("m2", "m1")
+    assert rec["anchor"] == it["anchor"] and rec["sighting"] == it["sighting"]
+    assert rec["candidate"] == {"id": "c1", "candidate_key": "kc1"}            # the candidate itself is unchanged
+    assert r["a"]["move_id"] == "m1" and r["run_id"] == "canary:x"              # and so is its stored first sighting
+    # Bound to the sighting and to the exact ends, compared end for end with the stored row.
+    assert dr.binding_problems(r, it) == []
+    changed = copy.deepcopy(r)
+    changed["a"]["representation_sha256"] = "z" * 64                           # stored A, which this item shows as B
+    assert dr.binding_problems(changed, it) == ["b: claim text changed since the batch was made"]
+    rolled_back = copy.deepcopy(r)
+    rolled_back["occurrences"] = rolled_back["occurrences"][:1]
+    assert dr.binding_problems(rolled_back, it) == [
+        "the selected sighting is no longer current (its run was rolled back, or it never was)"]
+
+
+def test_a_sighting_from_the_stored_a_keeps_the_stored_direction_and_candidate_reviews_are_unchanged():
+    r = c1_seen_from_both_ends()
+    items, _ = dr.review_items([r], seen_in_runs=["canary:x"])                 # control: the stored query's own search
+    batch = dr.make_batch(dr.queue(items, MAPPINGS)["cross_source"], database="personal_koi", mappings=MAPPINGS,
+                          created_at="x")
+    it = batch["items"][0]
+    assert (it["a"]["move_id"], it["b"]["move_id"], it["anchor"]) == ("m1", "m2", {"move_id": "m1", "stored_end": "a"})
+    rec = dr.annotation(batch, 1, reviewer="agent:test", answer="useful", created_at="t1")
+    assert rec["shown"]["orientation"] == dr.SIGHTING_ORIENTATION and rec["shown"]["a"]["move_id"] == "m1"
+    assert dr.binding_problems(r, it) == []
+    # A candidate review (no --seen-in-run) is exactly what I1 recorded: no anchor, no sighting, stored orientation.
+    plain = dr.make_batch(dr.queue(dr.review_items([r])[0], MAPPINGS)["cross_source"], database="personal_koi",
+                          mappings=MAPPINGS, created_at="x")
+    assert plain["batch_id"] == batch_of([rows()[0]])["batch_id"]
+    old = dr.annotation(plain, 1, reviewer="agent:test", answer="useful", created_at="t1")
+    assert set(old) == {"schema", "question", "answer", "reason", "reviewer", "os_user", "created_at", "batch_id",
+                        "position", "blind", "database", "candidate", "shown", "tool", "supersedes", "annotation_id"}
+    assert old["shown"]["orientation"] == dr.STORED_ORIENTATION == "A=query, B=target"
+
+
+def test_reviews_of_the_two_directions_stay_separate(tmp_path):
+    r = c1_seen_from_both_ends()
+    items, _ = dr.review_items([r], seen_in_runs=["canary:x", "ingest:9:1"])
+    batch = dr.make_batch(items, database="personal_koi", created_at="x")
+    assert [(i["a"]["move_id"], i["anchor"]["stored_end"]) for i in batch["items"]] == [("m1", "a"), ("m2", "b")]
+    path = str(tmp_path / "ann.jsonl")
+    one = dr.annotation(batch, 1, reviewer="agent:test", answer="useful", created_at="t1")
+    two = dr.annotation(batch, 2, reviewer="agent:test", answer="not_useful", created_at="t1")
+    assert one["annotation_id"] != two["annotation_id"]
+    assert (one["anchor"], one["sighting"]) == ({"move_id": "m1", "stored_end": "a"},
+                                                {"run_id": "canary:x", "query_move_id": "m1"})
+    assert (two["anchor"], two["sighting"]) == ({"move_id": "m2", "stored_end": "b"},
+                                                {"run_id": "ingest:9:1", "query_move_id": "m2"})
+    dr.append_annotation(path, one)
+    dr.append_annotation(path, two)
+    assert sorted(a["answer"] for a in dr.latest(dr.read_annotations(path))) == ["not_useful", "useful"]
+    across = dr.annotation(batch, 2, reviewer="agent:test", answer="useful", supersedes=one["annotation_id"],
+                           created_at="t2")
+    with pytest.raises(dr.ReviewError, match="studying the same claim A"):
+        dr.append_annotation(path, across)
+    same = dr.annotation(batch, 2, reviewer="agent:test", answer="marginal", supersedes=two["annotation_id"],
+                         created_at="t2")
+    dr.append_annotation(path, same)                                            # control: same direction supersedes
+    assert sorted(a["answer"] for a in dr.latest(dr.read_annotations(path))) == ["marginal", "useful"]
+
+
+def test_blind_hides_sightings_and_the_operator_view_labels_each_one():
+    r = c1_seen_from_both_ends()
+    r["occurrences"].append(occ(r, "canary:old", None, 5))
+    item = dr.queue(dr.review_items([r], seen_in_runs=["ingest:9:1"])[0], MAPPINGS)["cross_source"][0]
+    for hidden in ("occurrences", "tier", "anchor", "sighting", "scores", "run_id"):
+        assert hidden not in dr.view(item, blind=True) and hidden in dr.view(item, blind=False)
+    blind = dr.render(item, blind=True)
+    for hidden in ("occurrence", "pick", "first_five", "additional", "ingest:", "canary:", "tier", "anchor"):
+        assert hidden not in blind
+    shown = dr.render(item, blind=False)
+    assert "anchor: A, the query of the selected sighting (run ingest:9:1, stored B): additional" in shown
+    assert ("occurrence (first sighting): run canary:x, B's search, pick 3 (limit 5 per claim): "
+            "first_five (recorded pick)") in shown                              # restated for the swapped ends
+    assert ("occurrence (seen again): run ingest:9:1, A's search, pick 8 (limit 10 per claim): "
+            "additional (recorded pick)") in shown
+    assert "pick ? (limit 5 per claim): first_five (pick not recorded; the run kept at most 5 per claim)" in shown
+    assert f"tier note: {dr.TIER_NOTE}" in shown
+    assert "not a judgment" in dr.TIER_NOTE and "not a lasting property" in dr.TIER_NOTE
+
+
+def test_cli_queue_and_batch_keep_the_two_run_filters_apart(monkeypatch, capsys, tmp_path):
+    cli = _load_cli()
+    monkeypatch.delenv("KOI_DISCOURSE_REVIEW_MAPPINGS", raising=False)
+    rs = rows()
+    rs[0] = c1_seen_from_both_ends()
+    rs[2]["occurrences"] = [occ(rs[2], "ingest:9:1", 2, 10)]
+    rs[3]["occurrences"] = [occ(rs[3], "ingest:1:1", 8, 10)]                   # additional, but in another run
+    calls = []
+
+    class Conn:
+        async def fetchval(self, sql, *a):
+            return "personal_koi"
+
+    async def fake_readonly(dsn, fn):
+        return await fn(Conn())
+
+    async def fake_rows(conn, run_ids=None, candidate_ids=None, seen_in_runs=None):
+        calls.append({"run_ids": run_ids, "seen_in_runs": seen_in_runs})
+        return [x for x in rs if not seen_in_runs or any(o["run_id"] in seen_in_runs for o in x.get("occurrences", []))]
+
+    async def no_suggestions(conn):
+        return []
+    monkeypatch.setattr(cli, "_readonly", fake_readonly)
+    monkeypatch.setattr(dr, "candidate_rows", fake_rows)
+    monkeypatch.setattr(dr, "suggested_same_work", no_suggestions)
+    args = type("A", (), {"dsn": "unused", "run_id": None, "seen_in_run": ["ingest:9:1"], "tier": "additional",
+                          "order": "fused", "lane": "all", "limit": 10, "mappings": None, "show_scores": True,
+                          "format": "json"})()
+    cli.cmd_queue(args)
+    out = json.loads(capsys.readouterr().out)
+    assert calls[-1] == {"run_ids": None, "seen_in_runs": ["ingest:9:1"]}
+    assert out["unit"] == "sightings" and out["tier_counts"] == {"first_five": 1, "additional": 1, "unknown": 0}
+    listed = [r for lane in out["lanes"].values() for r in lane]
+    assert [(r["candidate_id"], r["a"]["move_id"]) for r in listed] == [("c1", "m2")]   # anchored at the sighting
+    args.run_id, args.seen_in_run, args.tier = ["canary:x"], None, "all"
+    cli.cmd_queue(args)
+    out = json.loads(capsys.readouterr().out)
+    assert calls[-1] == {"run_ids": ["canary:x"], "seen_in_runs": None} and out["unit"] == "candidates"
+    args.format, args.show_scores, args.run_id, args.seen_in_run, args.tier = "text", False, None, ["ingest:9:1"], "additional"
+    cli.cmd_queue(args)
+    text = capsys.readouterr().out
+    assert "tier=additional" in text and "sightings by tier: first_five=1  additional=1  unknown=0" in text
+    assert "pick 8" not in text and "ingest:9:1" not in text.split("\n", 2)[2]  # blind items show no pick or run
+    out_path = tmp_path / "b.json"
+    bargs = type("B", (), {"dsn": "unused", "candidate_id": None, "run_id": None, "seen_in_run": ["ingest:9:1"],
+                           "tier": "additional", "from_queue": 5, "order": "fused", "mappings": None, "note": None,
+                           "out": str(out_path)})()
+    cli.cmd_batch(bargs)
+    b = json.loads(out_path.read_text())
+    assert b["selection"] == {"run_ids": None, "seen_in_runs": ["ingest:9:1"], "tier": "additional"}
+    assert [(i["a"]["move_id"], i["anchor"]["stored_end"]) for i in b["items"]] == [("m2", "b")]

@@ -17,6 +17,9 @@
           A plan refused at apply is replanned at most max_replans times. Any
           other failure returns the job to 'pending' with backoff, or 'failed'
           after max_attempts. Nothing is written to the ingested document.
+          The per-claim limit is the job's own (profile.per_move_cap, one of
+          PER_MOVE_CAPS, else the job fails); the plan, the run's scope and its
+          candidate write budget (claims x limit) follow it.
   status  Jobs, their runs, and bound extractions with no job. READ ONLY.
 
 With --state-file, run also writes a JSON summary after each pass: what it did,
@@ -220,6 +223,11 @@ async def run_job(dsn: str, job: Dict[str, Any], *, worker_id: str, embedder_for
     if len(moves) > limits["max_moves"]:
         outcome["status"] = await _settle_job(dsn, job, worker_id, "failed",
                                               f"{len(moves)} moves > max_moves {limits['max_moves']}")
+        return outcome
+    cap = dd._jsonb(job["profile"]).get("per_move_cap")
+    if type(cap) is not int or cap not in dd.PER_MOVE_CAPS:     # the write budget is claims x this limit
+        outcome["status"] = await _settle_job(dsn, job, worker_id, "failed",
+                                              f"per_move_cap {cap!r} is not one of {dd.PER_MOVE_CAPS}")
         return outcome
     for replan in range(limits["max_replans"] + 1):
         run_id = f"ingest:{job['id']}:{job['attempts']}" + (f".{replan}" if replan else "")

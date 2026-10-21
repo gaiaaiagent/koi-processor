@@ -793,7 +793,7 @@ def main() -> None:
     c.add_argument("--dsn", default=LIVE_READ_DSN)
     c.add_argument("--query")
     c.add_argument("--move-id")
-    c.add_argument("--run-id")
+    c.add_argument("--run-id", help="only candidates first discovered by this run (the run stored on the candidate)")
     c.add_argument("--limit", type=int, default=5)
     rb = sub.add_parser("rollback")
     rb.add_argument("--accept-legacy-embedding-ownership", action="store_true",

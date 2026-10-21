@@ -8,10 +8,25 @@ append-only annotation file (annotate, review).
 
   queue        open candidates in lanes (cross_source, same_work_mapped,
                same_work_suggested), each ordered source_diverse (default) or by
-               fused score. Text by default, --format json for JSON.
+               fused score. Text by default, --format json for JSON. --show-scores
+               shows each sighting's run, search, pick and tier.
   batch        a self-contained review batch: the exact text and versions shown,
-               no retrieval scores or run ids. From --candidate-id, or the first
-               --from-queue N of the cross_source lane.
+               no retrieval scores, ranks, picks or tiers. From --candidate-id, or
+               the first --from-queue N of the cross_source lane. Its filters are
+               recorded as the batch's selection.
+
+  Filters (queue and batch):
+    --run-id RUN        candidates first discovered by RUN (the run stored on the
+                        candidate). Reviewed as stored: A is that first sighting's
+                        query. Same meaning as `koi-discourse candidates --run-id`.
+    --seen-in-run RUN   every sighting by RUN, first or again (rediscovery). Each is
+                        reviewed from its own query: A is the claim whose search
+                        found B in that sighting, so a pair met from both ends is
+                        two items. A sighting whose query was not recorded is
+                        counted, not listed.
+    --tier TIER         first_five (picks 1-5), additional (6 on) or unknown: the
+                        tier of each --seen-in-run sighting, otherwise of each
+                        candidate's first sighting.
   show         render a batch (blind). --verify re-checks it against the database.
   annotate     record one answer to "Is B useful to someone studying A?" for one
                batch item: useful | marginal | not_useful | needs_context, with an
@@ -69,25 +84,48 @@ def _mappings(path: Optional[str]) -> Dict[str, Any]:
     return dr.load_mappings(path or os.environ.get("KOI_DISCOURSE_REVIEW_MAPPINGS"))
 
 
+def _selection(args) -> Optional[Dict[str, Any]]:
+    """The filters a batch was made with, or None when none was given."""
+    if not (args.run_id or args.seen_in_run or args.tier != "all"):
+        return None
+    return {"run_ids": sorted(args.run_id) if args.run_id else None,
+            "seen_in_runs": sorted(args.seen_in_run) if args.seen_in_run else None,
+            "tier": None if args.tier == "all" else args.tier}
+
+
+async def _items(conn, args, candidate_ids=None):
+    rows = await dr.candidate_rows(conn, run_ids=args.run_id or None, candidate_ids=candidate_ids,
+                                   seen_in_runs=args.seen_in_run or None)
+    items, unanchored = dr.review_items(rows, seen_in_runs=args.seen_in_run or None)
+    selected = [it for it in items if args.tier == "all" or it["tier"] == args.tier]
+    return selected, dr.tier_counts(items), unanchored
+
+
 async def _queue(conn, args, mappings):
-    rows = await dr.candidate_rows(conn, run_ids=args.run_id or None)
+    items, counts, unanchored = await _items(conn, args)
     suggested = await dr.suggested_same_work(conn)
-    return await conn.fetchval("SELECT current_database()"), dr.queue(rows, mappings, suggested, args.order)
+    return (await conn.fetchval("SELECT current_database()"), dr.queue(items, mappings, suggested, args.order),
+            counts, unanchored)
 
 
 def cmd_queue(args) -> None:
     mappings = _mappings(args.mappings)
-    database, lanes = asyncio.run(_readonly(args.dsn, lambda c: _queue(c, args, mappings)))
+    database, lanes, tiers, unanchored = asyncio.run(_readonly(args.dsn, lambda c: _queue(c, args, mappings)))
     wanted = dr.LANES if args.lane == "all" else (args.lane,)
     blind = not args.show_scores
+    unit = "sightings" if args.seen_in_run else "candidates"
     if args.format == "json":
         print(json.dumps({"database": database, "read_only": True, "order": args.order, "mappings": mappings["path"],
                           "label": "candidates (unreviewed): similarity proposals, not judgments",
+                          "selection": _selection(args), "unit": unit, "tier_counts": tiers,
+                          "sightings_without_a_recorded_query": unanchored, "tier_note": dr.TIER_NOTE,
                           "counts": {k: len(v) for k, v in lanes.items()},
                           "lanes": {k: [dr.view(r, blind=blind) for r in lanes[k][:args.limit]] for k in wanted}},
                          indent=1, default=str))
         return
-    print(f"{database}  order={args.order}  " + "  ".join(f"{k}={len(v)}" for k, v in lanes.items()))
+    print(f"{database}  order={args.order}  tier={args.tier}  " + "  ".join(f"{k}={len(v)}" for k, v in lanes.items()))
+    print(f"{unit} by tier: " + "  ".join(f"{k}={v}" for k, v in tiers.items())
+          + (f"  (not listed: {unanchored} sightings without a recorded query)" if unanchored else ""))
     for k in wanted:
         print(f"\n== lane {k}: {len(lanes[k])} candidates" + (f" (showing {args.limit})" if args.limit < len(lanes[k]) else ""))
         for i, r in enumerate(lanes[k][:args.limit], start=1):
@@ -100,21 +138,24 @@ def cmd_batch(args) -> None:
         raise SystemExit(f"refusing to overwrite {out}")
     mappings = _mappings(args.mappings)
 
+    selection = _selection(args)
+
     async def body(conn):
-        rows = await dr.candidate_rows(conn, candidate_ids=args.candidate_id or None)
+        selected, _, _ = await _items(conn, args, candidate_ids=args.candidate_id or None)
         suggested = await dr.suggested_same_work(conn)
-        lanes = dr.queue(rows, mappings, suggested, args.order)
+        lanes = dr.queue(selected, mappings, suggested, args.order)
         if args.candidate_id:
-            by_id = {r["candidate_id"]: r for k in dr.LANES for r in lanes[k]}
-            missing = [c for c in args.candidate_id if c not in by_id]
+            listed = [r for k in dr.LANES for r in lanes[k]]
+            missing = [c for c in args.candidate_id if not any(r["candidate_id"] == c for r in listed)]
             if missing:
-                raise SystemExit(f"not open or not visible: {', '.join(missing)}")
-            items = [by_id[c] for c in args.candidate_id]
+                raise SystemExit(f"not open, not visible{' or outside the selection' if selection else ''}: "
+                                 f"{', '.join(missing)}")
+            items = [r for c in args.candidate_id for r in listed if r["candidate_id"] == c]
         else:
             items = lanes["cross_source"][:args.from_queue]
         return await conn.fetchval("SELECT current_database()"), items
     database, items = asyncio.run(_readonly(args.dsn, body))
-    batch = dr.make_batch(items, database=database, blind=True, mappings=mappings, note=args.note)
+    batch = dr.make_batch(items, database=database, blind=True, mappings=mappings, note=args.note, selection=selection)
     out.write_text(json.dumps(batch, indent=1, ensure_ascii=False) + "\n")
     print(f"wrote {out}: {len(batch['items'])} items, batch_id {batch['batch_id'][:12]}")
 
@@ -171,9 +212,20 @@ def cmd_annotations(args) -> None:
     if args.batch:
         current = [a for a in current if a["batch_id"] == _load_batch(args.batch)["batch_id"]]
     for a in current:
-        print(f"{a['position']:>3}  {a['answer']:<13} {a['reviewer']:<12} {a['candidate']['id'][:8]}  "
-              f"{a['created_at']}  {a['reason'] or ''}")
+        anchor = a.get("anchor") or {}
+        print(f"{a['position']:>3}  {a['answer']:<13} {a['reviewer']:<12} {a['candidate']['id'][:8]}"
+              + (f" (A = stored {anchor['stored_end'].upper()}, run {a['sighting']['run_id']})" if anchor else "")
+              + f"  {a['created_at']}  {a['reason'] or ''}")
     print(f"{len(current)} current answer(s)")
+
+
+def _filters(p) -> None:
+    p.add_argument("--run-id", action="append",
+                   help="candidates first discovered by this run (repeatable), reviewed as stored")
+    p.add_argument("--seen-in-run", action="append",
+                   help="every sighting by this run, first or again (repeatable), each reviewed from its own query")
+    p.add_argument("--tier", choices=("all",) + dr.TIERS, default="all",
+                   help="tier of each --seen-in-run sighting, otherwise of each candidate's first sighting")
 
 
 def main() -> None:
@@ -181,16 +233,18 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     q = sub.add_parser("queue")
     q.add_argument("--dsn", default=DSN)
-    q.add_argument("--run-id", action="append")
+    _filters(q)
     q.add_argument("--order", choices=dr.ORDERS, default="source_diverse")
     q.add_argument("--lane", choices=("all",) + dr.LANES, default="all")
     q.add_argument("--limit", type=int, default=10)
     q.add_argument("--mappings")
-    q.add_argument("--show-scores", action="store_true", help="not blind: show retrieval scores and run")
+    q.add_argument("--show-scores", action="store_true",
+                   help="not blind: show retrieval scores and each sighting's run, search, pick and tier")
     q.add_argument("--format", choices=("text", "json"), default="text")
     b = sub.add_parser("batch")
     b.add_argument("--dsn", default=DSN)
     b.add_argument("--candidate-id", action="append")
+    _filters(b)
     b.add_argument("--from-queue", type=int, default=10)
     b.add_argument("--order", choices=dr.ORDERS, default="source_diverse")
     b.add_argument("--mappings")

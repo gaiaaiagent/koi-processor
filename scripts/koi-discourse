@@ -5,8 +5,8 @@
 #
 #   koi-discourse candidates [--query TEXT | --move-id UUID] [--run-id RUN] [--limit N]
 #   koi-discourse jobs [--source-rid RID]
-#   koi-discourse queue [--order source_diverse|fused] [--lane LANE] [--mappings FILE] [--limit N]
-#   koi-discourse batch (--candidate-id ID ... | --from-queue N) --out FILE [--mappings FILE]
+#   koi-discourse queue [--run-id RUN] [--seen-in-run RUN] [--tier TIER] [--order ORDER] [--lane LANE] [--limit N]
+#   koi-discourse batch (--candidate-id ID ... | --from-queue N) [--run-id RUN] [--seen-in-run RUN] [--tier TIER] --out FILE
 #   koi-discourse show --batch FILE [--item N] [--verify]
 #   koi-discourse annotate --batch FILE --item N --answer A --reviewer NAME --annotations FILE [--reason TEXT]
 #   koi-discourse review --batch FILE --reviewer NAME --annotations FILE
@@ -18,14 +18,14 @@
 #               are labelled "candidate (unreviewed)": text similarity only, not
 #               identity, support, contradiction or corroboration. Admitted
 #               (reviewed) judgments, if any exist, are listed separately under
-#               admitted_relations.
+#               admitted_relations. --run-id: candidates first discovered by RUN.
 #   jobs        discovery jobs (pending, running, completed, failed, stale) with
-#               their errors, runs and candidate counts, and bound extractions
-#               that have no job.
+#               their per-claim limit, errors, run and candidate count, and the
+#               bound extractions that have no job.
 #   queue, batch, show, annotate, review, annotations
-#               local review (scripts/discourse_review.py): candidates in lanes and
-#               a source-diverse order, blind batches, and answers to "Is B useful
-#               to someone studying A?" appended to an annotation file you name.
+#               local review (scripts/discourse_review.py). --run-id: first
+#               discovered by RUN. --seen-in-run: each sighting by RUN, reviewed
+#               from its own query. Answers "Is B useful to someone studying A?".
 # Nothing here writes to the database. batch writes the batch file you name;
 # annotate and review append to the annotation file you name.
 #

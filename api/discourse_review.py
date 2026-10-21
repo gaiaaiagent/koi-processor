@@ -17,7 +17,20 @@ What it shows comes in three kinds, kept apart:
 
 An annotation binds to the candidate (id and key) and to the exact text and
 source version shown, and names its reviewer as declared. It is appended,
-never edited: a correction is a new line that supersedes an earlier one.
+never edited: a correction is a new line that supersedes an earlier one. A is
+the claim being studied. In a candidate review A is the stored query (its first
+sighting's); in a sighting review (--seen-in-run) A is that sighting's query,
+the annotation records the anchor and the sighting, and reviews of the two
+directions stay separate.
+
+Tiers belong to occurrences, not to candidates. An occurrence is one sighting
+of the pair by one completed run: the run, the claim whose search found it and
+its pick (position among that search's picks, 1-based), from the run's effect
+rows. Picks 1-5 are the first five (what the default per-claim limit keeps);
+6 and later are additional. A sighting recorded before picks were recorded is
+first five when its run kept at most five per claim, and unknown otherwise:
+never guessed. The same pair can be first five in one run and additional in
+another.
 """
 
 from __future__ import annotations
@@ -29,7 +42,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from api import discourse_links as dl
 
@@ -51,6 +64,13 @@ NAME_NOTE = ("The claim text contains a name the mapping lists as an author of t
 SUGGESTED_LANE_NOTE = ("Suggested by text similarity between the two sources (dl.same_work_signals), not by a "
                        "mapping. Unverified.")
 ADMISSION_NOTE = "Admission is disabled. Binding limitations are shown so the reviewer knows what a judgment could not rely on."
+FIRST_PICKS = 5          # the default per-claim limit (api.discourse_discovery.PROFILE): picks 1-5 are what it keeps
+TIERS = ("first_five", "additional", "unknown")
+TIER_NOTE = ("A tier describes one retrieval occurrence: where one run's search for one claim placed this pair among "
+             "its picks. It is not a judgment of the pair and not a lasting property of the candidate.")
+_SIGHTINGS = ("candidate_inserted", "candidate_seen")
+STORED_ORIENTATION = "A=query, B=target"     # the stored candidate: A is its first sighting's query
+SIGHTING_ORIENTATION = "A=query of the selected sighting, B=the claim it picked"
 
 
 class ReviewError(ValueError):
@@ -82,22 +102,74 @@ def _end(mv: Dict[str, Any], *, stored_repr: str, stored_bound: Optional[str]) -
     }
 
 
+def _json(v):
+    return json.loads(v) if isinstance(v, str) else v
+
+
+def occurrence_tier(pick: Optional[int], run_per_move_cap: Optional[int]) -> Tuple[str, str]:
+    """One occurrence's tier and its basis: first_five (picks 1-5), additional (6 on) or unknown."""
+    if isinstance(pick, int):
+        return ("first_five" if pick <= FIRST_PICKS else "additional"), "recorded pick"
+    if isinstance(run_per_move_cap, int) and run_per_move_cap <= FIRST_PICKS:
+        return "first_five", f"pick not recorded; the run kept at most {run_per_move_cap} per claim"
+    return "unknown", "pick not recorded"
+
+
+async def occurrences(conn, candidates: Sequence[Any]) -> Dict[str, List[Dict[str, Any]]]:
+    """Each stored candidate's sightings by completed runs, in the order they were
+    written: the run, which end's search found it, the pick and its tier. A
+    rolled-back run's sightings stay in its history and are not occurrences.
+    SELECTs only."""
+    await require_read_only(conn)
+    stored = {str(c["id"]): c for c in candidates}
+    if not stored:
+        return {}
+    out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for e in await conn.fetch(
+            """SELECT e.candidate_id, e.run_id, e.effect, e.after_state, r.approval_scope
+                 FROM discourse_link_run_effects e JOIN discourse_link_runs r ON r.run_id = e.run_id
+                WHERE e.candidate_id = ANY($1::uuid[]) AND e.effect = ANY($2::text[]) AND r.status = 'completed'
+                ORDER BY e.id""", list(stored), list(_SIGHTINGS)):
+        c = stored[str(e["candidate_id"])]
+        occ = (_json(e["after_state"]) or {}).get("occurrence") or {}
+        cap = (_json(e["approval_scope"]) or {}).get("per_move_cap")
+        query = occ.get("query_move_id")
+        if query is None and e["effect"] == "candidate_inserted":
+            query = str(c["query_move_id"])          # the first sighting is the stored row's own query
+        tier, basis = occurrence_tier(occ.get("pick"), cap)
+        out[str(e["candidate_id"])].append({
+            "run_id": e["run_id"], "sighting": "first" if e["effect"] == "candidate_inserted" else "again",
+            "query_move_id": query, "query_end": {str(c["query_move_id"]): "a", str(c["target_move_id"]): "b"}.get(query),
+            "pick": occ.get("pick"), "run_per_move_cap": cap, "tier": tier, "tier_basis": basis})
+    return out
+
+
 async def candidate_rows(conn, *, run_ids: Optional[Sequence[str]] = None,
-                         candidate_ids: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+                         candidate_ids: Optional[Sequence[str]] = None,
+                         seen_in_runs: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
     """Open candidates whose two claims the personal context may see, each with
-    both claims' current text, source version and binding. SELECTs only, and
-    refused outside a READ ONLY transaction."""
+    both claims' current text, source version and binding, and its occurrences
+    (see occurrences()). run_ids: candidates first discovered by those runs (the
+    stored run). seen_in_runs: candidates sighted by those runs, first or again.
+    Rows are in stored orientation (A = the first sighting's query). SELECTs only,
+    and refused outside a READ ONLY transaction."""
     await require_read_only(conn)
     rows = await conn.fetch(
-        """SELECT * FROM discourse_link_candidates
-            WHERE status = 'candidate'
-              AND ($1::text[] IS NULL OR run_id = ANY($1::text[]))
-              AND ($2::uuid[] IS NULL OR id = ANY($2::uuid[]))
-            ORDER BY id""",
-        list(run_ids) if run_ids else None, list(candidate_ids) if candidate_ids else None)
+        """SELECT * FROM discourse_link_candidates c
+            WHERE c.status = 'candidate'
+              AND ($1::text[] IS NULL OR c.run_id = ANY($1::text[]))
+              AND ($2::uuid[] IS NULL OR c.id = ANY($2::uuid[]))
+              AND ($3::text[] IS NULL OR EXISTS (
+                     SELECT 1 FROM discourse_link_run_effects e JOIN discourse_link_runs r ON r.run_id = e.run_id
+                      WHERE e.candidate_id = c.id AND e.run_id = ANY($3::text[]) AND r.status = 'completed'
+                        AND e.effect IN ('candidate_inserted', 'candidate_seen')))
+            ORDER BY c.id""",
+        list(run_ids) if run_ids else None, list(candidate_ids) if candidate_ids else None,
+        list(seen_in_runs) if seen_in_runs else None)
     ids = {str(r[k]) for r in rows for k in ("query_move_id", "target_move_id")}
     visible = await dl.visible_ids(conn, dl.personal_context(), ids)
     moves = await dl.fetch_moves(conn, visible)
+    seen = await occurrences(conn, rows)
     out = []
     for r in rows:
         q, t = str(r["query_move_id"]), str(r["target_move_id"])
@@ -113,6 +185,7 @@ async def candidate_rows(conn, *, run_ids: Optional[Sequence[str]] = None,
             "a": _end(moves[q], stored_repr=r["query_representation_sha256"], stored_bound=r["query_bound_version"]),
             "b": _end(moves[t], stored_repr=r["target_representation_sha256"], stored_bound=r["target_bound_version"]),
             "current": not reasons, "not_current_reasons": reasons,
+            "occurrences": seen.get(str(r["id"]), []),
         })
     return out
 
@@ -226,6 +299,55 @@ def order(rows: Sequence[Dict[str, Any]], strategy: str = "source_diverse") -> L
     return out
 
 
+def anchored(row: Dict[str, Any], occ: Dict[str, Any]) -> Dict[str, Any]:
+    """The row as one sighting saw it: A is that sighting's query, B the claim it picked.
+    When the query was the stored B, the ends swap, and each occurrence's query_end is
+    restated for the swapped ends. The stored row is not changed."""
+    swap = occ["query_end"] == "b"
+    item = dict(row)
+    if swap:
+        item["a"], item["b"] = row["b"], row["a"]
+        item["occurrences"] = [dict(o, query_end={"a": "b", "b": "a"}.get(o["query_end"]))
+                               for o in row.get("occurrences", [])]
+    item["anchor"] = {"move_id": item["a"]["move_id"], "stored_end": "b" if swap else "a"}
+    item["sighting"] = {"run_id": occ["run_id"], "query_move_id": occ["query_move_id"]}
+    item["tier"] = occ["tier"]
+    return item
+
+
+def review_items(rows: Sequence[Dict[str, Any]], *, seen_in_runs: Optional[Sequence[str]] = None,
+                 tier: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
+    """What to review, and how many sightings could not be anchored.
+
+    Without seen_in_runs: each candidate once, in stored orientation, with its first
+    sighting's tier. With seen_in_runs: each sighting by those runs, anchored at its
+    own query (anchored()), so one pair met from both ends gives two items. A
+    sighting whose query was not recorded is not listed and is counted. tier keeps
+    only items of that tier."""
+    if tier is not None and tier not in TIERS:
+        raise ReviewError(f"tier must be one of {TIERS}")
+    items: List[Dict[str, Any]] = []
+    unanchored = 0
+    for r in rows:
+        if not seen_in_runs:
+            first = next((o for o in r.get("occurrences", []) if o["sighting"] == "first"), None)
+            items.append(dict(r, tier=first["tier"] if first else "unknown"))
+            continue
+        for o in r.get("occurrences", []):
+            if o["run_id"] not in seen_in_runs:
+                continue
+            if o["query_end"] is None:
+                unanchored += tier is None or o["tier"] == tier
+                continue
+            items.append(anchored(r, o))
+    return [it for it in items if tier is None or it["tier"] == tier], unanchored
+
+
+def tier_counts(items: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    """Review items by tier (review_items: one per candidate, or one per sighting)."""
+    return {t: sum(it.get("tier") == t for it in items) for t in TIERS}
+
+
 def queue(rows: Sequence[Dict[str, Any]], mappings: Dict[str, Any], suggested: Iterable[frozenset] = (),
           strategy: str = "source_diverse") -> Dict[str, List[Dict[str, Any]]]:
     """Rows split into lanes and ordered within each. Nothing is dropped."""
@@ -241,11 +363,12 @@ def queue(rows: Sequence[Dict[str, Any]], mappings: Dict[str, Any], suggested: I
 # Showing an item
 # ---------------------------------------------------------------------------
 
-_HIDDEN_WHEN_BLIND = ("scores", "run_id", "method", "discovered_by", "times_seen")
+_HIDDEN_WHEN_BLIND = ("scores", "run_id", "method", "discovered_by", "times_seen", "occurrences", "tier", "anchor",
+                      "sighting")
 
 
 def view(row: Dict[str, Any], *, blind: bool = True) -> Dict[str, Any]:
-    """What a reviewer sees. Blind hides retrieval scores, ranks, the run and the discoverer."""
+    """What a reviewer sees. Blind hides retrieval scores, ranks, runs, sightings, picks and tiers, and the discoverer."""
     v = {k: v for k, v in row.items() if not (blind and k in _HIDDEN_WHEN_BLIND)}
     v["admission_note"] = ADMISSION_NOTE
     return v
@@ -290,6 +413,16 @@ def render(item: Dict[str, Any], *, position: Optional[int] = None, total: Optio
         s = item["scores"]
         lines.append(f"retrieval: fused {s['fused_score']:.4f}  lexical rank {s['lexical_rank']}  semantic rank {s['semantic_rank']}"
                      f"  run {item.get('run_id')}")
+    if not blind and item.get("sighting"):
+        lines.append(f"anchor: A, the query of the selected sighting (run {item['sighting']['run_id']}, "
+                     f"{'stored B' if item['anchor']['stored_end'] == 'b' else 'stored A'}): {item['tier']}")
+    if not blind and item.get("occurrences"):
+        for o in item["occurrences"]:
+            search = {"a": "A's search", "b": "B's search"}.get(o["query_end"], "search not recorded")
+            limit = f"limit {o['run_per_move_cap']} per claim" if o["run_per_move_cap"] else "limit not recorded"
+            lines.append(f"occurrence ({'first sighting' if o['sighting'] == 'first' else 'seen again'}): run {o['run_id']}, "
+                         f"{search}, pick {o['pick'] or '?'} ({limit}): {o['tier']} ({o['tier_basis']})")
+        lines.append(f"tier note: {TIER_NOTE}")
     lines.append(ADMISSION_NOTE)
     lines.append(f"Question: {QUESTION_TEXT}  ({' | '.join(ANSWERS)})")
     return "\n".join(lines)
@@ -315,31 +448,55 @@ def _shown_end(end: Dict[str, Any]) -> Dict[str, Any]:
 
 def make_batch(items: Sequence[Dict[str, Any]], *, database: str, blind: bool = True,
                mappings: Optional[Dict[str, Any]] = None, note: Optional[str] = None,
-               created_at: Optional[str] = None) -> Dict[str, Any]:
+               created_at: Optional[str] = None, selection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A self-contained batch: the exact text and versions shown, and the mapping file behind
-    its lanes and cues. No retrieval scores or run ids."""
-    entries = [{"position": i, "candidate_id": it["candidate_id"], "candidate_key": it["candidate_key"],
-                "lane": it.get("lane", "cross_source"), "authors": it.get("authors", {}), "cues": it.get("cues", []),
-                "a": _shown_end(it["a"]), "b": _shown_end(it["b"])} for i, it in enumerate(items, start=1)]
+    its lanes and cues. No retrieval scores, ranks, picks or tiers. An item made from one
+    sighting (review_items with seen_in_runs) also carries its anchor and that sighting
+    (run and query), which its annotations are bound to. `selection` (the filters the
+    items were chosen by) is recorded for the operator and is part of batch_id. A batch
+    made without either is exactly what it was before."""
+    entries = []
+    for i, it in enumerate(items, start=1):
+        entry = {"position": i, "candidate_id": it["candidate_id"], "candidate_key": it["candidate_key"],
+                 "lane": it.get("lane", "cross_source"), "authors": it.get("authors", {}), "cues": it.get("cues", []),
+                 "a": _shown_end(it["a"]), "b": _shown_end(it["b"])}
+        if it.get("anchor"):
+            entry["anchor"], entry["sighting"] = dict(it["anchor"]), dict(it["sighting"])
+        entries.append(entry)
     body = {"schema": BATCH_SCHEMA, "question": QUESTION, "question_text": QUESTION_TEXT, "answers": list(ANSWERS),
             "blind": blind, "database": database, "note": note,
             "mappings": {k: (mappings or {}).get(k) for k in ("path", "sha256", "prepared_by")}, "items": entries}
+    if selection is not None:
+        body["selection"] = selection
     return {**body, "batch_id": _sha(body),
             "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds")}
 
 
 def binding_problems(current: Optional[Dict[str, Any]], item: Dict[str, Any]) -> List[str]:
-    """Why an annotation on `item` would no longer be bound to what the reviewer saw."""
+    """Why an annotation on `item` would no longer be bound to what the reviewer saw.
+    `current` is the candidate as candidate_rows reads it now, in stored orientation;
+    an item anchored at the stored B is compared end for end."""
     if current is None:
         return ["candidate is no longer open or visible"]
     problems = []
     if current["candidate_key"] != item["candidate_key"]:
         problems.append("candidate key changed")
+    anchor = item.get("anchor")
+    stored = {"a": "b", "b": "a"} if anchor and anchor["stored_end"] == "b" else {"a": "a", "b": "b"}
     for side in ("a", "b"):
-        if current[side]["representation_sha256"] != item[side]["representation_sha256"]:
+        now = current[stored[side]]
+        if now["move_id"] != item[side]["move_id"]:
+            problems.append(f"{side}: not the claim the batch showed")
+        if now["representation_sha256"] != item[side]["representation_sha256"]:
             problems.append(f"{side}: claim text changed since the batch was made")
-        if current[side]["source"]["version"] != item[side]["source"]["version"]:
+        if now["source"]["version"] != item[side]["source"]["version"]:
             problems.append(f"{side}: source version changed since the batch was made")
+    if anchor:
+        s = item["sighting"]
+        if s["query_move_id"] != item["a"]["move_id"] or not any(
+                o["run_id"] == s["run_id"] and o["query_move_id"] == s["query_move_id"]
+                for o in current.get("occurrences", [])):
+            problems.append("the selected sighting is no longer current (its run was rolled back, or it never was)")
     return problems
 
 
@@ -368,8 +525,11 @@ def annotation(batch: Dict[str, Any], position: int, *, reviewer: str, answer: s
            "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds"),
            "batch_id": batch["batch_id"], "position": position, "blind": batch["blind"], "database": batch["database"],
            "candidate": {"id": it["candidate_id"], "candidate_key": it["candidate_key"]},
-           "shown": {"orientation": "A=query, B=target", "a": shown(it["a"]), "b": shown(it["b"])},
+           "shown": {"orientation": SIGHTING_ORIENTATION if it.get("anchor") else STORED_ORIENTATION,
+                     "a": shown(it["a"]), "b": shown(it["b"])},
            "tool": {"name": "koi-discourse review", "version": tool_version}, "supersedes": supersedes}
+    if it.get("anchor"):
+        rec["anchor"], rec["sighting"] = dict(it["anchor"]), dict(it["sighting"])
     return {**rec, "annotation_id": _sha(rec)}
 
 
@@ -404,10 +564,10 @@ def append_annotation(path: str, rec: Dict[str, Any]) -> None:
         raise ReviewError("this exact annotation is already recorded")
     if rec.get("supersedes"):
         old = next((a for a in prior if a["annotation_id"] == rec["supersedes"]), None)
-        if old is None or (old["reviewer"], old["candidate"]["id"], old["question"]) != (
-                rec["reviewer"], rec["candidate"]["id"], rec["question"]):
+        if old is None or (old["reviewer"], old["candidate"]["id"], old["question"], old["shown"]["a"]["move_id"]) != (
+                rec["reviewer"], rec["candidate"]["id"], rec["question"], rec["shown"]["a"]["move_id"]):
             raise ReviewError("supersedes must name an earlier annotation by the same reviewer on the same "
-                              "candidate and question")
+                              "candidate and question, studying the same claim A")
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, sort_keys=True, ensure_ascii=False) + "\n")
