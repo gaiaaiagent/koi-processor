@@ -560,6 +560,10 @@ def make_split_batch(items: Sequence[Dict[str, Any]], *, database: str,
         entries.append((iid, queue_position, it, anchor, sighting))
     if len({e[0] for e in entries}) != len(entries):
         raise ReviewError("the same item is listed twice")
+    shown_pairs = [(it["a"]["move_id"], it["b"]["move_id"]) for _, _, it, _, _ in entries]
+    if len(set(shown_pairs)) != len(shown_pairs):
+        raise ReviewError("two items would show the same A and B (one pair sighted from the same claim by two runs); "
+                          "a reviewer would learn it was retrieved twice. Make one batch per run")
     entries.sort(key=lambda e: e[0])
     shown, bound = [], []
     for position, (iid, queue_position, it, anchor, sighting) in enumerate(entries, start=1):

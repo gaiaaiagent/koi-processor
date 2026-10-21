@@ -568,8 +568,25 @@ def _walk(obj):
         yield "value", obj
 
 
-def assert_reviewer_file_is_blind(raw: bytes, *, run_ids, candidate_ids):
+REVIEWER_TOP = {"schema", "question", "question_text", "answers", "blind", "orientation", "items",
+                "binding_commitment", "reviewer_batch_id"}
+REVIEWER_ITEM = {"position", "item_id", "lane", "authors", "cues", "a", "b"}
+REVIEWER_END = {"move_id", "move_type", "title", "detail", "status", "chunk_range", "representation_sha256",
+                "source", "binding"}
+
+
+def assert_reviewer_file_is_blind(raw: bytes, *, run_ids, candidate_ids, salt=None):
     text = raw.decode("utf-8")
+    shape = json.loads(raw)                                    # a whitelist, so a new field cannot slip in
+    assert set(shape) == REVIEWER_TOP
+    for it in shape["items"]:
+        assert set(it) == REVIEWER_ITEM and set(it["authors"]) <= {"a", "b"}
+        for side in ("a", "b"):
+            assert set(it[side]) == REVIEWER_END
+            assert set(it[side]["source"]) == {"rid", "title", "url", "version", "version_basis"}
+            assert set(it[side]["binding"]) == {"kind", "association", "bound_version", "current", "limitations"}
+    if salt:
+        assert salt not in text
     reviewer = json.loads(raw)
     found = list(_walk(reviewer))
     assert not ({k for kind, k in found if kind == "key"} & FORBIDDEN_KEYS)
@@ -629,7 +646,8 @@ def test_the_serialized_reviewer_file_carries_the_question_texts_and_sources_and
     """Mixed-tier (all) and filtered (additional) batches, read back from the files the CLI wrote."""
     _, _, out, bpath, rs = _cli_batch(tmp_path, monkeypatch, tier=tier, name=f"b-{tier}")
     raw, binding = out.read_bytes(), json.loads(bpath.read_text())
-    assert_reviewer_file_is_blind(raw, run_ids=[RUN, "canary:x"], candidate_ids=[r["candidate_id"] for r in rs])
+    assert_reviewer_file_is_blind(raw, run_ids=[RUN, "canary:x"], candidate_ids=[r["candidate_id"] for r in rs],
+                                  salt=binding["salt"])
     reviewer = json.loads(raw)
     assert reviewer["schema"] == dr.REVIEWER_SCHEMA and reviewer["question_text"] == dr.QUESTION_TEXT
     assert reviewer["answers"] == list(dr.ANSWERS) and reviewer["orientation"] == dr.REVIEWER_ORIENTATION
@@ -868,7 +886,7 @@ def test_cli_filtered_batch_names_its_binding_file_outside_the_reviewer_director
     # The binding file cannot be written: the reviewer file just written is removed again.
     lost = type("B", (), {**{k: getattr(args, k) for k in dir(args) if not k.startswith("_")},
                           "out": str(nxt), "binding_out": str(tmp_path / "missing-dir" / "n.binding.json")})()
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(SystemExit, match="cannot write .*nothing was kept"):
         cli.cmd_batch(lost)
     assert not nxt.exists()
     assert len(tried) == 5
@@ -905,3 +923,67 @@ def test_the_review_loop_on_a_reviewer_file_records_v2_annotations(tmp_path, mon
     assert n == 2 and [r["answer"] for r in recs] == ["useful", "not_useful"]
     assert all(r["schema"] == dr.SPLIT_ANNOTATION_SCHEMA and r["batch_id"] == batch["batch_id"] for r in recs)
     assert not any(s in "\n".join(shown) for s in (RUN, "first_five", "additional", "candidate c", "stored"))
+
+
+def test_folders_are_compared_by_identity_not_by_spelling(tmp_path, monkeypatch):
+    (tmp_path / "Reviewer").mkdir()
+    if not (tmp_path / "reviewer").exists():
+        pytest.skip("case-sensitive volume: Reviewer and reviewer are two folders")
+    cli, args, out, bpath, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="case")
+    same = type("B", (), {**{k: getattr(args, k) for k in dir(args) if not k.startswith("_")},
+                          "out": str(tmp_path / "Reviewer" / "c.json"),
+                          "binding_out": str(tmp_path / "reviewer" / "c.binding.json")})()
+    with pytest.raises(SystemExit, match="outside the reviewer file's directory"):
+        cli.cmd_batch(same)
+    assert not (tmp_path / "Reviewer" / "c.json").exists()
+
+
+def test_a_binding_file_found_in_the_reviewer_directory_is_refused(tmp_path, monkeypatch):
+    cli, _, out, bpath, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="leak")
+    moved = out.parent / "leak.binding.json"
+    moved.write_bytes(bpath.read_bytes())                    # someone put it where reviewers read
+    with pytest.raises(SystemExit, match="binding file is inside the reviewer file's directory"):
+        cli._load_batch(str(out), str(moved), need_binding=True)
+
+
+def test_a_failed_binding_write_keeps_neither_file(tmp_path, monkeypatch):
+    """The binding file is created, then its write fails (a full disk): both files are removed."""
+    cli, args, _, _, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="seed")
+    out, bpath = tmp_path / "reviewer" / "full.json", tmp_path / "operator" / "full.binding.json"
+    real_open = open
+
+    class Full:
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+            return False
+
+        def write(self, data):
+            self.f.write(data[:10])
+            raise OSError(28, "No space left on device", str(bpath))
+
+    def fake_open(path, mode="r", *a, **k):
+        f = real_open(path, mode, *a, **k)
+        return Full(f) if Path(path) == bpath else f
+    monkeypatch.setattr(cli, "open", fake_open, raising=False)
+    full = type("B", (), {**{k: getattr(args, k) for k in dir(args) if not k.startswith("_")},
+                          "out": str(out), "binding_out": str(bpath)})()
+    with pytest.raises(SystemExit, match="No space left on device; nothing was kept"):
+        cli.cmd_batch(full)
+    assert not out.exists() and not bpath.exists()
+
+
+def test_a_pair_sighted_from_the_same_claim_by_two_runs_is_refused_in_one_reviewer_file():
+    r = rows()[0]
+    r["occurrences"] = [occ(r, RUN, 8, 10, sighting="again", end="b"), occ(r, "ingest:10:1", 3, 10, sighting="again", end="b")]
+    items, _ = dr.review_items([r], seen_in_runs=[RUN, "ingest:10:1"])
+    assert len(items) == 2 and items[0]["a"]["move_id"] == items[1]["a"]["move_id"] == "m2"
+    with pytest.raises(dr.ReviewError, match="the same A and B .* one batch per run"):
+        dr.make_split_batch(items, database="d", selection={"x": 1}, salt="s" * 64, created_at="t")
+    assert len(json.loads(dr.make_split_batch(items[:1], database="d", selection={"x": 1}, salt="s" * 64,
+                                              created_at="t")[0])["items"]) == 1

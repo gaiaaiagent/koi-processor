@@ -144,9 +144,29 @@ def cmd_queue(args) -> None:
 
 
 def _inside(path: Path, directory: Path) -> bool:
-    """Whether path is in directory or below it (both resolved)."""
-    p, d = path.resolve(), directory.resolve()
-    return p == d or d in p.parents
+    """Whether path is in directory or below it. Compared by file identity, not by spelling,
+    so a case-insensitive volume (macOS) or a symlink cannot make one folder look like two."""
+    if not directory.exists():
+        return False
+    p = path.resolve()
+    return any(a.exists() and os.path.samefile(a, directory) for a in (p, *p.parents))
+
+
+def _write_new(files: List[tuple]) -> None:
+    """Create each (path, bytes) exclusively, never overwriting. On any failure, remove every
+    file this call created, partial ones included, and refuse."""
+    created: List[Path] = []
+    try:
+        for path, data in files:
+            with open(path, "xb") as f:
+                created.append(path)
+                f.write(data)
+    except BaseException as e:
+        for path in created:
+            path.unlink(missing_ok=True)
+        if isinstance(e, OSError):
+            raise SystemExit(f"refused: cannot write {e.filename or ''}: {e.strerror or e}; nothing was kept")
+        raise
 
 
 def cmd_batch(args) -> None:
@@ -186,14 +206,8 @@ def cmd_batch(args) -> None:
         raw, binding = dr.make_split_batch(items, database=database, mappings=mappings, note=args.note,
                                            selection=selection)
         bpath = Path(binding_out)
-        with open(out, "xb") as f:                    # x: never overwrite, even a file made since the check
-            f.write(raw)
-        try:
-            with open(bpath, "x", encoding="utf-8") as f:
-                f.write(json.dumps(binding, indent=1, sort_keys=True, ensure_ascii=False) + "\n")
-        except BaseException:
-            out.unlink()                              # a reviewer file without its binding file is useless
-            raise
+        _write_new([(out, raw), (bpath, (json.dumps(binding, indent=1, sort_keys=True, ensure_ascii=False)
+                                         + "\n").encode("utf-8"))])
         print(f"wrote {out}: {len(binding['items'])} items, reviewer_batch_id {binding['reviewer_batch_id'][:12]}. "
               "Give reviewers only this file, in a directory that holds nothing else. Their answers must name "
               "each item's id (shown as 'item <id>').")
@@ -201,7 +215,7 @@ def cmd_batch(args) -> None:
               f"{binding['binding_id'][:12]}. Operator only: annotate and review need it; reviewers must not see it.")
         return
     batch = dr.make_batch(items, database=database, blind=True, mappings=mappings, note=args.note, selection=selection)
-    out.write_text(json.dumps(batch, indent=1, ensure_ascii=False) + "\n")
+    _write_new([(out, (json.dumps(batch, indent=1, ensure_ascii=False) + "\n").encode("utf-8"))])
     print(f"wrote {out}: {len(batch['items'])} items, batch_id {batch['batch_id'][:12]}")
 
 
@@ -229,6 +243,9 @@ def _load_batch(path: str, binding: Optional[str] = None, *, need_binding: bool 
                 "blind": True, "question_text": reviewer["question_text"], "items": reviewer["items"]}
     if binding is None:
         return dr.bind_split(raw, None)                     # refuses: the binding file is required
+    if _inside(Path(binding), Path(path).parent):
+        raise SystemExit("refused: the binding file is inside the reviewer file's directory, which a reviewer may "
+                         "read in full. Move it out, and treat the batch as no longer blind if a reviewer had it")
     try:
         bound = json.loads(Path(binding).read_bytes())
     except FileNotFoundError:
