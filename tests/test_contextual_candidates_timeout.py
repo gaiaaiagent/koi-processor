@@ -1,9 +1,11 @@
 """Contextual candidates (POST /get-contextual-candidates): the two fixes of a5e1990.
 
 1. The vault-people fallback leaves out people who already have a document link. It does
-   so with NOT EXISTS, an anti-join on idx_del_entity_uri. The NOT IN form it replaced was
-   planned as a SubPlan over the whole of document_entity_links and took about 76 s per
-   call on the live database (2026-10-13), past the client's 30 s limit.
+   so with NOT EXISTS, which Postgres always plans as an anti join (on the live database,
+   over its idx_del_entity_uri index, which no migration here creates; elsewhere a hash anti
+   join). The NOT IN form it replaced was planned as a SubPlan over the whole of
+   document_entity_links and took about 76 s per call on the live database (2026-10-13),
+   past the client's 30 s limit.
    document_entity_links.entity_uri is NOT NULL, so both forms return the same rows. The
    difference is the plan, which the first test checks on the exact SQL the function sends.
 2. An attendee name that matches more than ATTENDEE_DOC_CAP documents carries no
@@ -25,14 +27,6 @@ import pytest
 pytestmark = pytest.mark.anyio
 
 DSN = os.environ.get("POSTGRES_URL")
-
-UNLINKED_VAULT_PEOPLE = """
-    SELECT count(*) FROM entity_registry er
-    JOIN entity_rid_mappings erm ON er.fuseki_uri = erm.canonical_uri
-    WHERE er.entity_type = 'Person' AND NOT er.node_private AND er.merged_into IS NULL
-      AND NOT EXISTS (SELECT 1 FROM document_entity_links d WHERE d.entity_uri = er.fuseki_uri)
-"""
-
 
 @pytest.fixture
 def anyio_backend():
@@ -111,11 +105,14 @@ async def test_the_vault_people_fallback_is_an_anti_join_and_keeps_its_rows(conn
     await _link(conn, f"document:ctx-{tag}-1", linked)
     rec = Recording(conn)
     out = await pia.get_contextual_candidates_internal(rec, entity_types=["Person"])
-    uris = {c["uri"] for c in out["candidates"]}
-    assert linked not in uris                                      # a linked person is not a fallback
-    if await conn.fetchval(UNLINKED_VAULT_PEOPLE) <= 50:           # the fallback keeps LIMIT 50
-        assert unlinked in uris
+    assert linked not in {c["uri"] for c in out["candidates"]}     # a linked person is not a fallback
     (sql,) = [s for s in rec.sql if "entity_rid_mappings" in s]
+    # The rows: the function's own query without its LIMIT 50 (which picks 50 of however many
+    # the test database holds), restricted to the two fixture people. Exactly the unlinked one.
+    assert sql.count("LIMIT 50") == 1
+    rows = await conn.fetch(f"SELECT fuseki_uri FROM ({sql.replace('LIMIT 50', '')}) q "
+                            "WHERE fuseki_uri = ANY($1::text[])", [unlinked, linked])
+    assert [r["fuseki_uri"] for r in rows] == [unlinked]
     plan = "\n".join(r[0] for r in await conn.fetch("EXPLAIN (COSTS OFF) " + sql))
     assert "Anti Join" in plan and "SubPlan" not in plan, plan
 
