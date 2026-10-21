@@ -337,6 +337,10 @@ def test_cli_batch_records_the_mapping_and_refuses_to_overwrite(tmp_path, monkey
     assert b["items"][0]["authors"]["b"]["names"] == ["Michael Levin"]
     with pytest.raises(SystemExit, match="refusing to overwrite"):
         cli.cmd_batch(args)
+    args.out, args.binding_out = str(tmp_path / "other.json"), str(tmp_path / "x.binding.json")
+    with pytest.raises(SystemExit, match="only for a filtered batch"):
+        cli.cmd_batch(args)
+    assert not (tmp_path / "other.json").exists()
 
 
 # ---- occurrence tiers (I2) ------------------------------------------------------
@@ -524,14 +528,16 @@ def test_cli_queue_and_batch_keep_the_two_run_filters_apart(monkeypatch, capsys,
     text = capsys.readouterr().out
     assert "tier=additional" in text and "sightings by tier: first_five=1  additional=1  unknown=0" in text
     assert "pick 8" not in text and "ingest:9:1" not in text.split("\n", 2)[2]  # blind items show no pick or run
-    out_path = tmp_path / "b.json"
+    (tmp_path / "reviewer").mkdir()
+    (tmp_path / "operator").mkdir()
+    out_path, binding_path = tmp_path / "reviewer" / "b.json", tmp_path / "operator" / "b.binding.json"
     bargs = type("B", (), {"dsn": "unused", "candidate_id": None, "run_id": None, "seen_in_run": ["ingest:9:1"],
                            "tier": "additional", "from_queue": 5, "order": "fused", "mappings": None, "note": None,
-                           "out": str(out_path)})()
+                           "out": str(out_path), "binding_out": str(binding_path)})()
     cli.cmd_batch(bargs)
     # S1: a filtered batch is a reviewer file plus a binding file; the selection and anchor live in the binding.
     reviewer = json.loads(out_path.read_text())
-    binding = json.loads((tmp_path / "b.binding.json").read_text())
+    binding = json.loads(binding_path.read_text())
     assert reviewer["schema"] == dr.REVIEWER_SCHEMA and "selection" not in reviewer
     assert binding["selection"] == {"run_ids": None, "seen_in_runs": ["ingest:9:1"], "tier": "additional"}
     assert [i["a"]["move_id"] for i in reviewer["items"]] == ["m2"]
@@ -546,7 +552,8 @@ RUN = "ingest:9:1"
 FORBIDDEN_KEYS = {"candidate_id", "candidate_key", "scores", "fused_score", "lexical_rank", "lexical_score",
                   "semantic_rank", "semantic_score", "run_id", "run_ids", "seen_in_runs", "pick", "tier",
                   "tier_basis", "tier_counts", "anchor", "sighting", "stored_end", "selection", "occurrences",
-                  "queue_position", "salt", "note", "database", "created_at", "method", "discovered_by", "times_seen"}
+                  "queue_position", "salt", "database", "created_at", "method", "discovered_by", "times_seen"}
+FORBIDDEN_TOP = FORBIDDEN_KEYS | {"note", "mappings"}            # a cue's "note" is its fixed caveat text
 
 
 def _walk(obj):
@@ -563,8 +570,12 @@ def _walk(obj):
 
 def assert_reviewer_file_is_blind(raw: bytes, *, run_ids, candidate_ids):
     text = raw.decode("utf-8")
-    found = list(_walk(json.loads(raw)))
+    reviewer = json.loads(raw)
+    found = list(_walk(reviewer))
     assert not ({k for kind, k in found if kind == "key"} & FORBIDDEN_KEYS)
+    assert not (set(reviewer) & FORBIDDEN_TOP)
+    assert all(set(c) <= {"kind", "names", "publication", "side", "name", "matched", "basis", "note"}
+               for i in reviewer["items"] for c in i["cues"])
     values = {v for kind, v in found if kind == "value"}
     assert not (values & (set(dr.TIERS) | set(run_ids) | set(candidate_ids)))
     for s in list(run_ids) + list(dr.TIERS) + [json.dumps(c) for c in candidate_ids]:
@@ -584,6 +595,10 @@ def _cli_batch(tmp_path, monkeypatch, *, tier, name):
     cli = _load_cli()
     monkeypatch.delenv("KOI_DISCOURSE_REVIEW_MAPPINGS", raising=False)
     rs = mixed_rows()
+    mp = tmp_path / "mapping.json"
+    mp.write_text(json.dumps({"prepared_by": "test", "same_work": {}, "authors": {LEVIN_DOC: ["Michael Levin"]}}))
+    for d in ("reviewer", "operator"):
+        (tmp_path / d).mkdir(exist_ok=True)
 
     class Conn:
         async def fetchval(self, sql, *a):
@@ -600,12 +615,12 @@ def _cli_batch(tmp_path, monkeypatch, *, tier, name):
     monkeypatch.setattr(cli, "_readonly", fake_readonly)
     monkeypatch.setattr(dr, "candidate_rows", fake_rows)
     monkeypatch.setattr(dr, "suggested_same_work", no_suggestions)
-    out = tmp_path / f"{name}.json"
+    out, bpath = tmp_path / "reviewer" / f"{name}.json", tmp_path / "operator" / f"{name}.binding.json"
     args = type("B", (), {"dsn": "unused", "candidate_id": None, "run_id": None, "seen_in_run": [RUN], "tier": tier,
-                          "from_queue": 10, "order": "fused", "mappings": None, "note": "limit-10 trial",
-                          "out": str(out), "binding_out": None})()
+                          "from_queue": 10, "order": "fused", "mappings": str(mp), "note": "limit-10 trial",
+                          "out": str(out), "binding_out": str(bpath)})()
     cli.cmd_batch(args)
-    return cli, args, out, tmp_path / f"{name}.binding.json", rs
+    return cli, args, out, bpath, rs
 
 
 @pytest.mark.parametrize("tier", ["all", "additional"])
@@ -626,6 +641,9 @@ def test_the_serialized_reviewer_file_carries_the_question_texts_and_sources_and
     assert c1["a"]["source"] == {"rid": LEVIN_DOC, "title": f"title of {LEVIN_DOC[:20]}", "url": None,
                                  "version": "sha256:" + "v" * 64, "version_basis": "document_ingestion_log.content_hash"}
     assert c1["b"]["binding"]["kind"] == "content_addressed_source" and c1["b"]["binding"]["limitations"]
+    # Cues follow the shown direction: B (m1, stored A) names A's listed author.
+    assert [(c["kind"], c["side"], c["matched"]) for c in c1["cues"]] == [("names_other_source_author", "b", "Levin")]
+    assert c1["authors"]["a"]["names"] == ["Michael Levin"] and c1["authors"]["b"] is None
     # The binding file holds the tier key, the anchors and the selection.
     assert binding["selection"] == {"run_ids": None, "seen_in_runs": [RUN], "tier": None if tier == "all" else tier}
     assert binding["note"] == "limit-10 trial" and binding["database"] == "personal_koi"
@@ -659,6 +677,16 @@ def _rehash(binding):
     return {**body, "binding_id": dr._sha(body)}
 
 
+def _forge(raw, binding):
+    """Both files rewritten to agree on everything except the reviewer file's item ids."""
+    reviewer = json.loads(raw)
+    body = {k: v for k, v in reviewer.items() if k != "reviewer_batch_id"}
+    body["binding_commitment"] = dr.binding_commitment(binding["salt"], binding)
+    new_raw = dr.reviewer_file_bytes({**body, "reviewer_batch_id": dr._sha(body)})
+    return new_raw, _rehash({**binding, "reviewer_batch_id": dr._sha(body),
+                             "reviewer_file_sha256": hashlib.sha256(new_raw).hexdigest()})
+
+
 def test_a_missing_mismatched_or_tampered_binding_file_is_refused():
     raw, binding = _split()
     assert len(dr.bind_split(raw, binding)["items"]) == 3                      # control: the pair binds
@@ -677,14 +705,19 @@ def test_a_missing_mismatched_or_tampered_binding_file_is_refused():
     swapped = copy.deepcopy(binding)                                           # anchor flipped, id recomputed
     it = swapped["items"][0]
     it["anchor"] = {"move_id": it["anchor"]["move_id"], "stored_end": {"a": "b", "b": "a"}[it["anchor"]["stored_end"]]}
-    refused(raw, _rehash(swapped), "do not describe the same item")
+    refused(raw, _rehash(swapped), "contents are not the ones its reviewer file was made with")
     moved = copy.deepcopy(binding)                                             # two items' bindings exchanged
     moved["items"][0]["candidate_id"], moved["items"][1]["candidate_id"] = (moved["items"][1]["candidate_id"],
                                                                             moved["items"][0]["candidate_id"])
-    refused(raw, _rehash(moved), "do not describe the same item")
+    refused(raw, _rehash(moved), "contents are not the ones its reviewer file was made with")
     fewer = copy.deepcopy(binding)
     fewer["items"].pop()
-    refused(raw, _rehash(fewer), "list different items")
+    refused(raw, _rehash(fewer), "contents are not the ones its reviewer file was made with")
+    # A forgery that also rewrites the reviewer file's commitment and ids, keeping the items a reviewer
+    # saw: the salted item ids still refuse it.
+    refused(*_forge(raw, swapped), "do not describe the same item")
+    refused(*_forge(raw, moved), "do not describe the same item")
+    refused(*_forge(raw, fewer), "list different items")
     reviewer = json.loads(raw)
     reviewer["items"][0]["a"]["title"] = "an edited claim"                     # reviewer file edited, id kept
     refused(dr.reviewer_file_bytes(reviewer), binding, "reviewer file does not match its own id")
@@ -693,7 +726,24 @@ def test_a_missing_mismatched_or_tampered_binding_file_is_refused():
             "belongs to another reviewer file")                                # edited and re-hashed
     compact = json.dumps(json.loads(raw), separators=(",", ":")).encode()      # same content, other bytes
     refused(compact, binding, "bytes are not the ones")
-    assert len(refusals) == 9
+    # Edits a reviewer could not see but the trial analysis reads, each with the binding's own id recomputed.
+    retiered = copy.deepcopy(binding)
+    retiered["items"][0]["tier"] = {"first_five": "additional", "additional": "first_five"}[retiered["items"][0]["tier"]]
+    refused(raw, _rehash(retiered), "contents are not the ones its reviewer file was made with")
+    for field, value in (("selection", {"run_ids": None, "seen_in_runs": ["ingest:2:1"], "tier": None}),
+                         ("note", "edited"), ("database", "another_db")):
+        refused(raw, _rehash({**binding, field: value}), "contents are not the ones its reviewer file was made with")
+    requeued = copy.deepcopy(binding)
+    requeued["items"][0]["queue_position"], requeued["items"][1]["queue_position"] = (
+        requeued["items"][1]["queue_position"], requeued["items"][0]["queue_position"])
+    refused(raw, _rehash(requeued), "contents are not the ones its reviewer file was made with")
+    unsalted = {k: v for k, v in binding.items() if k != "salt"}
+    refused(raw, _rehash(unsalted), "does not have the fields a binding file has")
+    keyless = copy.deepcopy(binding)
+    del keyless["items"][0]["tier"]
+    refused(raw, _rehash(keyless), "does not have the fields a binding file has")
+    refused(raw, ["not", "a", "binding"], "not a koi-discourse-review-binding/v1 file")
+    assert len(refusals) == 20
 
 
 def test_a_split_annotation_is_v2_keeps_the_sighting_direction_and_binds_like_v1(tmp_path):
@@ -742,14 +792,27 @@ def test_one_file_batches_and_their_annotations_keep_their_identities():
 def test_cli_annotate_refuses_without_the_binding_and_records_with_it(tmp_path, monkeypatch, capsys):
     cli, _, out, bpath, rs = _cli_batch(tmp_path, monkeypatch, tier="all", name="trial")
     monkeypatch.setattr(cli, "_verify", lambda dsn, items: {i["position"]: [] for i in items})
-    ann = tmp_path / "ann.jsonl"
+    ann = tmp_path / "operator" / "ann.jsonl"
+    items = json.loads(out.read_text())["items"]
     base = {"dsn": "unused", "batch": str(out), "item": 1, "answer": "useful", "reason": None,
-            "reviewer": "agent:a", "annotations": str(ann), "supersedes": None}
+            "reviewer": "agent:a", "annotations": str(ann), "supersedes": None, "item_id": items[0]["item_id"][:8]}
     with pytest.raises(dr.ReviewError, match="needs its binding file"):
         cli.cmd_annotate(type("A", (), {**base, "binding": None})())
     with pytest.raises(SystemExit, match="does not exist"):
         cli.cmd_annotate(type("A", (), {**base, "binding": str(tmp_path / "missing.json")})())
-    assert not ann.exists()                                                    # nothing recorded
+    (tmp_path / "bad.json").write_text("{not json")
+    with pytest.raises(SystemExit, match="is not JSON"):
+        cli.cmd_annotate(type("A", (), {**base, "binding": str(tmp_path / "bad.json")})())
+    with pytest.raises(SystemExit, match="cannot read binding file"):
+        cli.cmd_annotate(type("A", (), {**base, "binding": str(tmp_path)})())   # a directory
+    with pytest.raises(dr.ReviewError, match="needs the item id"):
+        cli.cmd_annotate(type("A", (), {**base, "binding": str(bpath), "item_id": None})())
+    with pytest.raises(dr.ReviewError, match="does not match the item at this position"):
+        cli.cmd_annotate(type("A", (), {**base, "binding": str(bpath), "item_id": items[1]["item_id"][:8]})())
+    with pytest.raises(SystemExit, match="outside the reviewer file's directory"):
+        cli.cmd_annotate(type("A", (), {**base, "binding": str(bpath),
+                                        "annotations": str(out.parent / "ann.jsonl")})())
+    assert not ann.exists() and not (out.parent / "ann.jsonl").exists()      # nothing recorded
     cli.cmd_annotate(type("A", (), {**base, "binding": str(bpath)})())
     (rec,) = dr.read_annotations(str(ann))
     assert rec["schema"] == dr.SPLIT_ANNOTATION_SCHEMA and rec["binding_id"] == json.loads(bpath.read_text())["binding_id"]
@@ -781,3 +844,64 @@ def test_cli_one_file_batches_refuse_a_binding_and_warn_when_they_carry_sighting
     cli.cmd_annotate(type("A", (), {**base, "binding": None})())             # still annotates as in I2
     (rec,) = dr.read_annotations(str(ann))
     assert rec["schema"] == dr.ANNOTATION_SCHEMA and rec["batch_id"] == legacy["batch_id"] and rec["anchor"]["stored_end"] == "b"
+
+
+def test_cli_filtered_batch_names_its_binding_file_outside_the_reviewer_directory(tmp_path, monkeypatch):
+    cli, args, out, bpath, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="first")
+    assert out.exists() and bpath.exists()
+    tried = []
+
+    def refused(match, **changes):
+        a = type("B", (), {**{k: getattr(args, k) for k in dir(args) if not k.startswith("_")}, **changes})()
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_batch(a)
+        tried.append(changes.get("out", args.out))
+    nxt = tmp_path / "reviewer" / "next.json"
+    refused("name the binding file with --binding-out", out=str(nxt), binding_out=None)
+    refused("outside the reviewer file's directory", out=str(nxt), binding_out=str(tmp_path / "reviewer" / "n.binding.json"))
+    (tmp_path / "reviewer" / "sub").mkdir()
+    refused("outside the reviewer file's directory", out=str(nxt),
+            binding_out=str(tmp_path / "reviewer" / "sub" / "n.binding.json"))
+    refused("refusing to overwrite", out=str(nxt), binding_out=str(bpath))              # an existing binding file
+    refused("refusing to overwrite", out=str(out), binding_out=str(tmp_path / "operator" / "n.binding.json"))
+    assert not nxt.exists() and not (tmp_path / "operator" / "n.binding.json").exists()
+    # The binding file cannot be written: the reviewer file just written is removed again.
+    lost = type("B", (), {**{k: getattr(args, k) for k in dir(args) if not k.startswith("_")},
+                          "out": str(nxt), "binding_out": str(tmp_path / "missing-dir" / "n.binding.json")})()
+    with pytest.raises(FileNotFoundError):
+        cli.cmd_batch(lost)
+    assert not nxt.exists()
+    assert len(tried) == 5
+
+
+def test_an_answer_cannot_land_on_the_same_position_of_another_reviewer_file(tmp_path, monkeypatch):
+    """Two reviewer files of the same items number them 1..N in different salted orders. An answer
+    recorded with the item id the reviewer saw in one file is refused against the other."""
+    cli, _, out_a, bind_a, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="a")
+    _, _, out_b, bind_b, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="b")
+    monkeypatch.setattr(cli, "_verify", lambda dsn, items: {i["position"]: [] for i in items})
+    seen_in_a = json.loads(out_a.read_text())["items"][0]
+    ann = tmp_path / "operator" / "ann.jsonl"
+    args = type("A", (), {"dsn": "unused", "batch": str(out_b), "binding": str(bind_b), "item": 1,
+                          "item_id": seen_in_a["item_id"][:12], "answer": "useful", "reason": None,
+                          "reviewer": "agent:a", "annotations": str(ann), "supersedes": None})()
+    with pytest.raises(dr.ReviewError, match="another item or another reviewer file"):
+        cli.cmd_annotate(args)
+    args.batch, args.binding = str(out_a), str(bind_a)
+    cli.cmd_annotate(args)
+    (rec,) = dr.read_annotations(str(ann))
+    assert rec["item_id"] == seen_in_a["item_id"] and rec["shown"]["a"]["move_id"] == seen_in_a["a"]["move_id"]
+
+
+def test_the_review_loop_on_a_reviewer_file_records_v2_annotations(tmp_path, monkeypatch):
+    cli, _, out, bpath, _ = _cli_batch(tmp_path, monkeypatch, tier="all", name="loop")
+    batch = cli._load_batch(str(out), str(bpath), need_binding=True)
+    path = str(tmp_path / "operator" / "loop.jsonl")
+    keys = iter(["u", "", "n", "why not", "q"])
+    shown = []
+    n = dr.review_loop(batch, reviewer="person:x", path=path, verify=lambda it: [], ask=lambda _: next(keys),
+                       say=shown.append)
+    recs = dr.read_annotations(path)
+    assert n == 2 and [r["answer"] for r in recs] == ["useful", "not_useful"]
+    assert all(r["schema"] == dr.SPLIT_ANNOTATION_SCHEMA and r["batch_id"] == batch["batch_id"] for r in recs)
+    assert not any(s in "\n".join(shown) for s in (RUN, "first_five", "additional", "candidate c", "stored"))

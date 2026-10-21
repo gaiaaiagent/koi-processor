@@ -8,7 +8,7 @@
 #   koi-discourse queue [--run-id RUN] [--seen-in-run RUN] [--tier TIER] [--order ORDER] [--lane LANE] [--limit N]
 #   koi-discourse batch (--candidate-id ID ... | --from-queue N) [--run-id RUN] [--seen-in-run RUN] [--tier TIER] --out FILE [--binding-out FILE]
 #   koi-discourse show --batch FILE [--binding FILE] [--item N] [--verify]
-#   koi-discourse annotate --batch FILE --item N --answer A --reviewer NAME --annotations FILE [--binding FILE] [--reason TEXT]
+#   koi-discourse annotate --batch FILE --item N --answer A --reviewer NAME --annotations FILE [--binding FILE --item-id ID] [--reason TEXT]
 #   koi-discourse review --batch FILE --reviewer NAME --annotations FILE [--binding FILE]
 #   koi-discourse annotations --annotations FILE [--batch FILE]
 #

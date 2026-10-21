@@ -3021,9 +3021,9 @@ def test_reviewer_file_cli_flow_reversed_sighting_binding_controls_and_rollback(
         five = next(it for it in others if it["tier"] == "first_five")
         extra = next(it for it in others if it["tier"] == "additional")
         chosen = [rev["candidate_id"], five["candidate_id"], extra["candidate_id"]]
-        trial = tmp_path / "trial"
-        trial.mkdir()
-        rfile, bfile = trial / "batch.json", trial / "batch.binding.json"
+        (tmp_path / "reviewer").mkdir()
+        (tmp_path / "operator").mkdir()
+        rfile, bfile = tmp_path / "reviewer" / "batch.json", tmp_path / "operator" / "batch.binding.json"
         made = koi("batch", "--seen-in-run", rx2, *[a for c in chosen for a in ("--candidate-id", c)], "--out", rfile,
                    "--binding-out", bfile)
         assert made.returncode == 0, made.stderr
@@ -3042,19 +3042,20 @@ def test_reviewer_file_cli_flow_reversed_sighting_binding_controls_and_rollback(
         assert shown["b"]["move_id"] == rows[rev["candidate_id"]]["a"]["move_id"] and shown["b"]["move_id"] in ys
         blind = koi("show", "--batch", rfile)
         assert blind.returncode == 0 and rx2 not in blind.stdout and "first_five" not in blind.stdout
-        ann = tmp_path / "annotations.jsonl"
-        args = ("annotate", "--batch", rfile, "--item", bound["position"], "--answer", "useful",
-                "--reviewer", "agent:a", "--annotations", ann)
+        ann = tmp_path / "operator" / "annotations.jsonl"
+        args = ("annotate", "--batch", rfile, "--item", bound["position"], "--item-id", shown["item_id"][:10],
+                "--answer", "useful", "--reviewer", "agent:a", "--annotations", ann)
         missing = koi(*args)
         assert missing.returncode != 0 and "needs its binding file" in missing.stderr
-        assert koi("batch", "--seen-in-run", ry, "--candidate-id", rev["candidate_id"],
-                   "--out", tmp_path / "other.json").returncode == 0
-        wrong = koi(*args, "--binding", tmp_path / "other.binding.json")
+        assert koi("batch", "--seen-in-run", ry, "--candidate-id", rev["candidate_id"], "--out",
+                   tmp_path / "reviewer" / "other.json", "--binding-out", tmp_path / "operator" / "other.binding.json"
+                   ).returncode == 0
+        wrong = koi(*args, "--binding", tmp_path / "operator" / "other.binding.json")
         assert wrong.returncode != 0 and "belongs to another reviewer file" in wrong.stderr
         edited = json.loads(bfile.read_text())
         edited["items"][0]["tier"] = {"first_five": "additional", "additional": "first_five"}[edited["items"][0]["tier"]]
-        (tmp_path / "edited.binding.json").write_text(json.dumps(edited))
-        tampered = koi(*args, "--binding", tmp_path / "edited.binding.json")
+        (tmp_path / "operator" / "edited.binding.json").write_text(json.dumps(edited))
+        tampered = koi(*args, "--binding", tmp_path / "operator" / "edited.binding.json")
         assert tampered.returncode != 0 and "binding file does not match its own id" in tampered.stderr
         assert not ann.exists()                                                       # nothing recorded so far
         ok = koi(*args, "--binding", bfile)

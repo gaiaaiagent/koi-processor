@@ -548,7 +548,8 @@ def make_split_batch(items: Sequence[Dict[str, Any]], *, database: str,
     pick, tier, anchor, selection, note, database or time, and its positions follow
     the salted item ids, not the queue's (score) order. Everything else goes in the
     binding file: per item the candidate, its queue position, anchor, sighting and
-    tier, and for the batch the salt, selection, note, mapping file and database."""
+    tier, and for the batch the salt, selection, note, mapping file and database. The
+    reviewer file carries a salted commitment to all of that (binding_commitment)."""
     salt = salt or secrets.token_hex(32)
     entries = []
     for queue_position, it in enumerate(items, start=1):
@@ -568,16 +569,45 @@ def make_split_batch(items: Sequence[Dict[str, Any]], *, database: str,
         bound.append({"position": position, "item_id": iid, "queue_position": queue_position,
                       "candidate_id": it["candidate_id"], "candidate_key": it["candidate_key"],
                       "anchor": anchor, "sighting": sighting, "tier": it.get("tier")})
-    body = {"schema": REVIEWER_SCHEMA, "question": QUESTION, "question_text": QUESTION_TEXT, "answers": list(ANSWERS),
-            "blind": True, "orientation": REVIEWER_ORIENTATION, "items": shown}
-    raw = reviewer_file_bytes({**body, "reviewer_batch_id": _sha(body)})
-    binding = {"schema": BINDING_SCHEMA, "reviewer_batch_id": _sha(body),
-               "reviewer_file_sha256": hashlib.sha256(raw).hexdigest(), "salt": salt, "database": database,
-               "note": note, "selection": selection,
+    content = {"database": database, "note": note, "selection": selection,
                "mappings": {k: (mappings or {}).get(k) for k in ("path", "sha256", "prepared_by")},
                "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                "items": bound}
+    body = {"schema": REVIEWER_SCHEMA, "question": QUESTION, "question_text": QUESTION_TEXT, "answers": list(ANSWERS),
+            "blind": True, "orientation": REVIEWER_ORIENTATION, "items": shown,
+            "binding_commitment": binding_commitment(salt, content)}
+    raw = reviewer_file_bytes({**body, "reviewer_batch_id": _sha(body)})
+    binding = {"schema": BINDING_SCHEMA, "reviewer_batch_id": _sha(body),
+               "reviewer_file_sha256": hashlib.sha256(raw).hexdigest(), "salt": salt, **content}
     return raw, {**binding, "binding_id": _sha(binding)}
+
+
+_BINDING_CONTENT = ("database", "note", "selection", "mappings", "created_at", "items")
+_BINDING_KEYS = ("schema", "reviewer_batch_id", "reviewer_file_sha256", "salt", "binding_id") + _BINDING_CONTENT
+_BOUND_ITEM_KEYS = ("position", "item_id", "queue_position", "candidate_id", "candidate_key", "anchor", "sighting", "tier")
+
+
+def binding_commitment(salt: str, content: Dict[str, Any]) -> str:
+    """The reviewer file's salted commitment to everything the binding file says about the
+    batch and its items (tiers, queue positions, anchors, sightings, candidates, selection,
+    note, mappings, database, time). Salted, so it reveals none of them."""
+    return _sha({"salt": salt, **{k: content[k] for k in _BINDING_CONTENT}})
+
+
+MIN_ITEM_ID_PREFIX = 8
+
+
+def check_item_id(item: Dict[str, Any], given: Optional[str]) -> None:
+    """An answer recorded from a reviewer file names the item id the reviewer was shown, so
+    an answer cannot land on another item, or on another reviewer file's item at the same
+    position."""
+    given = (given or "").strip().lower()
+    if len(given) < MIN_ITEM_ID_PREFIX:
+        raise ReviewError(f"an answer to a reviewer file needs the item id it was given for "
+                          f"(--item-id, at least {MIN_ITEM_ID_PREFIX} characters)")
+    if not item["item_id"].startswith(given):
+        raise ReviewError("the item id does not match the item at this position: "
+                          "the answer was given for another item or another reviewer file")
 
 
 def read_reviewer_file(raw: bytes) -> Dict[str, Any]:
@@ -590,6 +620,9 @@ def read_reviewer_file(raw: bytes) -> Dict[str, Any]:
         raise ReviewError(f"not a {REVIEWER_SCHEMA} file")
     if reviewer.get("reviewer_batch_id") != _sha({k: v for k, v in reviewer.items() if k != "reviewer_batch_id"}):
         raise ReviewError("the reviewer file does not match its own id: it was edited")
+    if not isinstance(reviewer.get("items"), list) or not all(
+            isinstance(i, dict) and {"position", "item_id", "a", "b"} <= set(i) for i in reviewer["items"]):
+        raise ReviewError("the reviewer file does not have the fields a reviewer file has")
     return reviewer
 
 
@@ -597,21 +630,29 @@ def bind_split(raw: bytes, binding: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The reviewer file and its binding file as one batch that annotation() and
     binding_problems() accept, after these checks, each of which refuses:
       1. the reviewer file matches its own id (reviewer_batch_id);
-      2. a binding file is given, and matches its own id (binding_id);
+      2. a binding file is given, has the expected fields, and matches its own id (binding_id);
       3. it names this reviewer file, by id and by the sha256 of its exact bytes;
-      4. both list the same positions, each with the same item id, and that id is the
+      4. its contents (items, tiers, selection, note, mappings, database, time) are the ones
+         the reviewer file committed to (binding_commitment), so an edit is refused even
+         when the binding file's own id was recomputed;
+      5. both list the same positions, each with the same item id, and that id is the
          one the binding's salt and candidate give for the A and B the reviewer saw."""
     reviewer = read_reviewer_file(raw)
     if binding is None:
         raise ReviewError("this reviewer file needs its binding file (--binding); nothing is recorded without it")
     if not isinstance(binding, dict) or binding.get("schema") != BINDING_SCHEMA:
         raise ReviewError(f"not a {BINDING_SCHEMA} file")
-    if binding.get("binding_id") != _sha({k: v for k, v in binding.items() if k != "binding_id"}):
+    if set(binding) != set(_BINDING_KEYS) or not isinstance(binding["items"], list) or not all(
+            isinstance(b, dict) and set(b) == set(_BOUND_ITEM_KEYS) for b in binding["items"]):
+        raise ReviewError("the binding file does not have the fields a binding file has")
+    if binding["binding_id"] != _sha({k: v for k, v in binding.items() if k != "binding_id"}):
         raise ReviewError("the binding file does not match its own id: it was edited")
     if binding["reviewer_batch_id"] != reviewer["reviewer_batch_id"]:
         raise ReviewError("the binding file belongs to another reviewer file")
     if binding["reviewer_file_sha256"] != hashlib.sha256(raw).hexdigest():
         raise ReviewError("the reviewer file's bytes are not the ones its binding file was made for")
+    if reviewer.get("binding_commitment") != binding_commitment(binding["salt"], binding):
+        raise ReviewError("the binding file's contents are not the ones its reviewer file was made with: it was edited")
     shown = {it["position"]: it for it in reviewer["items"]}
     bound = {it["position"]: it for it in binding["items"]}
     if len(shown) != len(reviewer["items"]) or len(bound) != len(binding["items"]) or set(shown) != set(bound):

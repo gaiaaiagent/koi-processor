@@ -3,8 +3,9 @@
 
 Every database read runs in one READ ONLY transaction. Nothing here writes to the
 database, admits, declines or hides a candidate, or changes a retrieval limit.
-The only files written are the ones you name: a batch file (batch) and an
-append-only annotation file (annotate, review).
+The only files written are the ones you name: a batch file, or for a filtered
+batch a reviewer file and a binding file (batch), and an append-only annotation
+file (annotate, review).
 
   queue        open candidates in lanes (cross_source, same_work_mapped,
                same_work_suggested), each ordered source_diverse (default) or by
@@ -16,10 +17,10 @@ append-only annotation file (annotate, review).
                is one file, as before. With --run-id, --seen-in-run or --tier it is
                two: --out, the reviewer file (all a reviewer receives: question,
                A and B with their sources, no run, rank, pick, tier, anchor or
-               selection, in a salted order), and --binding-out (default
-               <out>.binding.json), the operator's binding file holding the
-               candidates, runs, anchors, tiers and the selection. Never give a
-               reviewer the binding file.
+               selection, in a salted order), and --binding-out (required, and
+               outside the reviewer file's directory), the operator's binding
+               file holding the candidates, runs, anchors, tiers and the
+               selection. Never give a reviewer the binding file.
 
   Filters (queue and batch):
     --run-id RUN        candidates first discovered by RUN (the run stored on the
@@ -39,7 +40,9 @@ append-only annotation file (annotate, review).
                batch item: useful | marginal | not_useful | needs_context, with an
                optional reason. Refused if the candidate's text or source version
                changed since the batch was made. A reviewer file needs its
-               --binding file, and is refused if the two do not match.
+               --binding file and the --item-id the answer was given for, and is
+               refused if they do not match. Its annotation file must be outside
+               the reviewer file's directory.
   review       walk a batch interactively and record answers as annotate does.
   annotations  summarise an annotation file (current answers per item).
 
@@ -140,19 +143,28 @@ def cmd_queue(args) -> None:
             print("\n" + dr.render(r, position=i, total=len(lanes[k]), blind=blind))
 
 
-def _binding_out(args) -> Path:
-    out = Path(args.out)
-    return Path(args.binding_out) if getattr(args, "binding_out", None) else out.with_name(out.stem + ".binding.json")
+def _inside(path: Path, directory: Path) -> bool:
+    """Whether path is in directory or below it (both resolved)."""
+    p, d = path.resolve(), directory.resolve()
+    return p == d or d in p.parents
 
 
 def cmd_batch(args) -> None:
     out = Path(args.out)
     selection = _selection(args)
-    for path in ([out, _binding_out(args)] if selection is not None else [out]):
+    binding_out = getattr(args, "binding_out", None)
+    if selection is None and binding_out:
+        raise SystemExit("--binding-out is only for a filtered batch (--run-id, --seen-in-run, --tier)")
+    if selection is not None:
+        if not binding_out:
+            raise SystemExit("a filtered batch is a reviewer file and a binding file: name the binding file with "
+                             "--binding-out, outside the reviewer file's directory")
+        if _inside(Path(binding_out), out.parent):
+            raise SystemExit("--binding-out must be outside the reviewer file's directory, which a reviewer may "
+                             "read in full")
+    for path in [out] + ([Path(binding_out)] if selection is not None else []):
         if path.exists():
             raise SystemExit(f"refusing to overwrite {path}")
-    if selection is not None and _binding_out(args).resolve() == out.resolve():
-        raise SystemExit("--binding-out must differ from --out")
     mappings = _mappings(args.mappings)
 
     async def body(conn):
@@ -173,11 +185,18 @@ def cmd_batch(args) -> None:
     if dr.needs_split(items, selection):
         raw, binding = dr.make_split_batch(items, database=database, mappings=mappings, note=args.note,
                                            selection=selection)
-        bpath = _binding_out(args)
-        bpath.write_text(json.dumps(binding, indent=1, sort_keys=True, ensure_ascii=False) + "\n")
-        out.write_bytes(raw)
+        bpath = Path(binding_out)
+        with open(out, "xb") as f:                    # x: never overwrite, even a file made since the check
+            f.write(raw)
+        try:
+            with open(bpath, "x", encoding="utf-8") as f:
+                f.write(json.dumps(binding, indent=1, sort_keys=True, ensure_ascii=False) + "\n")
+        except BaseException:
+            out.unlink()                              # a reviewer file without its binding file is useless
+            raise
         print(f"wrote {out}: {len(binding['items'])} items, reviewer_batch_id {binding['reviewer_batch_id'][:12]}. "
-              "Give reviewers only this file, in a directory that holds nothing else.")
+              "Give reviewers only this file, in a directory that holds nothing else. Their answers must name "
+              "each item's id (shown as 'item <id>').")
         print(f"wrote {bpath}: the binding file (candidates, runs, anchors, tiers, selection), binding_id "
               f"{binding['binding_id'][:12]}. Operator only: annotate and review need it; reviewers must not see it.")
         return
@@ -190,7 +209,10 @@ def _load_batch(path: str, binding: Optional[str] = None, *, need_binding: bool 
     """A batch file. A one-file batch is returned as it is (a binding file is refused for it).
     A reviewer file is checked against its binding file when one is given or needed
     (dr.bind_split); without one it is returned for display only."""
-    raw = Path(path).read_bytes()
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        raise SystemExit(f"refused: cannot read batch file {path}: {e.strerror or e}")
     try:
         schema = json.loads(raw).get("schema")
     except (ValueError, AttributeError):
@@ -211,9 +233,19 @@ def _load_batch(path: str, binding: Optional[str] = None, *, need_binding: bool 
         bound = json.loads(Path(binding).read_bytes())
     except FileNotFoundError:
         raise SystemExit(f"refused: binding file {binding} does not exist")
+    except OSError as e:
+        raise SystemExit(f"refused: cannot read binding file {binding}: {e.strerror or e}")
     except ValueError:
         raise SystemExit(f"refused: binding file {binding} is not JSON")
     return dr.bind_split(raw, bound)
+
+
+def _annotations_outside(batch: Dict[str, Any], batch_path: str, annotations: str) -> None:
+    """A reviewer file's annotations name candidates, anchors and runs: keep them out of the
+    directory handed to reviewers."""
+    if batch.get("format") == "split" and _inside(Path(annotations), Path(batch_path).parent):
+        raise SystemExit("refused: keep the annotation file outside the reviewer file's directory; "
+                         "annotations name candidates, anchors and runs")
 
 
 def _carries_retrieval_metadata(batch: Dict[str, Any]) -> bool:
@@ -245,9 +277,12 @@ def cmd_show(args) -> None:
 
 def cmd_annotate(args) -> None:
     batch = _load_batch(args.batch, args.binding, need_binding=True)
+    _annotations_outside(batch, args.batch, args.annotations)
     item = next((i for i in batch["items"] if i["position"] == args.item), None)
     if item is None:
         raise SystemExit(f"batch has no item {args.item}")
+    if batch.get("format") == "split":
+        dr.check_item_id(item, getattr(args, "item_id", None))
     problems = _verify(args.dsn, [item])[item["position"]]
     if problems:
         raise SystemExit("not recorded: " + "; ".join(problems))
@@ -259,6 +294,7 @@ def cmd_annotate(args) -> None:
 
 def cmd_review(args) -> None:
     batch = _load_batch(args.batch, args.binding, need_binding=True)
+    _annotations_outside(batch, args.batch, args.annotations)
     n = dr.review_loop(batch, reviewer=args.reviewer, path=args.annotations,
                        verify=lambda it: _verify(args.dsn, [it])[it["position"]],
                        os_user=getpass.getuser(), tool_version=_tool_version())
@@ -308,7 +344,8 @@ def main() -> None:
     b.add_argument("--mappings")
     b.add_argument("--note")
     b.add_argument("--out", required=True)
-    b.add_argument("--binding-out", help="where a filtered batch's binding file goes (default <out>.binding.json)")
+    b.add_argument("--binding-out", help="a filtered batch's binding file (required for one), outside the reviewer "
+                                         "file's directory")
     s = sub.add_parser("show")
     s.add_argument("--dsn", default=DSN)
     s.add_argument("--batch", required=True)
@@ -320,6 +357,7 @@ def main() -> None:
     a.add_argument("--batch", required=True)
     a.add_argument("--binding", help="the binding file a reviewer file needs")
     a.add_argument("--item", type=int, required=True)
+    a.add_argument("--item-id", help="for a reviewer file: the item id the answer was given for (8+ characters)")
     a.add_argument("--answer", choices=dr.ANSWERS, required=True)
     a.add_argument("--reason")
     a.add_argument("--reviewer", required=True)
